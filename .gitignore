@@ -1,0 +1,16 @@
+.DS_Store
+Thumbs.db
+
+.env
+.env.*
+!.env.example
+
+/data/
+/backups/
+/screenshots/
+/test-data/private/
+
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
