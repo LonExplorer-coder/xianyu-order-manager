@@ -1,0 +1,811 @@
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+
+import type { BootstrapState, DesktopApi } from '../core/desktop-api';
+import type {
+  DraftItem,
+  OrderDetails,
+  OrderDraft,
+  OrderSummary,
+} from '../core/contracts';
+
+export type AppProps = {
+  api: DesktopApi;
+};
+
+type BusyAction = 'directory' | 'upload' | 'confirm' | 'detail' | 'retry' | null;
+
+export function App({ api }: AppProps) {
+  const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
+  const [draft, setDraft] = useState<OrderDraft | null>(null);
+  const [reviewScreenshotUrl, setReviewScreenshotUrl] = useState('');
+  const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
+  const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [operationError, setOperationError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .getBootstrapState()
+      .then((state) => {
+        if (active) setBootstrap(state);
+      })
+      .catch((error: unknown) => {
+        if (active) setBootstrap({ kind: 'error', message: errorMessage(error) });
+      });
+    return () => {
+      active = false;
+    };
+  }, [api]);
+
+  async function uploadScreenshot() {
+    setBusyAction('upload');
+    setOperationError('');
+    try {
+      const selectedDraft = await api.selectSourceScreenshot();
+      if (!selectedDraft) return;
+      const screenshotUrl = await api.getScreenshotDataUrl(selectedDraft.screenshotId);
+      setReviewScreenshotUrl(screenshotUrl);
+      setDraft(selectedDraft);
+      setOrderDetails(null);
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function confirmOrder(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (!draft || bootstrap?.kind !== 'ready') return;
+    setBusyAction('confirm');
+    setOperationError('');
+    try {
+      await api.confirmDraft(draft);
+      const orders = await api.listOrders();
+      setBootstrap({ ...bootstrap, orders });
+      setDraft(null);
+      setReviewScreenshotUrl('');
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function openOrder(orderId: string) {
+    setBusyAction('detail');
+    setOperationError('');
+    try {
+      const details = await api.getOrder(orderId);
+      const screenshotUrl = await api.getScreenshotDataUrl(details.sourceScreenshot.id);
+      setDetailScreenshotUrl(screenshotUrl);
+      setOrderDetails(details);
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function chooseDataDirectory() {
+    setBusyAction('directory');
+    setOperationError('');
+    try {
+      setBootstrap(await api.selectDataDirectory());
+    } catch (error) {
+      setBootstrap({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function retryBootstrap() {
+    setBusyAction('retry');
+    try {
+      setBootstrap(await api.retryDataDirectory());
+    } catch (error) {
+      setBootstrap({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function closeDetails() {
+    setOrderDetails(null);
+    setDetailScreenshotUrl('');
+    setOperationError('');
+  }
+
+  if (!bootstrap) {
+    return <SystemScreen kind="loading" />;
+  }
+
+  if (bootstrap.kind === 'needs_data_directory') {
+    return (
+      <SystemScreen
+        kind="setup"
+        busy={busyAction === 'directory'}
+        onAction={() => void chooseDataDirectory()}
+      />
+    );
+  }
+
+  if (bootstrap.kind === 'locked') {
+    return (
+      <SystemScreen
+        kind="locked"
+        message={bootstrap.message}
+        dataDirectory={bootstrap.dataDirectory}
+        busy={busyAction === 'directory'}
+        onAction={() => void chooseDataDirectory()}
+      />
+    );
+  }
+
+  if (bootstrap.kind === 'error') {
+    return (
+      <SystemScreen
+        kind="error"
+        message={bootstrap.message}
+        busy={busyAction === 'retry'}
+        onAction={() => void retryBootstrap()}
+      />
+    );
+  }
+
+  let workspace: ReactNode;
+  if (draft) {
+    workspace = (
+      <ReviewWorkspace
+        draft={draft}
+        screenshotUrl={reviewScreenshotUrl}
+        error={operationError}
+        confirming={busyAction === 'confirm'}
+        onDraftChange={setDraft}
+        onConfirm={(event) => void confirmOrder(event)}
+      />
+    );
+  } else if (orderDetails) {
+    workspace = (
+      <DetailWorkspace
+        details={orderDetails}
+        screenshotUrl={detailScreenshotUrl}
+        error={operationError}
+        onBack={closeDetails}
+      />
+    );
+  } else {
+    workspace = (
+      <OrdersWorkspace
+        orders={bootstrap.orders}
+        dataDirectory={bootstrap.dataDirectory}
+        error={operationError}
+        uploading={busyAction === 'upload'}
+        openingOrder={busyAction === 'detail'}
+        onUpload={() => void uploadScreenshot()}
+        onOpenOrder={(orderId) => void openOrder(orderId)}
+      />
+    );
+  }
+
+  return <AppFrame dataDirectory={bootstrap.dataDirectory}>{workspace}</AppFrame>;
+}
+
+function AppFrame({ dataDirectory, children }: { dataDirectory: string; children: ReactNode }) {
+  return (
+    <div className="app-shell">
+      <aside className="sidebar" aria-label="主导航">
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true">闲</span>
+          <span className="brand-copy">
+            <strong>闲鱼订单</strong>
+            <small>本机工作台</small>
+          </span>
+        </div>
+
+        <nav className="primary-nav">
+          <button className="nav-item is-active" type="button" aria-current="page">
+            <Icon name="orders" />
+            <span className="nav-label">订单</span>
+          </button>
+          <button className="nav-item" type="button" disabled>
+            <Icon name="shipment" />
+            <span className="nav-label">发货组</span>
+            <span className="nav-badge">稍后</span>
+          </button>
+          <button className="nav-item" type="button" disabled>
+            <Icon name="template" />
+            <span className="nav-label">表格模板</span>
+            <span className="nav-badge">稍后</span>
+          </button>
+        </nav>
+
+        <div className="sidebar-footer" title={dataDirectory}>
+          <span className="connection-dot" aria-hidden="true" />
+          <span className="directory-status">
+            <strong>数据目录已连接</strong>
+            <small>本机安全保存</small>
+          </span>
+        </div>
+      </aside>
+      <main className="workspace">{children}</main>
+    </div>
+  );
+}
+
+type SystemScreenProps =
+  | { kind: 'loading' }
+  | { kind: 'setup'; busy: boolean; onAction: () => void }
+  | {
+      kind: 'locked';
+      message: string;
+      dataDirectory: string;
+      busy: boolean;
+      onAction: () => void;
+    }
+  | { kind: 'error'; message: string; busy: boolean; onAction: () => void };
+
+function SystemScreen(props: SystemScreenProps) {
+  if (props.kind === 'loading') {
+    return (
+      <main className="system-screen" aria-live="polite">
+        <div className="system-brand">
+          <span className="brand-mark" aria-hidden="true">闲</span>
+          <strong>闲鱼订单管理</strong>
+        </div>
+        <div className="loading-line" aria-hidden="true"><span /></div>
+        <p className="system-status">正在打开订单数据…</p>
+      </main>
+    );
+  }
+
+  if (props.kind === 'setup') {
+    return (
+      <main className="system-screen system-screen--setup">
+        <div className="system-brand">
+          <span className="brand-mark" aria-hidden="true">闲</span>
+          <strong>闲鱼订单管理</strong>
+        </div>
+        <section className="system-content">
+          <span className="section-kicker">01 / 开始使用</span>
+          <h1>选择订单数据保存位置</h1>
+          <p>订单、来源截图和之后的备份都将保存在这个目录。程序更新或移动时，您的数据不会受影响。</p>
+          <button className="button button--primary button--large" type="button" onClick={props.onAction} disabled={props.busy}>
+            <Icon name="folder" />
+            {props.busy ? '正在打开…' : '选择数据目录'}
+          </button>
+          <div className="privacy-note">
+            <Icon name="shield" />
+            <span><strong>只保存在您的电脑上</strong>当前流程不会上传任何文件。</span>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const isLocked = props.kind === 'locked';
+  return (
+    <main className="system-screen system-screen--issue">
+      <div className="system-brand">
+        <span className="brand-mark" aria-hidden="true">闲</span>
+        <strong>闲鱼订单管理</strong>
+      </div>
+      <section className="system-content">
+        <span className="issue-icon" aria-hidden="true"><Icon name={isLocked ? 'lock' : 'warning'} /></span>
+        <span className="section-kicker">{isLocked ? '数据保护' : '启动检查'}</span>
+        <h1>{isLocked ? '数据目录正在使用' : '无法打开订单数据'}</h1>
+        <p role={isLocked ? undefined : 'alert'}>{props.message}</p>
+        {isLocked && <p className="system-path">{props.dataDirectory}</p>}
+        <button className="button button--primary" type="button" onClick={props.onAction} disabled={props.busy}>
+          {props.busy ? '正在处理…' : isLocked ? '选择其他目录' : '重新尝试'}
+        </button>
+      </section>
+    </main>
+  );
+}
+
+type OrdersWorkspaceProps = {
+  orders: OrderSummary[];
+  dataDirectory: string;
+  error: string;
+  uploading: boolean;
+  openingOrder: boolean;
+  onUpload: () => void;
+  onOpenOrder: (orderId: string) => void;
+};
+
+function OrdersWorkspace({
+  orders,
+  dataDirectory,
+  error,
+  uploading,
+  openingOrder,
+  onUpload,
+  onOpenOrder,
+}: OrdersWorkspaceProps) {
+  if (orders.length === 0) {
+    return (
+      <section className="empty-workspace workspace-enter">
+        <div className="empty-visual" aria-hidden="true">
+          <div className="document-outline"><Icon name="image" /></div>
+          <span className="scan-line" />
+        </div>
+        <span className="section-kicker">订单工作台</span>
+        <h1>还没有订单</h1>
+        <p>上传一张包含完整闲鱼订单详情的来源截图，识别后对照原图校对并入库。</p>
+        <InlineError message={error} />
+        <button className="button button--primary button--large" type="button" onClick={onUpload} disabled={uploading}>
+          <Icon name="upload" />
+          {uploading ? '正在识别来源截图…' : '上传来源截图'}
+        </button>
+        <div className="empty-support">
+          <span>PNG、JPG、JPEG 或 WebP</span>
+          <span aria-hidden="true">·</span>
+          <span>一张来源截图对应一个订单</span>
+        </div>
+        <p className="data-path"><Icon name="folder" />{dataDirectory}</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="orders-workspace workspace-enter" aria-busy={openingOrder}>
+      <header className="workspace-header">
+        <div>
+          <span className="section-kicker">原始订单</span>
+          <h1>订单</h1>
+          <p>{orders.length} 笔订单，保留来源截图与来源快照。</p>
+        </div>
+        <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
+          <Icon name="upload" />
+          {uploading ? '正在识别来源截图…' : '上传来源截图'}
+        </button>
+      </header>
+
+      <InlineError message={error} />
+
+      <div className="table-toolbar" aria-label="订单表概况">
+        <span><strong>{orders.length}</strong> 全部订单</span>
+        <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
+        <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
+      </div>
+
+      <div className="table-frame">
+        <table aria-label="原始订单">
+          <thead>
+            <tr>
+              <th>订单号</th>
+              <th>买家</th>
+              <th>收件人</th>
+              <th>商品</th>
+              <th>成交金额</th>
+              <th>履约状态</th>
+              <th>入库时间</th>
+              <th><span className="visually-hidden">操作</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((order) => (
+              <tr key={order.id}>
+                <td>
+                  <button
+                    className="order-link"
+                    type="button"
+                    aria-label={`查看订单 ${order.orderNumber}`}
+                    onClick={() => onOpenOrder(order.id)}
+                    disabled={openingOrder}
+                  >
+                    {order.orderNumber}
+                  </button>
+                </td>
+                <td>{order.buyerNickname || '—'}</td>
+                <td>{order.recipient}</td>
+                <td>{order.itemCount} 件</td>
+                <td className="money-cell">{formatMoney(order.amountCents)}</td>
+                <td><span className="status-chip">待发货</span></td>
+                <td>{formatDateTime(order.createdAt)}</td>
+                <td><Icon name="chevron" /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+type ReviewWorkspaceProps = {
+  draft: OrderDraft;
+  screenshotUrl: string;
+  error: string;
+  confirming: boolean;
+  onDraftChange: (draft: OrderDraft) => void;
+  onConfirm: (event: FormEvent<HTMLFormElement>) => void;
+};
+
+function ReviewWorkspace({
+  draft,
+  screenshotUrl,
+  error,
+  confirming,
+  onDraftChange,
+  onConfirm,
+}: ReviewWorkspaceProps) {
+  const isComplete =
+    draft.orderNumber.trim() !== '' &&
+    draft.recipient.trim() !== '' &&
+    draft.phone.trim() !== '' &&
+    draft.addressOriginal.trim() !== '' &&
+    draft.items.length > 0 &&
+    draft.items.every((item) => item.sourceTitle.trim() !== '' && item.quantity >= 1) &&
+    draft.amountCents >= 0;
+
+  function patchDraft(patch: Partial<OrderDraft>) {
+    onDraftChange({ ...draft, ...patch });
+  }
+
+  function patchItem(index: number, patch: Partial<DraftItem>) {
+    const items = [...draft.items];
+    items[index] = { ...items[index], ...patch };
+    patchDraft({ items });
+  }
+
+  return (
+    <section className="review-workspace review-enter">
+      <header className="workspace-header workspace-header--review">
+        <div className="header-title-row">
+          <div>
+            <span className="section-kicker">识别结果 · 待确认</span>
+            <h1>校对识别结果</h1>
+            <p>左侧是来源截图，修正右侧字段后再入库。</p>
+          </div>
+        </div>
+        <div className="header-actions">
+          <button
+            className="button button--primary"
+            type="submit"
+            form="review-form"
+            disabled={confirming || !isComplete}
+          >
+            <Icon name="check" />
+            {confirming ? '正在入库…' : '确认并入库'}
+          </button>
+        </div>
+      </header>
+
+      <InlineError message={error} />
+
+      <div className="review-layout">
+        <figure className="source-panel">
+          <div className="panel-label">
+            <span><Icon name="image" />来源截图</span>
+            <span>仅用于当前订单校对</span>
+          </div>
+          <div className="source-image-stage">
+            <img src={screenshotUrl} alt="来源截图" />
+          </div>
+        </figure>
+
+        <form id="review-form" className="review-form" onSubmit={onConfirm}>
+          <div className="review-summary">
+            <div>
+              <span>订单号</span>
+              <strong>{draft.orderNumber || '待补充'}</strong>
+            </div>
+            <div>
+              <span>商品</span>
+              <strong>{draft.items.length} 项</strong>
+            </div>
+            <div>
+              <span>成交金额</span>
+              <strong>{formatMoney(draft.amountCents)}</strong>
+            </div>
+          </div>
+
+          <FormSection title="订单信息" description="用于唯一识别订单与区分卖家账号。">
+            <div className="field-grid field-grid--two">
+              <Field label="订单号" required>
+                <input value={draft.orderNumber} onChange={(event) => patchDraft({ orderNumber: event.target.value })} />
+              </Field>
+              <Field label="卖家账号">
+                <input value={draft.sellerAccount} onChange={(event) => patchDraft({ sellerAccount: event.target.value })} />
+              </Field>
+              <Field label="买家昵称">
+                <input value={draft.buyerNickname} onChange={(event) => patchDraft({ buyerNickname: event.target.value })} />
+              </Field>
+              <Field label="成交金额" required suffix="元">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={(draft.amountCents / 100).toFixed(2)}
+                  onChange={(event) => patchDraft({ amountCents: yuanToCents(event.target.value) })}
+                />
+              </Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="收货信息" description="界面中保留完整信息，仅在导出时按模板脱敏。">
+            <div className="field-grid field-grid--two">
+              <Field label="收件人" required>
+                <input value={draft.recipient} onChange={(event) => patchDraft({ recipient: event.target.value })} />
+              </Field>
+              <Field label="手机号" required>
+                <input inputMode="tel" value={draft.phone} onChange={(event) => patchDraft({ phone: event.target.value })} />
+              </Field>
+              <Field label="完整收货地址" required wide>
+                <textarea rows={3} value={draft.addressOriginal} onChange={(event) => patchDraft({ addressOriginal: event.target.value })} />
+              </Field>
+            </div>
+          </FormSection>
+
+          <FormSection title={`商品明细 · ${draft.items.length}`} description="没有识别到明确数量时，系统默认为 1。">
+            <div className="item-list">
+              {draft.items.map((item, index) => (
+                <div className="item-editor" key={item.id}>
+                  <div className="item-index">{String(index + 1).padStart(2, '0')}</div>
+                  <div className="item-fields">
+                    <Field label="商品标题" required wide>
+                      <input value={item.sourceTitle} onChange={(event) => patchItem(index, { sourceTitle: event.target.value })} />
+                    </Field>
+                    <div className="field-grid field-grid--item">
+                      <Field label="规格">
+                        <input value={item.sourceSpec} onChange={(event) => patchItem(index, { sourceSpec: event.target.value })} />
+                      </Field>
+                      <Field label="单价" suffix="元">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={(item.unitPriceCents / 100).toFixed(2)}
+                          onChange={(event) => patchItem(index, { unitPriceCents: yuanToCents(event.target.value) })}
+                        />
+                      </Field>
+                      <Field label="数量" suffix={item.quantityInferred ? '默认值' : undefined}>
+                        <input
+                          aria-label={draft.items.length === 1 ? '数量' : `商品 ${index + 1} 数量`}
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={item.quantity}
+                          onChange={(event) => patchItem(index, {
+                            quantity: Number(event.target.value),
+                            quantityInferred: false,
+                          })}
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </FormSection>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return (
+    <section className="form-section">
+      <header>
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function Field({
+  label,
+  required = false,
+  suffix,
+  wide = false,
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  suffix?: string;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`field${wide ? ' field--wide' : ''}`}>
+      <span className="field-label">
+        {label}{required && <i aria-hidden="true">*</i>}
+        {suffix && <small>{suffix}</small>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function DetailWorkspace({
+  details,
+  screenshotUrl,
+  error,
+  onBack,
+}: {
+  details: OrderDetails;
+  screenshotUrl: string;
+  error: string;
+  onBack: () => void;
+}) {
+  const { order, sourceScreenshot, sourceSnapshot } = details;
+  const recipientChanged = sourceSnapshot.recognition.recipient !== order.recipient;
+
+  return (
+    <section className="detail-workspace detail-enter">
+      <header className="workspace-header workspace-header--detail">
+        <div className="header-title-row">
+          <button className="icon-button" type="button" onClick={onBack} aria-label="返回订单表">
+            <Icon name="back" />
+          </button>
+          <div>
+            <span className="section-kicker">原始订单 · 待发货</span>
+            <h1>订单详情</h1>
+            <p>{order.orderNumber}</p>
+          </div>
+        </div>
+        <span className="status-chip status-chip--large">已付款 · 待发货</span>
+      </header>
+
+      <InlineError message={error} />
+
+      <div className="detail-layout">
+        <figure className="source-panel source-panel--detail">
+          <div className="panel-label">
+            <span><Icon name="image" />来源截图</span>
+            <span>{sourceScreenshot.mimeType.replace('image/', '').toUpperCase()}</span>
+          </div>
+          <div className="source-image-stage">
+            <img src={screenshotUrl} alt="来源截图" />
+          </div>
+          <figcaption>
+            <span>{sourceScreenshot.originalName}</span>
+            <small>保存于本机数据目录</small>
+          </figcaption>
+        </figure>
+
+        <div className="detail-content">
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h2>订单信息</h2>
+              <span>{formatDateTime(order.createdAt)} 入库</span>
+            </div>
+            <dl className="detail-grid">
+              <DetailTerm label="订单号" value={order.orderNumber} />
+              <DetailTerm label="卖家账号" value={order.sellerAccount} />
+              <DetailTerm label="买家昵称" value={order.buyerNickname || '—'} />
+              <DetailTerm label="成交金额" value={formatMoney(order.amountCents)} strong />
+            </dl>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h2>收货信息</h2>
+              <span>完整信息</span>
+            </div>
+            <dl className="detail-grid">
+              <DetailTerm label="收件人" value={order.recipient} />
+              <DetailTerm label="手机号" value={order.phone} />
+              <DetailTerm label="完整地址" value={order.addressOriginal} wide />
+            </dl>
+            {recipientChanged && (
+              <div className="source-change-note">
+                <Icon name="history" />
+                <span>识别原值“{sourceSnapshot.recognition.recipient}”已在入库前修正。</span>
+              </div>
+            )}
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h2>商品明细</h2>
+              <span>{order.items.length} 项</span>
+            </div>
+            <div className="detail-items">
+              {order.items.map((item, index) => (
+                <div className="detail-item" key={item.id}>
+                  <span className="item-index">{String(index + 1).padStart(2, '0')}</span>
+                  <div>
+                    <strong>{item.sourceTitle}</strong>
+                    <small>{item.sourceSpec || '无规格'}</small>
+                  </div>
+                  <span>{formatMoney(item.unitPriceCents)} × {item.quantity}</span>
+                  <strong>{formatMoney(item.subtotalCents)}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DetailTerm({ label, value, strong = false, wide = false }: { label: string; value: string; strong?: boolean; wide?: boolean }) {
+  return (
+    <div className={wide ? 'detail-term detail-term--wide' : 'detail-term'}>
+      <dt>{label}</dt>
+      <dd className={strong ? 'is-strong' : undefined}>{value}</dd>
+    </div>
+  );
+}
+
+function InlineError({ message }: { message: string }) {
+  if (!message) return null;
+  return (
+    <div className="inline-error" role="alert">
+      <Icon name="warning" />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+type IconName =
+  | 'orders'
+  | 'shipment'
+  | 'template'
+  | 'folder'
+  | 'shield'
+  | 'lock'
+  | 'warning'
+  | 'image'
+  | 'upload'
+  | 'chevron'
+  | 'back'
+  | 'check'
+  | 'history';
+
+function Icon({ name }: { name: IconName }) {
+  const paths: Record<IconName, ReactNode> = {
+    orders: <><path d="M5 4.75h14v14.5H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></>,
+    shipment: <><path d="M3.5 7.5h11v9h-11zM14.5 10.5h3l3 3v3h-6z" /><circle cx="7" cy="18" r="1.5" /><circle cx="17.5" cy="18" r="1.5" /></>,
+    template: <><path d="M4.5 4.5h15v15h-15zM4.5 9h15M10 9v10.5" /></>,
+    folder: <path d="M3.5 6.5h6l2-2h9v14h-17z" />,
+    shield: <><path d="M12 3.5 19 6v5c0 4.5-2.8 7.8-7 9.5C7.8 18.8 5 15.5 5 11V6z" /><path d="m9 12 2 2 4-4" /></>,
+    lock: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+    warning: <><path d="m12 3.5 9 16H3z" /><path d="M12 9v4.5M12 17h.01" /></>,
+    image: <><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m5.5 17 4.5-4 3 2.5 2.5-2 3 3.5" /></>,
+    upload: <><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5" /><path d="M5 14v5h14v-5" /></>,
+    chevron: <path d="m9 6 6 6-6 6" />,
+    back: <><path d="m15 5-7 7 7 7" /><path d="M8 12h11" /></>,
+    check: <path d="m5 12.5 4 4L19 7" />,
+    history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 7.5V12l3 2" /></>,
+  };
+  return (
+    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {paths[name]}
+    </svg>
+  );
+}
+
+function formatMoney(cents: number): string {
+  return `¥${(cents / 100).toFixed(2)}`;
+}
+
+function yuanToCents(value: string): number {
+  const amount = Number.parseFloat(value);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '发生未知错误';
+}

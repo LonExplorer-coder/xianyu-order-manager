@@ -1,0 +1,53 @@
+{
+  "name": "xianyu-order-manager",
+  "productName": "闲鱼订单管理",
+  "version": "0.1.0",
+  "description": "本机优先的闲鱼来源截图识别与订单管理工具",
+  "main": ".vite/build/electron-main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "7.11.2",
+    "@electron-forge/maker-zip": "7.11.2",
+    "@electron-forge/plugin-fuses": "7.11.2",
+    "@electron-forge/plugin-vite": "7.11.2",
+    "@electron-forge/shared-types": "7.11.2",
+    "@electron/fuses": "1.8.0",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "electron": "43.2.0",
+    "jsdom": "30.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "yauzl": "3.3.1"
+    },
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}

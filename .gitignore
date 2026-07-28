@@ -1,3 +1,8 @@
+node_modules/
+.vite/
+out/
+coverage/
+*.log
 .DS_Store
 Thumbs.db
 
@@ -5,12 +10,16 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Real order screenshots, local databases and private acceptance data never belong in git.
 /data/
 /backups/
 /screenshots/
 /test-data/private/
-
+private-data/
 *.db
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

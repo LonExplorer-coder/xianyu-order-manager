@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm package
+      - name: Verify macOS application bundle
+        if: runner.os == 'macOS'
+        run: |
+          test -x out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/MacOS/XianyuOrderManager
+          test -f out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/Resources/app.asar
+          plutil -lint out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/Info.plist
+      - name: Verify Windows portable application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'out/XianyuOrderManager-win32-x64/XianyuOrderManager.exe')) { throw 'Missing Windows executable' }
+          if (!(Test-Path 'out/XianyuOrderManager-win32-x64/resources/app.asar')) { throw 'Missing Windows app.asar' }
