@@ -1,7 +1,10 @@
 import { MakerZIP } from '@electron-forge/maker-zip';
+import AutoUnpackNativesPlugin from '@electron-forge/plugin-auto-unpack-natives';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+import { cpSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 
 const config: ForgeConfig = {
@@ -9,10 +12,22 @@ const config: ForgeConfig = {
     asar: true,
     name: 'XianyuOrderManager',
     executableName: 'XianyuOrderManager',
+    appBundleId: 'com.lonexplorer.xianyu-order-manager',
+    afterPrune: [
+      (buildPath, _electronVersion, platform, arch, callback) => {
+        try {
+          copyKeyringRuntime(buildPath, platform, arch);
+          callback();
+        } catch (error) {
+          callback(error instanceof Error ? error : new Error('无法复制系统凭据运行库'));
+        }
+      },
+    ],
   },
   rebuildConfig: {},
   makers: [new MakerZIP({}, ['darwin', 'win32'])],
   plugins: [
+    new AutoUnpackNativesPlugin({}),
     new VitePlugin({
       build: [
         {
@@ -44,5 +59,28 @@ const config: ForgeConfig = {
     }),
   ],
 };
+
+function copyKeyringRuntime(buildPath: string, platform: string, arch: string): void {
+  const platformPackage = keyringPlatformPackage(platform, arch);
+  const sourceRoot = join(process.cwd(), 'node_modules', '@napi-rs');
+  const destinationRoot = join(buildPath, 'node_modules', '@napi-rs');
+  mkdirSync(destinationRoot, { recursive: true });
+  for (const packageName of ['keyring', platformPackage]) {
+    cpSync(join(sourceRoot, packageName), join(destinationRoot, packageName), {
+      recursive: true,
+      dereference: true,
+    });
+  }
+}
+
+function keyringPlatformPackage(platform: string, arch: string): string {
+  if (platform === 'darwin' && (arch === 'arm64' || arch === 'x64')) {
+    return `keyring-darwin-${arch}`;
+  }
+  if (platform === 'win32' && ['arm64', 'x64', 'ia32'].includes(arch)) {
+    return `keyring-win32-${arch}-msvc`;
+  }
+  throw new Error(`系统凭据运行库不支持目标平台 ${platform}-${arch}`);
+}
 
 export default config;

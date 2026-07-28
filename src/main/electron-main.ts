@@ -1,9 +1,17 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { join } from 'node:path';
 
+import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
+import { BailianOcrClient } from '../adapters/recognition/bailian-ocr-client';
 import { ControlledRecognizer } from '../adapters/recognition/controlled-recognizer';
 import type { OrderDraft } from '../core/contracts';
+import type {
+  OcrConnectionTestInput,
+  SaveOcrSettingsInput,
+} from '../core/ocr-settings';
 import { DesktopSession } from './desktop-session';
+import { OcrSettingsFile } from './ocr-settings-file';
+import { OcrSettingsService } from './ocr-settings';
 import { Preferences } from './preferences';
 
 let mainWindow: BrowserWindow | undefined;
@@ -110,6 +118,16 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
   });
+  ipcMain.handle('settings:get-ocr', () => desktopSession.getOcrSettings());
+  ipcMain.handle('settings:save-ocr', (_event, input: unknown) => {
+    return desktopSession.saveOcrSettings(parseSaveOcrSettingsInput(input));
+  });
+  ipcMain.handle('settings:remove-ocr-api-key', () => {
+    return desktopSession.removeOcrApiKey();
+  });
+  ipcMain.handle('settings:test-ocr', (_event, input: unknown) => {
+    return desktopSession.testOcrConnection(parseConnectionTestInput(input));
+  });
 }
 
 function requireWindow(): BrowserWindow {
@@ -118,9 +136,15 @@ function requireWindow(): BrowserWindow {
 }
 
 void app.whenReady().then(() => {
+  const configDirectory = join(app.getPath('userData'), 'bootstrap');
   session = new DesktopSession(
-    new Preferences(join(app.getPath('userData'), 'bootstrap')),
+    new Preferences(configDirectory),
     controlledRecognizer,
+    new OcrSettingsService(
+      new OcrSettingsFile(configDirectory),
+      new SystemApiKeyStore(),
+      new BailianOcrClient(),
+    ),
   );
   session.restore();
   registerIpcHandlers(session);
@@ -138,3 +162,36 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   session?.close();
 });
+
+function parseSaveOcrSettingsInput(input: unknown): SaveOcrSettingsInput {
+  if (!isRecord(input)) throw new Error('OCR 设置格式无效');
+  const workspaceId = asBoundedString(input.workspaceId, 128, 'Workspace ID');
+  const apiKey = asBoundedString(input.apiKey, 4_096, 'API Key', true);
+  if (input.region !== 'cn-beijing') throw new Error('当前暂不支持该百炼地域');
+  return { workspaceId, apiKey, region: input.region };
+}
+
+function parseConnectionTestInput(input: unknown): OcrConnectionTestInput {
+  if (!isRecord(input) || input.consentToPaidCall !== true) {
+    throw new Error('请先确认本次测试会产生一次 OCR 调用');
+  }
+  return { consentToPaidCall: true };
+}
+
+function asBoundedString(
+  value: unknown,
+  maximumLength: number,
+  label: string,
+  allowEmpty = false,
+): string {
+  if (typeof value !== 'string' || value.length > maximumLength) {
+    throw new Error(`${label} 格式无效`);
+  }
+  const normalized = value.trim();
+  if (!allowEmpty && !normalized) throw new Error(`请输入百炼 ${label}`);
+  return normalized;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

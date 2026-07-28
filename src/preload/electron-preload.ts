@@ -12,6 +12,10 @@ const api: DesktopApi = {
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),
   getScreenshotDataUrl: (screenshotId) =>
     ipcRenderer.invoke('evidence:get-screenshot-data-url', screenshotId),
+  getOcrSettings: () => ipcRenderer.invoke('settings:get-ocr'),
+  saveOcrSettings: (input) => ipcRenderer.invoke('settings:save-ocr', input),
+  removeOcrApiKey: () => ipcRenderer.invoke('settings:remove-ocr-api-key'),
+  testOcrConnection: (input) => ipcRenderer.invoke('settings:test-ocr', input),
 };
 
 contextBridge.exposeInMainWorld('xianyuApi', api);

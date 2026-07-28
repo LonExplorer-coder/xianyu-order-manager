@@ -8,7 +8,14 @@ import type {
   OriginalOrder,
   Recognizer,
 } from '../core/contracts';
+import type {
+  OcrConnectionTestInput,
+  OcrConnectionTestResult,
+  OcrSettingsView,
+  SaveOcrSettingsInput,
+} from '../core/ocr-settings';
 import { LocalApplication } from './local-application';
+import { OcrSettingsService } from './ocr-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
 
@@ -19,6 +26,7 @@ export class DesktopSession {
   public constructor(
     private readonly preferences: Preferences,
     private readonly recognizer: Recognizer,
+    private readonly ocrSettings: OcrSettingsService,
   ) {}
 
   public restore(): BootstrapState {
@@ -71,6 +79,24 @@ export class DesktopSession {
   public async getScreenshotDataUrl(screenshotId: string): Promise<string> {
     const screenshot = await this.requireApplication().readSourceScreenshot(screenshotId);
     return `data:${screenshot.mimeType};base64,${Buffer.from(screenshot.bytes).toString('base64')}`;
+  }
+
+  public getOcrSettings(): Promise<OcrSettingsView> {
+    return this.ocrSettings.getSettings();
+  }
+
+  public saveOcrSettings(input: SaveOcrSettingsInput): Promise<OcrSettingsView> {
+    return this.ocrSettings.saveSettings(input);
+  }
+
+  public removeOcrApiKey(): Promise<OcrSettingsView> {
+    return this.ocrSettings.removeApiKey();
+  }
+
+  public testOcrConnection(
+    input: OcrConnectionTestInput,
+  ): Promise<OcrConnectionTestResult> {
+    return this.ocrSettings.testConnection(input);
   }
 
   public close(): void {

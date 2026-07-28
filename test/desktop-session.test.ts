@@ -5,9 +5,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import { DesktopSession } from '../src/main/desktop-session';
+import { OcrSettingsService } from '../src/main/ocr-settings';
 import { Preferences } from '../src/main/preferences';
 
 const sessions: DesktopSession[] = [];
+const unusedOcrSettings = new OcrSettingsService(
+  { read: () => null, write: () => undefined },
+  {
+    getApiKey: async () => null,
+    setApiKey: async () => undefined,
+    deleteApiKey: async () => undefined,
+    getDisplayName: () => '测试系统凭据库',
+  },
+  { testConnection: async () => ({ model: 'qwen3.5-ocr' }) },
+);
 
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
@@ -30,7 +41,7 @@ describe('桌面启动状态', () => {
       items: [],
     });
 
-    const first = new DesktopSession(preferences, recognizer);
+    const first = new DesktopSession(preferences, recognizer, unusedOcrSettings);
     sessions.push(first);
     expect(first.restore()).toEqual({ kind: 'needs_data_directory' });
     expect(first.useDataDirectory(dataDirectory)).toMatchObject({
@@ -41,7 +52,7 @@ describe('桌面启动状态', () => {
     first.close();
     sessions.splice(sessions.indexOf(first), 1);
 
-    const reopened = new DesktopSession(preferences, recognizer);
+    const reopened = new DesktopSession(preferences, recognizer, unusedOcrSettings);
     sessions.push(reopened);
     expect(reopened.restore()).toMatchObject({
       kind: 'ready',
@@ -69,7 +80,7 @@ describe('桌面启动状态', () => {
     preferences.setLastDataDirectory(dataDirectory);
     await writeFile(dataDirectory, '暂时占位');
 
-    const session = new DesktopSession(preferences, recognizer);
+    const session = new DesktopSession(preferences, recognizer, unusedOcrSettings);
     sessions.push(session);
     expect(session.restore()).toMatchObject({ kind: 'error' });
 

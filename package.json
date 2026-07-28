@@ -11,6 +11,7 @@
     "make": "electron-forge make",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:credential-store": "node scripts/system-credential-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test"
   },
@@ -19,12 +20,14 @@
   },
   "packageManager": "pnpm@10.30.3",
   "dependencies": {
+    "@napi-rs/keyring": "1.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@electron-forge/cli": "7.11.2",
     "@electron-forge/maker-zip": "7.11.2",
+    "@electron-forge/plugin-auto-unpack-natives": "7.11.2",
     "@electron-forge/plugin-fuses": "7.11.2",
     "@electron-forge/plugin-vite": "7.11.2",
     "@electron-forge/shared-types": "7.11.2",

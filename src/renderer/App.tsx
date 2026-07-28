@@ -7,12 +7,14 @@ import type {
   OrderDraft,
   OrderSummary,
 } from '../core/contracts';
+import type { OcrSettingsView } from '../core/ocr-settings';
 
 export type AppProps = {
   api: DesktopApi;
 };
 
 type BusyAction = 'directory' | 'upload' | 'confirm' | 'detail' | 'retry' | null;
+type AppPage = 'orders' | 'settings';
 
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -22,6 +24,7 @@ export function App({ api }: AppProps) {
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [operationError, setOperationError] = useState('');
+  const [activePage, setActivePage] = useState<AppPage>('orders');
 
   useEffect(() => {
     let active = true;
@@ -155,7 +158,9 @@ export function App({ api }: AppProps) {
   }
 
   let workspace: ReactNode;
-  if (draft) {
+  if (activePage === 'settings') {
+    workspace = <SettingsWorkspace api={api} />;
+  } else if (draft) {
     workspace = (
       <ReviewWorkspace
         draft={draft}
@@ -189,10 +194,28 @@ export function App({ api }: AppProps) {
     );
   }
 
-  return <AppFrame dataDirectory={bootstrap.dataDirectory}>{workspace}</AppFrame>;
+  return (
+    <AppFrame
+      dataDirectory={bootstrap.dataDirectory}
+      activePage={activePage}
+      onNavigate={setActivePage}
+    >
+      {workspace}
+    </AppFrame>
+  );
 }
 
-function AppFrame({ dataDirectory, children }: { dataDirectory: string; children: ReactNode }) {
+function AppFrame({
+  dataDirectory,
+  activePage,
+  onNavigate,
+  children,
+}: {
+  dataDirectory: string;
+  activePage: AppPage;
+  onNavigate: (page: AppPage) => void;
+  children: ReactNode;
+}) {
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="主导航">
@@ -205,7 +228,12 @@ function AppFrame({ dataDirectory, children }: { dataDirectory: string; children
         </div>
 
         <nav className="primary-nav">
-          <button className="nav-item is-active" type="button" aria-current="page">
+          <button
+            className={`nav-item${activePage === 'orders' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'orders' ? 'page' : undefined}
+            onClick={() => onNavigate('orders')}
+          >
             <Icon name="orders" />
             <span className="nav-label">订单</span>
           </button>
@@ -218,6 +246,15 @@ function AppFrame({ dataDirectory, children }: { dataDirectory: string; children
             <Icon name="template" />
             <span className="nav-label">表格模板</span>
             <span className="nav-badge">稍后</span>
+          </button>
+          <button
+            className={`nav-item nav-item--settings${activePage === 'settings' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'settings' ? 'page' : undefined}
+            onClick={() => onNavigate('settings')}
+          >
+            <Icon name="settings" />
+            <span className="nav-label">设置</span>
           </button>
         </nav>
 
@@ -412,6 +449,268 @@ function OrdersWorkspace({
         </table>
       </div>
     </section>
+  );
+}
+
+type SettingsAction = 'loading' | 'saving' | 'removing' | 'testing' | null;
+type SettingsFeedback = { kind: 'success' | 'error'; message: string } | null;
+
+function SettingsWorkspace({ api }: { api: DesktopApi }) {
+  const [settings, setSettings] = useState<OcrSettingsView | null>(null);
+  const [workspaceId, setWorkspaceId] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [busy, setBusy] = useState<SettingsAction>('loading');
+  const [feedback, setFeedback] = useState<SettingsFeedback>(null);
+  const [showPaidCallConfirmation, setShowPaidCallConfirmation] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setBusy('loading');
+    setFeedback(null);
+    void api
+      .getOcrSettings()
+      .then((value) => {
+        if (!active) return;
+        setSettings(value);
+        setWorkspaceId(value.workspaceId);
+        setApiKey('');
+      })
+      .catch((error: unknown) => {
+        if (active) setFeedback({ kind: 'error', message: errorMessage(error) });
+      })
+      .finally(() => {
+        if (active) setBusy(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, reloadToken]);
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy('saving');
+    setFeedback(null);
+    try {
+      const saved = await api.saveOcrSettings({
+        workspaceId,
+        region: 'cn-beijing',
+        apiKey,
+      });
+      setSettings(saved);
+      setWorkspaceId(saved.workspaceId);
+      setApiKey('');
+      setShowPaidCallConfirmation(false);
+      setFeedback({ kind: 'success', message: '设置已保存' });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function removeApiKey() {
+    setBusy('removing');
+    setFeedback(null);
+    try {
+      const updated = await api.removeOcrApiKey();
+      setSettings(updated);
+      setWorkspaceId(updated.workspaceId);
+      setApiKey('');
+      setShowPaidCallConfirmation(false);
+      setFeedback({ kind: 'success', message: 'API Key 已移除' });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmConnectionTest() {
+    setBusy('testing');
+    setFeedback(null);
+    try {
+      const result = await api.testOcrConnection({ consentToPaidCall: true });
+      setShowPaidCallConfirmation(false);
+      setFeedback({ kind: 'success', message: result.message });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="settings-workspace workspace-enter">
+      <header className="workspace-header workspace-header--settings">
+        <div>
+          <span className="section-kicker">本机配置</span>
+          <h1>设置</h1>
+          <p>管理识别服务与本机凭据。</p>
+        </div>
+      </header>
+
+      <div className="settings-body">
+        {busy === 'loading' && !settings ? (
+          <div className="settings-loading" role="status">正在读取 OCR 设置…</div>
+        ) : !settings ? (
+          <div className="settings-load-error">
+            <SettingsNotice feedback={feedback} />
+            <button
+              className="button button--quiet"
+              type="button"
+              onClick={() => setReloadToken((value) => value + 1)}
+            >
+              重新读取
+            </button>
+          </div>
+        ) : (
+          <form className="settings-form" aria-label="百炼 OCR 设置" onSubmit={(event) => void saveSettings(event)}>
+            <section className="settings-section">
+              <div className="settings-section-heading">
+                <div>
+                  <span className="section-kicker">识别服务</span>
+                  <h2>百炼 OCR</h2>
+                  <p>使用阿里云百炼 qwen3.5-ocr 识别本机来源截图。</p>
+                </div>
+                <span className={`service-state${settings.apiKeyConfigured ? ' is-ready' : ''}`}>
+                  <i aria-hidden="true" />
+                  {settings.apiKeyConfigured ? '已配置' : '未配置'}
+                </span>
+              </div>
+
+              <div className="settings-fields">
+                <Field label="Workspace ID" required>
+                  <input
+                    value={workspaceId}
+                    autoComplete="off"
+                    onChange={(event) => setWorkspaceId(event.target.value)}
+                    placeholder="输入百炼 Workspace ID"
+                  />
+                </Field>
+                <Field label="地域">
+                  <input aria-label="地域" value={settings.regionLabel} readOnly />
+                  <small className="field-help">qwen3.5-ocr 当前仅开放华北 2（北京）</small>
+                </Field>
+                <Field label="模型">
+                  <input aria-label="模型" value={settings.model} readOnly />
+                </Field>
+                <Field label="API Key" required>
+                  <input
+                    aria-label="API Key"
+                    type="password"
+                    value={apiKey}
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder={settings.apiKeyConfigured ? '输入新密钥以替换' : '输入百炼 API Key'}
+                  />
+                </Field>
+              </div>
+
+              <div className="credential-row">
+                <div className="credential-copy">
+                  <span className="credential-mask">
+                    {settings.apiKeyConfigured ? '••••••••' : '尚未保存 API Key'}
+                  </span>
+                  <small>
+                    {settings.apiKeyConfigured
+                      ? `已保存在 ${settings.credentialStore}`
+                      : `保存后将存入 ${settings.credentialStore}`}
+                  </small>
+                </div>
+                {settings.apiKeyConfigured && (
+                  <button
+                    className="text-button text-button--danger"
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => void removeApiKey()}
+                  >
+                    {busy === 'removing' ? '正在移除…' : '移除 API Key'}
+                  </button>
+                )}
+              </div>
+
+              <p className="credential-policy">
+                API Key 不会回填到输入框，也不会写入订单数据、备份或日志。
+              </p>
+
+              <div className="settings-actions">
+                <button className="button button--primary" type="submit" disabled={busy !== null}>
+                  <Icon name="check" />
+                  {busy === 'saving' ? '正在保存…' : '保存设置'}
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-section settings-section--connection">
+              <div className="settings-section-heading">
+                <div>
+                  <span className="section-kicker">连接检查</span>
+                  <h2>测试连接</h2>
+                  <p>仅在需要验证当前配置时手动执行。</p>
+                </div>
+                {!showPaidCallConfirmation && (
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    disabled={busy !== null || !settings.apiKeyConfigured || !settings.workspaceId}
+                    onClick={() => {
+                      setFeedback(null);
+                      setShowPaidCallConfirmation(true);
+                    }}
+                  >
+                    测试连接
+                  </button>
+                )}
+              </div>
+
+              {showPaidCallConfirmation && (
+                <div className="paid-call-notice" aria-label="连接测试确认">
+                  <div>
+                    <strong>发送一张内置测试图片并可能产生一次 OCR 调用</strong>
+                    <p>测试图片会直接发往百炼，请确认后继续。</p>
+                  </div>
+                  <div className="paid-call-actions">
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={busy === 'testing'}
+                      onClick={() => setShowPaidCallConfirmation(false)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      disabled={busy === 'testing'}
+                      onClick={() => void confirmConnectionTest()}
+                    >
+                      {busy === 'testing' ? '正在测试…' : '确认并测试连接'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <SettingsNotice feedback={feedback} />
+          </form>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SettingsNotice({ feedback }: { feedback: SettingsFeedback }) {
+  if (!feedback) return null;
+  return (
+    <div
+      className={`settings-notice settings-notice--${feedback.kind}`}
+      role={feedback.kind === 'error' ? 'alert' : 'status'}
+    >
+      <Icon name={feedback.kind === 'error' ? 'warning' : 'check'} />
+      <span>{feedback.message}</span>
+    </div>
   );
 }
 
@@ -759,7 +1058,8 @@ type IconName =
   | 'chevron'
   | 'back'
   | 'check'
-  | 'history';
+  | 'history'
+  | 'settings';
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
@@ -776,6 +1076,7 @@ function Icon({ name }: { name: IconName }) {
     back: <><path d="m15 5-7 7 7 7" /><path d="M8 12h11" /></>,
     check: <path d="m5 12.5 4 4L19 7" />,
     history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 7.5V12l3 2" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06-2.76 2.76-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.08 1.65V21H10v-.09A1.8 1.8 0 0 0 8.92 19.3a1.8 1.8 0 0 0-2 .36l-.06.06-2.76-2.76.06-.06a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.91 14H2.8v-4h.11a1.8 1.8 0 0 0 1.61-1.08 1.8 1.8 0 0 0-.36-2l-.06-.06L6.86 4.1l.06.06a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10 2.91V2.8h4v.11a1.8 1.8 0 0 0 1.08 1.61 1.8 1.8 0 0 0 2-.36l.06-.06 2.76 2.76-.06.06a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.09 10h.11v4h-.11A1.8 1.8 0 0 0 19.4 15Z" /></>,
   };
   return (
     <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

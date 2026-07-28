@@ -89,6 +89,18 @@ function createApi(overrides: Partial<DesktopApi> = {}): DesktopApi {
     listOrders: vi.fn().mockResolvedValue([]),
     getOrder: vi.fn(),
     getScreenshotDataUrl: vi.fn(),
+    getOcrSettings: vi.fn().mockResolvedValue({
+      workspaceId: '',
+      region: 'cn-beijing',
+      regionLabel: '中国（北京）',
+      model: 'qwen3.5-ocr',
+      apiKeyConfigured: false,
+      apiKeyMask: '',
+      credentialStore: '测试系统凭据库',
+    }),
+    saveOcrSettings: vi.fn(),
+    removeOcrApiKey: vi.fn(),
+    testOcrConnection: vi.fn(),
     ...overrides,
   };
 }
@@ -285,5 +297,167 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('来源截图识别失败，请稍后重试');
     expect(screen.getByRole('button', { name: '上传来源截图' })).toBeEnabled();
+  });
+
+  it('从侧栏打开百炼 OCR 设置时只显示密钥状态，不回填 API Key', async () => {
+    const user = userEvent.setup();
+    const getOcrSettings = vi.fn().mockResolvedValue({
+      workspaceId: 'ws-existing',
+      region: 'cn-beijing',
+      regionLabel: '中国（北京）',
+      model: 'qwen3.5-ocr',
+      apiKeyConfigured: true,
+      apiKeyMask: '••••••••',
+      credentialStore: 'macOS 钥匙串',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [],
+      }),
+      getOcrSettings,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByRole('heading', { name: '百炼 OCR' })).toBeVisible();
+    expect(getOcrSettings).toHaveBeenCalledOnce();
+    expect(screen.getByRole('textbox', { name: 'Workspace ID' })).toHaveValue('ws-existing');
+    expect(screen.getByLabelText('API Key')).toHaveValue('');
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
+    expect(screen.getByText('••••••••')).toBeVisible();
+    expect(screen.getByText('已保存在 macOS 钥匙串')).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '地域' })).toHaveValue('中国（北京）');
+    expect(screen.getByRole('textbox', { name: '地域' })).toHaveAttribute('readonly');
+    expect(screen.getByText('qwen3.5-ocr 当前仅开放华北 2（北京）')).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '模型' })).toHaveValue('qwen3.5-ocr');
+    expect(screen.getByRole('textbox', { name: '模型' })).toHaveAttribute('readonly');
+
+    await user.click(screen.getByRole('button', { name: '订单' }));
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+  });
+
+  it('可保存百炼设置并清空密钥输入，保存失败时显示可读错误', async () => {
+    const user = userEvent.setup();
+    const savedSettings = {
+      workspaceId: 'ws-new',
+      region: 'cn-beijing' as const,
+      regionLabel: '中国（北京）',
+      model: 'qwen3.5-ocr' as const,
+      apiKeyConfigured: true,
+      apiKeyMask: '••••••••',
+      credentialStore: 'Windows 凭据管理器',
+    };
+    const saveOcrSettings = vi
+      .fn()
+      .mockResolvedValueOnce(savedSettings)
+      .mockRejectedValueOnce(new Error('无法保存 OCR 设置'));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      saveOcrSettings,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByRole('heading', { name: '百炼 OCR' });
+
+    await user.type(screen.getByRole('textbox', { name: 'Workspace ID' }), 'ws-new');
+    await user.type(screen.getByLabelText('API Key'), 'sk-new-secret');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    expect(saveOcrSettings).toHaveBeenLastCalledWith({
+      workspaceId: 'ws-new',
+      region: 'cn-beijing',
+      apiKey: 'sk-new-secret',
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent('设置已保存');
+    expect(screen.getByLabelText('API Key')).toHaveValue('');
+
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法保存 OCR 设置');
+  });
+
+  it('连接测试必须先展示付费调用提示，再次确认后才发起请求', async () => {
+    const user = userEvent.setup();
+    const testOcrConnection = vi.fn().mockResolvedValue({
+      ok: true,
+      model: 'qwen3.5-ocr',
+      message: '连接成功，qwen3.5-ocr 可以使用',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOcrSettings: vi.fn().mockResolvedValue({
+        workspaceId: 'ws-existing',
+        region: 'cn-beijing',
+        regionLabel: '中国（北京）',
+        model: 'qwen3.5-ocr',
+        apiKeyConfigured: true,
+        apiKeyMask: '••••••••',
+        credentialStore: '测试系统凭据库',
+      }),
+      testOcrConnection,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(await screen.findByRole('button', { name: '测试连接' }));
+
+    expect(testOcrConnection).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('发送一张内置测试图片并可能产生一次 OCR 调用'),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '确认并测试连接' }));
+    expect(testOcrConnection).toHaveBeenCalledOnce();
+    expect(testOcrConnection).toHaveBeenCalledWith({ consentToPaidCall: true });
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '连接成功，qwen3.5-ocr 可以使用',
+    );
+  });
+
+  it('可从系统凭据库移除 API Key', async () => {
+    const user = userEvent.setup();
+    const removedSettings = {
+      workspaceId: 'ws-existing',
+      region: 'cn-beijing' as const,
+      regionLabel: '中国（北京）',
+      model: 'qwen3.5-ocr' as const,
+      apiKeyConfigured: false,
+      apiKeyMask: '',
+      credentialStore: '测试系统凭据库',
+    };
+    const removeOcrApiKey = vi.fn().mockResolvedValue(removedSettings);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOcrSettings: vi.fn().mockResolvedValue({
+        ...removedSettings,
+        apiKeyConfigured: true,
+        apiKeyMask: '••••••••',
+      }),
+      removeOcrApiKey,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(await screen.findByRole('button', { name: '移除 API Key' }));
+
+    expect(removeOcrApiKey).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('status')).toHaveTextContent('API Key 已移除');
+    expect(screen.getByText('尚未保存 API Key')).toBeVisible();
+    expect(screen.queryByText('••••••••')).not.toBeInTheDocument();
   });
 });
