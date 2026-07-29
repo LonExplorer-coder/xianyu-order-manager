@@ -7,12 +7,21 @@ import { cpSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 
+const MAC_RELEASE_BUILD = process.env.XIANYU_MAC_RELEASE === '1';
+const MAC_NOTARY_KEYCHAIN_PROFILE =
+  process.env.XIANYU_NOTARY_KEYCHAIN_PROFILE?.trim() || 'xianyu-order-manager-notary';
+type MacSignOptions = Exclude<
+  NonNullable<NonNullable<ForgeConfig['packagerConfig']>['osxSign']>,
+  true
+>;
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     name: 'XianyuOrderManager',
     executableName: 'XianyuOrderManager',
     appBundleId: 'com.lonexplorer.xianyu-order-manager',
+    ...macSecurityOptions(),
     afterPrune: [
       (buildPath, _electronVersion, platform, arch, callback) => {
         try {
@@ -59,6 +68,31 @@ const config: ForgeConfig = {
     }),
   ],
 };
+
+function macSecurityOptions(): Pick<
+  NonNullable<ForgeConfig['packagerConfig']>,
+  'osxSign' | 'osxNotarize'
+> | Record<string, never> {
+  if (process.platform !== 'darwin') return {};
+  if (MAC_RELEASE_BUILD) {
+    return {
+      osxSign: failClosedMacSign({}),
+      osxNotarize: { keychainProfile: MAC_NOTARY_KEYCHAIN_PROFILE },
+    };
+  }
+  return {
+    osxSign: failClosedMacSign({
+      identity: '-',
+      identityValidation: false,
+      optionsForFile: () => ({ hardenedRuntime: false }),
+    }),
+  };
+}
+
+function failClosedMacSign(options: MacSignOptions): MacSignOptions {
+  // Electron Packager 19 supports this at runtime but omits it from the macOS option type.
+  return { ...options, continueOnError: false } as MacSignOptions;
+}
 
 function copyKeyringRuntime(buildPath: string, platform: string, arch: string): void {
   const platformPackage = keyringPlatformPackage(platform, arch);

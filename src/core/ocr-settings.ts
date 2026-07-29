@@ -1,5 +1,11 @@
 export type BailianRegion = 'cn-beijing';
 
+export type BailianRecognitionCredentials = {
+  workspaceId: string;
+  region: BailianRegion;
+  apiKey: string;
+};
+
 const BAILIAN_WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
 

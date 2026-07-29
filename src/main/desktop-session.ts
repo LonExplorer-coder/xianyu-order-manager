@@ -62,6 +62,26 @@ export class DesktopSession {
       .then((batch) => batch.drafts[0]);
   }
 
+  public getLastSourceScreenshotDirectory(): string | undefined {
+    try {
+      return this.preferences.getLastSourceScreenshotDirectory();
+    } catch {
+      return undefined;
+    }
+  }
+
+  public rememberSourceScreenshotDirectory(sourceDirectory: string): void {
+    try {
+      this.preferences.setLastSourceScreenshotDirectory(sourceDirectory);
+    } catch {
+      // This convenience preference must never prevent selecting or importing a screenshot.
+    }
+  }
+
+  public cancelDraft(draftId: string): void {
+    this.requireApplication().cancelDraft(draftId);
+  }
+
   public confirmDraft(draft: OrderDraft): OriginalOrder {
     const order = this.requireApplication().confirmDraft(draft);
     this.refreshOrders();

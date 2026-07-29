@@ -2,7 +2,7 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,11 +21,25 @@ const draft: OrderDraft = {
   platform: 'xianyu',
   sellerAccount: '测试闲鱼账号',
   orderNumber: 'XY-TEST-20260727-0001',
+  alipayTransactionNumber: 'ALI-SYNTH-UI-0001',
   buyerNickname: '测试买家',
   recipient: '测试收件人',
   phone: '13800000000',
+  phoneNormalized: '13800000000',
   addressOriginal: '广东省深圳市南山区测试路1号',
+  addressNormalized: '广东省深圳市南山区测试路1号',
+  province: '广东省',
+  city: '深圳市',
+  district: '南山区',
+  orderedAtOriginal: '2026-07-27 11:21:46',
+  orderedAtNormalized: '2026-07-27T11:21:46+08:00',
+  paidAtOriginal: '2026-07-27 11:21:54',
+  paidAtNormalized: '2026-07-27T11:21:54+08:00',
+  productTotalCents: 800,
+  shippingFeeCents: 0,
   amountCents: 800,
+  platformTransactionStatus: 'paid',
+  fulfillmentStatus: 'pending_shipment',
   items: [
     {
       id: 'item-1',
@@ -44,17 +58,35 @@ const confirmedOrder: OriginalOrder = {
   platform: 'xianyu',
   sellerAccount: draft.sellerAccount,
   orderNumber: draft.orderNumber,
+  alipayTransactionNumber: draft.alipayTransactionNumber,
   buyerNickname: draft.buyerNickname,
   recipient: '人工修正收件人',
   phone: draft.phone,
+  phoneNormalized: draft.phoneNormalized,
   addressOriginal: draft.addressOriginal,
+  addressNormalized: draft.addressNormalized,
+  province: draft.province,
+  city: draft.city,
+  district: draft.district,
+  orderedAtOriginal: draft.orderedAtOriginal,
+  orderedAtNormalized: draft.orderedAtNormalized,
+  paidAtOriginal: draft.paidAtOriginal,
+  paidAtNormalized: draft.paidAtNormalized,
+  productTotalCents: draft.productTotalCents,
+  shippingFeeCents: draft.shippingFeeCents,
   amountCents: 800,
   platformTransactionStatus: 'paid',
   fulfillmentStatus: 'pending_shipment',
   lifecycleStatus: 'active',
   createdAt: '2026-07-27T11:22:00.000Z',
   updatedAt: '2026-07-27T11:24:00.000Z',
-  items: [{ ...draft.items[0], quantity: 2, quantityInferred: false, subtotalCents: 1_600 }],
+  items: [{
+    ...draft.items[0],
+    unitPriceCents: 800,
+    quantity: 2,
+    quantityInferred: false,
+    subtotalCents: 1_600,
+  }],
 };
 
 const orderDetails: OrderDetails = {
@@ -85,6 +117,7 @@ function createApi(overrides: Partial<DesktopApi> = {}): DesktopApi {
       orders: [],
     }),
     selectSourceScreenshot: vi.fn().mockResolvedValue(null),
+    cancelDraft: vi.fn().mockResolvedValue(undefined),
     confirmDraft: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
     getOrder: vi.fn(),
@@ -117,6 +150,9 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
     expect(screen.getByRole('button', { name: '上传来源截图' })).toBeVisible();
+    expect(screen.getByText(
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。',
+    )).toBeVisible();
     expect(screen.getByText('/Users/test/闲鱼订单')).toBeVisible();
   });
 
@@ -140,6 +176,8 @@ describe('订单管理工作台', () => {
           recipient: confirmedOrder.recipient,
           amountCents: confirmedOrder.amountCents,
           itemCount: 1,
+          platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+          fulfillmentStatus: confirmedOrder.fulfillmentStatus,
           createdAt: confirmedOrder.createdAt,
         },
       ]),
@@ -170,6 +208,351 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('可取消本次校对并回到上传页，且不会确认订单', async () => {
+    const user = userEvent.setup();
+    const cancelDraft = vi.fn().mockResolvedValue(undefined);
+    const confirmDraft = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      cancelDraft,
+      confirmDraft,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '取消本次校对' }));
+
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '校对识别结果' })).not.toBeInTheDocument();
+    expect(cancelDraft).toHaveBeenCalledWith(draft.id);
+    expect(confirmDraft).not.toHaveBeenCalled();
+  });
+
+  it('收件人与买家昵称疑似错位时给出明确校对提示', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue({
+        ...draft,
+        buyerNickname: '陈测试',
+        recipient: '陈测试',
+      }),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    expect(await screen.findByText(
+      'OCR 疑似把收件人同时填入了买家昵称，请对照截图核对',
+    )).toBeVisible();
+    await user.clear(screen.getByRole('textbox', { name: '买家昵称' }));
+    await user.type(screen.getByRole('textbox', { name: '买家昵称' }), '测***户');
+    expect(screen.queryByText(
+      'OCR 疑似把收件人同时填入了买家昵称，请对照截图核对',
+    )).not.toBeInTheDocument();
+  });
+
+  it('取消校对失败时保留截图与编辑内容，并允许重试', async () => {
+    const user = userEvent.setup();
+    const cancelDraft = vi.fn().mockRejectedValue(new Error('暂时无法取消校对'));
+    const confirmDraft = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      cancelDraft,
+      confirmDraft,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    const recipient = await screen.findByRole('textbox', { name: '收件人' });
+    await user.clear(recipient);
+    await user.type(recipient, '人工校对中的收件人');
+    await user.click(screen.getByRole('button', { name: '取消本次校对' }));
+
+    expect(await screen.findByText('暂时无法取消校对')).toBeVisible();
+    expect(screen.getByRole('heading', { name: '校对识别结果' })).toBeVisible();
+    expect(screen.getByRole('img', { name: '来源截图' })).toBeVisible();
+    expect(recipient).toHaveValue('人工校对中的收件人');
+    expect(screen.getByRole('button', { name: '取消本次校对' })).toBeEnabled();
+    expect(confirmDraft).not.toHaveBeenCalled();
+  });
+
+  it('校对时可修正完整交易、地址、时间、金额与状态字段', async () => {
+    const user = userEvent.setup();
+    const confirmDraft = vi.fn().mockResolvedValue(confirmedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    expect(await screen.findByRole('textbox', { name: '平台' })).toHaveValue('闲鱼');
+    expect(screen.getByRole('textbox', { name: '平台' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('textbox', { name: '卖家账号' })).toBeRequired();
+
+    await user.clear(screen.getByRole('textbox', { name: '支付宝交易号' }));
+    await user.type(screen.getByRole('textbox', { name: '支付宝交易号' }), 'ALI-CORRECTED-001');
+    await user.clear(screen.getByRole('textbox', { name: '完整收货地址' }));
+    await user.type(screen.getByRole('textbox', { name: '完整收货地址' }), '广东省 深圳市 南山区 科技路2号');
+    await user.clear(screen.getByRole('textbox', { name: '下单时间（原文）' }));
+    await user.type(screen.getByRole('textbox', { name: '下单时间（原文）' }), '2026-07-27 11:22:00');
+    await user.clear(screen.getByRole('textbox', { name: '付款时间（原文）' }));
+    await user.type(screen.getByRole('textbox', { name: '付款时间（原文）' }), '2026-07-27 11:23:00');
+
+    await user.clear(screen.getByRole('spinbutton', { name: '商品总价' }));
+    await user.type(screen.getByRole('spinbutton', { name: '商品总价' }), '18.00');
+    await user.clear(screen.getByRole('spinbutton', { name: '运费' }));
+    await user.type(screen.getByRole('spinbutton', { name: '运费' }), '2.00');
+    await user.clear(screen.getByRole('spinbutton', { name: '成交金额' }));
+    await user.type(screen.getByRole('spinbutton', { name: '成交金额' }), '20.00');
+    await user.selectOptions(screen.getByRole('combobox', { name: '平台交易状态' }), 'refunded');
+    await user.selectOptions(screen.getByRole('combobox', { name: '履约状态' }), 'shipped');
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(expect.objectContaining({
+      alipayTransactionNumber: 'ALI-CORRECTED-001',
+      addressNormalized: '广东省深圳市南山区科技路2号',
+      orderedAtNormalized: '2026-07-27T11:22:00+08:00',
+      paidAtNormalized: '2026-07-27T11:23:00+08:00',
+      productTotalCents: 1_800,
+      shippingFeeCents: 200,
+      amountCents: 2_000,
+      platformTransactionStatus: 'refunded',
+      fulfillmentStatus: 'shipped',
+    }));
+  });
+
+  it('金额按十进制精确保存为分，并拒绝三位小数与指数格式', async () => {
+    const user = userEvent.setup();
+    const confirmDraft = vi.fn().mockResolvedValue(confirmedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '商品总价' }), {
+      target: { value: '1.005' },
+    });
+    expect(screen.getByText('金额仅支持普通数字，最多两位小数')).toBeVisible();
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '商品总价' }), {
+      target: { value: '1.05' },
+    });
+    fireEvent.change(screen.getByRole('spinbutton', { name: '运费' }), {
+      target: { value: '1e2' },
+    });
+    expect(screen.getByText('金额仅支持普通数字，最多两位小数')).toBeVisible();
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '运费' }), {
+      target: { value: '0.10' },
+    });
+    fireEvent.change(screen.getByRole('spinbutton', { name: '成交金额' }), {
+      target: { value: '1.15' },
+    });
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(expect.objectContaining({
+      productTotalCents: 105,
+      shippingFeeCents: 10,
+      amountCents: 115,
+    }));
+  });
+
+  it('成交金额缺失时保留空白并阻止确认入库', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue({ ...draft, amountCents: null }),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    expect(screen.getByRole('spinbutton', { name: '成交金额' })).toHaveValue(null);
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '成交金额' }), {
+      target: { value: '0.00' },
+    });
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled();
+  });
+
+  it('数量缺失时显示推定标记，且单个商品也可删除后重新添加', async () => {
+    const user = userEvent.setup();
+    const confirmDraft = vi.fn().mockResolvedValue(confirmedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    expect(await screen.findByText('截图未显示数量，已按 1 件处理')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '删除商品 1' }));
+
+    expect(screen.getByRole('heading', { name: '商品明细 · 0' })).toBeVisible();
+    expect(screen.getByText('暂无商品明细')).toBeVisible();
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: '添加商品' }));
+    expect(screen.getByRole('heading', { name: '商品明细 · 1' })).toBeVisible();
+    expect(screen.queryByText('截图未显示数量，已按 1 件处理')).not.toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: '数量' })).toHaveValue(1);
+
+    await user.type(screen.getByRole('textbox', { name: '商品标题' }), '人工补录商品');
+    await user.type(screen.getByRole('spinbutton', { name: '单价' }), '1.00');
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(expect.objectContaining({
+      items: [expect.objectContaining({
+        sourceTitle: '人工补录商品',
+        unitPriceCents: 100,
+        quantity: 1,
+        quantityInferred: false,
+      })],
+    }));
+  });
+
+  it('商品数量必须是大于等于 1 的整数', async () => {
+    const user = userEvent.setup();
+    const confirmDraft = vi.fn().mockResolvedValue(confirmedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '数量' }), {
+      target: { value: '1.5' },
+    });
+
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+    expect(confirmDraft).not.toHaveBeenCalled();
+  });
+
+  it('修正手机号和原始地址时同步只读的规范化值', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    fireEvent.change(screen.getByRole('textbox', { name: '手机号' }), {
+      target: { value: '+86 139-0000-0002' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: '完整收货地址' }), {
+      target: { value: '测试省，测试市 示例区 安全路 2号' },
+    });
+
+    expect(screen.getByRole('textbox', { name: '规范化手机号' }))
+      .toHaveValue('8613900000002');
+    expect(screen.getByRole('textbox', { name: '规范化手机号' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('textbox', { name: '规范化地址' }))
+      .toHaveValue('测试省测试市示例区安全路2号');
+    expect(screen.getByRole('textbox', { name: '规范化地址' })).toHaveAttribute('readonly');
+  });
+
+  it('修正交易时间原文时同步只读的规范化时间', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+
+    fireEvent.change(screen.getByRole('textbox', { name: '下单时间（原文）' }), {
+      target: { value: '2026年7月30日 08:09:10' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: '付款时间（原文）' }), {
+      target: { value: '2026/07/30 08:09:18' },
+    });
+
+    expect(screen.getByRole('textbox', { name: '下单时间（规范化）' }))
+      .toHaveValue('2026-07-30T08:09:10+08:00');
+    expect(screen.getByRole('textbox', { name: '下单时间（规范化）' }))
+      .toHaveAttribute('readonly');
+    expect(screen.getByRole('textbox', { name: '付款时间（规范化）' }))
+      .toHaveValue('2026-07-30T08:09:18+08:00');
+    expect(screen.getByRole('textbox', { name: '付款时间（规范化）' }))
+      .toHaveAttribute('readonly');
+  });
+
   it('有订单时直接展示主表，并可查看带来源截图的订单详情', async () => {
     const user = userEvent.setup();
     const api = createApi({
@@ -184,6 +567,8 @@ describe('订单管理工作台', () => {
             recipient: confirmedOrder.recipient,
             amountCents: confirmedOrder.amountCents,
             itemCount: 1,
+            platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+            fulfillmentStatus: confirmedOrder.fulfillmentStatus,
             createdAt: confirmedOrder.createdAt,
           },
         ],
@@ -195,6 +580,9 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
 
     expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
+    expect(screen.getByText(
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。',
+    )).toBeVisible();
     await user.click(
       screen.getByRole('button', { name: `查看订单 ${confirmedOrder.orderNumber}` }),
     );
@@ -205,6 +593,70 @@ describe('订单管理工作台', () => {
       'src',
       'data:image/png;base64,ZGV0YWls',
     );
+  });
+
+  it('订单详情展示完整当前值与真实状态，不暴露 OCR 原始响应', async () => {
+    const user = userEvent.setup();
+    const detailedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      alipayTransactionNumber: 'ALI-DETAIL-20260727',
+      addressNormalized: '广东省深圳市南山区科技路2号',
+      orderedAtOriginal: '2026-07-27 11:21:46',
+      orderedAtNormalized: '2026-07-27T11:21:46+08:00',
+      paidAtOriginal: '2026-07-27 11:21:54',
+      paidAtNormalized: '2026-07-27T11:21:54+08:00',
+      productTotalCents: 1_800,
+      shippingFeeCents: 200,
+      amountCents: 2_000,
+      platformTransactionStatus: 'refunded',
+      fulfillmentStatus: 'shipped',
+    };
+    const detailsWithEvidence = {
+      ...orderDetails,
+      order: detailedOrder,
+      sourceSnapshot: {
+        ...orderDetails.sourceSnapshot,
+        rawResponse: 'SECRET_RAW_OCR_RESPONSE',
+      },
+    } as OrderDetails;
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [{
+          id: detailedOrder.id,
+          orderNumber: detailedOrder.orderNumber,
+          buyerNickname: detailedOrder.buyerNickname,
+          recipient: detailedOrder.recipient,
+          amountCents: detailedOrder.amountCents,
+          itemCount: detailedOrder.items.length,
+          platformTransactionStatus: detailedOrder.platformTransactionStatus,
+          fulfillmentStatus: detailedOrder.fulfillmentStatus,
+          createdAt: detailedOrder.createdAt,
+        }],
+      }),
+      getOrder: vi.fn().mockResolvedValue(detailsWithEvidence),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    const orderTable = await screen.findByRole('table', { name: '原始订单' });
+    expect(orderTable).toHaveTextContent('已退款');
+    expect(orderTable).toHaveTextContent('已发货');
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${detailedOrder.orderNumber}` }));
+
+    const detailPage = (await screen.findByRole('heading', { name: '订单详情' })).closest('section');
+    expect(detailPage).not.toBeNull();
+    expect(detailPage).toHaveTextContent('闲鱼');
+    expect(detailPage).toHaveTextContent('ALI-DETAIL-20260727');
+    expect(detailPage).toHaveTextContent('已退款 · 已发货');
+    expect(detailPage).toHaveTextContent('商品总价¥18.00');
+    expect(detailPage).toHaveTextContent('运费¥2.00');
+    expect(detailPage).toHaveTextContent('成交金额¥20.00');
+    expect(detailPage).toHaveTextContent('2026-07-27 11:21:46');
+    expect(detailPage).toHaveTextContent('2026-07-27T11:21:54+08:00');
+    expect(detailPage).toHaveTextContent('广东省深圳市南山区科技路2号');
+    expect(detailPage).not.toHaveTextContent('SECRET_RAW_OCR_RESPONSE');
   });
 
   it('数据目录被其他实例占用时说明原因，并允许选择其他目录', async () => {

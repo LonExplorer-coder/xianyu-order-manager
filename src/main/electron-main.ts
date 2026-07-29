@@ -1,48 +1,22 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { join } from 'node:path';
 
+import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
 import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
-import { BailianOcrClient } from '../adapters/recognition/bailian-ocr-client';
-import { ControlledRecognizer } from '../adapters/recognition/controlled-recognizer';
 import type { OrderDraft } from '../core/contracts';
 import type {
   OcrConnectionTestInput,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import { DesktopSession } from './desktop-session';
-import { OcrSettingsFile } from './ocr-settings-file';
-import { OcrSettingsService } from './ocr-settings';
-import { Preferences } from './preferences';
+import { createConfiguredDesktopSession } from './production-session';
+import {
+  selectedSourceScreenshotDirectory,
+  sourceScreenshotDialogOptions,
+} from './source-screenshot-dialog';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
-
-const controlledRecognizer = new ControlledRecognizer({
-  platform: 'xianyu',
-  sellerAccount: '默认闲鱼账号',
-  orderNumber: 'XY-DEMO-20260727-001',
-  buyerNickname: '演示买家',
-  recipient: '测试收件人',
-  phone: '13800000000',
-  addressOriginal: '广东省深圳市南山区测试路1号',
-  amountCents: 2_600,
-  items: [
-    {
-      sourceTitle: '演示商品 A',
-      sourceSpec: '白色',
-      unitPriceCents: 800,
-      quantity: 2,
-      quantityInferred: false,
-    },
-    {
-      sourceTitle: '演示商品 B',
-      sourceSpec: '标准款',
-      unitPriceCents: 1_000,
-      quantity: 1,
-      quantityInferred: true,
-    },
-  ],
-});
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -98,20 +72,28 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
 
   ipcMain.handle('workflow:select-source-screenshot', async () => {
     const window = requireWindow();
-    const selection = await dialog.showOpenDialog(window, {
-      title: '选择一张包含完整闲鱼订单详情的来源截图',
-      buttonLabel: '识别此来源截图',
-      properties: ['openFile'],
-      filters: [
-        { name: '来源截图', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
-      ],
-    });
+    const selection = await dialog.showOpenDialog(
+      window,
+      sourceScreenshotDialogOptions(
+        desktopSession.getLastSourceScreenshotDirectory(),
+      ),
+    );
     if (selection.canceled || selection.filePaths.length === 0) return null;
+    const sourceDirectory = selectedSourceScreenshotDirectory(selection);
+    if (sourceDirectory) {
+      desktopSession.rememberSourceScreenshotDirectory(sourceDirectory);
+    }
     return desktopSession.submitSourceScreenshot(selection.filePaths[0]);
   });
 
   ipcMain.handle('workflow:confirm-draft', (_event, draft: OrderDraft) => {
     return desktopSession.confirmDraft(draft);
+  });
+  ipcMain.handle('workflow:cancel-draft', (_event, draftId: unknown) => {
+    if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > 128) {
+      throw new Error('订单草稿 ID 格式无效');
+    }
+    return desktopSession.cancelDraft(draftId.trim());
   });
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
@@ -135,17 +117,27 @@ function requireWindow(): BrowserWindow {
   return mainWindow;
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
+  if (process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1') {
+    try {
+      await runPackagedCredentialStoreSmoke();
+      console.log('Packaged credential store smoke test passed and cleaned up.');
+      app.exit(0);
+    } catch (error) {
+      console.error(
+        'Packaged credential store smoke test failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      app.exit(1);
+    }
+    return;
+  }
+
   const configDirectory = join(app.getPath('userData'), 'bootstrap');
-  session = new DesktopSession(
-    new Preferences(configDirectory),
-    controlledRecognizer,
-    new OcrSettingsService(
-      new OcrSettingsFile(configDirectory),
-      new SystemApiKeyStore(),
-      new BailianOcrClient(),
-    ),
-  );
+  session = createConfiguredDesktopSession({
+    configDirectory,
+    apiKeyStore: new SystemApiKeyStore(),
+  });
   session.restore();
   registerIpcHandlers(session);
   mainWindow = createWindow();

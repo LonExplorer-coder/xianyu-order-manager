@@ -22,6 +22,7 @@ export interface DesktopApi {
   retryDataDirectory(): Promise<BootstrapState>;
   selectDataDirectory(): Promise<BootstrapState>;
   selectSourceScreenshot(): Promise<OrderDraft | null>;
+  cancelDraft(draftId: string): Promise<void>;
   confirmDraft(draft: OrderDraft): Promise<OriginalOrder>;
   listOrders(): Promise<OrderSummary[]>;
   getOrder(orderId: string): Promise<OrderDetails>;

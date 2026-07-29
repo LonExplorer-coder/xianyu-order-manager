@@ -39,6 +39,8 @@ jobs:
           test -f out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/Resources/app.asar.unpacked/node_modules/@napi-rs/keyring-darwin-arm64/keyring.darwin-arm64.node
           test "$(plutil -extract CFBundleIdentifier raw out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/Info.plist)" = "com.lonexplorer.xianyu-order-manager"
           plutil -lint out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=4 out/XianyuOrderManager-darwin-arm64/XianyuOrderManager.app
+          pnpm test:packaged-credential-store
       - name: Verify Windows portable application
         if: runner.os == 'Windows'
         shell: pwsh
@@ -46,3 +48,4 @@ jobs:
           if (!(Test-Path 'out/XianyuOrderManager-win32-x64/XianyuOrderManager.exe')) { throw 'Missing Windows executable' }
           if (!(Test-Path 'out/XianyuOrderManager-win32-x64/resources/app.asar')) { throw 'Missing Windows app.asar' }
           if (!(Test-Path 'out/XianyuOrderManager-win32-x64/resources/app.asar.unpacked/node_modules/@napi-rs/keyring-win32-x64-msvc/keyring.win32-x64-msvc.node')) { throw 'Missing Windows Credential Manager native module' }
+          pnpm test:packaged-credential-store

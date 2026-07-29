@@ -7,6 +7,7 @@ const api: DesktopApi = {
   retryDataDirectory: () => ipcRenderer.invoke('app:retry-data-directory'),
   selectDataDirectory: () => ipcRenderer.invoke('app:select-data-directory'),
   selectSourceScreenshot: () => ipcRenderer.invoke('workflow:select-source-screenshot'),
+  cancelDraft: (draftId) => ipcRenderer.invoke('workflow:cancel-draft', draftId),
   confirmDraft: (draft) => ipcRenderer.invoke('workflow:confirm-draft', draft),
   listOrders: () => ipcRenderer.invoke('orders:list'),
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),

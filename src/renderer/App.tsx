@@ -8,13 +8,22 @@ import type {
   OrderSummary,
 } from '../core/contracts';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import {
+  isValidAddressPair,
+  isValidPhonePair,
+  normalizeAddress,
+  normalizePhone,
+  normalizeShanghaiDateTime,
+} from '../core/order-normalization';
 
 export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'confirm' | 'detail' | 'retry' | null;
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'retry' | null;
 type AppPage = 'orders' | 'settings';
+
+const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
 
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -67,6 +76,21 @@ export function App({ api }: AppProps) {
       await api.confirmDraft(draft);
       const orders = await api.listOrders();
       setBootstrap({ ...bootstrap, orders });
+      setDraft(null);
+      setReviewScreenshotUrl('');
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function cancelReview() {
+    if (!draft) return;
+    setBusyAction('cancel');
+    setOperationError('');
+    try {
+      await api.cancelDraft(draft.id);
       setDraft(null);
       setReviewScreenshotUrl('');
     } catch (error) {
@@ -166,8 +190,10 @@ export function App({ api }: AppProps) {
         draft={draft}
         screenshotUrl={reviewScreenshotUrl}
         error={operationError}
+        cancelling={busyAction === 'cancel'}
         confirming={busyAction === 'confirm'}
         onDraftChange={setDraft}
+        onCancel={() => void cancelReview()}
         onConfirm={(event) => void confirmOrder(event)}
       />
     );
@@ -314,7 +340,7 @@ function SystemScreen(props: SystemScreenProps) {
           </button>
           <div className="privacy-note">
             <Icon name="shield" />
-            <span><strong>只保存在您的电脑上</strong>当前流程不会上传任何文件。</span>
+            <span><strong>本机保存为主</strong>订单数据与原图保存在所选目录，识别时截图会发送至您配置的阿里云百炼。</span>
           </div>
         </section>
       </main>
@@ -376,6 +402,7 @@ function OrdersWorkspace({
           <Icon name="upload" />
           {uploading ? '正在识别来源截图…' : '上传来源截图'}
         </button>
+        <p className="upload-disclosure">{OCR_UPLOAD_DISCLOSURE}</p>
         <div className="empty-support">
           <span>PNG、JPG、JPEG 或 WebP</span>
           <span aria-hidden="true">·</span>
@@ -394,10 +421,13 @@ function OrdersWorkspace({
           <h1>订单</h1>
           <p>{orders.length} 笔订单，保留来源截图与来源快照。</p>
         </div>
-        <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
-          <Icon name="upload" />
-          {uploading ? '正在识别来源截图…' : '上传来源截图'}
-        </button>
+        <div className="upload-action">
+          <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
+            <Icon name="upload" />
+            {uploading ? '正在识别来源截图…' : '上传来源截图'}
+          </button>
+          <small>{OCR_UPLOAD_DISCLOSURE}</small>
+        </div>
       </header>
 
       <InlineError message={error} />
@@ -417,6 +447,7 @@ function OrdersWorkspace({
               <th>收件人</th>
               <th>商品</th>
               <th>成交金额</th>
+              <th>交易状态</th>
               <th>履约状态</th>
               <th>入库时间</th>
               <th><span className="visually-hidden">操作</span></th>
@@ -440,7 +471,8 @@ function OrdersWorkspace({
                 <td>{order.recipient}</td>
                 <td>{order.itemCount} 件</td>
                 <td className="money-cell">{formatMoney(order.amountCents)}</td>
-                <td><span className="status-chip">待发货</span></td>
+                <td><span className="status-chip">{platformTransactionStatusLabel(order.platformTransactionStatus)}</span></td>
+                <td><span className="status-chip">{fulfillmentStatusLabel(order.fulfillmentStatus)}</span></td>
                 <td>{formatDateTime(order.createdAt)}</td>
                 <td><Icon name="chevron" /></td>
               </tr>
@@ -718,8 +750,10 @@ type ReviewWorkspaceProps = {
   draft: OrderDraft;
   screenshotUrl: string;
   error: string;
+  cancelling: boolean;
   confirming: boolean;
   onDraftChange: (draft: OrderDraft) => void;
+  onCancel: () => void;
   onConfirm: (event: FormEvent<HTMLFormElement>) => void;
 };
 
@@ -727,18 +761,31 @@ function ReviewWorkspace({
   draft,
   screenshotUrl,
   error,
+  cancelling,
   confirming,
   onDraftChange,
+  onCancel,
   onConfirm,
 }: ReviewWorkspaceProps) {
+  const [moneyErrors, setMoneyErrors] = useState<Record<string, string>>({});
+  const hasMoneyErrors = Object.keys(moneyErrors).length > 0;
   const isComplete =
     draft.orderNumber.trim() !== '' &&
+    draft.sellerAccount.trim() !== '' &&
     draft.recipient.trim() !== '' &&
-    draft.phone.trim() !== '' &&
-    draft.addressOriginal.trim() !== '' &&
+    isValidPhonePair(draft.phone, draft.phoneNormalized) &&
+    isValidAddressPair(draft.addressOriginal, draft.addressNormalized) &&
     draft.items.length > 0 &&
-    draft.items.every((item) => item.sourceTitle.trim() !== '' && item.quantity >= 1) &&
-    draft.amountCents >= 0;
+    draft.items.every((item) =>
+      item.sourceTitle.trim() !== '' &&
+      item.unitPriceCents !== null &&
+      Number.isSafeInteger(item.quantity) &&
+      item.quantity >= 1
+    ) &&
+    draft.productTotalCents !== null &&
+    draft.shippingFeeCents !== null &&
+    draft.amountCents !== null &&
+    !hasMoneyErrors;
 
   function patchDraft(patch: Partial<OrderDraft>) {
     onDraftChange({ ...draft, ...patch });
@@ -748,6 +795,75 @@ function ReviewWorkspace({
     const items = [...draft.items];
     items[index] = { ...items[index], ...patch };
     patchDraft({ items });
+  }
+
+  function patchMoney(
+    key: string,
+    value: string,
+    onValid: (cents: number | null) => void,
+  ) {
+    if (value.trim() === '') {
+      setMoneyErrors((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      onValid(null);
+      return;
+    }
+    const cents = yuanToCents(value);
+    if (cents === null) {
+      setMoneyErrors((current) => ({
+        ...current,
+        [key]: '金额仅支持普通数字，最多两位小数',
+      }));
+      return;
+    }
+
+    setMoneyErrors((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    onValid(cents);
+  }
+
+  function removeItem(index: number) {
+    const removedItem = draft.items[index];
+    if (removedItem) {
+      setMoneyErrors((current) => {
+        const key = `item:${removedItem.id}:unitPrice`;
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
+    patchDraft({
+      items: draft.items
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map((item, position) => ({ ...item, position })),
+    });
+  }
+
+  function addItem() {
+    const position = draft.items.length;
+    patchDraft({
+      items: [
+        ...draft.items,
+        {
+          id: `manual-item-${draft.id}-${Date.now()}-${position}`,
+          position,
+          sourceTitle: '',
+          sourceSpec: '',
+          unitPriceCents: null,
+          quantity: 1,
+          quantityInferred: false,
+        },
+      ],
+    });
   }
 
   return (
@@ -762,10 +878,18 @@ function ReviewWorkspace({
         </div>
         <div className="header-actions">
           <button
+            className="button button--quiet"
+            type="button"
+            disabled={cancelling || confirming}
+            onClick={onCancel}
+          >
+            {cancelling ? '正在取消…' : '取消本次校对'}
+          </button>
+          <button
             className="button button--primary"
             type="submit"
             form="review-form"
-            disabled={confirming || !isComplete}
+            disabled={cancelling || confirming || !isComplete}
           >
             <Icon name="check" />
             {confirming ? '正在入库…' : '确认并入库'}
@@ -802,25 +926,135 @@ function ReviewWorkspace({
             </div>
           </div>
 
-          <FormSection title="订单信息" description="用于唯一识别订单与区分卖家账号。">
+          <FormSection title="订单信息" description="平台只读；卖家账号与订单号共同确定订单归属。">
             <div className="field-grid field-grid--two">
-              <Field label="订单号" required>
-                <input value={draft.orderNumber} onChange={(event) => patchDraft({ orderNumber: event.target.value })} />
+              <Field label="平台">
+                <input value={platformLabel(draft.platform)} readOnly />
               </Field>
-              <Field label="卖家账号">
-                <input value={draft.sellerAccount} onChange={(event) => patchDraft({ sellerAccount: event.target.value })} />
+              <Field label="卖家账号" required>
+                <input required value={draft.sellerAccount} onChange={(event) => patchDraft({ sellerAccount: event.target.value })} />
+              </Field>
+              <Field label="订单号" required>
+                <input required value={draft.orderNumber} onChange={(event) => patchDraft({ orderNumber: event.target.value })} />
+              </Field>
+              <Field label="支付宝交易号">
+                <input value={draft.alipayTransactionNumber} onChange={(event) => patchDraft({ alipayTransactionNumber: event.target.value })} />
               </Field>
               <Field label="买家昵称">
-                <input value={draft.buyerNickname} onChange={(event) => patchDraft({ buyerNickname: event.target.value })} />
+                <input
+                  aria-label="买家昵称"
+                  value={draft.buyerNickname}
+                  onChange={(event) => patchDraft({ buyerNickname: event.target.value })}
+                />
+                {draft.buyerNickname && draft.buyerNickname === draft.recipient && (
+                  <small className="field-warning">
+                    OCR 疑似把收件人同时填入了买家昵称，请对照截图核对
+                  </small>
+                )}
+              </Field>
+              <Field label="平台交易状态">
+                <select
+                  value={draft.platformTransactionStatus}
+                  onChange={(event) => patchDraft({
+                    platformTransactionStatus: event.target.value as OrderDraft['platformTransactionStatus'],
+                  })}
+                >
+                  <option value="paid">已付款</option>
+                  <option value="cancelled">已取消</option>
+                  <option value="refunded">已退款</option>
+                  <option value="unknown">未知</option>
+                </select>
+              </Field>
+              <Field label="履约状态">
+                <select
+                  value={draft.fulfillmentStatus}
+                  onChange={(event) => patchDraft({
+                    fulfillmentStatus: event.target.value as OrderDraft['fulfillmentStatus'],
+                  })}
+                >
+                  <option value="pending_shipment">待发货</option>
+                  <option value="shipped">已发货</option>
+                  <option value="unknown">未知</option>
+                </select>
+              </Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="金额" description="金额以人民币元校对，入库时以分精确保存。">
+            <div className="field-grid field-grid--three">
+              <Field label="商品总价" required suffix="元">
+                <input
+                  aria-label="商品总价"
+                  aria-invalid={Boolean(moneyErrors.productTotalCents)}
+                  type="number"
+                  required
+                  min="0"
+                  step="0.01"
+                  value={formatMoneyInput(draft.productTotalCents)}
+                  onChange={(event) => patchMoney('productTotalCents', event.target.value, (cents) => {
+                    patchDraft({ productTotalCents: cents });
+                  })}
+                />
+                {moneyErrors.productTotalCents && <small className="field-error">{moneyErrors.productTotalCents}</small>}
+              </Field>
+              <Field label="运费" required suffix="元">
+                <input
+                  aria-label="运费"
+                  aria-invalid={Boolean(moneyErrors.shippingFeeCents)}
+                  type="number"
+                  required
+                  min="0"
+                  step="0.01"
+                  value={formatMoneyInput(draft.shippingFeeCents)}
+                  onChange={(event) => patchMoney('shippingFeeCents', event.target.value, (cents) => {
+                    patchDraft({ shippingFeeCents: cents });
+                  })}
+                />
+                {moneyErrors.shippingFeeCents && <small className="field-error">{moneyErrors.shippingFeeCents}</small>}
               </Field>
               <Field label="成交金额" required suffix="元">
                 <input
+                  aria-label="成交金额"
+                  aria-invalid={Boolean(moneyErrors.amountCents)}
+                  required
                   type="number"
                   min="0"
                   step="0.01"
-                  value={(draft.amountCents / 100).toFixed(2)}
-                  onChange={(event) => patchDraft({ amountCents: yuanToCents(event.target.value) })}
+                  value={formatMoneyInput(draft.amountCents)}
+                  onChange={(event) => patchMoney('amountCents', event.target.value, (cents) => {
+                    patchDraft({ amountCents: cents });
+                  })}
                 />
+                {moneyErrors.amountCents && <small className="field-error">{moneyErrors.amountCents}</small>}
+              </Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="交易时间" description="原文便于对照截图，规范化时间用于查询与排序。">
+            <div className="field-grid field-grid--two">
+              <Field label="下单时间（原文）">
+                <input value={draft.orderedAtOriginal} onChange={(event) => {
+                  const orderedAtOriginal = event.target.value;
+                  patchDraft({
+                    orderedAtOriginal,
+                    orderedAtNormalized: normalizeShanghaiDateTime(orderedAtOriginal),
+                  });
+                }} />
+              </Field>
+              <Field label="下单时间（规范化）">
+                <input value={draft.orderedAtNormalized} readOnly />
+              </Field>
+              <Field label="付款时间（原文）">
+                <input value={draft.paidAtOriginal} onChange={(event) => {
+                  const paidAtOriginal = event.target.value;
+                  patchDraft({
+                    paidAtOriginal,
+                    paidAtNormalized: normalizeShanghaiDateTime(paidAtOriginal),
+                  });
+                }} />
+              </Field>
+              <Field label="付款时间（规范化）">
+                <input value={draft.paidAtNormalized} readOnly />
               </Field>
             </div>
           </FormSection>
@@ -828,40 +1062,98 @@ function ReviewWorkspace({
           <FormSection title="收货信息" description="界面中保留完整信息，仅在导出时按模板脱敏。">
             <div className="field-grid field-grid--two">
               <Field label="收件人" required>
-                <input value={draft.recipient} onChange={(event) => patchDraft({ recipient: event.target.value })} />
+                <input required value={draft.recipient} onChange={(event) => patchDraft({ recipient: event.target.value })} />
               </Field>
               <Field label="手机号" required>
-                <input inputMode="tel" value={draft.phone} onChange={(event) => patchDraft({ phone: event.target.value })} />
+                <input required inputMode="tel" value={draft.phone} onChange={(event) => {
+                  const phone = event.target.value;
+                  patchDraft({ phone, phoneNormalized: normalizePhone(phone) });
+                }} />
+              </Field>
+              <Field label="规范化手机号" wide>
+                <input inputMode="tel" value={draft.phoneNormalized} readOnly />
               </Field>
               <Field label="完整收货地址" required wide>
-                <textarea rows={3} value={draft.addressOriginal} onChange={(event) => patchDraft({ addressOriginal: event.target.value })} />
+                <textarea required rows={3} value={draft.addressOriginal} onChange={(event) => {
+                  const addressOriginal = event.target.value;
+                  patchDraft({
+                    addressOriginal,
+                    addressNormalized: normalizeAddress(addressOriginal),
+                  });
+                }} />
+              </Field>
+              <Field label="规范化地址" wide>
+                <textarea rows={3} value={draft.addressNormalized} readOnly />
+              </Field>
+            </div>
+            <div className="field-grid field-grid--three field-grid--spaced">
+              <Field label="省">
+                <input value={draft.province} onChange={(event) => patchDraft({ province: event.target.value })} />
+              </Field>
+              <Field label="市">
+                <input value={draft.city} onChange={(event) => patchDraft({ city: event.target.value })} />
+              </Field>
+              <Field label="区 / 县">
+                <input value={draft.district} onChange={(event) => patchDraft({ district: event.target.value })} />
               </Field>
             </div>
           </FormSection>
 
           <FormSection title={`商品明细 · ${draft.items.length}`} description="没有识别到明确数量时，系统默认为 1。">
             <div className="item-list">
+              {draft.items.length === 0 && (
+                <div className="empty-items">暂无商品明细</div>
+              )}
               {draft.items.map((item, index) => (
                 <div className="item-editor" key={item.id}>
                   <div className="item-index">{String(index + 1).padStart(2, '0')}</div>
                   <div className="item-fields">
-                    <Field label="商品标题" required wide>
-                      <input value={item.sourceTitle} onChange={(event) => patchItem(index, { sourceTitle: event.target.value })} />
-                    </Field>
-                    <div className="field-grid field-grid--item">
-                      <Field label="规格">
-                        <input value={item.sourceSpec} onChange={(event) => patchItem(index, { sourceSpec: event.target.value })} />
-                      </Field>
-                      <Field label="单价" suffix="元">
+                    <div className="item-title-row">
+                      <Field label="商品标题" required>
                         <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={(item.unitPriceCents / 100).toFixed(2)}
-                          onChange={(event) => patchItem(index, { unitPriceCents: yuanToCents(event.target.value) })}
+                          aria-label={draft.items.length === 1 ? undefined : `商品 ${index + 1} 标题`}
+                          required
+                          value={item.sourceTitle}
+                          onChange={(event) => patchItem(index, { sourceTitle: event.target.value })}
                         />
                       </Field>
-                      <Field label="数量" suffix={item.quantityInferred ? '默认值' : undefined}>
+                      <button
+                        className="item-remove-button"
+                        type="button"
+                        aria-label={`删除商品 ${index + 1}`}
+                        onClick={() => removeItem(index)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                    <div className="field-grid field-grid--item">
+                      <Field label="规格">
+                        <input
+                          aria-label={draft.items.length === 1 ? undefined : `商品 ${index + 1} 规格`}
+                          value={item.sourceSpec}
+                          onChange={(event) => patchItem(index, { sourceSpec: event.target.value })}
+                        />
+                      </Field>
+                      <Field label="单价" required suffix="元">
+                        <input
+                          aria-label={draft.items.length === 1 ? '单价' : `商品 ${index + 1} 单价`}
+                          aria-invalid={Boolean(moneyErrors[`item:${item.id}:unitPrice`])}
+                          type="number"
+                          required
+                          min="0"
+                          step="0.01"
+                          value={formatMoneyInput(item.unitPriceCents)}
+                          onChange={(event) => patchMoney(
+                            `item:${item.id}:unitPrice`,
+                            event.target.value,
+                            (cents) => patchItem(index, { unitPriceCents: cents }),
+                          )}
+                        />
+                        {moneyErrors[`item:${item.id}:unitPrice`] && (
+                          <small className="field-error">{moneyErrors[`item:${item.id}:unitPrice`]}</small>
+                        )}
+                      </Field>
+                      <Field label="数量" suffix={item.quantityInferred ? '默认 1' : undefined}>
                         <input
                           aria-label={draft.items.length === 1 ? '数量' : `商品 ${index + 1} 数量`}
                           type="number"
@@ -875,10 +1167,16 @@ function ReviewWorkspace({
                         />
                       </Field>
                     </div>
+                    {item.quantityInferred && (
+                      <div className="inferred-note">截图未显示数量，已按 1 件处理</div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
+            <button className="add-item-button" type="button" onClick={addItem}>
+              <span aria-hidden="true">+</span>添加商品
+            </button>
           </FormSection>
         </form>
       </div>
@@ -944,12 +1242,14 @@ function DetailWorkspace({
             <Icon name="back" />
           </button>
           <div>
-            <span className="section-kicker">原始订单 · 待发货</span>
+            <span className="section-kicker">原始订单 · {fulfillmentStatusLabel(order.fulfillmentStatus)}</span>
             <h1>订单详情</h1>
             <p>{order.orderNumber}</p>
           </div>
         </div>
-        <span className="status-chip status-chip--large">已付款 · 待发货</span>
+        <span className="status-chip status-chip--large">
+          {platformTransactionStatusLabel(order.platformTransactionStatus)} · {fulfillmentStatusLabel(order.fulfillmentStatus)}
+        </span>
       </header>
 
       <InlineError message={error} />
@@ -976,10 +1276,38 @@ function DetailWorkspace({
               <span>{formatDateTime(order.createdAt)} 入库</span>
             </div>
             <dl className="detail-grid">
+              <DetailTerm label="平台" value={platformLabel(order.platform)} />
+              <DetailTerm label="卖家账号" value={displayValue(order.sellerAccount)} />
               <DetailTerm label="订单号" value={order.orderNumber} />
-              <DetailTerm label="卖家账号" value={order.sellerAccount} />
+              <DetailTerm label="支付宝交易号" value={displayValue(order.alipayTransactionNumber)} />
               <DetailTerm label="买家昵称" value={order.buyerNickname || '—'} />
+              <DetailTerm label="平台交易状态" value={platformTransactionStatusLabel(order.platformTransactionStatus)} />
+              <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
+            </dl>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h2>金额</h2>
+              <span>人民币</span>
+            </div>
+            <dl className="detail-grid detail-grid--three">
+              <DetailTerm label="商品总价" value={formatMoney(order.productTotalCents)} />
+              <DetailTerm label="运费" value={formatMoney(order.shippingFeeCents)} />
               <DetailTerm label="成交金额" value={formatMoney(order.amountCents)} strong />
+            </dl>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h2>交易时间</h2>
+              <span>原文与规范化值</span>
+            </div>
+            <dl className="detail-grid">
+              <DetailTerm label="下单时间（原文）" value={displayValue(order.orderedAtOriginal)} />
+              <DetailTerm label="下单时间（规范化）" value={displayValue(order.orderedAtNormalized)} />
+              <DetailTerm label="付款时间（原文）" value={displayValue(order.paidAtOriginal)} />
+              <DetailTerm label="付款时间（规范化）" value={displayValue(order.paidAtNormalized)} />
             </dl>
           </section>
 
@@ -991,7 +1319,13 @@ function DetailWorkspace({
             <dl className="detail-grid">
               <DetailTerm label="收件人" value={order.recipient} />
               <DetailTerm label="手机号" value={order.phone} />
-              <DetailTerm label="完整地址" value={order.addressOriginal} wide />
+              <DetailTerm label="规范化手机号" value={displayValue(order.phoneNormalized)} />
+              <DetailTerm
+                label="省 / 市 / 区县"
+                value={displayValue([order.province, order.city, order.district].filter(Boolean).join(' / '))}
+              />
+              <DetailTerm label="完整地址（原文）" value={order.addressOriginal} wide />
+              <DetailTerm label="规范化地址" value={displayValue(order.addressNormalized)} wide />
             </dl>
             {recipientChanged && (
               <div className="source-change-note">
@@ -1085,13 +1419,50 @@ function Icon({ name }: { name: IconName }) {
   );
 }
 
-function formatMoney(cents: number): string {
+function formatMoney(cents: number | null): string {
+  if (cents === null) return '—';
   return `¥${(cents / 100).toFixed(2)}`;
 }
 
-function yuanToCents(value: string): number {
-  const amount = Number.parseFloat(value);
-  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+function formatMoneyInput(cents: number | null): string {
+  return cents === null ? '' : (cents / 100).toFixed(2);
+}
+
+function platformLabel(platform: OrderDraft['platform']): string {
+  return platform === 'xianyu' ? '闲鱼' : platform;
+}
+
+function platformTransactionStatusLabel(status: OrderDraft['platformTransactionStatus']): string {
+  return {
+    paid: '已付款',
+    cancelled: '已取消',
+    refunded: '已退款',
+    unknown: '未知',
+  }[status];
+}
+
+function fulfillmentStatusLabel(status: OrderDraft['fulfillmentStatus']): string {
+  if (status === 'shipped') return '已发货';
+  if (status === 'pending_shipment') return '待发货';
+  return '未知';
+}
+
+function displayValue(value?: string): string {
+  return value?.trim() || '—';
+}
+
+function yuanToCents(value: string): number | null {
+  const normalized = value.trim();
+  if (normalized === '') return null;
+
+  const match = /^(\d+)(?:\.(\d{0,2}))?$/.exec(normalized);
+  if (!match) return null;
+
+  const yuan = BigInt(match[1]);
+  const fraction = (match[2] ?? '').padEnd(2, '0');
+  const cents = yuan * 100n + BigInt(fraction || '0');
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(cents);
 }
 
 function formatDateTime(value: string): string {

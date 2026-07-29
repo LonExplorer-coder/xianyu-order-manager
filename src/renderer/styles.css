@@ -41,7 +41,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -51,7 +52,8 @@ button {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--navy-900);
   outline-offset: 2px;
 }
@@ -430,12 +432,35 @@ textarea:focus-visible {
   letter-spacing: -0.04em;
 }
 
-.empty-workspace > p:not(.data-path) {
+.empty-workspace > p:not(.data-path):not(.upload-disclosure) {
   max-width: 460px;
   margin: 0 0 26px;
   color: var(--navy-500);
   font-size: 13px;
   line-height: 1.75;
+}
+
+.upload-disclosure {
+  max-width: 430px;
+  margin: 11px 0 0;
+  color: #8a929b;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.upload-action {
+  display: flex;
+  max-width: 290px;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.upload-action small {
+  color: #8a929b;
+  font-size: 9px;
+  line-height: 1.4;
+  text-align: right;
 }
 
 .empty-support {
@@ -753,6 +778,14 @@ textarea:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.field-grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.field-grid--spaced {
+  margin-top: 15px;
+}
+
 .field-grid--item {
   grid-template-columns: minmax(0, 1.25fr) minmax(110px, 0.75fr) minmax(100px, 0.55fr);
 }
@@ -790,7 +823,8 @@ textarea:focus-visible {
 }
 
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   width: 100%;
   min-height: 39px;
   padding: 9px 11px;
@@ -808,13 +842,38 @@ textarea:focus-visible {
   resize: vertical;
 }
 
+.field input:read-only {
+  background: var(--surface-muted);
+  color: #69737e;
+  cursor: default;
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.field-warning {
+  color: #8a5a16;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.field input[aria-invalid="true"] {
+  border-color: #bc7770;
+  background: var(--danger-soft);
+}
+
 .field input:hover,
-.field textarea:hover {
+.field textarea:hover,
+.field select:hover {
   border-color: #afb4b5;
 }
 
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.field select:focus {
   border-color: var(--navy-700);
   background: #fff;
   box-shadow: 0 0 0 3px rgba(23, 34, 49, 0.07);
@@ -862,6 +921,74 @@ textarea:focus-visible {
   gap: 14px;
 }
 
+.item-title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.item-remove-button,
+.add-item-button {
+  border: 0;
+  background: transparent;
+  color: #707985;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.item-remove-button {
+  min-height: 39px;
+  padding: 0 4px;
+}
+
+.item-remove-button:hover {
+  color: var(--danger);
+}
+
+.add-item-button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  margin-top: 16px;
+  padding: 0 12px;
+  border: 1px dashed #cdd0ce;
+  border-radius: 6px;
+}
+
+.add-item-button:hover {
+  border-color: #aeb3b3;
+  background: var(--surface-muted);
+  color: var(--navy-900);
+}
+
+.add-item-button span {
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.empty-items {
+  padding: 19px;
+  border: 1px dashed #d7d9d7;
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: #858d96;
+  font-size: 11px;
+  text-align: center;
+}
+
+.inferred-note {
+  align-self: flex-start;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: #f3f1e6;
+  color: #716938;
+  font-size: 9px;
+  font-weight: 650;
+}
+
 .detail-layout {
   align-items: start;
 }
@@ -906,6 +1033,11 @@ textarea:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px 28px;
   margin: 0;
+}
+
+.detail-grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .detail-term {

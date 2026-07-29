@@ -1,4 +1,5 @@
 import type {
+  RecognitionAttempt,
   RecognitionResult,
   Recognizer,
   RecognizerSource,
@@ -9,7 +10,19 @@ export class ControlledRecognizer implements Recognizer {
 
   public constructor(private readonly result: RecognitionResult) {}
 
-  public async recognize(_source: RecognizerSource): Promise<RecognitionResult> {
-    return structuredClone(this.result);
+  public async recognize(_source: RecognizerSource): Promise<RecognitionAttempt> {
+    const result = structuredClone(this.result);
+    return {
+      result,
+      evidences: [
+        {
+          provider: 'controlled',
+          model: 'controlled',
+          requestId: '',
+          schemaVersion: 1,
+          rawResponse: JSON.stringify(result),
+        },
+      ],
+    };
   }
 }

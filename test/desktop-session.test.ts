@@ -4,11 +4,37 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
+import type { RecognitionResult } from '../src/core/contracts';
 import { DesktopSession } from '../src/main/desktop-session';
 import { OcrSettingsService } from '../src/main/ocr-settings';
 import { Preferences } from '../src/main/preferences';
 
 const sessions: DesktopSession[] = [];
+const unusedRecognition: RecognitionResult = {
+  platform: 'xianyu',
+  sellerAccount: '默认闲鱼账号',
+  orderNumber: 'unused',
+  alipayTransactionNumber: '',
+  buyerNickname: '',
+  recipient: 'unused',
+  phone: 'unused',
+  phoneNormalized: '',
+  addressOriginal: 'unused',
+  addressNormalized: 'unused',
+  province: '',
+  city: '',
+  district: '',
+  orderedAtOriginal: '',
+  orderedAtNormalized: '',
+  paidAtOriginal: '',
+  paidAtNormalized: '',
+  productTotalCents: 0,
+  shippingFeeCents: 0,
+  amountCents: 0,
+  platformTransactionStatus: 'paid',
+  fulfillmentStatus: 'pending_shipment',
+  items: [],
+};
 const unusedOcrSettings = new OcrSettingsService(
   { read: () => null, write: () => undefined },
   {
@@ -29,17 +55,7 @@ describe('桌面启动状态', () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-session-'));
     const preferences = new Preferences(join(testRoot, '启动配置'));
     const dataDirectory = join(testRoot, '订单数据');
-    const recognizer = new ControlledRecognizer({
-      platform: 'xianyu',
-      sellerAccount: '默认闲鱼账号',
-      orderNumber: 'unused',
-      buyerNickname: '',
-      recipient: 'unused',
-      phone: 'unused',
-      addressOriginal: 'unused',
-      amountCents: 0,
-      items: [],
-    });
+    const recognizer = new ControlledRecognizer(unusedRecognition);
 
     const first = new DesktopSession(preferences, recognizer, unusedOcrSettings);
     sessions.push(first);
@@ -65,17 +81,7 @@ describe('桌面启动状态', () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-retry-'));
     const preferences = new Preferences(join(testRoot, '启动配置'));
     const dataDirectory = join(testRoot, '订单数据');
-    const recognizer = new ControlledRecognizer({
-      platform: 'xianyu',
-      sellerAccount: '默认闲鱼账号',
-      orderNumber: 'unused',
-      buyerNickname: '',
-      recipient: 'unused',
-      phone: 'unused',
-      addressOriginal: 'unused',
-      amountCents: 0,
-      items: [],
-    });
+    const recognizer = new ControlledRecognizer(unusedRecognition);
 
     preferences.setLastDataDirectory(dataDirectory);
     await writeFile(dataDirectory, '暂时占位');

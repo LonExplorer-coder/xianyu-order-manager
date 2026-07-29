@@ -1,7 +1,7 @@
 {
   "name": "xianyu-order-manager",
   "productName": "闲鱼订单管理",
-  "version": "0.1.0",
+  "version": "0.2.6",
   "description": "本机优先的闲鱼来源截图识别与订单管理工具",
   "main": ".vite/build/electron-main.js",
   "private": true,
@@ -9,9 +9,12 @@
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
+    "make:mac:release": "XIANYU_MAC_RELEASE=1 electron-forge make --platform darwin --arch arm64",
+    "verify:mac:release": "node scripts/verify-macos-release.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:credential-store": "node scripts/system-credential-smoke.mjs",
+    "test:packaged-credential-store": "node scripts/run-packaged-credential-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test"
   },

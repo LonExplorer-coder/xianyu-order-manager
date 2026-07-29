@@ -1,4 +1,5 @@
 import type {
+  BailianRecognitionCredentials,
   BailianRegion,
   OcrConnectionTestInput,
   OcrConnectionTestResult,
@@ -112,6 +113,19 @@ export class OcrSettingsService {
       ok: true,
       model: result.model,
       message: '连接成功，qwen3.5-ocr 可以使用',
+    };
+  }
+
+  public async getRecognitionCredentials(): Promise<BailianRecognitionCredentials> {
+    const record = this.repository.read();
+    const apiKey = await this.apiKeyStore.getApiKey();
+    if (!record || !apiKey) {
+      throw new Error('请先在设置中保存百炼 OCR 配置和 API Key');
+    }
+    return {
+      workspaceId: record.workspaceId,
+      region: record.region,
+      apiKey,
     };
   }
 
