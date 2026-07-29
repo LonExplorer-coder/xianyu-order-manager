@@ -1201,6 +1201,309 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
+  it('模块化首轮和复核都给出可信姓名及仅手机号同行文本时保留姓名和恢复手机号', async () => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成可信收件人商品',
+              spec: '规格可信',
+              unit_price: '17.00',
+              price_tag_text: '¥17.00',
+              quantity: '1',
+              quantity_text: '×1',
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: '合成收件人甲',
+            recipient_phone_line_text: '13900000021',
+            phone: null,
+            address: '测试省测试市示例区安全路21号',
+            province: '测试省',
+            city: '测试市',
+            district: '示例区',
+            controls: [
+              { text: '复制', action: 'copy' },
+              { text: '去发货', action: 'ship' },
+            ],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-TRUSTED-RECIPIENT-0001',
+            alipay_transaction_number: null,
+            product_total: '17.00',
+            shipping_fee: '0.00',
+            amount: '17.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: [{ text: '展开', action: 'expand' }],
+          },
+          page_context: {
+            global_controls: [{ text: '联系买家', action: 'contact' }],
+            excluded_regions: [],
+          },
+        }, 'request-trusted-recipient-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '合成收件人甲',
+          recipient_phone_line_text: '13900000021',
+          phone: null,
+          address: '测试省测试市示例区安全路21号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: [
+            { text: '复制', action: 'copy' },
+            { text: '去发货', action: 'ship' },
+          ],
+        },
+      }, 'request-trusted-recipient-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-trusted-recipient',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-trusted-recipient.png',
+        originalName: '合成可信收件人订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-trusted-recipient',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人甲',
+      phone: '13900000021',
+      phoneNormalized: '13900000021',
+    });
+  });
+
+  it('模块化复核给出严格更完整的相关姓名时替换首轮姓名片段并恢复手机号', async () => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成完整收件人商品',
+              spec: '规格完整',
+              unit_price: '19.00',
+              price_tag_text: '¥19.00',
+              quantity: '1',
+              quantity_text: '×1',
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: '收件人甲',
+            recipient_phone_line_text: '13900000022',
+            phone: null,
+            address: '测试省测试市示例区安全路22号',
+            province: '测试省',
+            city: '测试市',
+            district: '示例区',
+            controls: [
+              { text: '复制', action: 'copy' },
+              { text: '去发货', action: 'ship' },
+            ],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-FULLER-RECIPIENT-0001',
+            alipay_transaction_number: null,
+            product_total: '19.00',
+            shipping_fee: '0.00',
+            amount: '19.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: [{ text: '展开', action: 'expand' }],
+          },
+          page_context: {
+            global_controls: [{ text: '联系买家', action: 'contact' }],
+            excluded_regions: [],
+          },
+        }, 'request-fuller-recipient-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '合成收件人甲',
+          recipient_phone_line_text: '13900000022',
+          phone: null,
+          address: '测试省测试市示例区安全路22号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: [
+            { text: '复制', action: 'copy' },
+            { text: '去发货', action: 'ship' },
+          ],
+        },
+      }, 'request-fuller-recipient-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-fuller-recipient',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-fuller-recipient.png',
+        originalName: '合成完整收件人订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-fuller-recipient',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人甲',
+      phone: '13900000022',
+      phoneNormalized: '13900000022',
+    });
+  });
+
+  it.each([
+    {
+      reviewCase: '姓名尾部粘连了已声明按钮',
+      reviewedRecipient: '收件人甲复制',
+      reviewedPhone: null,
+      reviewedContactLine: '13900000023',
+      reviewedControls: [{ text: '复制', action: 'copy' }],
+    },
+    {
+      reviewCase: '显式手机号与同行文本中的手机号冲突',
+      reviewedRecipient: '合成收件人甲',
+      reviewedPhone: '13900000023',
+      reviewedContactLine: '13800000023',
+      reviewedControls: [{ text: '复制', action: 'copy' }],
+    },
+    {
+      reviewCase: '同行文本同时含冲突手机号和显式手机号',
+      reviewedRecipient: '合成收件人甲',
+      reviewedPhone: '13900000023',
+      reviewedContactLine: '13800000023 13900000023',
+      reviewedControls: [{ text: '复制', action: 'copy' }],
+    },
+  ])('模块化$reviewCase时拒绝不安全复核值并保留首轮可信联系人', async ({
+    reviewedRecipient,
+    reviewedPhone,
+    reviewedContactLine,
+    reviewedControls,
+  }) => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成安全复核商品',
+              spec: '规格安全',
+              unit_price: '21.00',
+              price_tag_text: '¥21.00',
+              quantity: '1',
+              quantity_text: '×1',
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: '收件人甲',
+            recipient_phone_line_text: '13900000023',
+            phone: null,
+            address: '测试省测试市示例区安全路23号',
+            province: '测试省',
+            city: '测试市',
+            district: '示例区',
+            controls: [
+              { text: '复制', action: 'copy' },
+              { text: '去发货', action: 'ship' },
+            ],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-SAFE-RECIPIENT-0001',
+            alipay_transaction_number: null,
+            product_total: '21.00',
+            shipping_fee: '0.00',
+            amount: '21.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: [{ text: '展开', action: 'expand' }],
+          },
+          page_context: {
+            global_controls: [{ text: '联系买家', action: 'contact' }],
+            excluded_regions: [],
+          },
+        }, 'request-safe-recipient-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: reviewedRecipient,
+          recipient_phone_line_text: reviewedContactLine,
+          phone: reviewedPhone,
+          address: '测试省测试市示例区安全路23号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: reviewedControls,
+        },
+      }, 'request-safe-recipient-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-safe-recipient',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-safe-recipient.png',
+        originalName: '合成安全复核订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-safe-recipient',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '收件人甲',
+      phone: '13900000023',
+      phoneNormalized: '13900000023',
+    });
+  });
+
   it.each([
     { reviewCase: '手机号为空', reviewedPhone: '' },
     { reviewCase: '手机号与首轮冲突', reviewedPhone: '13800000011' },

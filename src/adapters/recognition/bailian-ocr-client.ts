@@ -700,9 +700,22 @@ function mergeReviewResult(
   const primaryBuyer = businessText(primary.buyer_nickname, controlLabels);
   const primaryRecipient = optionalText(recoveredPrimaryContact.recipient);
   const recoveredPrimaryPhone = chineseMobileCore(recoveredPrimaryContact.phone);
+  const primaryPhoneWasRecovered = Boolean(
+    !chineseMobileCore(primary.phone) &&
+    recoveredPrimaryPhone,
+  );
   if (primaryRecipient) merged.recipient = primaryRecipient;
-  if (!chineseMobileCore(primary.phone) && recoveredPrimaryPhone) {
+  if (primaryPhoneWasRecovered) {
     merged.phone = recoveredPrimaryContact.phone;
+    if (primaryRecipient && phoneOnlyContactLine(
+      primary.recipient_phone_line_text,
+      recoveredPrimaryContact.phone,
+    )) {
+      // The line supplied the missing phone, but it contains no evidence against
+      // the independently extracted recipient. Keeping it would make the next
+      // sanitization pass reject an otherwise trusted name.
+      merged.recipient_phone_line_text = null;
+    }
   }
   const reviewedBuyer = businessText(flattened.buyer_nickname, controlLabels);
   const strictlyReviewedRecipient = optionalText(recipientValue(
@@ -726,8 +739,17 @@ function mergeReviewResult(
       controlLabels,
     ),
   );
+  const completedReviewedRecipient = moreCompleteReviewedRecipient(
+    primaryRecipient,
+    recoveredPrimaryContact.phone,
+    flattened.recipient_candidate,
+    flattened.phone,
+    flattened.contact_line_text,
+    controlLabels,
+  );
   const reviewedRecipient = strictlyReviewedRecipient ||
-    (phoneOnlyRecipientMatchesPrimary ? phoneOnlyReviewedRecipient : '');
+    (phoneOnlyRecipientMatchesPrimary ? phoneOnlyReviewedRecipient : '') ||
+    completedReviewedRecipient;
   const primaryBuyerLabelVisible = isBuyerNicknameLabel(
     primary.buyer_nickname_label,
   );
@@ -791,7 +813,8 @@ function mergeReviewResult(
     (!primaryRecipient ||
       identitiesMatchedInitially ||
       primaryRecipientLooksLikeMaskedNickname ||
-      primaryRecipientWasContaminated) &&
+      primaryRecipientWasContaminated ||
+      Boolean(completedReviewedRecipient)) &&
     reviewedRecipient
   ) {
     merged.recipient = reviewedRecipient;
@@ -1296,6 +1319,65 @@ function contaminatedRecipientMatchesReview(
   );
 }
 
+function moreCompleteReviewedRecipient(
+  primaryRecipient: string,
+  primaryPhoneValue: unknown,
+  reviewedValue: unknown,
+  reviewedPhoneValue: unknown,
+  contactLineValue: unknown,
+  controlLabels: string[],
+): string {
+  const primaryPhone = chineseMobileCore(primaryPhoneValue);
+  if (!primaryRecipient || !primaryPhone || typeof reviewedValue !== 'string') return '';
+
+  const reviewedText = stripTrailingUiControlLabels(
+    optionalText(reviewedValue),
+    controlLabels,
+    'contact-boundary',
+  );
+  const contactLine = typeof contactLineValue === 'string'
+    ? stripTrailingUiControlLabels(
+        optionalText(contactLineValue),
+        controlLabels,
+        'contact-boundary',
+      )
+    : '';
+  const reviewedPhones = [...new Set([
+    chineseMobileCore(reviewedPhoneValue),
+    ...chineseMobileCores(contactLine),
+    ...chineseMobileCores(reviewedText),
+  ].filter(Boolean))];
+  if (reviewedPhones.length !== 1 || reviewedPhones[0] !== primaryPhone) return '';
+  const reviewedPhone = reviewedPhones[0];
+
+  const withoutPhone = stripPhoneSuffixFromRecipient(reviewedText, reviewedPhone);
+  if (withoutPhone === null) return '';
+  const reviewedRecipient = withoutPhone === undefined
+    ? reviewedText
+    : withoutPhone;
+  if (isUnsafeRecoveredRecipient(
+    reviewedRecipient,
+    controlLabels,
+    contactLine,
+    reviewedPhone,
+  )) {
+    return '';
+  }
+
+  const primaryComparable = comparableText(primaryRecipient);
+  const reviewedComparable = comparableText(reviewedRecipient);
+  const addedCharacters = [...reviewedComparable].length - [...primaryComparable].length;
+  const completesAtStart = reviewedComparable.startsWith(primaryComparable);
+  const completesAtEnd = reviewedComparable.endsWith(primaryComparable);
+  if (addedCharacters < 1 || addedCharacters > 2 || (!completesAtStart && !completesAtEnd)) {
+    return '';
+  }
+  const addedText = completesAtStart
+    ? reviewedComparable.slice(primaryComparable.length)
+    : reviewedComparable.slice(0, -primaryComparable.length);
+  return isUiControlText(addedText, controlLabels) ? '' : reviewedRecipient;
+}
+
 function stripTrailingUiControlLabels(
   value: string,
   controlLabels: string[],
@@ -1378,6 +1460,18 @@ function chineseMobileCore(value: unknown): string {
     ? digits.slice(2)
     : digits;
   return /^1[3-9]\d{9}$/u.test(core) ? core : '';
+}
+
+function chineseMobileCores(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  const matches = value.normalize('NFKC').matchAll(
+    /(?:^|[^\d])((?:\+?86[\s\p{Pd}()（）]*)?1[3-9](?:[\s\p{Pd}()（）]*\d){9})(?!\d)/gu,
+  );
+  return [...new Set(
+    [...matches]
+      .map((match) => chineseMobileCore(match[1]))
+      .filter(Boolean),
+  )];
 }
 
 function stripPhoneSuffixFromRecipient(
