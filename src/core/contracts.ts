@@ -98,6 +98,8 @@ export type RecognitionBatchItem = {
   status: RecognitionBatchItemStatus;
   draftId?: string;
   errorMessage?: string;
+  retryCount?: number;
+  nextRetryAt?: string;
 };
 
 export type RecognitionBatchView = {

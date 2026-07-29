@@ -803,6 +803,14 @@ select:focus-visible {
   text-overflow: ellipsis;
 }
 
+.batch-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  white-space: nowrap;
+}
+
 .batch-status--recognizing,
 .batch-status--validating {
   border-color: #e4c83c;

@@ -24,6 +24,8 @@ export interface DesktopApi {
   selectDataDirectory(): Promise<BootstrapState>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
+  retryRecognitionItem(batchId: string, itemId: string): Promise<void>;
+  createManualDraft(batchId: string, itemId: string): Promise<OrderDraft>;
   getDraft(draftId: string): Promise<OrderDraft>;
   onRecognitionBatchesChanged(
     listener: (batches: RecognitionBatchView[]) => void,

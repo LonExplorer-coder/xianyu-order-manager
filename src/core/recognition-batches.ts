@@ -16,10 +16,26 @@ export const RECOGNITION_BATCH_ITEM_STATUSES = [
   'cancelled',
 ] as const satisfies readonly RecognitionBatchItemStatus[];
 
+export const AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS = [
+  30_000,
+  120_000,
+  600_000,
+  1_800_000,
+  1_800_000,
+] as const;
+export const MAX_AUTOMATIC_RECOGNITION_RETRIES =
+  AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS.length;
+
+const ACTIVE_RECOGNITION_BATCH_ITEM_STATUSES = new Set<RecognitionBatchItemStatus>([
+  'waiting_recognition',
+  'recognizing',
+  'validating',
+  'waiting_retry',
+]);
+
 const PROCESSED_RECOGNITION_BATCH_ITEM_STATUSES = new Set<RecognitionBatchItemStatus>([
   'awaiting_confirmation',
   'imported',
-  'waiting_retry',
   'failed',
   'duplicate_skipped',
   'cancelled',
@@ -31,6 +47,12 @@ export function isRecognitionBatchItemStatus(
   return typeof value === 'string' && (
     RECOGNITION_BATCH_ITEM_STATUSES as readonly string[]
   ).includes(value);
+}
+
+export function isActiveRecognitionBatchItemStatus(
+  status: RecognitionBatchItemStatus,
+): boolean {
+  return ACTIVE_RECOGNITION_BATCH_ITEM_STATUSES.has(status);
 }
 
 export function summarizeRecognitionBatchItems(

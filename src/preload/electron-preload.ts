@@ -8,6 +8,12 @@ const api: DesktopApi = {
   selectDataDirectory: () => ipcRenderer.invoke('app:select-data-directory'),
   selectSourceScreenshots: () => ipcRenderer.invoke('workflow:select-source-screenshots'),
   listRecognitionBatches: () => ipcRenderer.invoke('workflow:list-recognition-batches'),
+  retryRecognitionItem: (batchId, itemId) => (
+    ipcRenderer.invoke('workflow:retry-recognition-item', batchId, itemId)
+  ),
+  createManualDraft: (batchId, itemId) => (
+    ipcRenderer.invoke('workflow:create-manual-draft', batchId, itemId)
+  ),
   getDraft: (draftId) => ipcRenderer.invoke('workflow:get-draft', draftId),
   onRecognitionBatchesChanged: (listener) => {
     const ipcListener = (

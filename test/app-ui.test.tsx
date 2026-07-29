@@ -14,6 +14,7 @@ import type {
   RecognitionBatchItemStatus,
   RecognitionBatchView,
 } from '../src/core/contracts';
+import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
 import { App } from '../src/renderer/App';
 
 afterEach(cleanup);
@@ -138,6 +139,8 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       return selectedDraft ? batchForDraft(selectedDraft) : null;
     }),
     listRecognitionBatches: vi.fn().mockResolvedValue([]),
+    retryRecognitionItem: vi.fn().mockResolvedValue(undefined),
+    createManualDraft: vi.fn(),
     getDraft: vi.fn(async () => {
       if (!selectedDraft) throw new Error('未找到订单草稿');
       return selectedDraft;
@@ -183,30 +186,10 @@ function recognitionBatchView(
   id: string,
   items: RecognitionBatchView['items'],
 ): RecognitionBatchView {
-  const statuses: RecognitionBatchItemStatus[] = [
-    'waiting_recognition',
-    'recognizing',
-    'validating',
-    'awaiting_confirmation',
-    'imported',
-    'waiting_retry',
-    'failed',
-    'duplicate_skipped',
-    'cancelled',
-  ];
-  const counts = Object.fromEntries(
-    statuses.map((status) => [status, items.filter((item) => item.status === status).length]),
-  ) as RecognitionBatchView['counts'];
   return {
     id,
     createdAt: '2026-07-30T06:32:00.000Z',
-    totalCount: items.length,
-    processedCount: items.filter((item) => ![
-      'waiting_recognition',
-      'recognizing',
-      'validating',
-    ].includes(item.status)).length,
-    counts,
+    ...summarizeRecognitionBatchItems(items),
     items,
   };
 }
@@ -859,8 +842,9 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByRole('heading', { name: '识别批次' })).toBeVisible();
-    expect(screen.getByRole('progressbar', { name: '批次识别进度' })).toHaveAttribute('value', '6');
-    expect(screen.getByRole('status')).toHaveTextContent('6/9');
+    expect(screen.getByRole('progressbar', { name: '批次识别进度' })).toHaveAttribute('value', '5');
+    expect(screen.getByRole('status')).toHaveTextContent('5/9');
+    expect(screen.getByLabelText('批次结果统计')).toHaveTextContent('4处理中');
     const table = screen.getByRole('table', { name: '批次截图状态' });
     for (const label of [
       '等待识别',
@@ -876,8 +860,8 @@ describe('订单管理工作台', () => {
       expect(within(table).getByText(label)).toBeVisible();
     }
     expect(within(table).getByText('截图内容不完整')).toBeVisible();
-    expect(within(table).getByText('暂时无法识别，本轮未生成订单草稿')).toBeVisible();
-    expect(screen.getByText(/应用保持打开时，后台会继续逐张处理/)).toBeVisible();
+    expect(within(table).getByText('已保留原图，将按受控退避自动重试')).toBeVisible();
+    expect(screen.getByText(/断网或重启不会丢失未完成任务/)).toBeVisible();
   });
 
   it('离开批次页后继续接收后台进度，并在订单首页显示最近结果', async () => {
@@ -1006,6 +990,121 @@ describe('订单管理工作台', () => {
     const table = await screen.findByRole('table', { name: '批次截图状态' });
     expect(within(table).getByText('重复跳过')).toBeVisible();
     expect(within(table).queryByText('等待识别')).not.toBeInTheDocument();
+  });
+
+  it('批次失败项可单独立即重试，并且只提交被点击的批次项', async () => {
+    const user = userEvent.setup();
+    const batch = recognitionBatchView('batch-manual-retry', [
+      {
+        id: 'batch-item-stays-failed',
+        batchId: 'batch-manual-retry',
+        sourceName: '保持失败.png',
+        status: 'failed',
+        errorMessage: '截图内容不完整',
+      },
+      {
+        id: 'batch-item-retry-target',
+        batchId: 'batch-manual-retry',
+        sourceName: '只重试这一张.png',
+        status: 'failed',
+        errorMessage: '服务暂时不可用',
+      },
+    ]);
+    let publish!: (batches: RecognitionBatchView[]) => void;
+    const retryingBatch = recognitionBatchView('batch-manual-retry', [
+      batch.items[0],
+      { ...batch.items[1], status: 'waiting_recognition', errorMessage: undefined },
+    ]);
+    const retryRecognitionItem = vi.fn(async () => {
+      publish([retryingBatch]);
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      retryRecognitionItem,
+      onRecognitionBatchesChanged: vi.fn((listener) => {
+        publish = listener;
+        return () => undefined;
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    const table = await screen.findByRole('table', { name: '批次截图状态' });
+    const targetRow = within(table).getByText('只重试这一张.png').closest('tr');
+    if (!targetRow) throw new Error('未找到目标批次项');
+
+    await user.click(within(targetRow).getByRole('button', { name: '立即重试' }));
+
+    expect(retryRecognitionItem).toHaveBeenCalledOnce();
+    expect(retryRecognitionItem).toHaveBeenCalledWith(
+      'batch-manual-retry',
+      'batch-item-retry-target',
+    );
+    expect(within(table).getByText('保持失败.png').closest('tr')).toHaveTextContent('失败');
+    expect(targetRow).toHaveTextContent('等待识别');
+  });
+
+  it('批次失败项可用原截图进入人工录入校对页', async () => {
+    const user = userEvent.setup();
+    const batch = recognitionBatchView('batch-manual-entry', [{
+      id: 'batch-item-manual-entry',
+      batchId: 'batch-manual-entry',
+      sourceName: '人工录入来源.png',
+      status: 'failed',
+      errorMessage: '图片版式暂不支持',
+    }]);
+    const manualDraft: OrderDraft = {
+      ...draft,
+      id: 'draft-manual-entry',
+      batchId: 'batch-manual-entry',
+      screenshotId: 'shot-manual-entry',
+      orderNumber: '',
+      recipient: '',
+      phone: '',
+      phoneNormalized: '',
+      amountCents: null,
+      items: [{
+        ...draft.items[0],
+        id: 'manual-entry-item',
+        sourceTitle: '',
+        unitPriceCents: null,
+      }],
+    };
+    const createManualDraft = vi.fn().mockResolvedValue(manualDraft);
+    const getScreenshotDataUrl = vi.fn().mockResolvedValue(
+      'data:image/png;base64,bWFudWFsLWVudHJ5',
+    );
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      createManualDraft,
+      getScreenshotDataUrl,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    await user.click(await screen.findByRole('button', { name: '人工录入' }));
+
+    expect(createManualDraft).toHaveBeenCalledWith(
+      'batch-manual-entry',
+      'batch-item-manual-entry',
+    );
+    expect(getScreenshotDataUrl).toHaveBeenCalledWith('shot-manual-entry');
+    expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
+    expect(screen.getByAltText('来源截图')).toHaveAttribute(
+      'src',
+      'data:image/png;base64,bWFudWFsLWVudHJ5',
+    );
+    expect(screen.getByLabelText('成交金额')).toHaveValue(null);
   });
 
   it('从批次进入单张校对，确认后返回原批次并更新为已入库', async () => {

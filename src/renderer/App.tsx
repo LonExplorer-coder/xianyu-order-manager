@@ -11,6 +11,11 @@ import type {
 } from '../core/contracts';
 import type { OcrSettingsView } from '../core/ocr-settings';
 import {
+  isActiveRecognitionBatchItemStatus,
+  MAX_AUTOMATIC_RECOGNITION_RETRIES,
+  summarizeRecognitionBatchItems,
+} from '../core/recognition-batches';
+import {
   isValidAddressPair,
   isValidPhonePair,
   normalizeAddress,
@@ -36,6 +41,7 @@ export function App({ api }: AppProps) {
   const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
   const [reviewBatchId, setReviewBatchId] = useState('');
+  const [busyBatchItemId, setBusyBatchItemId] = useState('');
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [operationError, setOperationError] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('orders');
@@ -142,6 +148,42 @@ export function App({ api }: AppProps) {
       setOperationError(errorMessage(error));
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function retryRecognitionItem(batchId: string, itemId: string) {
+    setBusyBatchItemId(itemId);
+    setOperationError('');
+    try {
+      await api.retryRecognitionItem(batchId, itemId);
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyBatchItemId('');
+    }
+  }
+
+  async function createManualDraft(batchId: string, itemId: string) {
+    setBusyBatchItemId(itemId);
+    setOperationError('');
+    try {
+      const selectedDraft = await api.createManualDraft(batchId, itemId);
+      const screenshotUrl = await api.getScreenshotDataUrl(selectedDraft.screenshotId);
+      setRecognitionBatches((current) => updateBatchItemStatus(
+        current,
+        batchId,
+        itemId,
+        'awaiting_confirmation',
+        selectedDraft.id,
+      ));
+      setReviewScreenshotUrl(screenshotUrl);
+      setDraft(selectedDraft);
+      setReviewBatchId(batchId);
+      setOrderDetails(null);
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyBatchItemId('');
     }
   }
 
@@ -304,9 +346,12 @@ export function App({ api }: AppProps) {
         error={operationError}
         uploading={busyAction === 'upload'}
         openingDraft={busyAction === 'review'}
+        busyBatchItemId={busyBatchItemId}
         onUpload={() => void uploadScreenshots()}
         onSelectBatch={setActiveBatchId}
         onReview={(draftId, batchId) => void openDraftForReview(draftId, batchId)}
+        onRetry={(batchId, itemId) => void retryRecognitionItem(batchId, itemId)}
+        onManualEntry={(batchId, itemId) => void createManualDraft(batchId, itemId)}
       />
     );
   } else {
@@ -333,7 +378,8 @@ export function App({ api }: AppProps) {
       dataDirectory={bootstrap.dataDirectory}
       activePage={activePage}
       activeBatchCount={recognitionBatches.reduce(
-        (total, batch) => total + batch.items.filter((item) => isProcessingStatus(item.status)).length,
+        (total, batch) => total + batch.items
+          .filter((item) => isActiveRecognitionBatchItemStatus(item.status)).length,
         0,
       )}
       onNavigate={setActivePage}
@@ -626,9 +672,12 @@ type BatchesWorkspaceProps = {
   error: string;
   uploading: boolean;
   openingDraft: boolean;
+  busyBatchItemId: string;
   onUpload: () => void;
   onSelectBatch: (batchId: string) => void;
   onReview: (draftId: string, batchId: string) => void;
+  onRetry: (batchId: string, itemId: string) => void;
+  onManualEntry: (batchId: string, itemId: string) => void;
 };
 
 function BatchesWorkspace({
@@ -637,9 +686,12 @@ function BatchesWorkspace({
   error,
   uploading,
   openingDraft,
+  busyBatchItemId,
   onUpload,
   onSelectBatch,
   onReview,
+  onRetry,
+  onManualEntry,
 }: BatchesWorkspaceProps) {
   const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? batches[0];
 
@@ -649,7 +701,7 @@ function BatchesWorkspace({
         <div>
           <span className="section-kicker">来源截图识别</span>
           <h1>识别批次</h1>
-          <p>离开此页不会中断；应用保持打开时，后台会继续逐张处理。</p>
+          <p>离开此页不会中断；断网或重启不会丢失未完成任务，恢复后会继续处理。</p>
         </div>
         <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading}>
           <Icon name="upload" />
@@ -728,9 +780,9 @@ function BatchesWorkspace({
                       </td>
                       <td
                         className="batch-result"
-                        title={item.errorMessage || recognitionBatchResultLabel(item.status)}
+                        title={recognitionBatchItemResult(item)}
                       >
-                        {item.errorMessage || recognitionBatchResultLabel(item.status)}
+                        {recognitionBatchItemResult(item)}
                       </td>
                       <td>
                         {item.status === 'awaiting_confirmation' && item.draftId && (
@@ -742,6 +794,26 @@ function BatchesWorkspace({
                           >
                             校对
                           </button>
+                        )}
+                        {(item.status === 'waiting_retry' || item.status === 'failed') && (
+                          <div className="batch-item-actions">
+                            <button
+                              className="text-button"
+                              type="button"
+                              disabled={busyBatchItemId !== ''}
+                              onClick={() => onRetry(activeBatch.id, item.id)}
+                            >
+                              {busyBatchItemId === item.id ? '处理中…' : '立即重试'}
+                            </button>
+                            <button
+                              className="text-button"
+                              type="button"
+                              disabled={busyBatchItemId !== ''}
+                              onClick={() => onManualEntry(activeBatch.id, item.id)}
+                            >
+                              人工录入
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -1816,17 +1888,31 @@ function recognitionBatchResultLabel(status: RecognitionBatchItemStatus): string
   if (status === 'imported') return '已确认并写入原始订单表';
   if (status === 'duplicate_skipped') return '相同截图已接收过，本次未重复调用 OCR';
   if (status === 'cancelled') return '已取消本张截图的校对';
-  if (status === 'waiting_retry') return '暂时无法识别，本轮未生成订单草稿';
+  if (status === 'waiting_retry') return '已保留原图，将按受控退避自动重试';
   if (status === 'failed') return '未能形成可校对结果';
   return '后台正在处理';
 }
 
-function isProcessingStatus(status: RecognitionBatchItemStatus): boolean {
-  return status === 'waiting_recognition' || status === 'recognizing' || status === 'validating';
+function recognitionBatchItemResult(
+  item: RecognitionBatchView['items'][number],
+): string {
+  if (item.status !== 'waiting_retry') {
+    return item.errorMessage || recognitionBatchResultLabel(item.status);
+  }
+  const retryNumber = item.retryCount && item.retryCount > 0
+    ? `（第 ${item.retryCount}/${MAX_AUTOMATIC_RECOGNITION_RETRIES} 次）`
+    : '';
+  const retryTime = item.nextRetryAt
+    ? `，预计 ${formatDateTime(item.nextRetryAt)} 再试`
+    : '';
+  const reason = item.errorMessage ? `${item.errorMessage}；` : '';
+  return `${reason}已保留原图，将按受控退避自动重试${retryNumber}${retryTime}`;
 }
 
 function processingCount(batch: RecognitionBatchView): number {
-  return batch.counts.waiting_recognition + batch.counts.recognizing + batch.counts.validating;
+  return batch.items.filter((item) => (
+    isActiveRecognitionBatchItemStatus(item.status)
+  )).length;
 }
 
 function mergeRecognitionBatch(
@@ -1847,15 +1933,29 @@ function updateBatchDraftStatus(
     const items = batch.items.map((item) => (
       item.draftId === draftId ? { ...item, status, errorMessage: undefined } : item
     ));
-    const counts = { ...batch.counts };
-    for (const key of Object.keys(counts) as RecognitionBatchItemStatus[]) counts[key] = 0;
-    for (const item of items) counts[item.status] += 1;
     return {
       ...batch,
       items,
-      counts,
-      processedCount: items.filter((item) => !isProcessingStatus(item.status)).length,
+      ...summarizeRecognitionBatchItems(items),
     };
+  });
+}
+
+function updateBatchItemStatus(
+  batches: RecognitionBatchView[],
+  batchId: string,
+  itemId: string,
+  status: RecognitionBatchItemStatus,
+  draftId?: string,
+): RecognitionBatchView[] {
+  return batches.map((batch) => {
+    if (batch.id !== batchId) return batch;
+    const items = batch.items.map((item) => (
+      item.id === itemId
+        ? { ...item, status, errorMessage: undefined, ...(draftId ? { draftId } : {}) }
+        : item
+    ));
+    return { ...batch, items, ...summarizeRecognitionBatchItems(items) };
   });
 }
 

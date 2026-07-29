@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v4 并回填识别批次记录', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v5 并回填持久队列字段', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -18,7 +18,13 @@ describe('数据库升级', () => {
       first.database
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
     expect(
       (
         first.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
@@ -45,7 +51,8 @@ describe('数据库升级', () => {
     expect(
       first.database
         .prepare(`
-          SELECT batch_id, source_name, content_sha256, status, draft_id
+          SELECT batch_id, source_name, content_sha256, status, draft_id,
+            queue_relative_path, retry_count, next_retry_at
           FROM recognition_batch_items
           WHERE draft_id = 'draft-v1'
         `)
@@ -56,6 +63,9 @@ describe('数据库升级', () => {
       content_sha256: 'abc123',
       status: 'imported',
       draft_id: 'draft-v1',
+      queue_relative_path: null,
+      retry_count: 0,
+      next_retry_at: null,
     });
     expect(
       first.database
@@ -155,7 +165,13 @@ describe('数据库升级', () => {
       reopened.database
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
     expect(
       (
         reopened.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{

@@ -144,6 +144,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 2) migrateToVersion2(database);
   if (row.version < 3) migrateToVersion3(database);
   if (row.version < 4) migrateToVersion4(database);
+  if (row.version < 5) migrateToVersion5(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -493,6 +494,29 @@ function migrateToVersion4(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion5(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE recognition_batch_items ADD COLUMN queue_relative_path TEXT;
+      ALTER TABLE recognition_batch_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0
+        CHECK (retry_count >= 0);
+      ALTER TABLE recognition_batch_items ADD COLUMN next_retry_at TEXT;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

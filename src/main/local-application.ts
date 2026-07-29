@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
-import { basename, extname, join } from 'node:path';
+import { mkdir, readFile, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join } from 'node:path';
 
 import type {
   OrderDetails,
@@ -38,6 +38,29 @@ export type RecognitionBatchItemUpdate = {
   draftId?: string;
   sha256?: string;
   errorMessage?: string;
+  retryCount?: number;
+  nextRetryAt?: string | null;
+};
+
+export type PersistedRecognitionQueueItem = {
+  batchId: string;
+  itemId: string;
+  sourcePath: string;
+  retryCount: number;
+  nextRetryAt: string | null;
+};
+
+type PersistRecognitionDraftInput = {
+  batchId: string;
+  draftId: string;
+  screenshotId: string;
+  originalName: string;
+  storedPath: string;
+  mimeType: string;
+  sha256: string;
+  recognition: RecognitionResult;
+  evidences: readonly RecognitionEvidence[];
+  createdAt: string;
 };
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
@@ -63,7 +86,7 @@ export class LocalApplication {
   public createRecognitionBatch(input: {
     id: string;
     createdAt: string;
-    items: Array<{ id: string; sourceName: string }>;
+    items: Array<{ id: string; sourceName: string; queuePath?: string }>;
   }): void {
     if (input.items.length === 0) throw new Error('识别批次必须包含来源截图');
     const workspace = this.requireWorkspace();
@@ -78,8 +101,9 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO recognition_batch_items (
           id, batch_id, position, source_name, content_sha256, status,
-          draft_id, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, NULL, 'waiting_recognition', NULL, NULL, ?, ?)
+          draft_id, error_message, created_at, updated_at,
+          queue_relative_path, retry_count, next_retry_at
+        ) VALUES (?, ?, ?, ?, NULL, 'waiting_recognition', NULL, NULL, ?, ?, ?, 0, NULL)
       `);
       input.items.forEach((item, position) => {
         insertItem.run(
@@ -89,6 +113,7 @@ export class LocalApplication {
           item.sourceName,
           input.createdAt,
           input.createdAt,
+          item.queuePath ? workspace.toStoredPath(item.queuePath) : null,
         );
       });
     });
@@ -102,12 +127,38 @@ export class LocalApplication {
         .prepare(`
           UPDATE recognition_batch_items
           SET
-            status = 'failed',
-            error_message = '上次退出时处理未完成，请重新上传这张截图',
+            status = 'waiting_retry',
+            error_message = '上次退出时处理未完成，已恢复到等待重试',
+            retry_count = MAX(retry_count, 1),
+            next_retry_at = ?,
             updated_at = ?
-          WHERE status IN ('waiting_recognition', 'recognizing', 'validating')
+          WHERE status IN ('recognizing', 'validating')
+            AND queue_relative_path IS NOT NULL
+        `)
+        .run(now, now);
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'failed',
+            error_message = '上次退出时处理未完成，且本机队列文件已不可用',
+            next_retry_at = NULL,
+            updated_at = ?
+          WHERE status IN (
+            'waiting_recognition', 'recognizing', 'validating', 'waiting_retry'
+          )
+            AND queue_relative_path IS NULL
         `)
         .run(now);
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET next_retry_at = ?, updated_at = ?
+          WHERE status = 'waiting_retry'
+            AND queue_relative_path IS NOT NULL
+            AND next_retry_at IS NULL
+        `)
+        .run(now, now);
       workspace.database.exec(`
         UPDATE recognition_batches
         SET status = CASE
@@ -115,7 +166,9 @@ export class LocalApplication {
             SELECT 1
             FROM recognition_batch_items AS items
             WHERE items.batch_id = recognition_batches.id
-              AND items.status = 'awaiting_confirmation'
+              AND items.status IN (
+                'waiting_recognition', 'awaiting_confirmation', 'waiting_retry'
+              )
           ) THEN 'awaiting_review'
           ELSE 'completed'
         END
@@ -127,6 +180,221 @@ export class LocalApplication {
       `);
     });
     return this.listRecognitionBatches();
+  }
+
+  public listPendingRecognitionQueueItems(): PersistedRecognitionQueueItem[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database
+      .prepare(`
+        SELECT batch_id, id, queue_relative_path, retry_count, next_retry_at
+        FROM recognition_batch_items
+        WHERE status IN ('waiting_recognition', 'waiting_retry')
+          AND queue_relative_path IS NOT NULL
+        ORDER BY created_at, batch_id, position, id
+      `)
+      .all() as unknown as SqlRow[];
+    return rows.map((row) => ({
+      batchId: asString(row.batch_id),
+      itemId: asString(row.id),
+      sourcePath: workspace.resolveStoredPath(asString(row.queue_relative_path)),
+      retryCount: asNumber(row.retry_count),
+      nextRetryAt: row.next_retry_at === null ? null : asString(row.next_retry_at),
+    }));
+  }
+
+  public requestRecognitionItemRetry(
+    batchId: string,
+    itemId: string,
+  ): PersistedRecognitionQueueItem {
+    const workspace = this.requireWorkspace();
+    return workspace.transaction(() => {
+      const row = workspace.database
+        .prepare(`
+          SELECT status, queue_relative_path
+          FROM recognition_batch_items
+          WHERE id = ? AND batch_id = ?
+        `)
+        .get(itemId, batchId) as SqlRow | undefined;
+      if (!row) throw new Error('未找到识别批次中的来源截图');
+      if (!['waiting_retry', 'failed'].includes(asString(row.status))) {
+        throw new Error('当前状态不能手动重试');
+      }
+      if (row.queue_relative_path === null) {
+        throw new Error('本机队列文件已不可用，请重新上传这张截图');
+      }
+      const result = workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'waiting_recognition',
+            error_message = NULL,
+            retry_count = 0,
+            next_retry_at = NULL,
+            updated_at = ?
+          WHERE id = ? AND batch_id = ?
+            AND status IN ('waiting_retry', 'failed')
+        `)
+        .run(new Date().toISOString(), itemId, batchId);
+      if (result.changes !== 1) throw new Error('该来源截图状态已变化，请刷新后重试');
+      workspace.database
+        .prepare("UPDATE recognition_batches SET status = 'awaiting_review' WHERE id = ?")
+        .run(batchId);
+      return {
+        batchId,
+        itemId,
+        sourcePath: workspace.resolveStoredPath(asString(row.queue_relative_path)),
+        retryCount: 0,
+        nextRetryAt: null,
+      };
+    });
+  }
+
+  public claimRecognitionItem(
+    batchId: string,
+    itemId: string,
+    expectedRetryCount: number,
+  ): PersistedRecognitionQueueItem | null {
+    const workspace = this.requireWorkspace();
+    return workspace.transaction(() => {
+      const row = workspace.database
+        .prepare(`
+          SELECT status, queue_relative_path, retry_count
+          FROM recognition_batch_items
+          WHERE id = ? AND batch_id = ?
+        `)
+        .get(itemId, batchId) as SqlRow | undefined;
+      if (
+        !row ||
+        row.queue_relative_path === null ||
+        !['waiting_recognition', 'waiting_retry'].includes(asString(row.status)) ||
+        asNumber(row.retry_count) !== expectedRetryCount
+      ) {
+        return null;
+      }
+      const result = workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'recognizing',
+            error_message = NULL,
+            next_retry_at = NULL,
+            updated_at = ?
+          WHERE id = ? AND batch_id = ?
+            AND status IN ('waiting_recognition', 'waiting_retry')
+            AND retry_count = ?
+        `)
+        .run(new Date().toISOString(), itemId, batchId, expectedRetryCount);
+      if (result.changes !== 1) return null;
+      return {
+        batchId,
+        itemId,
+        sourcePath: workspace.resolveStoredPath(asString(row.queue_relative_path)),
+        retryCount: asNumber(row.retry_count),
+        nextRetryAt: null,
+      };
+    });
+  }
+
+  public async createManualDraft(batchId: string, itemId: string): Promise<OrderDraft> {
+    const workspace = this.requireWorkspace();
+    const queueItem = workspace.database
+      .prepare(`
+        SELECT source_name, status, queue_relative_path
+        FROM recognition_batch_items
+        WHERE id = ? AND batch_id = ?
+      `)
+      .get(itemId, batchId) as SqlRow | undefined;
+    if (!queueItem) throw new Error('未找到识别批次中的来源截图');
+    if (!['waiting_retry', 'failed'].includes(asString(queueItem.status))) {
+      throw new Error('当前状态不能改为人工录入');
+    }
+    if (queueItem.queue_relative_path === null) {
+      throw new Error('本机队列文件已不可用，请重新上传这张截图');
+    }
+    const queuePath = workspace.resolveStoredPath(asString(queueItem.queue_relative_path));
+    const extension = extname(queuePath).toLowerCase();
+    const mimeType = IMAGE_MIME_TYPES[extension];
+    if (!mimeType) throw new Error('当前仅支持 PNG、JPG、JPEG 或 WebP 来源截图');
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(queuePath);
+    } catch {
+      throw new Error('无法读取本机队列中的来源截图，请重新上传这张截图');
+    }
+    if (bytes.byteLength > MAX_SOURCE_SCREENSHOT_BYTES) {
+      throw new Error('来源截图不能超过 7.5 MB，请压缩后重试');
+    }
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const screenshotId = randomUUID();
+    const draftId = randomUUID();
+    const storedDirectory = join(workspace.dataDirectory, 'screenshots');
+    const storedPath = join(storedDirectory, `${screenshotId}${extension}`);
+    const now = new Date().toISOString();
+    const recognition = emptyManualRecognition();
+    try {
+      await mkdir(storedDirectory, { recursive: true });
+      await writeFile(storedPath, bytes, { flag: 'wx' });
+    } catch {
+      throw new Error('无法保存人工录入来源截图，请检查数据目录后重试');
+    }
+
+    try {
+      workspace.transaction(() => {
+        const current = workspace.database
+          .prepare(`
+            SELECT status, queue_relative_path
+            FROM recognition_batch_items
+            WHERE id = ? AND batch_id = ?
+          `)
+          .get(itemId, batchId) as SqlRow | undefined;
+        if (!current) throw new Error('未找到识别批次中的来源截图');
+        if (!['waiting_retry', 'failed'].includes(asString(current.status))) {
+          throw new Error('该来源截图状态已变化，请刷新后重试');
+        }
+        if (current.queue_relative_path !== queueItem.queue_relative_path) {
+          throw new Error('该来源截图状态已变化，请刷新后重试');
+        }
+
+        this.persistRecognitionDraft(workspace, {
+          batchId,
+          draftId,
+          screenshotId,
+          originalName: asString(queueItem.source_name),
+          storedPath,
+          mimeType,
+          sha256,
+          recognition,
+          evidences: [],
+          createdAt: now,
+        });
+        const linkedItem = workspace.database
+          .prepare(`
+            UPDATE recognition_batch_items
+            SET
+              status = 'awaiting_confirmation',
+              content_sha256 = ?,
+              draft_id = ?,
+              error_message = NULL,
+              queue_relative_path = NULL,
+              next_retry_at = NULL,
+              updated_at = ?
+            WHERE id = ? AND batch_id = ?
+              AND status IN ('waiting_retry', 'failed')
+          `)
+          .run(sha256, draftId, now, itemId, batchId);
+        if (linkedItem.changes !== 1) {
+          throw new Error('该来源截图状态已变化，请刷新后重试');
+        }
+      });
+    } catch (error) {
+      await unlink(storedPath).catch(() => undefined);
+      throw error;
+    }
+
+    const queueItemDirectory = dirname(queuePath);
+    await rm(queueItemDirectory, { recursive: true, force: true }).catch(() => undefined);
+    await rmdir(dirname(queueItemDirectory)).catch(() => undefined);
+    return this.getDraft(draftId);
   }
 
   public listRecognitionBatches(): RecognitionBatchView[] {
@@ -146,7 +414,7 @@ export class LocalApplication {
     const itemRows = workspace.database
       .prepare(`
         SELECT items.id, items.batch_id, items.source_name, items.status,
-          items.draft_id, items.error_message
+          items.draft_id, items.error_message, items.retry_count, items.next_retry_at
         FROM recognition_batch_items AS items
         JOIN recognition_batches AS batches ON batches.id = items.batch_id
         ORDER BY batches.created_at DESC, batches.id DESC, items.position, items.id
@@ -172,6 +440,10 @@ export class LocalApplication {
           ...(row.error_message === null
             ? {}
             : { errorMessage: asString(row.error_message) }),
+          retryCount: asNumber(row.retry_count),
+          ...(row.next_retry_at === null
+            ? {}
+            : { nextRetryAt: asString(row.next_retry_at) }),
         }));
       return {
         id: batchId,
@@ -193,6 +465,13 @@ export class LocalApplication {
             draft_id = COALESCE(?, draft_id),
             content_sha256 = COALESCE(?, content_sha256),
             error_message = ?,
+            retry_count = COALESCE(?, retry_count),
+            next_retry_at = ?,
+            queue_relative_path = CASE
+              WHEN ? IN ('awaiting_confirmation', 'duplicate_skipped', 'imported', 'cancelled')
+                THEN NULL
+              ELSE queue_relative_path
+            END,
             updated_at = ?
           WHERE id = ? AND batch_id = ?
         `)
@@ -201,6 +480,9 @@ export class LocalApplication {
           input.draftId ?? null,
           input.sha256 ?? null,
           input.errorMessage ?? null,
+          input.retryCount ?? null,
+          input.nextRetryAt ?? null,
+          input.status,
           new Date().toISOString(),
           input.itemId,
           input.batchId,
@@ -254,122 +536,17 @@ export class LocalApplication {
       const now = new Date().toISOString();
 
       workspace.transaction(() => {
-        workspace.database
-          .prepare(`
-            INSERT OR IGNORE INTO recognition_batches (
-              id, platform, seller_account, status, created_at
-            )
-            VALUES (?, ?, ?, 'awaiting_review', ?)
-          `)
-          .run(batchId, recognition.platform, recognition.sellerAccount, now);
-        workspace.database
-          .prepare("UPDATE recognition_batches SET status = 'awaiting_review' WHERE id = ?")
-          .run(batchId);
-
-        workspace.database
-          .prepare(`
-            INSERT INTO source_screenshots (
-              id, batch_id, original_name, relative_path, content_sha256, mime_type, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-          `)
-          .run(
-            screenshotId,
-            batchId,
-            basename(sourcePath),
-            workspace.toStoredPath(storedPath),
-            sha256,
-            mimeType,
-            now,
-          );
-
-        workspace.database
-          .prepare(`
-            INSERT INTO order_drafts (
-              id, batch_id, screenshot_id, platform, seller_account, order_number,
-              alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
-              address_original, address_normalized, province, city, district,
-              ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
-              product_total_cents, product_total_present,
-              shipping_fee_cents, shipping_fee_present, amount_cents, amount_present,
-              platform_transaction_status, fulfillment_status,
-              status, recognition_json, created_at
-            ) VALUES (
-              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              ?, ?, ?,
-              'awaiting_review', ?, ?
-            )
-          `)
-          .run(
-            draftId,
-            batchId,
-            screenshotId,
-            recognition.platform,
-            recognition.sellerAccount,
-            recognition.orderNumber,
-            recognition.alipayTransactionNumber,
-            recognition.buyerNickname,
-            recognition.recipient,
-            recognition.phone,
-            recognition.phoneNormalized,
-            recognition.addressOriginal,
-            recognition.addressNormalized,
-            recognition.province,
-            recognition.city,
-            recognition.district,
-            recognition.orderedAtOriginal,
-            recognition.orderedAtNormalized,
-            recognition.paidAtOriginal,
-            recognition.paidAtNormalized,
-            recognition.productTotalCents ?? 0,
-            recognition.productTotalCents === null ? 0 : 1,
-            recognition.shippingFeeCents ?? 0,
-            recognition.shippingFeeCents === null ? 0 : 1,
-            recognition.amountCents ?? 0,
-            recognition.amountCents === null ? 0 : 1,
-            recognition.platformTransactionStatus,
-            recognition.fulfillmentStatus,
-            JSON.stringify(recognition),
-            now,
-          );
-
-        const insertItem = workspace.database.prepare(`
-          INSERT INTO draft_items (
-            id, draft_id, position, source_title, source_spec,
-            unit_price_cents, unit_price_present, quantity, quantity_inferred
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        recognition.items.forEach((item, position) => {
-          insertItem.run(
-            randomUUID(),
-            draftId,
-            position,
-            item.sourceTitle,
-            item.sourceSpec,
-            item.unitPriceCents ?? 0,
-            item.unitPriceCents === null ? 0 : 1,
-            item.quantity,
-            item.quantityInferred ? 1 : 0,
-          );
-        });
-
-        const insertEvidence = workspace.database.prepare(`
-          INSERT INTO recognition_attempts (
-            id, screenshot_id, draft_id, provider, model, request_id,
-            schema_version, raw_response, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        attempt.evidences.forEach((evidence, index) => {
-          insertEvidence.run(
-            randomUUID(),
-            screenshotId,
-            draftId,
-            evidence.provider,
-            evidence.model,
-            evidence.requestId,
-            evidence.schemaVersion,
-            evidence.rawResponse,
-            new Date(Date.parse(now) + index).toISOString(),
-          );
+        this.persistRecognitionDraft(workspace, {
+          batchId,
+          draftId,
+          screenshotId,
+          originalName: basename(sourcePath),
+          storedPath,
+          mimeType,
+          sha256,
+          recognition,
+          evidences: attempt.evidences,
+          createdAt: now,
         });
 
         if (batchItemId) {
@@ -381,6 +558,8 @@ export class LocalApplication {
                 draft_id = ?,
                 content_sha256 = ?,
                 error_message = NULL,
+                queue_relative_path = NULL,
+                next_retry_at = NULL,
                 updated_at = ?
               WHERE id = ? AND batch_id = ?
             `)
@@ -758,7 +937,7 @@ export class LocalApplication {
             WHERE batch_id = ?
               AND status IN (
                 'waiting_recognition', 'recognizing', 'validating',
-                'awaiting_confirmation'
+                'awaiting_confirmation', 'waiting_retry'
               )
           ) THEN 'awaiting_review'
           ELSE 'completed'
@@ -911,6 +1090,133 @@ export class LocalApplication {
   public close(): void {
     this.workspace?.close();
     this.workspace = undefined;
+  }
+
+  private persistRecognitionDraft(
+    workspace: Workspace,
+    input: PersistRecognitionDraftInput,
+  ): void {
+    workspace.database
+      .prepare(`
+        INSERT OR IGNORE INTO recognition_batches (
+          id, platform, seller_account, status, created_at
+        ) VALUES (?, ?, ?, 'awaiting_review', ?)
+      `)
+      .run(
+        input.batchId,
+        input.recognition.platform,
+        input.recognition.sellerAccount,
+        input.createdAt,
+      );
+    workspace.database
+      .prepare("UPDATE recognition_batches SET status = 'awaiting_review' WHERE id = ?")
+      .run(input.batchId);
+
+    workspace.database
+      .prepare(`
+        INSERT INTO source_screenshots (
+          id, batch_id, original_name, relative_path, content_sha256, mime_type, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.screenshotId,
+        input.batchId,
+        input.originalName,
+        workspace.toStoredPath(input.storedPath),
+        input.sha256,
+        input.mimeType,
+        input.createdAt,
+      );
+
+    const recognition = input.recognition;
+    workspace.database
+      .prepare(`
+        INSERT INTO order_drafts (
+          id, batch_id, screenshot_id, platform, seller_account, order_number,
+          alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+          address_original, address_normalized, province, city, district,
+          ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+          product_total_cents, product_total_present,
+          shipping_fee_cents, shipping_fee_present, amount_cents, amount_present,
+          platform_transaction_status, fulfillment_status,
+          status, recognition_json, created_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'awaiting_review', ?, ?
+        )
+      `)
+      .run(
+        input.draftId,
+        input.batchId,
+        input.screenshotId,
+        recognition.platform,
+        recognition.sellerAccount,
+        recognition.orderNumber,
+        recognition.alipayTransactionNumber,
+        recognition.buyerNickname,
+        recognition.recipient,
+        recognition.phone,
+        recognition.phoneNormalized,
+        recognition.addressOriginal,
+        recognition.addressNormalized,
+        recognition.province,
+        recognition.city,
+        recognition.district,
+        recognition.orderedAtOriginal,
+        recognition.orderedAtNormalized,
+        recognition.paidAtOriginal,
+        recognition.paidAtNormalized,
+        recognition.productTotalCents ?? 0,
+        recognition.productTotalCents === null ? 0 : 1,
+        recognition.shippingFeeCents ?? 0,
+        recognition.shippingFeeCents === null ? 0 : 1,
+        recognition.amountCents ?? 0,
+        recognition.amountCents === null ? 0 : 1,
+        recognition.platformTransactionStatus,
+        recognition.fulfillmentStatus,
+        JSON.stringify(recognition),
+        input.createdAt,
+      );
+
+    const insertItem = workspace.database.prepare(`
+      INSERT INTO draft_items (
+        id, draft_id, position, source_title, source_spec,
+        unit_price_cents, unit_price_present, quantity, quantity_inferred
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    recognition.items.forEach((item, position) => {
+      insertItem.run(
+        randomUUID(),
+        input.draftId,
+        position,
+        item.sourceTitle,
+        item.sourceSpec,
+        item.unitPriceCents ?? 0,
+        item.unitPriceCents === null ? 0 : 1,
+        item.quantity,
+        item.quantityInferred ? 1 : 0,
+      );
+    });
+
+    const insertEvidence = workspace.database.prepare(`
+      INSERT INTO recognition_attempts (
+        id, screenshot_id, draft_id, provider, model, request_id,
+        schema_version, raw_response, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    input.evidences.forEach((evidence, index) => {
+      insertEvidence.run(
+        randomUUID(),
+        input.screenshotId,
+        input.draftId,
+        evidence.provider,
+        evidence.model,
+        evidence.requestId,
+        evidence.schemaVersion,
+        evidence.rawResponse,
+        new Date(Date.parse(input.createdAt) + index).toISOString(),
+      );
+    });
   }
 
   private requireWorkspace(): Workspace {
@@ -1138,6 +1444,40 @@ function asRecognitionBatchItemStatus(
     throw new Error('数据库来源截图识别状态格式错误');
   }
   return value;
+}
+
+function emptyManualRecognition(): RecognitionResult {
+  return {
+    platform: 'xianyu',
+    sellerAccount: '',
+    orderNumber: '',
+    alipayTransactionNumber: '',
+    buyerNickname: '',
+    recipient: '',
+    phone: '',
+    phoneNormalized: '',
+    addressOriginal: '',
+    addressNormalized: '',
+    province: '',
+    city: '',
+    district: '',
+    orderedAtOriginal: '',
+    orderedAtNormalized: '',
+    paidAtOriginal: '',
+    paidAtNormalized: '',
+    productTotalCents: null,
+    shippingFeeCents: null,
+    amountCents: null,
+    platformTransactionStatus: 'unknown',
+    fulfillmentStatus: 'unknown',
+    items: [{
+      sourceTitle: '',
+      sourceSpec: '',
+      unitPriceCents: null,
+      quantity: 1,
+      quantityInferred: true,
+    }],
+  };
 }
 
 function asString(value: string | number | null | undefined): string {

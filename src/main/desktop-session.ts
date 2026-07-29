@@ -9,9 +9,13 @@ import type {
   Recognizer,
   RecognitionBatchView,
 } from '../core/contracts';
-import { summarizeRecognitionBatchItems } from '../core/recognition-batches';
+import {
+  AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS,
+  MAX_AUTOMATIC_RECOGNITION_RETRIES,
+  summarizeRecognitionBatchItems,
+} from '../core/recognition-batches';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type {
   OcrConnectionTestInput,
@@ -36,6 +40,7 @@ export class DesktopSession {
   private workspaceGeneration = 0;
   private readonly applicationWorkCounts = new Map<LocalApplication, number>();
   private readonly retiringApplications = new Set<LocalApplication>();
+  private readonly recognitionRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly recognitionBatchListeners = new Set<
     (batches: RecognitionBatchView[]) => void
   >();
@@ -135,6 +140,7 @@ export class DesktopSession {
         batchId,
         sourceName: basename(sourcePath),
         status: 'waiting_recognition',
+        retryCount: 0,
       }));
       const batch: RecognitionBatchView = {
         id: batchId,
@@ -146,9 +152,10 @@ export class DesktopSession {
         application.createRecognitionBatch({
           id: batch.id,
           createdAt: batch.createdAt,
-          items: batch.items.map((item) => ({
+          items: batch.items.map((item, index) => ({
             id: item.id,
             sourceName: item.sourceName,
+            queuePath: stagedPaths[index],
           })),
         });
       } catch {
@@ -158,22 +165,15 @@ export class DesktopSession {
       }
       this.recognitionBatches.unshift(batch);
       this.notifyRecognitionBatchesChanged();
-      stagedPaths.forEach((sourcePath, index) => {
-        const itemId = batch.items[index].id;
-        this.retainApplicationWork(application);
-        this.recognitionQueue = this.recognitionQueue
-          .then(() => this.processRecognitionItem(
-            application,
-            generation,
-            batchId,
-            itemId,
-            sourcePath,
-          ))
-          .catch(() => undefined);
+      batch.items.forEach((item) => {
+        this.enqueueRecognitionItem(
+          application,
+          generation,
+          batchId,
+          item.id,
+          0,
+        );
       });
-      this.recognitionQueue = this.recognitionQueue.finally(() => (
-        rm(stagingBatchDirectory, { recursive: true, force: true }).catch(() => undefined)
-      ));
       return structuredClone(batch);
     } finally {
       this.releaseApplicationWork(application);
@@ -182,6 +182,48 @@ export class DesktopSession {
 
   public listRecognitionBatches(): RecognitionBatchView[] {
     return structuredClone(this.recognitionBatches);
+  }
+
+  public async retryRecognitionItem(batchId: string, itemId: string): Promise<void> {
+    const application = this.requireApplication();
+    const generation = this.workspaceGeneration;
+    this.cancelRecognitionRetryTimer(generation, batchId, itemId);
+    const item = application.requestRecognitionItemRetry(batchId, itemId);
+    this.applyRecognitionItemStatusToView(
+      generation,
+      {
+        batchId,
+        itemId,
+        status: 'waiting_recognition',
+        retryCount: 0,
+        nextRetryAt: null,
+      },
+    );
+    this.enqueueRecognitionItem(
+      application,
+      generation,
+      batchId,
+      itemId,
+      item.retryCount,
+    );
+  }
+
+  public async createManualDraft(batchId: string, itemId: string): Promise<OrderDraft> {
+    const application = this.requireApplication();
+    const generation = this.workspaceGeneration;
+    this.cancelRecognitionRetryTimer(generation, batchId, itemId);
+    const draft = await application.createManualDraft(batchId, itemId);
+    this.applyRecognitionItemStatusToView(
+      generation,
+      {
+        batchId,
+        itemId,
+        status: 'awaiting_confirmation',
+        draftId: draft.id,
+        nextRetryAt: null,
+      },
+    );
+    return structuredClone(draft);
   }
 
   public getDraft(draftId: string): OrderDraft {
@@ -261,6 +303,7 @@ export class DesktopSession {
 
   public close(): void {
     this.recognitionBatchListeners.clear();
+    this.cancelRecognitionRetryTimers();
     this.workspaceGeneration += 1;
     this.recognitionBatches.splice(0);
     this.seenSourceHashes.clear();
@@ -280,6 +323,7 @@ export class DesktopSession {
     }
     const previousApplication = this.application;
     this.application = undefined;
+    this.cancelRecognitionRetryTimers();
     this.workspaceGeneration += 1;
     this.recognitionBatches.splice(0);
     this.seenSourceHashes.clear();
@@ -296,6 +340,30 @@ export class DesktopSession {
         dataDirectory,
         orders: application.listOrders(),
       };
+      for (const item of application.listPendingRecognitionQueueItems()) {
+        const retryAt = item.nextRetryAt ? Date.parse(item.nextRetryAt) : Number.NaN;
+        const delay = Number.isFinite(retryAt)
+          ? Math.max(retryAt - Date.now(), 0)
+          : 0;
+        if (delay === 0) {
+          this.enqueueRecognitionItem(
+            application,
+            this.workspaceGeneration,
+            item.batchId,
+            item.itemId,
+            item.retryCount,
+          );
+        } else {
+          this.scheduleRecognitionRetry(
+            application,
+            this.workspaceGeneration,
+            item.batchId,
+            item.itemId,
+            item.retryCount,
+            delay,
+          );
+        }
+      }
     } catch (error) {
       application.close();
       if (error instanceof WorkspaceInUseError) {
@@ -328,14 +396,34 @@ export class DesktopSession {
     generation: number,
     batchId: string,
     itemId: string,
-    sourcePath: string,
+    expectedRetryCount: number,
   ): Promise<void> {
     let reservedHash: string | undefined;
+    let claimedSourcePath: string | undefined;
+    let retryCount = expectedRetryCount;
+    let keepStagedSource = false;
     try {
-      this.setRecognitionItemStatus(
-        application,
+      const claimedItem = application.claimRecognitionItem(
+        batchId,
+        itemId,
+        expectedRetryCount,
+      );
+      if (!claimedItem) {
+        keepStagedSource = true;
+        return;
+      }
+      const { sourcePath } = claimedItem;
+      retryCount = claimedItem.retryCount;
+      claimedSourcePath = sourcePath;
+      this.applyRecognitionItemStatusToView(
         generation,
-        { batchId, itemId, status: 'recognizing' },
+        {
+          batchId,
+          itemId,
+          status: 'recognizing',
+          retryCount,
+          nextRetryAt: null,
+        },
       );
       const sha256 = createHash('sha256')
         .update(await readFile(sourcePath))
@@ -360,13 +448,19 @@ export class DesktopSession {
           this.setRecognitionItemStatus(
             application,
             generation,
-            { batchId, itemId, status: 'validating', sha256 },
+            {
+              batchId,
+              itemId,
+              status: 'validating',
+              sha256,
+              retryCount,
+              nextRetryAt: null,
+            },
           );
         },
         itemId,
       );
-      this.setRecognitionItemStatus(
-        application,
+      this.applyRecognitionItemStatusToView(
         generation,
         {
           batchId,
@@ -374,26 +468,117 @@ export class DesktopSession {
           status: 'awaiting_confirmation',
           draftId: draft.id,
           sha256,
+          retryCount,
+          nextRetryAt: null,
         },
       );
     } catch (error) {
       const isTemporary = isTemporaryRecognitionError(error);
+      const nextRetryCount = retryCount + 1;
+      const retryDelay = recognitionRetryDelay(nextRetryCount);
+      const shouldRetry = isTemporary && nextRetryCount <= MAX_AUTOMATIC_RECOGNITION_RETRIES;
+      keepStagedSource = true;
       this.setRecognitionItemStatus(
         application,
         generation,
         {
           batchId,
           itemId,
-          status: isTemporary ? 'waiting_retry' : 'failed',
-          errorMessage: userFacingRecognitionError(error),
+          status: shouldRetry ? 'waiting_retry' : 'failed',
+          errorMessage: isTemporary && !shouldRetry
+            ? '已自动重试 5 次，服务仍不可用，请手动重试或改为人工录入'
+            : userFacingRecognitionError(error),
           sha256: reservedHash,
+          retryCount: isTemporary
+            ? Math.min(nextRetryCount, MAX_AUTOMATIC_RECOGNITION_RETRIES)
+            : retryCount,
+          nextRetryAt: shouldRetry
+            ? new Date(Date.now() + retryDelay).toISOString()
+            : null,
         },
       );
+      if (
+        shouldRetry &&
+        generation === this.workspaceGeneration &&
+        application === this.application
+      ) {
+        this.scheduleRecognitionRetry(
+          application,
+          generation,
+          batchId,
+          itemId,
+          nextRetryCount,
+          retryDelay,
+        );
+      }
     } finally {
       if (reservedHash) this.seenSourceHashes.delete(reservedHash);
-      await rm(dirname(sourcePath), { recursive: true, force: true }).catch(() => undefined);
+      if (!keepStagedSource && claimedSourcePath) {
+        const itemDirectory = dirname(claimedSourcePath);
+        await rm(itemDirectory, { recursive: true, force: true }).catch(() => undefined);
+        await rmdir(dirname(itemDirectory)).catch(() => undefined);
+      }
       this.releaseApplicationWork(application);
     }
+  }
+
+  private enqueueRecognitionItem(
+    application: LocalApplication,
+    generation: number,
+    batchId: string,
+    itemId: string,
+    expectedRetryCount: number,
+  ): void {
+    this.retainApplicationWork(application);
+    this.recognitionQueue = this.recognitionQueue
+      .then(() => this.processRecognitionItem(
+        application,
+        generation,
+        batchId,
+        itemId,
+        expectedRetryCount,
+      ))
+      .catch(() => undefined);
+  }
+
+  private scheduleRecognitionRetry(
+    application: LocalApplication,
+    generation: number,
+    batchId: string,
+    itemId: string,
+    retryCount: number,
+    delay = recognitionRetryDelay(retryCount),
+  ): void {
+    const key = `${generation}:${batchId}:${itemId}`;
+    const timer = setTimeout(() => {
+      this.recognitionRetryTimers.delete(key);
+      if (generation !== this.workspaceGeneration || application !== this.application) return;
+      this.enqueueRecognitionItem(
+        application,
+        generation,
+        batchId,
+        itemId,
+        retryCount,
+      );
+    }, delay);
+    this.recognitionRetryTimers.set(key, timer);
+  }
+
+  private cancelRecognitionRetryTimers(): void {
+    for (const timer of this.recognitionRetryTimers.values()) clearTimeout(timer);
+    this.recognitionRetryTimers.clear();
+  }
+
+  private cancelRecognitionRetryTimer(
+    generation: number,
+    batchId: string,
+    itemId: string,
+  ): void {
+    const key = `${generation}:${batchId}:${itemId}`;
+    const timer = this.recognitionRetryTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.recognitionRetryTimers.delete(key);
   }
 
   private setRecognitionItemStatus(
@@ -402,6 +587,13 @@ export class DesktopSession {
     update: RecognitionBatchItemUpdate,
   ): void {
     application.updateRecognitionBatchItem(update);
+    this.applyRecognitionItemStatusToView(generation, update);
+  }
+
+  private applyRecognitionItemStatusToView(
+    generation: number,
+    update: RecognitionBatchItemUpdate,
+  ): void {
     if (generation !== this.workspaceGeneration) return;
     const batch = this.recognitionBatches.find((candidate) => (
       candidate.id === update.batchId
@@ -412,6 +604,9 @@ export class DesktopSession {
     if (update.draftId) item.draftId = update.draftId;
     if (update.errorMessage) item.errorMessage = update.errorMessage;
     else delete item.errorMessage;
+    if (update.retryCount !== undefined) item.retryCount = update.retryCount;
+    if (update.nextRetryAt) item.nextRetryAt = update.nextRetryAt;
+    else if (update.nextRetryAt === null) delete item.nextRetryAt;
     updateBatchProgress(batch);
     this.notifyRecognitionBatchesChanged();
   }
@@ -516,6 +711,14 @@ const TEMPORARY_RECOGNITION_ERROR_MESSAGES = new Set([
   '百炼 OCR 当前限流或额度不足，请稍后再试',
   '百炼 OCR 服务暂时不可用，请稍后再试',
 ]);
+
+function recognitionRetryDelay(retryCount: number): number {
+  const index = Math.min(
+    Math.max(retryCount - 1, 0),
+    AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS.length - 1,
+  );
+  return AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS[index];
+}
 
 const STAGEABLE_SOURCE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const MAX_STAGEABLE_SOURCE_BYTES = 7_500_000;

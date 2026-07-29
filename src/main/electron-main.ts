@@ -88,6 +88,24 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('workflow:list-recognition-batches', () => (
     desktopSession.listRecognitionBatches()
   ));
+  ipcMain.handle(
+    'workflow:retry-recognition-item',
+    (_event, batchId: unknown, itemId: unknown) => (
+      desktopSession.retryRecognitionItem(
+        parseWorkflowId(batchId, '识别批次'),
+        parseWorkflowId(itemId, '来源截图'),
+      )
+    ),
+  );
+  ipcMain.handle(
+    'workflow:create-manual-draft',
+    (_event, batchId: unknown, itemId: unknown) => (
+      desktopSession.createManualDraft(
+        parseWorkflowId(batchId, '识别批次'),
+        parseWorkflowId(itemId, '来源截图'),
+      )
+    ),
+  );
   ipcMain.handle('workflow:get-draft', (_event, draftId: unknown) => {
     return desktopSession.getDraft(parseDraftId(draftId));
   });
@@ -120,10 +138,14 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
 }
 
 function parseDraftId(draftId: unknown): string {
-  if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > 128) {
-    throw new Error('订单草稿 ID 格式无效');
+  return parseWorkflowId(draftId, '订单草稿');
+}
+
+function parseWorkflowId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 128) {
+    throw new Error(`${label} ID 格式无效`);
   }
-  return draftId.trim();
+  return value.trim();
 }
 
 function requireWindow(): BrowserWindow {
