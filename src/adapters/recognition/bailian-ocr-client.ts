@@ -80,6 +80,9 @@ const XIANYU_UI_CONTROL_LABELS = new Set([
   '聊一聊',
 ]);
 
+const XIANYU_NON_RECIPIENT_BUSINESS_TEXT_PATTERN =
+  /(?:买家昵称|收货信息|订单编号|订单号|支付宝交易号|交易快照|商品总价|成交价|实付金额|运费|下单时间|付款时间|订单时间|支付时间|商品明细|款式|规格|买家已付款|交易已取消|退款成功)/u;
+
 const PAGE_CONTROLS_SCHEMA = {
   page_controls: {
     labels: [
@@ -1471,10 +1474,9 @@ function recipientValue(
   return candidate;
 }
 
-type RecoveredShippingContact = {
-  recipient: unknown;
-  phone: unknown;
-};
+type RecoveredShippingContact =
+  | { recipient: unknown; phone: null; phoneConflict: true }
+  | { recipient: unknown; phone: unknown; phoneConflict: false };
 
 type RecoveredContactCandidate = {
   core: string;
@@ -1499,7 +1501,19 @@ function recoverShippingContact(
     controlLabels,
     'contact-boundary',
   );
-  const explicitPhone = chineseMobileCore(phoneInput);
+  const explicitPhones = chineseMobileCores(phoneInput);
+  if (explicitPhones.length > 1) {
+    return {
+      recipient: consistentRecipientFromConflictingPhoneEvidence(
+        cleanedRecipient,
+        cleanedContactLine,
+        controlLabels,
+      ),
+      phone: null,
+      phoneConflict: true,
+    };
+  }
+  const explicitPhone = explicitPhones[0] ?? chineseMobileCore(phoneInput);
 
   if (explicitPhone) {
     const observedPhones = [...new Set([
@@ -1511,15 +1525,13 @@ function recoverShippingContact(
       (observedPhones.length !== 1 || observedPhones[0] !== explicitPhone)
     ) {
       return {
-        recipient: countDigits(cleanedRecipient) >= 7
-          ? null
-          : recipientValue(
-              cleanedRecipient,
-              null,
-              null,
-              controlLabels,
-            ),
+        recipient: consistentRecipientFromConflictingPhoneEvidence(
+          cleanedRecipient,
+          cleanedContactLine,
+          controlLabels,
+        ),
         phone: null,
+        phoneConflict: true,
       };
     }
     return {
@@ -1530,6 +1542,7 @@ function recoverShippingContact(
         controlLabels,
       ),
       phone: phoneInput,
+      phoneConflict: false,
     };
   }
 
@@ -1538,6 +1551,17 @@ function recoverShippingContact(
     .filter((candidate): candidate is RecoveredContactCandidate => Boolean(candidate));
   const distinctPhones = [...new Set(candidates.map((candidate) => candidate.core))];
   if (distinctPhones.length !== 1) {
+    if (distinctPhones.length > 1) {
+      return {
+        recipient: consistentRecipientFromConflictingPhoneEvidence(
+          cleanedRecipient,
+          cleanedContactLine,
+          controlLabels,
+        ),
+        phone: null,
+        phoneConflict: true,
+      };
+    }
     const recipientHasAmbiguousContactDigits = countDigits(cleanedRecipient) >= 7;
     return {
       recipient: recipientHasAmbiguousContactDigits
@@ -1549,6 +1573,7 @@ function recoverShippingContact(
             controlLabels,
           ),
       phone: phoneInput,
+      phoneConflict: false,
     };
   }
 
@@ -1568,7 +1593,50 @@ function recoverShippingContact(
   return {
     recipient: recoveredRecipient,
     phone: recoveredPhone,
+    phoneConflict: false,
   };
+}
+
+function consistentRecipientFromConflictingPhoneEvidence(
+  recipient: string,
+  contactLine: string,
+  controlLabels: string[],
+): string | null {
+  const evidences = [recipient, contactLine].map(
+    (value) => conflictingPhoneRecipientEvidence(value, controlLabels),
+  );
+  if (evidences.some((evidence) => evidence.kind === 'invalid')) return null;
+  const candidates = evidences.flatMap((evidence) =>
+    evidence.kind === 'candidate' ? [evidence.recipient] : []
+  );
+  const identities = new Set(candidates.map(comparableText));
+  return identities.size === 1 ? candidates[0] : null;
+}
+
+type ConflictingPhoneRecipientEvidence =
+  | { kind: 'absent' }
+  | { kind: 'invalid' }
+  | { kind: 'candidate'; recipient: string };
+
+function conflictingPhoneRecipientEvidence(
+  value: string,
+  controlLabels: string[],
+): ConflictingPhoneRecipientEvidence {
+  if (!value) return { kind: 'absent' };
+  const phones = chineseMobileCores(value);
+  let recipient = value;
+  if (phones.length > 0) {
+    const suffix = trailingChineseMobileSuffix(value);
+    if (phones.length !== 1 || !suffix || suffix.core !== phones[0]) {
+      return { kind: 'invalid' };
+    }
+    recipient = trimTrailingRecipientSeparators(value.slice(0, suffix.start));
+    if (!recipient) return { kind: 'absent' };
+  }
+  if (!safePhoneOnlyReviewedRecipient(recipient, controlLabels)) {
+    return { kind: 'invalid' };
+  }
+  return { kind: 'candidate', recipient };
 }
 
 function recoveredContactCandidate(value: string): RecoveredContactCandidate | undefined {
@@ -1622,7 +1690,8 @@ function safePhoneOnlyReviewedRecipient(
     isMaskedNickname(candidate) ||
     isHighConfidenceUiControlText(candidate) ||
     isModelClassifiedUiControlText(candidate, controlLabels) ||
-    /(?:复制|去发货|买家昵称|收货信息|订单编号|支付宝交易号)/u.test(candidate) ||
+    /(?:复制|去发货)/u.test(candidate) ||
+    XIANYU_NON_RECIPIENT_BUSINESS_TEXT_PATTERN.test(candidate) ||
     /\d{7,}/u.test(candidate)
   ) {
     return false;
@@ -2016,12 +2085,24 @@ function sanitizeOrderExtraction(
     sanitized.buyer_nickname,
     controlLabels,
   );
-  sanitized.recipient = recipientValue(
+  const recoveredContact = recoverShippingContact(
     sanitized.recipient,
     sanitized.phone,
     sanitized.recipient_phone_line_text,
     controlLabels,
   );
+  if (recoveredContact.phoneConflict) {
+    sanitized.recipient = recoveredContact.recipient;
+    sanitized.phone = null;
+    sanitized.recipient_phone_line_text = null;
+  } else {
+    sanitized.recipient = recipientValue(
+      sanitized.recipient,
+      sanitized.phone,
+      sanitized.recipient_phone_line_text,
+      controlLabels,
+    );
+  }
   sanitized.page_controls = { labels: controlLabels };
   for (const key of ['product_total', 'shipping_fee', 'amount']) {
     sanitized[key] = sanitizeMoneyValue(extracted[key]);

@@ -1884,7 +1884,150 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('首轮联系人全缺失且复核姓名粘连另一手机号时拒绝整组冲突联系人', async () => {
+  it('首轮姓名字段粘连的号码与独立手机号冲突时复核后保留姓名', async () => {
+    const primary = {
+      purchased_items: {
+        items: [{
+          title: '合成首轮联系人冲突商品',
+          spec: '规格首轮冲突',
+          unit_price: '43.00',
+          price_tag_text: '¥43.00',
+          quantity: '1',
+          quantity_text: '×1',
+        }],
+        controls: [],
+      },
+      shipping_information: {
+        recipient: '张三 13800000000',
+        recipient_phone_line_text: null,
+        phone: '13900000000',
+        address: '测试省测试市示例区安全路43号',
+        province: '测试省',
+        city: '测试市',
+        district: '示例区',
+        controls: ['复制'],
+      },
+      transaction_information: {
+        detail_state: 'collapsed',
+        order_number: 'XY-SYNTH-PRIMARY-CONTACT-CONFLICT-0001',
+        alipay_transaction_number: null,
+        product_total: '43.00',
+        shipping_fee: '0.00',
+        amount: '43.00',
+        platform_transaction_status: 'paid',
+        fulfillment_status: 'pending_shipment',
+        buyer_nickname_label: null,
+        buyer_nickname: null,
+        order_time: null,
+        payment_time: null,
+        controls: ['展开'],
+      },
+      page_context: {
+        top_status_text: '买家已付款，请尽快发货',
+        global_controls: ['联系买家'],
+        excluded_regions: [],
+      },
+    };
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primary,
+          'request-primary-contact-conflict-primary',
+        );
+      }
+      return successfulKieResponse({
+        shipping_information: primary.shipping_information,
+      }, 'request-primary-contact-conflict-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('primary-contact-conflict-review'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '张三',
+      phone: '',
+      phoneNormalized: '',
+    });
+  });
+
+  it.each([
+    {
+      name: '首轮联系人全缺失且复核手机号冲突时保留一致姓名',
+      caseId: 'same-name-explicit-phone-conflict',
+      recipient: '张三 13800000000',
+      recipientPhoneLineText: '张三 13800000000',
+      phone: '13900000000',
+      expectedRecipient: '张三',
+      addressNumber: 31,
+    },
+    {
+      name: '首轮联系人全缺失且复核姓名与手机号都冲突时拒绝整组联系人',
+      caseId: 'different-name-explicit-phone-conflict',
+      recipient: '张三 13800000000',
+      recipientPhoneLineText: '李四 13800000000',
+      phone: '13900000000',
+      expectedRecipient: '',
+      addressNumber: 32,
+    },
+    {
+      name: '首轮联系人全缺失且复核两路手机号冲突时保留一致姓名',
+      caseId: 'same-name-two-source-phone-conflict',
+      recipient: '张三 13800000000',
+      recipientPhoneLineText: '张三 13900000000',
+      phone: null,
+      expectedRecipient: '张三',
+      addressNumber: 33,
+    },
+    {
+      name: '首轮联系人全缺失且复核干净姓名与联系人行姓名冲突时拒绝整组联系人',
+      caseId: 'clean-name-different-line-name-conflict',
+      recipient: '李四',
+      recipientPhoneLineText: '张三 13800000000',
+      phone: '13900000000',
+      expectedRecipient: '',
+      addressNumber: 34,
+    },
+    {
+      name: '首轮联系人全缺失且复核冲突号码中的一致姓名粘连按钮时拒绝整组联系人',
+      caseId: 'button-contaminated-name-conflict',
+      recipient: '张三复制 13800000000',
+      recipientPhoneLineText: '张三复制 13800000000',
+      phone: '13900000000',
+      expectedRecipient: '',
+      addressNumber: 35,
+    },
+    {
+      name: '首轮联系人全缺失且复核独立手机号字段含两个号码时不选择其中一个',
+      caseId: 'multiple-phones-in-explicit-phone-field',
+      recipient: '张三 13800000000',
+      recipientPhoneLineText: '张三 13800000000',
+      phone: '13800000000 13900000000',
+      expectedRecipient: '张三',
+      addressNumber: 36,
+    },
+    {
+      name: '首轮联系人全缺失且复核冲突号码中的一致文本是业务标签时拒绝整组联系人',
+      caseId: 'business-label-name-conflict',
+      recipient: '商品总价 13800000000',
+      recipientPhoneLineText: '商品总价 13800000000',
+      phone: '13900000000',
+      expectedRecipient: '',
+      addressNumber: 37,
+    },
+  ])('$name', async ({
+    caseId,
+    recipient,
+    recipientPhoneLineText,
+    phone,
+    expectedRecipient,
+    addressNumber,
+  }) => {
     const primary = syntheticModularStatusExtraction({
       pageHeaderStatusText: '买家已付款，请尽快发货',
       shippingControls: ['复制'],
@@ -1905,31 +2048,31 @@ describe('阿里云百炼 OCR 请求契约', () => {
       if (request.mock.calls.length === 1) {
         return successfulKieResponse(
           primary,
-          'request-missing-contact-conflict-primary',
+          `request-missing-contact-${caseId}-primary`,
         );
       }
       return successfulKieResponse({
         shipping_information: {
-          recipient: '张三 13800000000',
-          recipient_phone_line_text: '张三 13800000000',
-          phone: '13900000000',
-          address: '测试省测试市示例区安全路31号',
+          recipient,
+          recipient_phone_line_text: recipientPhoneLineText,
+          phone,
+          address: `测试省测试市示例区安全路${addressNumber}号`,
           province: '测试省',
           city: '测试市',
           district: '示例区',
           controls: ['复制'],
         },
-      }, 'request-missing-contact-conflict-review');
+      }, `request-missing-contact-${caseId}-review`);
     });
     const client = new BailianOcrClient(request);
 
     const attempt = await client.recognizeOrder(
-      syntheticStatusRecognitionInput('missing-contact-conflict-review'),
+      syntheticStatusRecognitionInput(`missing-contact-${caseId}-review`),
     );
 
     expect(request).toHaveBeenCalledTimes(2);
     expect(attempt.result).toMatchObject({
-      recipient: '',
+      recipient: expectedRecipient,
       phone: '',
       phoneNormalized: '',
     });
