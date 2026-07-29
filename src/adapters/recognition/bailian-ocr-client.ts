@@ -24,6 +24,7 @@ const CONNECTION_TEST_IMAGE =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=';
 
 const MAXIMUM_BASE64_DATA_URL_BYTES = 10 * 1024 * 1024;
+const ORDER_NUMBER_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;
 
 const XIANYU_UI_CONTROL_LABELS = new Set([
   '去发货',
@@ -333,7 +334,10 @@ export class BailianOcrClient implements BailianConnectionTester {
       }
       const firstContent = asRecord(content[0]);
       const ocrResult = asRecord(firstContent.ocr_result);
-      const extracted = asRecord(ocrResult.kv_result);
+      const extracted = enrichExtractionFromProcessedText(
+        asRecord(ocrResult.kv_result),
+        ocrResult.processed_text,
+      );
 
       return {
         extracted,
@@ -465,6 +469,53 @@ function throwForRecognitionStatus(status: number): never {
   throw new Error('百炼 OCR 无法识别这张截图，请确认图片完整清晰');
 }
 
+function enrichExtractionFromProcessedText(
+  extracted: Record<string, unknown>,
+  processedText: unknown,
+): Record<string, unknown> {
+  const transaction = recordOrEmpty(extracted.transaction_information);
+  const modularOrderNumber = transaction.order_number;
+  const currentOrderNumber = Object.prototype.hasOwnProperty.call(
+    extracted,
+    'transaction_information',
+  )
+    ? modularOrderNumber
+    : extracted.order_number;
+  if (usableOrderNumber(currentOrderNumber)) return extracted;
+  const orderNumber = orderNumberFromProcessedText(processedText);
+  if (!orderNumber) return extracted;
+  if (Object.prototype.hasOwnProperty.call(extracted, 'transaction_information')) {
+    return {
+      ...extracted,
+      transaction_information: { ...transaction, order_number: orderNumber },
+    };
+  }
+  return { ...extracted, order_number: orderNumber };
+}
+
+function usableOrderNumber(value: unknown): boolean {
+  return Boolean(validatedOrderNumber(value));
+}
+
+function validatedOrderNumber(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const candidate = value.trim();
+  return ORDER_NUMBER_VALUE_PATTERN.test(candidate) ? candidate : '';
+}
+
+function orderNumberFromProcessedText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const candidates = new Set<string>();
+  for (const line of value.normalize('NFKC').split(/\r?\n/u)) {
+    const match = /订单编号[\t ]*(?:[:：|｜][\t ]*)?([A-Za-z0-9][A-Za-z0-9_-]{7,63})(?![A-Za-z0-9_-])/u.exec(
+      line,
+    );
+    const candidate = validatedOrderNumber(match?.[1]);
+    if (candidate) candidates.add(candidate);
+  }
+  return candidates.size === 1 ? [...candidates][0] : '';
+}
+
 function buildReviewSchema(result: RecognitionResult): Record<string, unknown> | undefined {
   const identitiesMatch = Boolean(
     result.recipient &&
@@ -504,13 +555,20 @@ function buildModularReviewSchema(
   extracted: Record<string, unknown>,
   result: RecognitionResult,
 ): Record<string, unknown> | undefined {
+  const transactionNeedsReview = transactionInformationNeedsReview(extracted, result);
   if (purchasedItemsNeedReview(extracted, result)) {
-    return buildPurchasedItemsReviewSchema(result);
+    return {
+      ...buildPurchasedItemsReviewSchema(result),
+      ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
+    };
   }
   if (shippingInformationNeedsReview(extracted, result)) {
-    return SHIPPING_INFORMATION_MODULE_SCHEMA;
+    return {
+      ...SHIPPING_INFORMATION_MODULE_SCHEMA,
+      ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
+    };
   }
-  if (transactionInformationNeedsReview(extracted, result)) {
+  if (transactionNeedsReview) {
     return TRANSACTION_INFORMATION_MODULE_SCHEMA;
   }
   return undefined;
@@ -595,7 +653,8 @@ function transactionInformationNeedsReview(
       return true;
     }
   }
-  return result.amountCents === null ||
+  return !result.orderNumber ||
+    result.amountCents === null ||
     result.platformTransactionStatus === 'unknown' ||
     result.fulfillmentStatus === 'unknown';
 }
@@ -615,12 +674,29 @@ function mergeReviewResult(
     controlLabels,
   ));
   const reviewedBuyer = businessText(flattened.buyer_nickname, controlLabels);
-  const reviewedRecipient = optionalText(recipientValue(
+  const strictlyReviewedRecipient = optionalText(recipientValue(
     flattened.recipient,
     flattened.phone,
     flattened.contact_line_text,
     controlLabels,
   ));
+  const phoneOnlyReviewedRecipient = phoneOnlyContactLine(
+      flattened.contact_line_text,
+      flattened.phone,
+    )
+    ? businessText(flattened.recipient_candidate, controlLabels)
+    : '';
+  const phoneOnlyRecipientMatchesPrimary = Boolean(
+    phoneOnlyReviewedRecipient &&
+    contaminatedRecipientMatchesReview(
+      primary.recipient,
+      phoneOnlyReviewedRecipient,
+      flattened.phone,
+      controlLabels,
+    ),
+  );
+  const reviewedRecipient = strictlyReviewedRecipient ||
+    (phoneOnlyRecipientMatchesPrimary ? phoneOnlyReviewedRecipient : '');
   const primaryBuyerLabelVisible = isBuyerNicknameLabel(
     primary.buyer_nickname_label,
   );
@@ -635,6 +711,13 @@ function mergeReviewResult(
     comparableText(primaryBuyer) === comparableText(primaryRecipient),
   );
   const primaryRecipientLooksLikeMaskedNickname = isMaskedNickname(primaryRecipient);
+  const primaryRecipientWasContaminated = Boolean(reviewedRecipient &&
+    contaminatedRecipientMatchesReview(
+      primary.recipient,
+      reviewedRecipient,
+      flattened.phone,
+      controlLabels,
+    ));
   const reviewedRecipientWasMisfiledAsBuyer = Boolean(
     !primaryRecipient &&
     primaryBuyer &&
@@ -676,11 +759,18 @@ function mergeReviewResult(
   if (
     (!primaryRecipient ||
       identitiesMatchedInitially ||
-      primaryRecipientLooksLikeMaskedNickname) &&
+      primaryRecipientLooksLikeMaskedNickname ||
+      primaryRecipientWasContaminated) &&
     reviewedRecipient
   ) {
-    merged.recipient = flattened.recipient;
-    merged.recipient_phone_line_text = flattened.contact_line_text;
+    merged.recipient = reviewedRecipient;
+    merged.recipient_phone_line_text = contactLineConfirmsRecipient(
+        flattened.contact_line_text,
+        reviewedRecipient,
+        flattened.phone,
+      )
+      ? flattened.contact_line_text
+      : null;
   } else if (primaryBuyerWasMisfiledRecipient) {
     merged.recipient = primary.buyer_nickname;
   }
@@ -720,6 +810,7 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
   const reviewedContactLine = shipping.contact_line_text ??
     review.recipient_phone_line_text ??
     review.contact_line_text;
+  const reviewedRecipient = shipping.recipient ?? review.recipient;
   return {
     order_number: identity.order_number ?? review.order_number,
     alipay_transaction_number:
@@ -730,11 +821,12 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
       controlLabels,
     ),
     recipient: recipientValue(
-      shipping.recipient ?? review.recipient,
+      reviewedRecipient,
       reviewedPhone,
       reviewedContactLine,
       controlLabels,
     ),
+    recipient_candidate: businessValue(reviewedRecipient, controlLabels),
     phone: reviewedPhone,
     address: shipping.address ?? review.address,
     province: shipping.province ?? review.province,
@@ -1039,6 +1131,60 @@ function recipientValue(
   return candidate;
 }
 
+function phoneOnlyContactLine(lineValue: unknown, phoneValue: unknown): boolean {
+  const line = optionalText(lineValue).normalize('NFKC');
+  const phone = chineseMobileCore(phoneValue);
+  if (!line || !phone || !/^[+\d\s\p{Pd}()（）]+$/u.test(line)) return false;
+  const digits = line.replace(/\D/gu, '');
+  return digits === phone || digits === `86${phone}`;
+}
+
+function contaminatedRecipientMatchesReview(
+  value: unknown,
+  reviewedRecipient: string,
+  phoneValue: unknown,
+  controlLabels: string[],
+): boolean {
+  const candidate = optionalText(value);
+  const phone = chineseMobileCore(phoneValue);
+  if (!candidate || !reviewedRecipient || !phone) return false;
+  const withoutControls = stripTrailingUiControlLabels(candidate, controlLabels);
+  const recipient = stripPhoneSuffixFromRecipient(withoutControls, phone);
+  return Boolean(
+    recipient && comparableText(recipient) === comparableText(reviewedRecipient),
+  );
+}
+
+function stripTrailingUiControlLabels(value: string, controlLabels: string[]): string {
+  const labels = [...new Set([
+    ...XIANYU_UI_CONTROL_LABELS,
+    ...controlLabels,
+  ])]
+    .map((label) => label.normalize('NFKC').trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
+  let candidate = value.normalize('NFKC').trim();
+  let removed = true;
+  while (removed && candidate) {
+    removed = false;
+    for (const label of labels) {
+      const match = new RegExp(
+        `${escapeRegExp(label)}[\\s,，:：|｜·\\p{Pd}()（）]*$`,
+        'u',
+      ).exec(candidate);
+      if (!match) continue;
+      candidate = trimTrailingRecipientSeparators(candidate.slice(0, match.index));
+      removed = true;
+      break;
+    }
+  }
+  return candidate;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
 function isUiControlText(value: unknown, controlLabels: string[]): boolean {
   return isHighConfidenceUiControlText(value) ||
     isModelClassifiedUiControlText(value, controlLabels);
@@ -1082,10 +1228,15 @@ function stripPhoneSuffixFromRecipient(
   if (suffix === null || suffix.core !== phone) return null;
 
   const recipientName = normalized
-    .slice(0, suffix.start)
-    .replace(/[\s,，:：|·\p{Pd}()（）]+$/gu, '')
+    .slice(0, suffix.start);
+  const trimmedRecipientName = trimTrailingRecipientSeparators(recipientName);
+  return trimmedRecipientName || null;
+}
+
+function trimTrailingRecipientSeparators(value: string): string {
+  return value
+    .replace(/[\s,，:：|｜·\p{Pd}()（）]+$/gu, '')
     .trim();
-  return recipientName || null;
 }
 
 function trailingChineseMobileSuffix(
@@ -1487,22 +1638,26 @@ function deriveAddressParts(
   const parsedDistrict =
     /^([\p{Script=Han}]{1,12}?(?:自治县|市辖区|区|县|旗|市))/u.exec(rest)?.[1] ||
     '';
+  const hasConfidentHierarchy = Boolean(parsedProvince);
 
   return {
-    province: administrativePart(
+    province: canonicalProvince(
       provided.province,
       parsedProvince,
-      /(?:特别行政区|自治区|省|市)$/u,
+      parsedCity,
+      provided.city,
     ),
     city: administrativePart(
       provided.city,
       parsedCity,
       /(?:自治州|地区|市|盟)$/u,
+      hasConfidentHierarchy,
     ),
     district: administrativePart(
       provided.district,
       parsedDistrict,
       /(?:自治县|市辖区|区|县|旗|市)$/u,
+      hasConfidentHierarchy,
     ),
   };
 }
@@ -1511,9 +1666,32 @@ function administrativePart(
   provided: string,
   parsed: string,
   completeSuffix: RegExp,
+  preferParsed: boolean,
 ): string {
+  if (preferParsed && parsed) return parsed;
   if (provided && completeSuffix.test(provided)) return provided;
   return parsed || provided;
+}
+
+function canonicalProvince(
+  providedProvince: string,
+  parsedProvince: string,
+  parsedCity: string,
+  providedCity: string,
+): string {
+  if (parsedProvince) return parsedProvince;
+  const province = normalizeAddress(providedProvince);
+  for (const city of new Set([parsedCity, providedCity].map(normalizeAddress))) {
+    if (!city || province === city || !province.endsWith(city)) continue;
+    const provinceOnly = province.slice(0, -city.length);
+    if (/(?:特别行政区|自治区|省|市)$/u.test(provinceOnly)) return provinceOnly;
+  }
+  return administrativePart(
+    providedProvince,
+    parsedProvince,
+    /(?:特别行政区|自治区|省|市)$/u,
+    false,
+  );
 }
 
 function stripAddressPrefix(value: string, prefix: string): string {
