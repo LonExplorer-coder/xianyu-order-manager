@@ -112,7 +112,13 @@ describe('正式 OCR 装配', () => {
     });
     session.useDataDirectory(join(testRoot, '订单数据'));
 
-    const draft = await session.submitSourceScreenshot(sourcePath);
+    const batch = await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+    const item = session.listRecognitionBatches()[0].items[0];
+    const draft = session.getDraft(item.draftId!);
 
     expect(draft).toMatchObject({
       orderNumber: 'REAL-OCR-20260729-001',
@@ -156,9 +162,25 @@ describe('正式 OCR 装配', () => {
     sessions.push(session);
     session.useDataDirectory(join(testRoot, '订单数据'));
 
-    await expect(session.submitSourceScreenshot(sourcePath)).rejects.toThrow(
-      '请先在设置中保存百炼 OCR 配置和 API Key',
-    );
+    await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0]).toMatchObject({
+        status: 'failed',
+        errorMessage: '请先在设置中保存百炼 OCR 配置和 API Key',
+      });
+    });
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+async function eventually(assertion: () => void): Promise<void> {
+  for (let index = 0; index < 2_000; index += 1) {
+    try {
+      assertion();
+      return;
+    } catch {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+  assertion();
+}

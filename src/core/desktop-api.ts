@@ -3,6 +3,7 @@ import type {
   OrderDraft,
   OrderSummary,
   OriginalOrder,
+  RecognitionBatchView,
 } from './contracts';
 import type {
   OcrConnectionTestInput,
@@ -21,7 +22,12 @@ export interface DesktopApi {
   getBootstrapState(): Promise<BootstrapState>;
   retryDataDirectory(): Promise<BootstrapState>;
   selectDataDirectory(): Promise<BootstrapState>;
-  selectSourceScreenshot(): Promise<OrderDraft | null>;
+  selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
+  listRecognitionBatches(): Promise<RecognitionBatchView[]>;
+  getDraft(draftId: string): Promise<OrderDraft>;
+  onRecognitionBatchesChanged(
+    listener: (batches: RecognitionBatchView[]) => void,
+  ): () => void;
   cancelDraft(draftId: string): Promise<void>;
   confirmDraft(draft: OrderDraft): Promise<OriginalOrder>;
   listOrders(): Promise<OrderSummary[]>;

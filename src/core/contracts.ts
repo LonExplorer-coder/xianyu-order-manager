@@ -80,6 +80,35 @@ export type RecognitionBatch = {
   drafts: OrderDraft[];
 };
 
+export type RecognitionBatchItemStatus =
+  | 'waiting_recognition'
+  | 'recognizing'
+  | 'validating'
+  | 'awaiting_confirmation'
+  | 'imported'
+  | 'waiting_retry'
+  | 'failed'
+  | 'duplicate_skipped'
+  | 'cancelled';
+
+export type RecognitionBatchItem = {
+  id: string;
+  batchId: string;
+  sourceName: string;
+  status: RecognitionBatchItemStatus;
+  draftId?: string;
+  errorMessage?: string;
+};
+
+export type RecognitionBatchView = {
+  id: string;
+  items: RecognitionBatchItem[];
+  totalCount: number;
+  processedCount: number;
+  counts: Record<RecognitionBatchItemStatus, number>;
+  createdAt: string;
+};
+
 export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
   id: string;
   position: number;

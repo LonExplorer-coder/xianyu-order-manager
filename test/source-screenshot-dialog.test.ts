@@ -37,7 +37,7 @@ describe('来源截图选择器目录记忆', () => {
 
     expect(sourceScreenshotDialogOptions(sourceDirectory)).toMatchObject({
       defaultPath: sourceDirectory,
-      properties: ['openFile'],
+      properties: ['openFile', 'multiSelections'],
     });
     expect(sourceScreenshotDialogOptions(filePath)).not.toHaveProperty('defaultPath');
     expect(sourceScreenshotDialogOptions(join(root, '已不存在'))).not.toHaveProperty(

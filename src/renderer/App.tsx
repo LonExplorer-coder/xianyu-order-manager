@@ -6,6 +6,8 @@ import type {
   OrderDetails,
   OrderDraft,
   OrderSummary,
+  RecognitionBatchView,
+  RecognitionBatchItemStatus,
 } from '../core/contracts';
 import type { OcrSettingsView } from '../core/ocr-settings';
 import {
@@ -20,8 +22,8 @@ export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'retry' | null;
-type AppPage = 'orders' | 'settings';
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | null;
+type AppPage = 'orders' | 'batches' | 'settings';
 
 const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
 
@@ -31,9 +33,15 @@ export function App({ api }: AppProps) {
   const [reviewScreenshotUrl, setReviewScreenshotUrl] = useState('');
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
+  const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState('');
+  const [reviewBatchId, setReviewBatchId] = useState('');
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [operationError, setOperationError] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('orders');
+  const readyDataDirectory = bootstrap?.kind === 'ready'
+    ? bootstrap.dataDirectory
+    : '';
 
   useEffect(() => {
     let active = true;
@@ -50,15 +58,85 @@ export function App({ api }: AppProps) {
     };
   }, [api]);
 
-  async function uploadScreenshot() {
+  useEffect(() => {
+    if (!readyDataDirectory) {
+      setRecognitionBatches([]);
+      setActiveBatchId('');
+      setDraft(null);
+      setReviewScreenshotUrl('');
+      setReviewBatchId('');
+      setOrderDetails(null);
+      setDetailScreenshotUrl('');
+      return;
+    }
+    let active = true;
+    let pushedSnapshotVersion = 0;
+    setRecognitionBatches([]);
+    setActiveBatchId('');
+    setDraft(null);
+    setReviewScreenshotUrl('');
+    setReviewBatchId('');
+    setOrderDetails(null);
+    setDetailScreenshotUrl('');
+    setActivePage('orders');
+    setOperationError('');
+
+    const refresh = async () => {
+      const requestedAtVersion = pushedSnapshotVersion;
+      try {
+        const batches = await api.listRecognitionBatches();
+        if (!active || requestedAtVersion !== pushedSnapshotVersion) return;
+        setRecognitionBatches(batches);
+        setActiveBatchId((current) => current || batches[0]?.id || '');
+      } catch (error) {
+        if (active) setOperationError(errorMessage(error));
+      }
+    };
+
+    void refresh();
+    const unsubscribe = api.onRecognitionBatchesChanged((batches) => {
+      if (!active) return;
+      pushedSnapshotVersion += 1;
+      setRecognitionBatches(batches);
+      setActiveBatchId((current) => current || batches[0]?.id || '');
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [api, readyDataDirectory]);
+
+  async function uploadScreenshots() {
     setBusyAction('upload');
     setOperationError('');
     try {
-      const selectedDraft = await api.selectSourceScreenshot();
-      if (!selectedDraft) return;
+      const selectedBatch = await api.selectSourceScreenshots();
+      if (!selectedBatch) return;
+      setRecognitionBatches((current) => mergeRecognitionBatch(current, selectedBatch));
+      setActiveBatchId(selectedBatch.id);
+      setOrderDetails(null);
+      const onlyItem = selectedBatch.items.length === 1 ? selectedBatch.items[0] : undefined;
+      if (onlyItem?.status === 'awaiting_confirmation' && onlyItem.draftId) {
+        await openDraftForReview(onlyItem.draftId, '');
+      } else {
+        setActivePage('batches');
+      }
+    } catch (error) {
+      setOperationError(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function openDraftForReview(draftId: string, batchId: string) {
+    setBusyAction('review');
+    setOperationError('');
+    try {
+      const selectedDraft = await api.getDraft(draftId);
       const screenshotUrl = await api.getScreenshotDataUrl(selectedDraft.screenshotId);
       setReviewScreenshotUrl(screenshotUrl);
       setDraft(selectedDraft);
+      setReviewBatchId(batchId);
       setOrderDetails(null);
     } catch (error) {
       setOperationError(errorMessage(error));
@@ -76,8 +154,14 @@ export function App({ api }: AppProps) {
       await api.confirmDraft(draft);
       const orders = await api.listOrders();
       setBootstrap({ ...bootstrap, orders });
+      setRecognitionBatches((current) => updateBatchDraftStatus(current, draft.id, 'imported'));
       setDraft(null);
       setReviewScreenshotUrl('');
+      if (reviewBatchId) {
+        setActiveBatchId(reviewBatchId);
+        setActivePage('batches');
+      }
+      setReviewBatchId('');
     } catch (error) {
       setOperationError(errorMessage(error));
     } finally {
@@ -91,8 +175,14 @@ export function App({ api }: AppProps) {
     setOperationError('');
     try {
       await api.cancelDraft(draft.id);
+      setRecognitionBatches((current) => updateBatchDraftStatus(current, draft.id, 'cancelled'));
       setDraft(null);
       setReviewScreenshotUrl('');
+      if (reviewBatchId) {
+        setActiveBatchId(reviewBatchId);
+        setActivePage('batches');
+      }
+      setReviewBatchId('');
     } catch (error) {
       setOperationError(errorMessage(error));
     } finally {
@@ -197,7 +287,7 @@ export function App({ api }: AppProps) {
         onConfirm={(event) => void confirmOrder(event)}
       />
     );
-  } else if (orderDetails) {
+  } else if (activePage === 'orders' && orderDetails) {
     workspace = (
       <DetailWorkspace
         details={orderDetails}
@@ -206,15 +296,33 @@ export function App({ api }: AppProps) {
         onBack={closeDetails}
       />
     );
+  } else if (activePage === 'batches') {
+    workspace = (
+      <BatchesWorkspace
+        batches={recognitionBatches}
+        activeBatchId={activeBatchId}
+        error={operationError}
+        uploading={busyAction === 'upload'}
+        openingDraft={busyAction === 'review'}
+        onUpload={() => void uploadScreenshots()}
+        onSelectBatch={setActiveBatchId}
+        onReview={(draftId, batchId) => void openDraftForReview(draftId, batchId)}
+      />
+    );
   } else {
     workspace = (
       <OrdersWorkspace
         orders={bootstrap.orders}
+        batches={recognitionBatches}
         dataDirectory={bootstrap.dataDirectory}
         error={operationError}
         uploading={busyAction === 'upload'}
         openingOrder={busyAction === 'detail'}
-        onUpload={() => void uploadScreenshot()}
+        onUpload={() => void uploadScreenshots()}
+        onOpenBatch={(batchId) => {
+          setActiveBatchId(batchId);
+          setActivePage('batches');
+        }}
         onOpenOrder={(orderId) => void openOrder(orderId)}
       />
     );
@@ -224,6 +332,10 @@ export function App({ api }: AppProps) {
     <AppFrame
       dataDirectory={bootstrap.dataDirectory}
       activePage={activePage}
+      activeBatchCount={recognitionBatches.reduce(
+        (total, batch) => total + batch.items.filter((item) => isProcessingStatus(item.status)).length,
+        0,
+      )}
       onNavigate={setActivePage}
     >
       {workspace}
@@ -234,11 +346,13 @@ export function App({ api }: AppProps) {
 function AppFrame({
   dataDirectory,
   activePage,
+  activeBatchCount,
   onNavigate,
   children,
 }: {
   dataDirectory: string;
   activePage: AppPage;
+  activeBatchCount: number;
   onNavigate: (page: AppPage) => void;
   children: ReactNode;
 }) {
@@ -272,6 +386,16 @@ function AppFrame({
             <Icon name="template" />
             <span className="nav-label">表格模板</span>
             <span className="nav-badge">稍后</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'batches' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'batches' ? 'page' : undefined}
+            onClick={() => onNavigate('batches')}
+          >
+            <Icon name="image" />
+            <span className="nav-label">识别批次</span>
+            {activeBatchCount > 0 && <span className="nav-count">{activeBatchCount}</span>}
           </button>
           <button
             className={`nav-item nav-item--settings${activePage === 'settings' ? ' is-active' : ''}`}
@@ -370,23 +494,28 @@ function SystemScreen(props: SystemScreenProps) {
 
 type OrdersWorkspaceProps = {
   orders: OrderSummary[];
+  batches: RecognitionBatchView[];
   dataDirectory: string;
   error: string;
   uploading: boolean;
   openingOrder: boolean;
   onUpload: () => void;
+  onOpenBatch: (batchId: string) => void;
   onOpenOrder: (orderId: string) => void;
 };
 
 function OrdersWorkspace({
   orders,
+  batches,
   dataDirectory,
   error,
   uploading,
   openingOrder,
   onUpload,
+  onOpenBatch,
   onOpenOrder,
 }: OrdersWorkspaceProps) {
+  const latestBatch = batches[0];
   if (orders.length === 0) {
     return (
       <section className="empty-workspace workspace-enter">
@@ -396,11 +525,11 @@ function OrdersWorkspace({
         </div>
         <span className="section-kicker">订单工作台</span>
         <h1>还没有订单</h1>
-        <p>上传一张包含完整闲鱼订单详情的来源截图，识别后对照原图校对并入库。</p>
+        <p>一次可上传 1–50 张闲鱼订单截图；每张截图独立识别、校对并入库。</p>
         <InlineError message={error} />
         <button className="button button--primary button--large" type="button" onClick={onUpload} disabled={uploading}>
           <Icon name="upload" />
-          {uploading ? '正在识别来源截图…' : '上传来源截图'}
+          {uploading ? '正在添加来源截图…' : '上传订单截图'}
         </button>
         <p className="upload-disclosure">{OCR_UPLOAD_DISCLOSURE}</p>
         <div className="empty-support">
@@ -408,6 +537,9 @@ function OrdersWorkspace({
           <span aria-hidden="true">·</span>
           <span>一张来源截图对应一个订单</span>
         </div>
+        {latestBatch && (
+          <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
+        )}
         <p className="data-path"><Icon name="folder" />{dataDirectory}</p>
       </section>
     );
@@ -424,13 +556,17 @@ function OrdersWorkspace({
         <div className="upload-action">
           <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
             <Icon name="upload" />
-            {uploading ? '正在识别来源截图…' : '上传来源截图'}
+            {uploading ? '正在添加来源截图…' : '上传订单截图'}
           </button>
           <small>{OCR_UPLOAD_DISCLOSURE}</small>
         </div>
       </header>
 
       <InlineError message={error} />
+
+      {latestBatch && (
+        <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
+      )}
 
       <div className="table-toolbar" aria-label="订单表概况">
         <span><strong>{orders.length}</strong> 全部订单</span>
@@ -481,6 +617,176 @@ function OrdersWorkspace({
         </table>
       </div>
     </section>
+  );
+}
+
+type BatchesWorkspaceProps = {
+  batches: RecognitionBatchView[];
+  activeBatchId: string;
+  error: string;
+  uploading: boolean;
+  openingDraft: boolean;
+  onUpload: () => void;
+  onSelectBatch: (batchId: string) => void;
+  onReview: (draftId: string, batchId: string) => void;
+};
+
+function BatchesWorkspace({
+  batches,
+  activeBatchId,
+  error,
+  uploading,
+  openingDraft,
+  onUpload,
+  onSelectBatch,
+  onReview,
+}: BatchesWorkspaceProps) {
+  const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? batches[0];
+
+  return (
+    <section className="batches-workspace workspace-enter">
+      <header className="workspace-header">
+        <div>
+          <span className="section-kicker">来源截图识别</span>
+          <h1>识别批次</h1>
+          <p>离开此页不会中断；应用保持打开时，后台会继续逐张处理。</p>
+        </div>
+        <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading}>
+          <Icon name="upload" />
+          {uploading ? '正在添加…' : '继续上传一批'}
+        </button>
+      </header>
+
+      <InlineError message={error} />
+
+      {batches.length === 0 || !activeBatch ? (
+        <div className="batch-empty">
+          <Icon name="image" />
+          <h2>还没有识别批次</h2>
+          <p>选择 1–50 张截图后，这里会显示每张图的实时状态。</p>
+          <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading}>
+            上传订单截图
+          </button>
+        </div>
+      ) : (
+        <div className="batch-layout">
+          <aside className="batch-sidebar" aria-label="最近识别批次">
+            <span className="batch-sidebar-title">最近批次</span>
+            {batches.map((batch) => (
+              <button
+                key={batch.id}
+                className={`batch-select${batch.id === activeBatch.id ? ' is-active' : ''}`}
+                type="button"
+                onClick={() => onSelectBatch(batch.id)}
+              >
+                <strong>{formatBatchTime(batch.createdAt)}</strong>
+                <span>{batch.processedCount}/{batch.totalCount} 已处理</span>
+              </button>
+            ))}
+          </aside>
+
+          <div className="batch-main">
+            <div className="batch-heading">
+              <div>
+                <span className="section-kicker">批次 · {formatBatchTime(activeBatch.createdAt)}</span>
+                <h2>{activeBatch.totalCount} 张来源截图</h2>
+              </div>
+              <strong className="batch-progress-value" role="status" aria-live="polite">
+                {activeBatch.processedCount}/{activeBatch.totalCount}
+              </strong>
+            </div>
+
+            <progress
+              className="batch-progress"
+              aria-label="批次识别进度"
+              max={activeBatch.totalCount}
+              value={activeBatch.processedCount}
+            />
+
+            <BatchStats batch={activeBatch} />
+
+            <div className="table-frame batch-table-frame">
+              <table aria-label="批次截图状态">
+                <thead>
+                  <tr>
+                    <th>序号</th>
+                    <th>文件名</th>
+                    <th>状态</th>
+                    <th>结果</th>
+                    <th><span className="visually-hidden">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeBatch.items.map((item, index) => (
+                    <tr key={item.id}>
+                      <td className="batch-index">{String(index + 1).padStart(2, '0')}</td>
+                      <td className="batch-filename" title={item.sourceName}>{item.sourceName}</td>
+                      <td>
+                        <span className={`status-chip batch-status batch-status--${item.status}`}>
+                          {recognitionBatchStatusLabel(item.status)}
+                        </span>
+                      </td>
+                      <td
+                        className="batch-result"
+                        title={item.errorMessage || recognitionBatchResultLabel(item.status)}
+                      >
+                        {item.errorMessage || recognitionBatchResultLabel(item.status)}
+                      </td>
+                      <td>
+                        {item.status === 'awaiting_confirmation' && item.draftId && (
+                          <button
+                            className="text-button"
+                            type="button"
+                            disabled={openingDraft}
+                            onClick={() => onReview(item.draftId!, activeBatch.id)}
+                          >
+                            校对
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RecentBatchStrip({ batch, onOpen }: { batch: RecognitionBatchView; onOpen: () => void }) {
+  return (
+    <section className="recent-batch" aria-label="最近识别批次">
+      <div>
+        <span className="section-kicker">最近批次 · {formatBatchTime(batch.createdAt)}</span>
+        <strong>{batch.processedCount}/{batch.totalCount} 张已处理</strong>
+      </div>
+      <BatchStats batch={batch} compact />
+      <button className="text-button" type="button" onClick={onOpen}>查看批次</button>
+    </section>
+  );
+}
+
+function BatchStats({ batch, compact = false }: { batch: RecognitionBatchView; compact?: boolean }) {
+  const stats = [
+    ['处理中', processingCount(batch)],
+    ['待确认', batch.counts.awaiting_confirmation],
+    ['已入库', batch.counts.imported],
+    ['等待重试', batch.counts.waiting_retry],
+    ['失败', batch.counts.failed],
+    ['重复跳过', batch.counts.duplicate_skipped],
+    ['已取消', batch.counts.cancelled],
+  ] as const;
+  return (
+    <div className={compact ? 'batch-stats batch-stats--compact' : 'batch-stats'} aria-label="批次结果统计">
+      {stats
+        .filter(([, value]) => !compact || value > 0)
+        .map(([label, value]) => (
+          <span key={label}><strong>{value}</strong>{label}</span>
+        ))}
+    </div>
   );
 }
 
@@ -1476,6 +1782,81 @@ function formatDateTime(value: string): string {
     minute: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+function formatBatchTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function recognitionBatchStatusLabel(status: RecognitionBatchItemStatus): string {
+  const labels: Record<RecognitionBatchItemStatus, string> = {
+    waiting_recognition: '等待识别',
+    recognizing: '识别中',
+    validating: '校验中',
+    awaiting_confirmation: '待确认',
+    imported: '已入库',
+    waiting_retry: '等待重试',
+    failed: '失败',
+    duplicate_skipped: '重复跳过',
+    cancelled: '已取消',
+  };
+  return labels[status];
+}
+
+function recognitionBatchResultLabel(status: RecognitionBatchItemStatus): string {
+  if (status === 'awaiting_confirmation') return '识别完成，请对照截图校对';
+  if (status === 'imported') return '已确认并写入原始订单表';
+  if (status === 'duplicate_skipped') return '相同截图已接收过，本次未重复调用 OCR';
+  if (status === 'cancelled') return '已取消本张截图的校对';
+  if (status === 'waiting_retry') return '暂时无法识别，本轮未生成订单草稿';
+  if (status === 'failed') return '未能形成可校对结果';
+  return '后台正在处理';
+}
+
+function isProcessingStatus(status: RecognitionBatchItemStatus): boolean {
+  return status === 'waiting_recognition' || status === 'recognizing' || status === 'validating';
+}
+
+function processingCount(batch: RecognitionBatchView): number {
+  return batch.counts.waiting_recognition + batch.counts.recognizing + batch.counts.validating;
+}
+
+function mergeRecognitionBatch(
+  batches: RecognitionBatchView[],
+  batch: RecognitionBatchView,
+): RecognitionBatchView[] {
+  const pushedSnapshot = batches.find((candidate) => candidate.id === batch.id);
+  return [pushedSnapshot ?? batch, ...batches.filter((candidate) => candidate.id !== batch.id)];
+}
+
+function updateBatchDraftStatus(
+  batches: RecognitionBatchView[],
+  draftId: string,
+  status: 'imported' | 'cancelled',
+): RecognitionBatchView[] {
+  return batches.map((batch) => {
+    if (!batch.items.some((item) => item.draftId === draftId)) return batch;
+    const items = batch.items.map((item) => (
+      item.draftId === draftId ? { ...item, status, errorMessage: undefined } : item
+    ));
+    const counts = { ...batch.counts };
+    for (const key of Object.keys(counts) as RecognitionBatchItemStatus[]) counts[key] = 0;
+    for (const item of items) counts[item.status] += 1;
+    return {
+      ...batch,
+      items,
+      counts,
+      processedCount: items.filter((item) => !isProcessingStatus(item.status)).length,
+    };
+  });
 }
 
 function errorMessage(error: unknown): string {

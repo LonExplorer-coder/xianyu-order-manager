@@ -2,12 +2,18 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
-import type { OrderDetails, OrderDraft, OriginalOrder } from '../src/core/contracts';
+import type {
+  OrderDetails,
+  OrderDraft,
+  OriginalOrder,
+  RecognitionBatchItemStatus,
+  RecognitionBatchView,
+} from '../src/core/contracts';
 import { App } from '../src/renderer/App';
 
 afterEach(cleanup);
@@ -107,7 +113,18 @@ const orderDetails: OrderDetails = {
   },
 };
 
-function createApi(overrides: Partial<DesktopApi> = {}): DesktopApi {
+type DesktopApiTestOverrides = Partial<DesktopApi> & {
+  selectSourceScreenshot?: () => Promise<OrderDraft | null>;
+};
+
+function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
+  const {
+    selectSourceScreenshot = vi.fn().mockResolvedValue(null),
+    ...desktopApiOverrides
+  } = overrides;
+  const selectOneSourceScreenshot = selectSourceScreenshot
+    ?? vi.fn().mockResolvedValue(null);
+  let selectedDraft: OrderDraft | null = null;
   return {
     getBootstrapState: vi.fn().mockResolvedValue({ kind: 'needs_data_directory' }),
     retryDataDirectory: vi.fn().mockResolvedValue({ kind: 'needs_data_directory' }),
@@ -116,7 +133,16 @@ function createApi(overrides: Partial<DesktopApi> = {}): DesktopApi {
       dataDirectory: '/Users/test/闲鱼订单',
       orders: [],
     }),
-    selectSourceScreenshot: vi.fn().mockResolvedValue(null),
+    selectSourceScreenshots: vi.fn(async () => {
+      selectedDraft = await selectOneSourceScreenshot();
+      return selectedDraft ? batchForDraft(selectedDraft) : null;
+    }),
+    listRecognitionBatches: vi.fn().mockResolvedValue([]),
+    getDraft: vi.fn(async () => {
+      if (!selectedDraft) throw new Error('未找到订单草稿');
+      return selectedDraft;
+    }),
+    onRecognitionBatchesChanged: vi.fn(() => () => undefined),
     cancelDraft: vi.fn().mockResolvedValue(undefined),
     confirmDraft: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
@@ -134,7 +160,54 @@ function createApi(overrides: Partial<DesktopApi> = {}): DesktopApi {
     saveOcrSettings: vi.fn(),
     removeOcrApiKey: vi.fn(),
     testOcrConnection: vi.fn(),
-    ...overrides,
+    ...desktopApiOverrides,
+  };
+}
+
+function batchForDraft(value: OrderDraft): RecognitionBatchView {
+  const status: RecognitionBatchItemStatus = value.status === 'confirmed'
+    ? 'imported'
+    : value.status === 'cancelled'
+      ? 'cancelled'
+      : 'awaiting_confirmation';
+  return recognitionBatchView(value.batchId, [{
+    id: `batch-item-${value.id}`,
+    batchId: value.batchId,
+    sourceName: '脱敏测试订单.png',
+    status,
+    draftId: value.id,
+  }]);
+}
+
+function recognitionBatchView(
+  id: string,
+  items: RecognitionBatchView['items'],
+): RecognitionBatchView {
+  const statuses: RecognitionBatchItemStatus[] = [
+    'waiting_recognition',
+    'recognizing',
+    'validating',
+    'awaiting_confirmation',
+    'imported',
+    'waiting_retry',
+    'failed',
+    'duplicate_skipped',
+    'cancelled',
+  ];
+  const counts = Object.fromEntries(
+    statuses.map((status) => [status, items.filter((item) => item.status === status).length]),
+  ) as RecognitionBatchView['counts'];
+  return {
+    id,
+    createdAt: '2026-07-30T06:32:00.000Z',
+    totalCount: items.length,
+    processedCount: items.filter((item) => ![
+      'waiting_recognition',
+      'recognizing',
+      'validating',
+    ].includes(item.status)).length,
+    counts,
+    items,
   };
 }
 
@@ -149,7 +222,7 @@ describe('订单管理工作台', () => {
     await user.click(screen.getByRole('button', { name: '选择数据目录' }));
 
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '上传来源截图' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '上传订单截图' })).toBeVisible();
     expect(screen.getByText(
       '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。',
     )).toBeVisible();
@@ -184,7 +257,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
     expect(screen.getByRole('img', { name: '来源截图' })).toHaveAttribute(
@@ -225,7 +298,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
     expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: '取消本次校对' }));
@@ -253,7 +326,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByText(
       'OCR 疑似把收件人同时填入了买家昵称，请对照截图核对',
@@ -282,7 +355,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
     const recipient = await screen.findByRole('textbox', { name: '收件人' });
     await user.clear(recipient);
     await user.type(recipient, '人工校对中的收件人');
@@ -312,7 +385,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByRole('textbox', { name: '平台' })).toHaveValue('闲鱼');
     expect(screen.getByRole('textbox', { name: '平台' })).toHaveAttribute('readonly');
@@ -366,7 +439,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '商品总价' }), {
       target: { value: '1.005' },
@@ -411,7 +484,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
     expect(screen.getByRole('spinbutton', { name: '成交金额' })).toHaveValue(null);
     expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
 
@@ -437,7 +510,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByText('截图未显示数量，已按 1 件处理')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '删除商品 1' }));
@@ -481,7 +554,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '数量' }), {
       target: { value: '1.5' },
@@ -504,7 +577,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     fireEvent.change(screen.getByRole('textbox', { name: '手机号' }), {
       target: { value: '+86 139-0000-0002' },
@@ -534,7 +607,7 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     fireEvent.change(screen.getByRole('textbox', { name: '下单时间（原文）' }), {
       target: { value: '2026年7月30日 08:09:10' },
@@ -724,12 +797,12 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
-    expect(screen.getByRole('button', { name: '正在识别来源截图…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '正在添加来源截图…' })).toBeDisabled();
     await act(async () => finishSelection(null));
 
-    expect(await screen.findByRole('button', { name: '上传来源截图' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: '上传订单截图' })).toBeEnabled();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -745,10 +818,260 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '上传来源截图' }));
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('来源截图识别失败，请稍后重试');
-    expect(screen.getByRole('button', { name: '上传来源截图' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '上传订单截图' })).toBeEnabled();
+  });
+
+  it('批次页实时汇总整批进度，并逐张展示全部处理状态和原因', async () => {
+    const user = userEvent.setup();
+    const statuses: RecognitionBatchItemStatus[] = [
+      'waiting_recognition',
+      'recognizing',
+      'validating',
+      'awaiting_confirmation',
+      'imported',
+      'waiting_retry',
+      'failed',
+      'duplicate_skipped',
+      'cancelled',
+    ];
+    const batch = recognitionBatchView('batch-all-statuses', statuses.map((status, index) => ({
+      id: `batch-item-${index}`,
+      batchId: 'batch-all-statuses',
+      sourceName: `订单截图-${index + 1}.png`,
+      status,
+      draftId: status === 'awaiting_confirmation' ? draft.id : undefined,
+      errorMessage: status === 'failed' ? '截图内容不完整' : undefined,
+    })));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshots: vi.fn().mockResolvedValue(batch),
+      listRecognitionBatches: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    expect(await screen.findByRole('heading', { name: '识别批次' })).toBeVisible();
+    expect(screen.getByRole('progressbar', { name: '批次识别进度' })).toHaveAttribute('value', '6');
+    expect(screen.getByRole('status')).toHaveTextContent('6/9');
+    const table = screen.getByRole('table', { name: '批次截图状态' });
+    for (const label of [
+      '等待识别',
+      '识别中',
+      '校验中',
+      '待确认',
+      '已入库',
+      '等待重试',
+      '失败',
+      '重复跳过',
+      '已取消',
+    ]) {
+      expect(within(table).getByText(label)).toBeVisible();
+    }
+    expect(within(table).getByText('截图内容不完整')).toBeVisible();
+    expect(within(table).getByText('暂时无法识别，本轮未生成订单草稿')).toBeVisible();
+    expect(screen.getByText(/应用保持打开时，后台会继续逐张处理/)).toBeVisible();
+  });
+
+  it('离开批次页后继续接收后台进度，并在订单首页显示最近结果', async () => {
+    const user = userEvent.setup();
+    let publish!: (batches: RecognitionBatchView[]) => void;
+    const running = recognitionBatchView('batch-background', [{
+      id: 'batch-item-background',
+      batchId: 'batch-background',
+      sourceName: '后台订单.png',
+      status: 'recognizing',
+    }]);
+    const completed = recognitionBatchView('batch-background', [{
+      id: 'batch-item-background',
+      batchId: 'batch-background',
+      sourceName: '后台订单.png',
+      status: 'awaiting_confirmation',
+      draftId: draft.id,
+    }]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshots: vi.fn().mockResolvedValue(running),
+      listRecognitionBatches: vi.fn().mockResolvedValue([]),
+      onRecognitionBatchesChanged: vi.fn((listener) => {
+        publish = listener;
+        return () => undefined;
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    expect(await screen.findByRole('heading', { name: '识别批次' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '订单' }));
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    await act(async () => publish([completed]));
+
+    expect(await screen.findByText('1/1 张已处理')).toBeVisible();
+    expect(screen.getByRole('region', { name: '最近识别批次' })).toHaveTextContent('待确认');
+    await user.click(screen.getByRole('button', { name: '查看批次' }));
+    expect(await screen.findByRole('table', { name: '批次截图状态' })).toHaveTextContent('待确认');
+  });
+
+  it('较晚返回的旧批次查询不会覆盖主进程刚推送的新进度', async () => {
+    let publish!: (batches: RecognitionBatchView[]) => void;
+    let finishInitialQuery!: (batches: RecognitionBatchView[]) => void;
+    const initialQuery = new Promise<RecognitionBatchView[]>((resolve) => {
+      finishInitialQuery = resolve;
+    });
+    const completed = recognitionBatchView('batch-newer-event', [{
+      id: 'batch-item-newer-event',
+      batchId: 'batch-newer-event',
+      sourceName: '已完成订单.png',
+      status: 'awaiting_confirmation',
+      draftId: draft.id,
+    }]);
+    const onRecognitionBatchesChanged = vi.fn((listener) => {
+      publish = listener;
+      return () => undefined;
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockReturnValue(initialQuery),
+      onRecognitionBatchesChanged,
+    });
+
+    render(<App api={api} />);
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    await waitFor(() => expect(onRecognitionBatchesChanged).toHaveBeenCalledOnce());
+    await act(async () => publish([completed]));
+    expect(await screen.findByText('1/1 张已处理')).toBeVisible();
+
+    await act(async () => finishInitialQuery([]));
+    expect(screen.getByText('1/1 张已处理')).toBeVisible();
+  });
+
+  it('选图调用的初始快照不会覆盖期间已经推送的完成状态', async () => {
+    const user = userEvent.setup();
+    let publish!: (batches: RecognitionBatchView[]) => void;
+    let finishSelection!: (batch: RecognitionBatchView) => void;
+    const initial = recognitionBatchView('batch-selection-race', [{
+      id: 'batch-item-selection-race',
+      batchId: 'batch-selection-race',
+      sourceName: '快速订单.png',
+      status: 'waiting_recognition',
+    }]);
+    const completed = recognitionBatchView('batch-selection-race', [{
+      id: 'batch-item-selection-race',
+      batchId: 'batch-selection-race',
+      sourceName: '快速订单.png',
+      status: 'duplicate_skipped',
+    }]);
+    const selection = new Promise<RecognitionBatchView>((resolve) => {
+      finishSelection = resolve;
+    });
+    const onRecognitionBatchesChanged = vi.fn((listener) => {
+      publish = listener;
+      return () => undefined;
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshots: vi.fn().mockReturnValue(selection),
+      listRecognitionBatches: vi.fn().mockResolvedValue([]),
+      onRecognitionBatchesChanged,
+    });
+
+    render(<App api={api} />);
+    await waitFor(() => expect(onRecognitionBatchesChanged).toHaveBeenCalledOnce());
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await act(async () => {
+      publish([completed]);
+      finishSelection(initial);
+    });
+
+    const table = await screen.findByRole('table', { name: '批次截图状态' });
+    expect(within(table).getByText('重复跳过')).toBeVisible();
+    expect(within(table).queryByText('等待识别')).not.toBeInTheDocument();
+  });
+
+  it('从批次进入单张校对，确认后返回原批次并更新为已入库', async () => {
+    const user = userEvent.setup();
+    const batch = recognitionBatchView('batch-review-return', [
+      {
+        id: 'batch-item-review',
+        batchId: 'batch-review-return',
+        sourceName: '待校对订单.png',
+        status: 'awaiting_confirmation',
+        draftId: draft.id,
+      },
+      {
+        id: 'batch-item-failed',
+        batchId: 'batch-review-return',
+        sourceName: '失败订单.png',
+        status: 'failed',
+        errorMessage: '截图不完整',
+      },
+    ]);
+    const confirmDraft = vi.fn().mockResolvedValue(confirmedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshots: vi.fn().mockResolvedValue(batch),
+      listRecognitionBatches: vi.fn().mockResolvedValue([]),
+      getDraft: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', { name: '校对' }));
+    expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+    const table = await screen.findByRole('table', { name: '批次截图状态' });
+    expect(within(table).getByText('待校对订单.png').closest('tr')).toHaveTextContent('已入库');
+    expect(confirmDraft).toHaveBeenCalledWith(expect.objectContaining({ id: draft.id }));
+  });
+
+  it('选择超过 50 张时在首页明确提示，且不会创建批次视图', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshots: vi.fn().mockRejectedValue(
+        new Error('一次最多选择 50 张，当前选择了 51 张，请重新选择'),
+      ),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '一次最多选择 50 张，当前选择了 51 张，请重新选择',
+    );
+    expect(screen.getByRole('heading', { name: '还没有订单' })).toBeVisible();
   });
 
   it('从侧栏打开百炼 OCR 设置时只显示密钥状态，不回填 API Key', async () => {

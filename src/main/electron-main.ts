@@ -70,7 +70,7 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     return desktopSession.useDataDirectory(selection.filePaths[0]);
   });
 
-  ipcMain.handle('workflow:select-source-screenshot', async () => {
+  ipcMain.handle('workflow:select-source-screenshots', async () => {
     const window = requireWindow();
     const selection = await dialog.showOpenDialog(
       window,
@@ -83,17 +83,24 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     if (sourceDirectory) {
       desktopSession.rememberSourceScreenshotDirectory(sourceDirectory);
     }
-    return desktopSession.submitSourceScreenshot(selection.filePaths[0]);
+    return desktopSession.submitSourceScreenshots(selection.filePaths);
+  });
+  ipcMain.handle('workflow:list-recognition-batches', () => (
+    desktopSession.listRecognitionBatches()
+  ));
+  ipcMain.handle('workflow:get-draft', (_event, draftId: unknown) => {
+    return desktopSession.getDraft(parseDraftId(draftId));
+  });
+  desktopSession.onRecognitionBatchesChanged((batches) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('workflow:recognition-batches-changed', batches);
   });
 
   ipcMain.handle('workflow:confirm-draft', (_event, draft: OrderDraft) => {
     return desktopSession.confirmDraft(draft);
   });
   ipcMain.handle('workflow:cancel-draft', (_event, draftId: unknown) => {
-    if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > 128) {
-      throw new Error('订单草稿 ID 格式无效');
-    }
-    return desktopSession.cancelDraft(draftId.trim());
+    return desktopSession.cancelDraft(parseDraftId(draftId));
   });
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
@@ -110,6 +117,13 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('settings:test-ocr', (_event, input: unknown) => {
     return desktopSession.testOcrConnection(parseConnectionTestInput(input));
   });
+}
+
+function parseDraftId(draftId: unknown): string {
+  if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > 128) {
+    throw new Error('订单草稿 ID 格式无效');
+  }
+  return draftId.trim();
 }
 
 function requireWindow(): BrowserWindow {

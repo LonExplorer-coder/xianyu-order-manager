@@ -45,7 +45,11 @@ export class LocalApplication {
     this.workspace = Workspace.open(dataDirectory);
   }
 
-  private async submitSourceScreenshot(sourcePath: string): Promise<OrderDraft> {
+  public async submitRecognitionSource(
+    sourcePath: string,
+    batchId: string,
+    onPhase?: (phase: 'validating') => void,
+  ): Promise<OrderDraft> {
     const workspace = this.requireWorkspace();
     const extension = extname(sourcePath).toLowerCase();
     const mimeType = IMAGE_MIME_TYPES[extension];
@@ -64,7 +68,6 @@ export class LocalApplication {
     }
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const screenshotId = randomUUID();
-    const batchId = randomUUID();
     const draftId = randomUUID();
     const storedDirectory = join(workspace.dataDirectory, 'screenshots');
     const storedPath = join(storedDirectory, `${screenshotId}${extension}`);
@@ -79,6 +82,7 @@ export class LocalApplication {
         sha256,
         bytes,
       });
+      onPhase?.('validating');
       const recognition = attempt.result;
       validateRecognition(recognition);
       const now = new Date().toISOString();
@@ -86,10 +90,15 @@ export class LocalApplication {
       workspace.transaction(() => {
         workspace.database
           .prepare(`
-            INSERT INTO recognition_batches (id, platform, seller_account, status, created_at)
+            INSERT OR IGNORE INTO recognition_batches (
+              id, platform, seller_account, status, created_at
+            )
             VALUES (?, ?, ?, 'awaiting_review', ?)
           `)
           .run(batchId, recognition.platform, recognition.sellerAccount, now);
+        workspace.database
+          .prepare("UPDATE recognition_batches SET status = 'awaiting_review' WHERE id = ?")
+          .run(batchId);
 
         workspace.database
           .prepare(`
@@ -206,11 +215,20 @@ export class LocalApplication {
   }
 
   public async submitRecognitionBatch(sourcePaths: string[]): Promise<RecognitionBatch> {
-    if (sourcePaths.length !== 1) {
-      throw new Error('当前识别批次必须且只能包含一张来源截图');
+    if (sourcePaths.length === 0) {
+      throw new Error('请至少选择 1 张来源截图');
     }
-    const draft = await this.submitSourceScreenshot(sourcePaths[0]);
-    return { id: draft.batchId, drafts: [draft] };
+    if (sourcePaths.length > 50) {
+      throw new Error(
+        `一次最多选择 50 张，当前选择了 ${sourcePaths.length} 张，请重新选择`,
+      );
+    }
+    const batchId = randomUUID();
+    const drafts: OrderDraft[] = [];
+    for (const sourcePath of sourcePaths) {
+      drafts.push(await this.submitRecognitionSource(sourcePath, batchId));
+    }
+    return { id: batchId, drafts };
   }
 
   public getDraft(draftId: string): OrderDraft {
@@ -277,6 +295,14 @@ export class LocalApplication {
     };
   }
 
+  public hasSourceScreenshotSha256(sha256: string): boolean {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database
+      .prepare('SELECT 1 AS found FROM source_screenshots WHERE content_sha256 = ? LIMIT 1')
+      .get(sha256) as SqlRow | undefined;
+    return row !== undefined;
+  }
+
   public cancelDraft(draftId: string): void {
     const workspace = this.requireWorkspace();
     workspace.transaction(() => {
@@ -305,9 +331,7 @@ export class LocalApplication {
       if (result.changes !== 1) {
         throw new Error('该订单草稿状态已变化，请刷新后重试');
       }
-      workspace.database
-        .prepare("UPDATE recognition_batches SET status = 'completed' WHERE id = ?")
-        .run(asString(row.batch_id));
+      this.completeBatchWhenReviewed(asString(row.batch_id));
     });
   }
 
@@ -417,9 +441,7 @@ export class LocalApplication {
       workspace.database
         .prepare("UPDATE order_drafts SET status = 'confirmed', confirmed_at = ? WHERE id = ?")
         .run(now, draft.id);
-      workspace.database
-        .prepare("UPDATE recognition_batches SET status = 'completed' WHERE id = ?")
-        .run(persistedDraft.batchId);
+      this.completeBatchWhenReviewed(persistedDraft.batchId);
     });
 
     return this.getOrder(orderId).order;
@@ -459,6 +481,23 @@ export class LocalApplication {
       fulfillmentStatus: asFulfillmentStatus(row.fulfillment_status),
       createdAt: asString(row.created_at),
     }));
+  }
+
+  private completeBatchWhenReviewed(batchId: string): void {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database
+      .prepare(`
+        SELECT COUNT(*) AS pending_count
+        FROM order_drafts
+        WHERE batch_id = ?
+          AND status = 'awaiting_review'
+          AND review_cancelled_at IS NULL
+      `)
+      .get(batchId) as SqlRow;
+    if (asNumber(row.pending_count) !== 0) return;
+    workspace.database
+      .prepare("UPDATE recognition_batches SET status = 'completed' WHERE id = ?")
+      .run(batchId);
   }
 
   public getOrder(orderId: string): OrderDetails {

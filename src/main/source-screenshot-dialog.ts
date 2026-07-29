@@ -12,9 +12,9 @@ export function sourceScreenshotDialogOptions(
   preferredDirectory?: string,
 ): OpenDialogOptions {
   const options: OpenDialogOptions = {
-    title: '选择一张包含完整闲鱼订单详情的来源截图',
-    buttonLabel: '识别此来源截图',
-    properties: ['openFile'],
+    title: '选择 1–50 张包含完整闲鱼订单详情的来源截图',
+    buttonLabel: '创建识别批次',
+    properties: ['openFile', 'multiSelections'],
     filters: [
       { name: '来源截图', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
     ],
