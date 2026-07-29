@@ -72,6 +72,18 @@ async function openSession(recognizer: Recognizer): Promise<DesktopSession> {
 }
 
 describe('批量来源截图识别队列', () => {
+  it('Windows 删除目录时遇到瞬时 EPERM 会继续等待直到路径消失', async () => {
+    const transientError = Object.assign(new Error('目录正在删除'), { code: 'EPERM' });
+    const missingError = Object.assign(new Error('目录已不存在'), { code: 'ENOENT' });
+    const probe = vi.fn<(path: string) => Promise<void>>()
+      .mockRejectedValueOnce(transientError)
+      .mockRejectedValueOnce(missingError);
+
+    await eventuallyMissing('C:\\Temp\\recognition-batch', probe);
+
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
   it('在 OCR 调用前明确拒绝 0 张和 51 张截图', async () => {
     const recognize = vi.fn<Recognizer['recognize']>(async () => (
       attempt('BATCH-LIMIT')
@@ -573,13 +585,17 @@ async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
   }
 }
 
-async function eventuallyMissing(path: string): Promise<void> {
+async function eventuallyMissing(
+  path: string,
+  probe: (candidate: string) => Promise<void> = access,
+): Promise<void> {
   for (let index = 0; index < 2_000; index += 1) {
     try {
-      await access(path);
+      await probe(path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return;
+      if (code !== 'EPERM' && code !== 'EBUSY') throw error;
     }
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
