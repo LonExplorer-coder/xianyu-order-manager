@@ -47,6 +47,12 @@ const ORDER_REVIEW_USER_PROMPT = [
   '商品只取订单商品卡，忽略广告与推荐内容。输出前自检：姓名、手机号、按钮必须各归其位，无法确认时返回 null。',
 ].join('\n');
 
+const PAGE_HEADER_REVIEW_USER_PROMPT =
+  '只提取页面最顶部、返回箭头下方、收货信息卡上方的第一行最大粗体闲鱼订单状态标题，填入 page_header_status_text。不要提取按钮、收货信息、商品、交易详情、广告或推荐内容；看不到时返回 null。';
+
+const SHIPPING_REVIEW_USER_PROMPT =
+  '只提取页面顶部收货信息卡：shipping_information.recipient 只填联系人姓名，phone 只填与姓名同行的完整手机号，address 填下方完整地址，controls 只填卡内功能按钮。禁止把“复制”“去发货”或页头状态填入 recipient；禁止把买家昵称当作收件人。';
+
 const XIANYU_UI_CONTROL_LABELS = new Set([
   '去发货',
   '发货',
@@ -146,6 +152,11 @@ const TRANSACTION_INFORMATION_MODULE_SCHEMA = {
       '原样列出仅位于交易详情内的可点击按钮或链接，例如“复制”“交易快照”“展开”“收起”；不要列入订单号、金额、时间或买家昵称',
     ],
   },
+} as const;
+
+const PAGE_HEADER_STATUS_SCHEMA = {
+  page_header_status_text:
+    '原样复制返回箭头下方、收货信息卡上方的第一行最大粗体闲鱼订单状态标题，例如“买家已付款，请尽快发货”“交易已取消”“退款成功”；不要填写收货卡、商品卡、交易详情、广告、推荐内容或按钮，看不到时返回 null',
 } as const;
 
 const PAGE_CONTEXT_MODULE_SCHEMA = {
@@ -251,14 +262,26 @@ export class BailianOcrClient implements BailianConnectionTester {
       resultSchema: ORDER_RESULT_SCHEMA,
       userPrompt: ORDER_EXTRACTION_USER_PROMPT,
     });
-    const primaryExtracted = sanitizeOrderExtraction(
+    let mergedExtracted = sanitizeOrderExtraction(
       flattenModularExtraction(primary.extracted),
     );
-    let result = normalizeOrderResult(primaryExtracted, input.sellerAccount);
+    let result = normalizeOrderResult(mergedExtracted, input.sellerAccount);
     const evidences: RecognitionAttempt['evidences'] = [primary.evidence];
-    const reviewSchema = hasModularExtraction(primary.extracted)
-      ? buildModularReviewSchema(primaryExtracted, result)
+    const primaryWasModular = hasModularExtraction(primary.extracted);
+    const defaultModuleReviewSchema = primaryWasModular
+      ? buildModularReviewSchema(mergedExtracted, result)
       : buildReviewSchema(result);
+    const shippingNeedsFocusedReview = shippingResultNeedsFocusedReview(result);
+    const shippingOnlyReview = shippingNeedsFocusedReview &&
+      !reviewSchemaHasCompetingReviewModule(defaultModuleReviewSchema);
+    const moduleReviewSchema = shippingOnlyReview
+      ? SHIPPING_INFORMATION_MODULE_SCHEMA
+      : defaultModuleReviewSchema;
+    const headerOnlyReview = !moduleReviewSchema &&
+      result.platformTransactionStatus === 'unknown';
+    const reviewSchema = moduleReviewSchema ?? (
+      headerOnlyReview ? PAGE_HEADER_STATUS_SCHEMA : undefined
+    );
 
     if (reviewSchema) {
       try {
@@ -267,20 +290,31 @@ export class BailianOcrClient implements BailianConnectionTester {
           apiKey: input.apiKey,
           imageDataUrl,
           resultSchema: reviewSchema,
-          userPrompt: ORDER_REVIEW_USER_PROMPT,
+          userPrompt: headerOnlyReview
+            ? PAGE_HEADER_REVIEW_USER_PROMPT
+            : shippingOnlyReview
+              ? SHIPPING_REVIEW_USER_PROMPT
+              : ORDER_REVIEW_USER_PROMPT,
         });
-        const merged = mergeReviewResult(
-          primaryExtracted,
-          flattenModularExtraction(review.extracted),
+        const flattenedReview = flattenModularExtraction(review.extracted);
+        let reviewedExtracted = mergeReviewResult(
+          mergedExtracted,
+          flattenedReview,
         );
-        result = normalizeOrderResult(
-          sanitizeOrderExtraction(merged),
-          input.sellerAccount,
+        if (headerOnlyReview) {
+          reviewedExtracted = preferIsolatedHeaderStatus(
+            reviewedExtracted,
+            flattenedReview,
+          );
+        }
+        mergedExtracted = sanitizeOrderExtraction(
+          reviewedExtracted,
         );
+        result = normalizeOrderResult(mergedExtracted, input.sellerAccount);
         evidences.push(review.evidence);
       } catch {
-        // The primary result remains usable for manual correction when the one allowed
-        // targeted review is unavailable, malformed, rate-limited, or unsafe to retain.
+        // The primary result remains usable for manual correction when the targeted
+        // module review is unavailable, malformed, rate-limited, or unsafe to retain.
       }
     }
 
@@ -506,27 +540,28 @@ function enrichExtractionFromProcessedText(
   extracted: Record<string, unknown>,
   processedText: unknown,
 ): Record<string, unknown> {
-  const processedStatuses = processedTopStatusSignals(processedText);
+  const processedExtraction = fencedProcessedExtraction(processedText);
   let enriched: Record<string, unknown> = {
     ...extracted,
     [XIANYU_STATUS_SIGNALS_KEY]: {
-      platformStatuses: processedStatuses,
+      platformStatuses: [],
       shippingControls: [],
       globalControls: [],
     } satisfies XianyuStatusSignals,
   };
-  const transaction = recordOrEmpty(extracted.transaction_information);
+  enriched = enrichShippingPhoneFromProcessed(enriched, processedExtraction);
+  const transaction = recordOrEmpty(enriched.transaction_information);
   const modularOrderNumber = transaction.order_number;
   const currentOrderNumber = Object.prototype.hasOwnProperty.call(
-    extracted,
+    enriched,
     'transaction_information',
   )
     ? modularOrderNumber
-    : extracted.order_number;
+    : enriched.order_number;
   if (usableOrderNumber(currentOrderNumber)) return enriched;
-  const orderNumber = orderNumberFromProcessedText(processedText);
+  const orderNumber = orderNumberFromProcessedExtraction(processedExtraction);
   if (!orderNumber) return enriched;
-  if (Object.prototype.hasOwnProperty.call(extracted, 'transaction_information')) {
+  if (Object.prototype.hasOwnProperty.call(enriched, 'transaction_information')) {
     enriched = {
       ...enriched,
       transaction_information: { ...transaction, order_number: orderNumber },
@@ -546,17 +581,56 @@ function validatedOrderNumber(value: unknown): string {
   return ORDER_NUMBER_VALUE_PATTERN.test(candidate) ? candidate : '';
 }
 
-function orderNumberFromProcessedText(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  const candidates = new Set<string>();
-  for (const line of value.normalize('NFKC').split(/\r?\n/u)) {
-    const match = /订单编号[\t ]*(?:[:：|｜][\t ]*)?([A-Za-z0-9][A-Za-z0-9_-]{7,63})(?![A-Za-z0-9_-])/u.exec(
-      line,
-    );
-    const candidate = validatedOrderNumber(match?.[1]);
-    if (candidate) candidates.add(candidate);
+function fencedProcessedExtraction(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string') return {};
+  const match = /^```json\r?\n([\s\S]+)\r?\n```$/u.exec(value.trim());
+  if (!match) return {};
+  try {
+    return recordOrEmpty(JSON.parse(match[1]));
+  } catch {
+    return {};
   }
-  return candidates.size === 1 ? [...candidates][0] : '';
+}
+
+function enrichShippingPhoneFromProcessed(
+  extracted: Record<string, unknown>,
+  processedExtraction: Record<string, unknown>,
+): Record<string, unknown> {
+  const shipping = recordOrEmpty(extracted.shipping_information);
+  if (!isMissingExtractedValue(shipping.phone)) return extracted;
+  const processedShipping = recordOrEmpty(processedExtraction.shipping_information);
+  const extractedRecipient = comparableText(shipping.recipient);
+  const processedRecipient = comparableText(processedShipping.recipient);
+  const extractedAddress = normalizedComparableAddress(shipping.address);
+  const processedAddress = normalizedComparableAddress(processedShipping.address);
+  if (
+    !extractedRecipient ||
+    extractedRecipient !== processedRecipient ||
+    !extractedAddress ||
+    extractedAddress !== processedAddress
+  ) {
+    return extracted;
+  }
+  const candidates = [...new Set([
+    chineseMobileCore(processedShipping.phone),
+    chineseMobileCore(processedShipping.recipient_phone),
+  ].filter(Boolean))];
+  if (candidates.length !== 1) return extracted;
+  return {
+    ...extracted,
+    shipping_information: { ...shipping, phone: candidates[0] },
+  };
+}
+
+function normalizedComparableAddress(value: unknown): string {
+  return typeof value === 'string' ? normalizeAddress(value) : '';
+}
+
+function orderNumberFromProcessedExtraction(
+  processedExtraction: Record<string, unknown>,
+): string {
+  const transaction = recordOrEmpty(processedExtraction.transaction_information);
+  return validatedOrderNumber(transaction.order_number);
 }
 
 function buildReviewSchema(result: RecognitionResult): Record<string, unknown> | undefined {
@@ -579,8 +653,15 @@ function buildReviewSchema(result: RecognitionResult): Record<string, unknown> |
     result.productTotalCents === null ||
     result.shippingFeeCents === null ||
     result.amountCents === null;
-
-  if (!purchasedItemsNeedReview && !shippingNeedsReview && !transactionNeedsReview) {
+  const statusNeedsReview =
+    result.platformTransactionStatus === 'unknown' ||
+    result.fulfillmentStatus === 'unknown';
+  if (
+    !purchasedItemsNeedReview &&
+    !shippingNeedsReview &&
+    !transactionNeedsReview &&
+    !statusNeedsReview
+  ) {
     return undefined;
   }
   const productReview = purchasedItemsNeedReview
@@ -597,7 +678,36 @@ function buildReviewSchema(result: RecognitionResult): Record<string, unknown> |
           ...IDENTITY_REVIEW_SCHEMA,
         }
       : {}),
+    ...(statusNeedsReview ? PAGE_CONTEXT_MODULE_SCHEMA : {}),
   };
+}
+
+function shippingResultNeedsFocusedReview(result: RecognitionResult): boolean {
+  const identitiesMatch = Boolean(
+    result.recipient &&
+    result.buyerNickname &&
+    comparableText(result.recipient) === comparableText(result.buyerNickname),
+  );
+  return !result.recipient ||
+    !result.phone ||
+    !result.addressOriginal ||
+    identitiesMatch ||
+    isMaskedNickname(result.recipient);
+}
+
+function reviewSchemaHasCompetingReviewModule(
+  schema: Record<string, unknown> | undefined,
+): boolean {
+  if (!schema) return false;
+  const shippingOnlyKeys = new Set([
+    'shipping_information',
+    'shipping_contact',
+    'buyer_section',
+    'page_controls',
+  ]);
+  return Object.keys(schema).some(
+    (key) => !shippingOnlyKeys.has(key),
+  );
 }
 
 function buildModularReviewSchema(
@@ -607,10 +717,8 @@ function buildModularReviewSchema(
   const productNeedsReview = purchasedItemsNeedReview(extracted, result);
   const shippingNeedsReview = shippingInformationNeedsReview(extracted, result);
   const transactionNeedsReview = transactionInformationNeedsReview(extracted, result);
-  const platformStatusNeedsReview = result.platformTransactionStatus === 'unknown';
   const fulfillmentStatusNeedsReview = result.fulfillmentStatus === 'unknown';
-  const pageContextNeedsReview =
-    platformStatusNeedsReview || fulfillmentStatusNeedsReview;
+  const pageContextNeedsReview = fulfillmentStatusNeedsReview;
   if (
     !productNeedsReview &&
     !shippingNeedsReview &&
@@ -627,7 +735,11 @@ function buildModularReviewSchema(
         : {}
     ),
     ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
-    ...(pageContextNeedsReview ? PAGE_CONTEXT_MODULE_SCHEMA : {}),
+    ...(
+      pageContextNeedsReview || result.platformTransactionStatus === 'unknown'
+        ? PAGE_CONTEXT_MODULE_SCHEMA
+        : {}
+    ),
   };
 }
 
@@ -687,8 +799,6 @@ function transactionInformationNeedsReview(
     'product_total',
     'shipping_fee',
     'amount',
-    'platform_transaction_status',
-    'fulfillment_status',
   ];
   if (requiredKeys.some(
     (key) => !Object.prototype.hasOwnProperty.call(transaction, key),
@@ -715,9 +825,7 @@ function transactionInformationNeedsReview(
     }
   }
   return !result.orderNumber ||
-    result.amountCents === null ||
-    result.platformTransactionStatus === 'unknown' ||
-    result.fulfillmentStatus === 'unknown';
+    result.amountCents === null;
 }
 
 function mergeReviewResult(
@@ -764,16 +872,26 @@ function mergeReviewResult(
       flattened.contact_line_text,
       flattened.phone,
     )
-    ? businessText(flattened.recipient_candidate, controlLabels)
+    ? businessText(flattened.recipient, controlLabels)
     : '';
+  const phoneOnlyReviewedRecipientIsSafe = safePhoneOnlyReviewedRecipient(
+    phoneOnlyReviewedRecipient,
+    controlLabels,
+  );
   const phoneOnlyRecipientMatchesPrimary = Boolean(
     phoneOnlyReviewedRecipient &&
+    phoneOnlyReviewedRecipientIsSafe &&
     contaminatedRecipientMatchesReview(
       primary.recipient,
       phoneOnlyReviewedRecipient,
       flattened.phone,
       controlLabels,
     ),
+  );
+  const phoneOnlyRecipientHasShippingAnchor = Boolean(
+    phoneOnlyReviewedRecipient &&
+    phoneOnlyReviewedRecipientIsSafe &&
+    shippingAddressConfirmsReview(primary, flattened),
   );
   const completedReviewedRecipient = moreCompleteReviewedRecipient(
     primaryRecipient,
@@ -784,7 +902,11 @@ function mergeReviewResult(
     controlLabels,
   );
   const reviewedRecipient = strictlyReviewedRecipient ||
-    (phoneOnlyRecipientMatchesPrimary ? phoneOnlyReviewedRecipient : '') ||
+    (
+      phoneOnlyRecipientMatchesPrimary || phoneOnlyRecipientHasShippingAnchor
+        ? phoneOnlyReviewedRecipient
+        : ''
+    ) ||
     completedReviewedRecipient;
   const primaryBuyerLabelVisible = isBuyerNicknameLabel(
     primary.buyer_nickname_label,
@@ -883,7 +1005,8 @@ function mergeReviewResult(
   } else if (
     primaryBuyerWasMisfiledRecipient ||
     ((reviewedRecipientWasMisfiledAsBuyer || identitiesMatchedInitially) &&
-      !reviewedBuyerVerified)
+      !reviewedBuyerVerified &&
+      !primaryBuyerVerified)
   ) {
     merged.buyer_nickname = null;
     merged.buyer_nickname_label = null;
@@ -905,6 +1028,12 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
     review.recipient_phone_line_text ??
     review.contact_line_text;
   const reviewedRecipient = shipping.recipient ?? review.recipient;
+  const recoveredReviewedContact = recoverShippingContact(
+    reviewedRecipient,
+    reviewedPhone,
+    reviewedContactLine,
+    controlLabels,
+  );
   return {
     order_number: identity.order_number ?? review.order_number,
     alipay_transaction_number:
@@ -914,14 +1043,9 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
       buyer.buyer_nickname ?? review.buyer_nickname,
       controlLabels,
     ),
-    recipient: recipientValue(
-      reviewedRecipient,
-      reviewedPhone,
-      reviewedContactLine,
-      controlLabels,
-    ),
+    recipient: recoveredReviewedContact.recipient,
     recipient_candidate: businessValue(reviewedRecipient, controlLabels),
-    phone: reviewedPhone,
+    phone: recoveredReviewedContact.phone,
     address: shipping.address ?? review.address,
     province: shipping.province ?? review.province,
     city: shipping.city ?? review.city,
@@ -943,6 +1067,7 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
 
 function hasModularExtraction(extracted: Record<string, unknown>): boolean {
   return [
+    'page_header_status_text',
     'purchased_items',
     'shipping_information',
     'transaction_information',
@@ -960,7 +1085,13 @@ function flattenModularExtraction(
   const transactionInformation = recordOrEmpty(extracted.transaction_information);
   const pageContext = recordOrEmpty(extracted.page_context);
   const inheritedStatusSignals = readXianyuStatusSignals(extracted);
-  const topStatuses = platformStatusSignals(pageContext.top_status_text);
+  const pageHeaderStatusText = Object.prototype.hasOwnProperty.call(
+    extracted,
+    'page_header_status_text',
+  )
+    ? extracted.page_header_status_text
+    : pageContext.top_status_text;
+  const topStatuses = platformStatusSignals(pageHeaderStatusText);
   const statusSignals: XianyuStatusSignals = {
     platformStatuses: topStatuses.length > 0
       ? topStatuses
@@ -979,6 +1110,7 @@ function flattenModularExtraction(
 
   return {
     ...extracted,
+    page_header_status_text: pageHeaderStatusText,
     items: moduleField(purchasedItems, 'items', extracted.items),
     recipient: moduleField(shippingInformation, 'recipient', extracted.recipient),
     recipient_phone_line_text: moduleField(
@@ -1032,11 +1164,7 @@ function flattenModularExtraction(
       extracted.shipping_fee,
     ),
     amount: moduleField(transactionInformation, 'amount', extracted.amount),
-    platform_transaction_status: moduleField(
-      transactionInformation,
-      'platform_transaction_status',
-      extracted.platform_transaction_status,
-    ),
+    platform_transaction_status: null,
     fulfillment_status: moduleField(
       transactionInformation,
       'fulfillment_status',
@@ -1100,6 +1228,22 @@ function mergeXianyuStatusSignals(
   };
 }
 
+function preferIsolatedHeaderStatus(
+  merged: Record<string, unknown>,
+  isolatedHeader: Record<string, unknown>,
+): Record<string, unknown> {
+  const isolatedSignals = readXianyuStatusSignals(isolatedHeader);
+  if (isolatedSignals.platformStatuses.length !== 1) return merged;
+  const mergedSignals = readXianyuStatusSignals(merged);
+  return {
+    ...merged,
+    [XIANYU_STATUS_SIGNALS_KEY]: {
+      ...mergedSignals,
+      platformStatuses: isolatedSignals.platformStatuses,
+    } satisfies XianyuStatusSignals,
+  };
+}
+
 function resolvedPlatformTransactionStatus(
   extracted: Record<string, unknown>,
 ): PlatformTransactionStatus {
@@ -1109,13 +1253,24 @@ function resolvedPlatformTransactionStatus(
   if (explicitStatus !== 'unknown') return explicitStatus;
   const signals = readXianyuStatusSignals(extracted);
   const inferredStatuses = [...new Set(signals.platformStatuses)];
-  return inferredStatuses.length === 1 ? inferredStatuses[0] : 'unknown';
+  if (inferredStatuses.length === 1) return inferredStatuses[0];
+  if (inferredStatuses.length > 1) return 'unknown';
+  // On the seller's Xianyu order page, an actionable "去发货" is only
+  // shown after buyer payment. Explicit header evidence always wins above.
+  return [...signals.shippingControls, ...signals.globalControls].some(isGoShipControl)
+    ? 'paid'
+    : 'unknown';
 }
 
 function resolvedFulfillmentStatus(
   extracted: Record<string, unknown>,
 ): FulfillmentStatus {
   const explicitStatus = normalizeFulfillmentStatus(extracted.fulfillment_status);
+  if (explicitStatus === 'shipped') return explicitStatus;
+  const platformStatus = resolvedPlatformTransactionStatus(extracted);
+  if (platformStatus === 'cancelled' || platformStatus === 'refunded') {
+    return 'unknown';
+  }
   if (explicitStatus !== 'unknown') return explicitStatus;
   const signals = readXianyuStatusSignals(extracted);
   return [...signals.shippingControls, ...signals.globalControls].some(isGoShipControl)
@@ -1123,26 +1278,31 @@ function resolvedFulfillmentStatus(
     : 'unknown';
 }
 
-function processedTopStatusSignals(value: unknown): PlatformTransactionStatus[] {
-  if (typeof value !== 'string') return [];
-  const topLines = value
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 8);
-  return platformStatusSignals(topLines.join('\n'));
-}
-
 function platformStatusSignals(value: unknown): PlatformTransactionStatus[] {
   if (typeof value !== 'string') return [];
-  const normalized = value.normalize('NFKC').replace(/\s+/gu, '');
-  const statuses: PlatformTransactionStatus[] = [];
-  if (/(?:退款成功|退款完成|已退款)/u.test(normalized)) statuses.push('refunded');
-  if (/(?:交易已取消|订单已取消|交易已关闭|订单已关闭|交易关闭)/u.test(normalized)) {
-    statuses.push('cancelled');
-  }
-  if (/(?:买家已付款|交易成功)/u.test(normalized)) statuses.push('paid');
-  return [...new Set(statuses)];
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/\s+/gu, '')
+    .replace(/[,，。!！]/gu, '')
+    .replace(/[>›»⌄∨▼▾﹀˅]+$/gu, '');
+  if (new Set([
+    '退款成功',
+    '退款完成',
+    '已退款',
+  ]).has(normalized)) return ['refunded'];
+  if (new Set([
+    '交易已取消',
+    '订单已取消',
+    '交易已关闭',
+    '订单已关闭',
+    '交易关闭',
+  ]).has(normalized)) return ['cancelled'];
+  if (new Set([
+    '买家已付款请尽快发货',
+    '买家已付款',
+    '交易成功',
+  ]).has(normalized)) return ['paid'];
+  return [];
 }
 
 function isGoShipControl(value: string): boolean {
@@ -1342,6 +1502,26 @@ function recoverShippingContact(
   const explicitPhone = chineseMobileCore(phoneInput);
 
   if (explicitPhone) {
+    const observedPhones = [...new Set([
+      ...chineseMobileCores(cleanedRecipient),
+      ...chineseMobileCores(cleanedContactLine),
+    ])];
+    if (
+      observedPhones.length > 0 &&
+      (observedPhones.length !== 1 || observedPhones[0] !== explicitPhone)
+    ) {
+      return {
+        recipient: countDigits(cleanedRecipient) >= 7
+          ? null
+          : recipientValue(
+              cleanedRecipient,
+              null,
+              null,
+              controlLabels,
+            ),
+        phone: null,
+      };
+    }
     return {
       recipient: recipientValue(
         cleanedRecipient,
@@ -1429,6 +1609,54 @@ function phoneOnlyContactLine(lineValue: unknown, phoneValue: unknown): boolean 
   if (!line || !phone || !/^[+\d\s\p{Pd}()（）]+$/u.test(line)) return false;
   const digits = line.replace(/\D/gu, '');
   return digits === phone || digits === `86${phone}`;
+}
+
+function safePhoneOnlyReviewedRecipient(
+  value: string,
+  controlLabels: string[],
+): boolean {
+  const candidate = optionalText(value);
+  if (
+    !candidate ||
+    candidate.length > 40 ||
+    isMaskedNickname(candidate) ||
+    isHighConfidenceUiControlText(candidate) ||
+    isModelClassifiedUiControlText(candidate, controlLabels) ||
+    /(?:复制|去发货|买家昵称|收货信息|订单编号|支付宝交易号)/u.test(candidate) ||
+    /\d{7,}/u.test(candidate)
+  ) {
+    return false;
+  }
+  const withoutControls = stripTrailingUiControlLabels(
+    candidate,
+    controlLabels,
+  );
+  return Boolean(
+    withoutControls &&
+    comparableText(withoutControls) === comparableText(candidate) &&
+    /\p{L}/u.test(candidate),
+  );
+}
+
+function shippingAddressConfirmsReview(
+  primary: Record<string, unknown>,
+  review: Record<string, unknown>,
+): boolean {
+  const reviewedAddress = normalizedComparableAddress(review.address);
+  if (!reviewedAddress) return false;
+  const primaryAddress = normalizedComparableAddress(primary.address);
+  if (primaryAddress) return primaryAddress === reviewedAddress;
+  const reviewedParts = deriveAddressParts(reviewedAddress, {
+    province: '',
+    city: '',
+    district: '',
+  });
+  return Boolean(
+    reviewedAddress.length >= 8 &&
+    reviewedParts.province &&
+    reviewedParts.city &&
+    reviewedParts.district,
+  );
 }
 
 function contaminatedRecipientMatchesReview(
@@ -2086,9 +2314,9 @@ function stripAddressPrefix(value: string, prefix: string): string {
 
 function normalizePlatformTransactionStatus(value: unknown): PlatformTransactionStatus {
   const normalized = optionalText(value).toLowerCase();
-  if (normalized === 'paid' || normalized.includes('已付款')) return 'paid';
-  if (normalized === 'cancelled' || normalized.includes('取消')) return 'cancelled';
-  if (normalized === 'refunded' || normalized.includes('退款')) return 'refunded';
+  if (normalized === 'paid') return 'paid';
+  if (normalized === 'cancelled') return 'cancelled';
+  if (normalized === 'refunded') return 'refunded';
   return 'unknown';
 }
 

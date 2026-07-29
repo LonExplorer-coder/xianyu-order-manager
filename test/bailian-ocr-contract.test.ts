@@ -25,10 +25,14 @@ function successfulKieResponse(
   }), { status: 200 });
 }
 
+function fencedProcessedJson(value: Record<string, unknown>): string {
+  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+}
+
 type SyntheticStatusControl = string | { text?: string; label?: string };
 
 function syntheticModularStatusExtraction(input: {
-  topStatusText?: string | null;
+  pageHeaderStatusText?: string | null;
   shippingControls?: SyntheticStatusControl[];
   globalControls?: SyntheticStatusControl[];
   purchasedItemControls?: SyntheticStatusControl[];
@@ -81,10 +85,56 @@ function syntheticModularStatusExtraction(input: {
       controls: input.transactionControls ?? [],
     },
     page_context: {
-      ...(input.topStatusText === undefined
+      ...(input.pageHeaderStatusText === undefined
         ? {}
-        : { top_status_text: input.topStatusText }),
+        : { top_status_text: input.pageHeaderStatusText }),
       global_controls: input.globalControls ?? [],
+      excluded_regions: [],
+    },
+  };
+}
+
+function syntheticModularPhoneFallbackExtraction(input: {
+  kvPhone?: string;
+} = {}): Record<string, unknown> {
+  return {
+    purchased_items: {
+      items: [{
+        title: '合成真实形态商品',
+        spec: '规格R',
+        unit_price: '39.00',
+        quantity: '1',
+        quantity_text: '×1',
+      }],
+      controls: [],
+    },
+    shipping_information: {
+      recipient: '合成收件人R',
+      ...(input.kvPhone === undefined ? {} : { phone: input.kvPhone }),
+      address: '测试省测试市示例区安全路39号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      controls: ['复制', '去发货'],
+    },
+    transaction_information: {
+      detail_state: 'expanded',
+      order_number: 'XY-SYNTH-PROCESSED-PHONE-0001',
+      alipay_transaction_number: 'ALI-SYNTH-PROCESSED-PHONE-0001',
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '合成买家R',
+      order_time: '2026-07-30 09:39:00',
+      payment_time: '2026-07-30 09:39:08',
+      product_total: '39.00',
+      shipping_fee: '0.00',
+      amount: '39.00',
+      platform_transaction_status: 'paid',
+      fulfillment_status: 'pending_shipment',
+      controls: [],
+    },
+    page_context: {
+      top_status_text: '买家已付款，请尽快发货',
+      global_controls: ['联系买家'],
       excluded_regions: [],
     },
   };
@@ -225,15 +275,14 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       ],
     });
-    expect(attempt.evidences).toEqual([
-      {
-        provider: 'aliyun-bailian',
-        model: 'qwen3.5-ocr',
-        requestId: 'request-xianyu-order-1',
-        schemaVersion: 1,
-        rawResponse,
-      },
-    ]);
+    expect(attempt.evidences).toHaveLength(1);
+    expect(attempt.evidences[0]).toEqual({
+      provider: 'aliyun-bailian',
+      model: 'qwen3.5-ocr',
+      requestId: 'request-xianyu-order-1',
+      schemaVersion: 1,
+      rawResponse,
+    });
 
     const [url, init] = request.mock.calls[0];
     expect(url).toBe(
@@ -298,8 +347,17 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
       'page_context.global_controls',
     );
+    expect(Object.keys(
+      body.parameters.ocr_options.task_config.result_schema,
+    )[0]).toBe('purchased_items');
+    expect(body.parameters.ocr_options.task_config.result_schema).not.toHaveProperty(
+      'page_header_status_text',
+    );
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
       'page_context.top_status_text',
+    );
+    expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
+      'transaction_information.platform_transaction_status',
     );
     expect(JSON.stringify(body.parameters.ocr_options.task_config.result_schema)).toContain(
       '绝不是收货联系人',
@@ -355,14 +413,196 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(request).toHaveBeenCalledOnce();
   });
 
+  it('扁平格式的完整收货信息不消耗额外复核调用', async () => {
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
+      order_number: 'XY-SYNTH-FLAT-COMPLETE-SHIPPING-0001',
+      alipay_transaction_number: 'ALI-SYNTH-FLAT-COMPLETE-SHIPPING-0001',
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '合成买家平',
+      recipient: '合成收件人平',
+      phone: '13900000041',
+      address: '测试省测试市示例区安全路41号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      order_time: '2026-07-30 10:41:00',
+      payment_time: '2026-07-30 10:41:08',
+      product_total: '41.00',
+      shipping_fee: '0.00',
+      amount: '41.00',
+      platform_transaction_status: 'paid',
+      fulfillment_status: 'pending_shipment',
+      items: [{
+        title: '合成扁平完整订单商品',
+        spec: '规格平',
+        unit_price: '41.00',
+        quantity: '1',
+      }],
+    }, 'request-flat-complete-shipping'));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-flat-complete-shipping',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-flat-complete-shipping.png',
+        originalName: '合成扁平完整收货订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-flat-complete-shipping',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(attempt.evidences).toHaveLength(1);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人平',
+      phone: '13900000041',
+      phoneNormalized: '13900000041',
+    });
+  });
+
+  it('扁平业务完整但履约状态为空时只复核页面上下文并从底部按钮得到待发货', async () => {
+    const primary = {
+      order_number: 'XY-SYNTH-FLAT-FULFILLMENT-STATUS-0001',
+      alipay_transaction_number: 'ALI-SYNTH-FLAT-FULFILLMENT-STATUS-0001',
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '合成买家态',
+      recipient: '合成收件人态',
+      phone: '13900000044',
+      address: '测试省测试市示例区安全路44号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      order_time: '2026-07-30 10:44:00',
+      payment_time: '2026-07-30 10:44:08',
+      product_total: '44.00',
+      shipping_fee: '0.00',
+      amount: '44.00',
+      platform_transaction_status: 'paid',
+      fulfillment_status: null,
+      items: [{
+        title: '合成扁平状态订单商品',
+        spec: '规格态',
+        unit_price: '44.00',
+        quantity: '1',
+      }],
+    };
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => successfulKieResponse(
+      request.mock.calls.length === 1
+        ? primary
+        : {
+            page_context: {
+              top_status_text: null,
+              global_controls: ['去发货'],
+              excluded_regions: [],
+            },
+          },
+      'request-flat-fulfillment-status-' + request.mock.calls.length,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('flat-fulfillment-status-only'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['page_context']);
+    expect(attempt.result).toMatchObject({
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it('扁平业务完整但平台与履约状态均空时只复核页面上下文并恢复已付款待发货', async () => {
+    const primary = {
+      order_number: 'XY-SYNTH-FLAT-BOTH-STATUSES-0001',
+      alipay_transaction_number: 'ALI-SYNTH-FLAT-BOTH-STATUSES-0001',
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '合成买家态',
+      recipient: '合成收件人态',
+      phone: '13900000045',
+      address: '测试省测试市示例区安全路45号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      order_time: '2026-07-30 10:45:00',
+      payment_time: '2026-07-30 10:45:08',
+      product_total: '45.00',
+      shipping_fee: '0.00',
+      amount: '45.00',
+      platform_transaction_status: null,
+      fulfillment_status: null,
+      items: [{
+        title: '合成扁平双状态订单商品',
+        spec: '规格双态',
+        unit_price: '45.00',
+        quantity: '1',
+      }],
+    };
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => successfulKieResponse(
+      request.mock.calls.length === 1
+        ? primary
+        : {
+            page_context: {
+              top_status_text: '买家已付款，请尽快发货',
+              global_controls: ['去发货'],
+              excluded_regions: [],
+            },
+          },
+      'request-flat-both-statuses-' + request.mock.calls.length,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('flat-both-statuses-only'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['page_context']);
+    expect(attempt.result).toMatchObject({
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
   it('顶部已付款原文与收货卡发货按钮在复核仍为空时仍推定已付款待发货', async () => {
     const primaryExtraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款，请尽快发货',
+      pageHeaderStatusText: '买家已付款，请尽快发货',
       shippingControls: [{ text: '去发货' }],
       globalControls: ['联系买家'],
       alipayTransactionNumber: null,
     });
-    const request = vi.fn(async (): Promise<Response> => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
       if (request.mock.calls.length === 1) {
         return successfulKieResponse(
           primaryExtraction,
@@ -404,14 +644,13 @@ describe('阿里云百炼 OCR 请求契约', () => {
   });
 
   it.each([
-    { reviewedStatus: 'cancelled', expectedStatus: 'cancelled' },
-    { reviewedStatus: 'refunded', expectedStatus: 'refunded' },
-  ] as const)('复核明确的 $reviewedStatus 覆盖首轮顶部已付款推定', async ({
+    { reviewedStatus: 'cancelled' },
+    { reviewedStatus: 'refunded' },
+  ] as const)('复核交易模块的 $reviewedStatus 不能覆盖首轮页头已付款证据', async ({
     reviewedStatus,
-    expectedStatus,
   }) => {
     const primaryExtraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款，请尽快发货',
+      pageHeaderStatusText: '买家已付款，请尽快发货',
       shippingControls: [{ text: '去发货' }],
       alipayTransactionNumber: null,
     });
@@ -446,22 +685,23 @@ describe('阿里云百炼 OCR 请求契约', () => {
       syntheticStatusRecognitionInput(`explicit-${reviewedStatus}-review`),
     );
 
-    expect(attempt.result.platformTransactionStatus).toBe(expectedStatus);
+    expect(attempt.result.platformTransactionStatus).toBe('paid');
   });
 
-  it('两轮顶部平台状态证据冲突时保守回落为未知', async () => {
+  it('独立页头复核用清晰状态覆盖首轮冲突页头文字', async () => {
     const primaryExtraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款',
+      pageHeaderStatusText: '买家已付款\n交易已取消',
       shippingControls: ['复制'],
       globalControls: ['联系买家'],
+      fulfillmentStatus: 'pending_shipment',
     });
-    const reviewedExtraction = syntheticModularStatusExtraction({
-      topStatusText: '交易已取消',
-      shippingControls: ['复制'],
-      globalControls: ['联系买家'],
-    });
-    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
-      request.mock.calls.length === 1 ? primaryExtraction : reviewedExtraction,
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => successfulKieResponse(
+      request.mock.calls.length === 1
+        ? primaryExtraction
+        : { page_header_status_text: '退款成功' },
       `request-conflicting-top-status-${request.mock.calls.length}`,
     ));
     const client = new BailianOcrClient(request);
@@ -471,12 +711,22 @@ describe('阿里云百炼 OCR 请求契约', () => {
     );
 
     expect(request).toHaveBeenCalledTimes(2);
-    expect(attempt.result.platformTransactionStatus).toBe('unknown');
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['page_header_status_text']);
+    expect(attempt.result.platformTransactionStatus).toBe('refunded');
   });
 
   it('复核明确已发货覆盖首轮发货按钮的待发货推定', async () => {
     const primaryExtraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款',
+      pageHeaderStatusText: '买家已付款',
       shippingControls: [{ text: '去发货' }],
       globalControls: [{ label: '去发货' }],
       alipayTransactionNumber: null,
@@ -517,7 +767,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
   it('底部全局发货按钮不在收货卡内时仍推定待发货', async () => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款',
+      pageHeaderStatusText: '买家已付款',
       shippingControls: ['复制'],
       globalControls: [{ label: '去发货' }],
     });
@@ -537,34 +787,250 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
+  it('模块化订单同时缺手机号和状态证据时在唯一复核中请求收货与页面上下文', async () => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      pageHeaderStatusText: null,
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+      platformTransactionStatus: null,
+      fulfillmentStatus: null,
+    });
+    const primaryShipping = primaryExtraction.shipping_information as
+      Record<string, unknown>;
+    primaryShipping.phone = null;
+    primaryShipping.recipient_phone_line_text = null;
+
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primaryExtraction,
+          'request-shipping-page-context-primary',
+        );
+      }
+      return successfulKieResponse({
+        shipping_information: {
+          ...primaryShipping,
+          recipient_phone_line_text: '合成收件人S 13900000031',
+          phone: '13900000031',
+        },
+        page_context: {
+          top_status_text: null,
+          global_controls: ['去发货'],
+          excluded_regions: [],
+        },
+      }, 'request-shipping-page-context-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('shipping-page-context-review'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['shipping_information', 'page_context']);
+    expect(attempt.result).toMatchObject({
+      phoneNormalized: '13900000031',
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it.each([
+    {
+      topStatusText: '交易已取消',
+      expectedStatus: 'cancelled',
+    },
+    {
+      topStatusText: '退款成功',
+      expectedStatus: 'refunded',
+    },
+  ] as const)(
+    '缺手机号和状态证据时复核页头“$topStatusText”得到终态且不推定待发货',
+    async ({ topStatusText, expectedStatus }) => {
+      const primaryExtraction = syntheticModularStatusExtraction({
+        pageHeaderStatusText: null,
+        shippingControls: ['复制'],
+        globalControls: ['联系买家'],
+        platformTransactionStatus: null,
+        fulfillmentStatus: null,
+      });
+      const primaryShipping = primaryExtraction.shipping_information as
+        Record<string, unknown>;
+      primaryShipping.phone = null;
+      primaryShipping.recipient_phone_line_text = null;
+
+      const request = vi.fn(async (
+        _input: string,
+        _init?: RequestInit,
+      ): Promise<Response> => {
+        if (request.mock.calls.length === 1) {
+          return successfulKieResponse(
+            primaryExtraction,
+            'request-terminal-page-context-' + expectedStatus + '-primary',
+          );
+        }
+        return successfulKieResponse({
+          shipping_information: {
+            ...primaryShipping,
+            recipient_phone_line_text: '合成收件人S 13900000031',
+            phone: '13900000031',
+          },
+          page_context: {
+            top_status_text: topStatusText,
+            global_controls: ['联系买家'],
+            excluded_regions: [],
+          },
+        }, 'request-terminal-page-context-' + expectedStatus + '-review');
+      });
+      const client = new BailianOcrClient(request);
+
+      const attempt = await client.recognizeOrder(
+        syntheticStatusRecognitionInput(
+          'terminal-page-context-' + expectedStatus,
+        ),
+      );
+
+      expect(request).toHaveBeenCalledTimes(2);
+      const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+        parameters: {
+          ocr_options: {
+            task_config: { result_schema: Record<string, unknown> };
+          };
+        };
+      };
+      expect(Object.keys(
+        secondBody.parameters.ocr_options.task_config.result_schema,
+      )).toEqual(['shipping_information', 'page_context']);
+      expect(attempt.result).toMatchObject({
+        phoneNormalized: '13900000031',
+        platformTransactionStatus: expectedStatus,
+        fulfillmentStatus: 'unknown',
+      });
+    },
+  );
+
+  it.each([
+    {
+      topStatusText: '交易已取消',
+      expectedStatus: 'cancelled',
+    },
+    {
+      topStatusText: '退款成功',
+      expectedStatus: 'refunded',
+    },
+  ] as const)(
+    '终态页头“$topStatusText”优先于误识别的全局去发货按钮',
+    async ({ topStatusText, expectedStatus }) => {
+      const extraction = syntheticModularStatusExtraction({
+        pageHeaderStatusText: topStatusText,
+        shippingControls: ['复制'],
+        globalControls: ['去发货'],
+        platformTransactionStatus: null,
+        fulfillmentStatus: null,
+      });
+      const request = vi.fn(async (): Promise<Response> =>
+        successfulKieResponse(
+          extraction,
+          'request-terminal-go-ship-' + expectedStatus + '-' +
+            request.mock.calls.length,
+        )
+      );
+      const client = new BailianOcrClient(request);
+
+      const attempt = await client.recognizeOrder(
+        syntheticStatusRecognitionInput('terminal-go-ship-' + expectedStatus),
+      );
+
+      expect(attempt.result).toMatchObject({
+        platformTransactionStatus: expectedStatus,
+        fulfillmentStatus: 'unknown',
+      });
+    },
+  );
+
+  it('仅平台状态未知时用根级页头字段窄复核，不重复复核交易信息', async () => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      pageHeaderStatusText: null,
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+      platformTransactionStatus: null,
+      fulfillmentStatus: 'pending_shipment',
+    });
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => successfulKieResponse(
+      request.mock.calls.length === 1
+        ? primaryExtraction
+        : { page_header_status_text: '买家已付款，请尽快发货' },
+      `request-page-header-status-review-${request.mock.calls.length}`,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('page-header-status-review'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    const reviewSchema = secondBody.parameters.ocr_options.task_config.result_schema;
+    expect(Object.keys(reviewSchema)[0]).toBe('page_header_status_text');
+    expect(reviewSchema).not.toHaveProperty('transaction_information');
+    expect(attempt.result.platformTransactionStatus).toBe('paid');
+  });
+
   it.each([
     {
       topStatusCase: '缺失',
-      topStatusText: undefined,
+      pageHeaderStatusText: undefined,
       shippingControls: [{ text: '去发货' }],
       globalControls: ['联系买家'],
     },
     {
       topStatusCase: '为空',
-      topStatusText: null,
+      pageHeaderStatusText: null,
       shippingControls: ['复制'],
       globalControls: [{ label: '去发货' }],
     },
-  ])('OCR 顶部状态字段$topStatusCase时从原文恢复已付款证据', async ({
+  ])('OCR 页头状态字段$topStatusCase时不把 fenced JSON 当作页面全文', async ({
     topStatusCase,
-    topStatusText,
+    pageHeaderStatusText,
     shippingControls,
     globalControls,
   }) => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText,
+      pageHeaderStatusText,
       shippingControls,
       globalControls,
     });
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
       extraction,
       `request-processed-status-fallback-${topStatusCase}-${request.mock.calls.length}`,
-      '买家已付款，请尽快发货',
+      fencedProcessedJson({
+        shipping_information: {
+          recipient: '合成收件人S',
+          address: '测试省测试市示例区安全路31号',
+          recognition_note: '买家已付款，请尽快发货',
+        },
+      }),
     ));
     const client = new BailianOcrClient(request);
 
@@ -578,16 +1044,19 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('OCR 原文顶部同时出现冲突平台状态时保守回落为未知', async () => {
+  it('fenced JSON 中的冲突状态文字不参与平台状态推定', async () => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: null,
+      pageHeaderStatusText: null,
       shippingControls: ['复制'],
       globalControls: ['联系买家'],
     });
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
       extraction,
       `request-conflicting-processed-status-${request.mock.calls.length}`,
-      '买家已付款，请尽快发货\n退款成功',
+      fencedProcessedJson({
+        generated_summary: '买家已付款，请尽快发货',
+        advertisement_text: '退款成功',
+      }),
     ));
     const client = new BailianOcrClient(request);
 
@@ -598,23 +1067,18 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(attempt.result.platformTransactionStatus).toBe('unknown');
   });
 
-  it('OCR 原文下部区域的状态词不作为顶部平台状态兜底', async () => {
+  it('fenced JSON 中非页头字段的状态词不作为平台状态兜底', async () => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: null,
+      pageHeaderStatusText: null,
       shippingControls: ['复制'],
       globalControls: ['联系买家'],
     });
-    const processedText = [
-      '13:02',
-      '返回',
-      '订单详情',
-      '合成收件人S 13900000031',
-      '测试省测试市示例区安全路31号',
-      '合成状态证据商品',
-      '成交价 31.00',
-      '广告推荐',
-      '退款成功',
-    ].join('\n');
+    const processedText = fencedProcessedJson({
+      shipping_information: {
+        recipient: '合成收件人S',
+        recognition_note: '退款成功',
+      },
+    });
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
       extraction,
       `request-lower-processed-status-${request.mock.calls.length}`,
@@ -631,7 +1095,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
   it('显式已发货状态不被收货卡或全局发货按钮覆盖', async () => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款',
+      pageHeaderStatusText: '买家已付款',
       shippingControls: [{ text: '去发货' }],
       globalControls: [{ label: '去发货' }],
       platformTransactionStatus: 'paid',
@@ -670,7 +1134,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     transactionControls,
   }) => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: '买家已付款',
+      pageHeaderStatusText: '买家已付款',
       shippingControls: ['复制'],
       globalControls: ['联系买家'],
       purchasedItemControls,
@@ -698,7 +1162,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expectedStatus,
   }) => {
     const extraction = syntheticModularStatusExtraction({
-      topStatusText: visibleStatus,
+      pageHeaderStatusText: visibleStatus,
       shippingControls: ['复制'],
       globalControls: ['联系买家'],
     });
@@ -714,6 +1178,117 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(attempt.result.platformTransactionStatus).toBe(expectedStatus);
     expect(attempt.result.fulfillmentStatus).toBe('unknown');
+  });
+
+  it('kv 缺少手机号时从双重匹配的 fenced JSON recipient_phone 恢复唯一合法号码', async () => {
+    const extraction = syntheticModularPhoneFallbackExtraction();
+    const processedText = fencedProcessedJson({
+      shipping_information: {
+        recipient: '合成收件人R',
+        recipient_phone: '13900000039',
+        address: '测试省测试市示例区安全路39号',
+      },
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-processed-phone-positive-${request.mock.calls.length}`,
+      processedText,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('processed-phone-positive'),
+    );
+
+    expect(attempt.result.phoneNormalized).toBe('13900000039');
+    expect(attempt.result.recipient).toBe('合成收件人R');
+    expect(attempt.result.addressNormalized).toBe(
+      '测试省测试市示例区安全路39号',
+    );
+  });
+
+  it.each([
+    {
+      mismatch: '收件人不一致',
+      processedRecipient: '另一个收件人',
+      processedAddress: '测试省测试市示例区安全路39号',
+    },
+    {
+      mismatch: '地址不一致',
+      processedRecipient: '合成收件人R',
+      processedAddress: '测试省测试市示例区其他路88号',
+    },
+  ])('processed_text 与 kv 的$mismatch时不恢复 recipient_phone', async ({
+    mismatch,
+    processedRecipient,
+    processedAddress,
+  }) => {
+    const extraction = syntheticModularPhoneFallbackExtraction();
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-processed-phone-mismatch-${mismatch}-${request.mock.calls.length}`,
+      fencedProcessedJson({
+        shipping_information: {
+          recipient: processedRecipient,
+          recipient_phone: '13900000039',
+          address: processedAddress,
+        },
+      }),
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput(`processed-phone-mismatch-${mismatch}`),
+    );
+
+    expect(attempt.result.phoneNormalized).toBe('');
+  });
+
+  it('processed_text 的 phone 与 recipient_phone 冲突时不猜测手机号', async () => {
+    const extraction = syntheticModularPhoneFallbackExtraction();
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-processed-phone-conflict-${request.mock.calls.length}`,
+      fencedProcessedJson({
+        shipping_information: {
+          recipient: '合成收件人R',
+          phone: '13800000039',
+          recipient_phone: '13900000039',
+          address: '测试省测试市示例区安全路39号',
+        },
+      }),
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('processed-phone-conflict'),
+    );
+
+    expect(attempt.result.phoneNormalized).toBe('');
+  });
+
+  it('kv 已有合法手机号时不被 processed_text 的 recipient_phone 覆盖', async () => {
+    const extraction = syntheticModularPhoneFallbackExtraction({
+      kvPhone: '13700000039',
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      'request-processed-phone-preserve-kv',
+      fencedProcessedJson({
+        shipping_information: {
+          recipient: '合成收件人R',
+          recipient_phone: '13900000039',
+          address: '测试省测试市示例区安全路39号',
+        },
+      }),
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('processed-phone-preserve-kv'),
+    );
+
+    expect(attempt.result.phoneNormalized).toBe('13700000039');
   });
 
   it('首轮按商品、收货和交易三个模块识别折叠订单并排除控件与广告', async () => {
@@ -758,6 +1333,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '取消订单', '去发货'],
         excluded_regions: ['合成广告横幅', '合成推荐商品'],
       },
@@ -825,10 +1401,15 @@ describe('阿里云百炼 OCR 请求契约', () => {
     };
     const firstPassSchema = firstBody.parameters.ocr_options.task_config.result_schema;
     expect(Object.keys(firstPassSchema)[0]).toBe('purchased_items');
+    expect(firstPassSchema).not.toHaveProperty('page_header_status_text');
     expect(firstPassSchema).toHaveProperty('purchased_items');
     expect(firstPassSchema).toHaveProperty('shipping_information');
     expect(firstPassSchema).toHaveProperty('transaction_information');
+    expect(firstPassSchema).toHaveProperty(
+      'transaction_information.platform_transaction_status',
+    );
     expect(firstPassSchema).toHaveProperty('page_context');
+    expect(firstPassSchema).toHaveProperty('page_context.top_status_text');
   });
 
   it('模块化收件人字段粘连同一手机号时只保留姓名', async () => {
@@ -872,6 +1453,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '去发货'],
         excluded_regions: [],
       },
@@ -938,6 +1520,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '去发货'],
         excluded_regions: [],
       },
@@ -1004,6 +1587,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '去发货'],
         excluded_regions: [],
       },
@@ -1077,6 +1661,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '去发货'],
         excluded_regions: [],
       },
@@ -1146,6 +1731,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             fulfillment_status: 'pending_shipment',
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '去发货'],
             excluded_regions: [],
           },
@@ -1197,14 +1783,159 @@ describe('阿里云百炼 OCR 请求契约', () => {
       secondBody.parameters.ocr_options.task_config.result_schema,
     )).toEqual(['shipping_information']);
     expect(secondBody.input.messages[0].content[1]?.text).toContain(
-      '只复核 result_schema 中列出的异常模块',
+      '只提取页面顶部收货信息卡',
     );
-    expect(secondBody.input.messages[0].content[1]?.text).toContain('姓名、手机号、按钮必须各归其位');
+    expect(secondBody.input.messages[0].content[1]?.text).toContain(
+      'recipient 只填联系人姓名',
+    );
     expect(attempt.result).toMatchObject({
       recipient: '合成收件人辛',
       phone: '13900000001',
       phoneNormalized: '13900000001',
     });
+  });
+
+  it('显式手机号与联系人行手机号冲突时复核后仍不猜测手机号', async () => {
+    const primary = {
+      purchased_items: {
+        items: [{
+          title: '合成手机号冲突商品',
+          spec: '规格冲突',
+          unit_price: '42.00',
+          price_tag_text: '¥42.00',
+          quantity: '1',
+          quantity_text: '×1',
+        }],
+        controls: [],
+      },
+      shipping_information: {
+        recipient: '合成收件人冲',
+        recipient_phone_line_text: '合成收件人冲 13800000042',
+        phone: '13900000042',
+        address: '测试省测试市示例区安全路42号',
+        province: '测试省',
+        city: '测试市',
+        district: '示例区',
+        controls: ['复制'],
+      },
+      transaction_information: {
+        detail_state: 'collapsed',
+        order_number: 'XY-SYNTH-PHONE-CONFLICT-0001',
+        alipay_transaction_number: null,
+        product_total: '42.00',
+        shipping_fee: '0.00',
+        amount: '42.00',
+        platform_transaction_status: 'paid',
+        fulfillment_status: 'pending_shipment',
+        buyer_nickname_label: null,
+        buyer_nickname: null,
+        order_time: null,
+        payment_time: null,
+        controls: ['展开'],
+      },
+      page_context: {
+        top_status_text: '买家已付款，请尽快发货',
+        global_controls: ['联系买家'],
+        excluded_regions: [],
+      },
+    };
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(primary, 'request-phone-conflict-primary');
+      }
+      return successfulKieResponse({
+        shipping_information: primary.shipping_information,
+      }, 'request-phone-conflict-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-phone-conflict',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-phone-conflict.png',
+        originalName: '合成手机号冲突订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-phone-conflict',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['shipping_information']);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人冲',
+      phone: '',
+      phoneNormalized: '',
+    });
+  });
+
+  it('首轮联系人全缺失且复核姓名粘连另一手机号时拒绝整组冲突联系人', async () => {
+    const primary = syntheticModularStatusExtraction({
+      pageHeaderStatusText: '买家已付款，请尽快发货',
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+      platformTransactionStatus: null,
+      fulfillmentStatus: 'pending_shipment',
+    });
+    const primaryShipping = primary.shipping_information as
+      Record<string, unknown>;
+    primaryShipping.recipient = null;
+    primaryShipping.recipient_phone_line_text = null;
+    primaryShipping.phone = null;
+
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primary,
+          'request-missing-contact-conflict-primary',
+        );
+      }
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '张三 13800000000',
+          recipient_phone_line_text: '张三 13800000000',
+          phone: '13900000000',
+          address: '测试省测试市示例区安全路31号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: ['复制'],
+        },
+      }, 'request-missing-contact-conflict-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('missing-contact-conflict-review'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '',
+      phone: '',
+      phoneNormalized: '',
+    });
+    expect(attempt.result.recipient + attempt.result.phone).not.toMatch(
+      /(?:138|139)00000000/u,
+    );
   });
 
   it('模块化收件人字段与独立手机号冲突时只复核收货模块', async () => {
@@ -1250,6 +1981,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             fulfillment_status: 'pending_shipment',
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '去发货'],
             excluded_regions: [],
           },
@@ -1345,6 +2077,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             fulfillment_status: 'pending_shipment',
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '去发货'],
             excluded_regions: [],
           },
@@ -1438,6 +2171,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         fulfillment_status: 'pending_shipment',
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家', '去发货'],
         excluded_regions: [],
       },
@@ -1507,6 +2241,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             fulfillment_status: 'pending_shipment',
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '去发货'],
             excluded_regions: [],
           },
@@ -1603,6 +2338,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '取消订单', '去发货'],
             excluded_regions: [],
           },
@@ -1693,6 +2429,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: [{ text: '展开', action: 'expand' }],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: [{ text: '联系买家', action: 'contact' }],
             excluded_regions: [],
           },
@@ -1739,7 +2476,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('模块化复核给出严格更完整的相关姓名时替换首轮姓名片段并恢复手机号', async () => {
+  it('模块化复核给出更完整相关姓名和纯手机号行时安全替换并恢复手机号', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -1786,6 +2523,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: [{ text: '展开', action: 'expand' }],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: [{ text: '联系买家', action: 'contact' }],
             excluded_regions: [],
           },
@@ -1906,6 +2644,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: [{ text: '展开', action: 'expand' }],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: [{ text: '联系买家', action: 'contact' }],
             excluded_regions: [],
           },
@@ -2000,6 +2739,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: [{ text: '展开', action: 'expand' }],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: [
               { text: '联系买家', action: 'contact' },
               { text: '取消订单', action: 'cancel' },
@@ -2097,6 +2837,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         controls: [],
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: [],
         excluded_regions: [],
       },
@@ -2166,6 +2907,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: [],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '取消订单', '去发货'],
             excluded_regions: [],
           },
@@ -2209,7 +2951,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('首轮同时缺失商品与收货信息时唯一一次复核同时修复两个模块', async () => {
+  it('首轮同时缺失商品与收货信息时在唯一复核中合并修复两个模块', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -2235,6 +2977,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家', '取消订单', '去发货'],
             excluded_regions: ['合成广告横幅'],
           },
@@ -2355,6 +3098,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -2453,6 +3197,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         controls: ['展开'],
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家'],
         excluded_regions: [],
       },
@@ -2519,6 +3264,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -2576,7 +3322,105 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('收货信息和折叠订单号同时缺失时在唯一一次复核中请求两个模块', async () => {
+  it('独立收货复核只返回姓名、纯手机号同行文本、地址和按钮时保留完整结果', async () => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成独立收货复核商品',
+              spec: '规格独',
+              unit_price: '18.00',
+              quantity: null,
+              quantity_text: null,
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: null,
+            recipient_phone_line_text: null,
+            phone: null,
+            address: null,
+            province: null,
+            city: null,
+            district: null,
+            controls: [],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-ISOLATED-SHIPPING-0001',
+            alipay_transaction_number: null,
+            product_total: '18.00',
+            shipping_fee: '0.00',
+            amount: '18.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: ['展开'],
+          },
+          page_context: {
+            top_status_text: '买家已付款，请尽快发货',
+            global_controls: ['去发货'],
+            excluded_regions: [],
+          },
+        }, 'request-isolated-shipping-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '合成收件人独',
+          recipient_phone_line_text: '13900000018',
+          address: '测试省测试市示例区安全路18号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: ['复制', '去发货'],
+        },
+      }, 'request-isolated-shipping-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-isolated-shipping',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-isolated-shipping.png',
+        originalName: '合成独立收货复核.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-isolated-shipping',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['shipping_information']);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人独',
+      phone: '13900000018',
+      phoneNormalized: '13900000018',
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it('收货信息和折叠订单号同时缺失时在唯一复核中请求两个模块', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -2619,6 +3463,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -2687,7 +3532,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('模块化交易与状态证据缺失时唯一一次复核覆盖对应模块', async () => {
+  it('交易与页头证据缺失时优先模块复核且不混入根级页头字段', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -2720,7 +3565,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
-            global_controls: ['联系买家'],
+            global_controls: ['联系买家', '去发货'],
             excluded_regions: [],
           },
         }, 'request-modular-transaction-primary');
@@ -2770,11 +3615,10 @@ describe('阿里云百炼 OCR 请求契约', () => {
     };
     expect(Object.keys(
       secondBody.parameters.ocr_options.task_config.result_schema,
-    )).toEqual([
-      'shipping_information',
-      'transaction_information',
-      'page_context',
-    ]);
+    )).toEqual(['transaction_information']);
+    expect(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    ).not.toHaveProperty('page_header_status_text');
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-TRANSACTION-REPAIR-0001',
       alipayTransactionNumber: 'ALI-SYNTH-TRANSACTION-REPAIR-0001',
@@ -2829,6 +3673,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['交易快照', '复制', '收起'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -2924,6 +3769,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['交易快照', '复制', '收起'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -3021,6 +3867,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             controls: ['展开'],
           },
           page_context: {
+            top_status_text: '买家已付款，请尽快发货',
             global_controls: ['联系买家'],
             excluded_regions: [],
           },
@@ -3086,7 +3933,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('结构化订单号漏识别时从明确标签后的 OCR 原文安全恢复', async () => {
+  it('结构化订单号漏识别时从 fenced JSON 的同名字段安全恢复', async () => {
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
       purchased_items: {
         items: [{
@@ -3124,14 +3971,15 @@ describe('阿里云百炼 OCR 请求契约', () => {
         controls: ['展开'],
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家'],
         excluded_regions: [],
       },
-    }, 'request-processed-text-order-number', [
-      '买家已付款，请尽快发货',
-      '订单编号 8800123456789012345 复制',
-      '交易快照',
-    ].join('\n')));
+    }, 'request-processed-text-order-number', fencedProcessedJson({
+      transaction_information: {
+        order_number: '8800123456789012345',
+      },
+    })));
     const client = new BailianOcrClient(request);
 
     const attempt = await client.recognizeOrder({
@@ -3152,7 +4000,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(attempt.result.orderNumber).toBe('8800123456789012345');
   });
 
-  it('展开详情漏掉收货信息和单价时定向复核一次并保留两份证据', async () => {
+  it('展开详情同时漏掉收货信息和单价时在唯一复核中保留两个异常模块', async () => {
     const responses = [
       {
         output: {
@@ -3201,26 +4049,32 @@ describe('阿里云百炼 OCR 请求契约', () => {
               content: [{
                 ocr_result: {
                   kv_result: {
+                    order_product_section: {
+                      items: [{
+                        title: '合成测试商品甲',
+                        spec: '规格A',
+                        unit_price: '8.00',
+                        price_tag_text: '¥8.00',
+                        quantity: null,
+                        quantity_text: null,
+                      }],
+                    },
                     shipping_contact: {
                       recipient: '合成收件人甲',
                       phone: '13900000001',
                       address: '测试省测试市示例区安全路1号',
+                      province: '测试省',
+                      city: '测试市',
+                      district: '示例区',
+                      contact_line_text: '合成收件人甲 13900000001',
                     },
                     buyer_section: {
                       label_text: '买家昵称',
                       buyer_nickname: 'x***4',
                     },
-                    amounts: {
-                      product_total: '8.00',
-                      shipping_fee: '0.00',
-                      amount: '8.00',
+                    page_controls: {
+                      labels: ['复制'],
                     },
-                    items: [{
-                      title: '合成测试商品甲',
-                      spec: '规格A',
-                      unit_price: '8.00',
-                      quantity: null,
-                    }],
                   },
                 },
               }],
@@ -3286,7 +4140,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     ]);
   });
 
-  it('折叠订单首轮在付款时间后提前结束时优先修复并恢复商品明细', async () => {
+  it('折叠订单首轮同时缺少收货人、商品和金额时保留全部异常模块', async () => {
     const primaryResult = {
       order_number: 'XY-SYNTH-FOLDED-0001',
       alipay_transaction_number: 'ALI-SYNTH-FOLDED-0001',
@@ -3304,7 +4158,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     };
     const request = vi.fn(async (
       _input: string,
-      init?: RequestInit,
+      _init?: RequestInit,
     ): Promise<Response> => {
       if (request.mock.calls.length === 1) {
         return successfulKieResponse(
@@ -3313,51 +4167,47 @@ describe('阿里云百炼 OCR 请求契约', () => {
         );
       }
 
-      const body = JSON.parse(String(init?.body)) as {
-        parameters: {
-          ocr_options: {
-            task_config: { result_schema: Record<string, unknown> };
-          };
-        };
-      };
-      const reviewSchemaKeys = Object.keys(
-        body.parameters.ocr_options.task_config.result_schema,
-      );
-      const productIndex = reviewSchemaKeys.indexOf('order_product_section');
-      const firstCompetingModuleIndex = [
-        reviewSchemaKeys.indexOf('shipping_contact'),
-        reviewSchemaKeys.indexOf('amounts'),
-      ].filter((index) => index >= 0).reduce(
-        (earliest, index) => Math.min(earliest, index),
-        Number.POSITIVE_INFINITY,
-      );
-      const productRepairIsPrioritized = productIndex >= 0 &&
-        productIndex < firstCompetingModuleIndex;
-
       return successfulKieResponse({
+        order_product_section: {
+          items: [{
+            title: '合成折叠订单商品',
+            spec: '商务蓝·标准款',
+            unit_price: '12.00',
+            price_tag_text: '¥12.00',
+            quantity: '2',
+            quantity_text: '×2',
+          }],
+        },
         shipping_contact: {
           recipient: '合成收件人甲',
           phone: '13900000001',
           address: '测试省测试市示例区安全路1号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
           contact_line_text: '合成收件人甲 13900000001',
+        },
+        buyer_section: {
+          label_text: null,
+          buyer_nickname: null,
+        },
+        page_controls: {
+          labels: ['复制'],
         },
         amounts: {
           product_total: '24.00',
           shipping_fee: '0.00',
           amount: '24.00',
         },
-        ...(productRepairIsPrioritized
-          ? {
-              order_product_section: {
-                items: [{
-                  title: '合成折叠订单商品',
-                  spec: '商务蓝·标准款',
-                  unit_price: '12.00',
-                  quantity: '2',
-                }],
-              },
-            }
-          : {}),
+        order_identity: {
+          order_number: 'XY-SYNTH-FOLDED-0001',
+          alipay_transaction_number: 'ALI-SYNTH-FOLDED-0001',
+        },
+        page_context: {
+          top_status_text: '买家已付款，请尽快发货',
+          global_controls: ['去发货'],
+          excluded_regions: [],
+        },
       }, 'request-folded-targeted-review');
     });
     const client = new BailianOcrClient(request);
@@ -3376,14 +4226,163 @@ describe('阿里云百炼 OCR 请求契约', () => {
       },
     });
 
-    expect(request.mock.calls.length).toBeLessThanOrEqual(2);
-    expect(attempt.result.items).toEqual([{
-      sourceTitle: '合成折叠订单商品',
-      sourceSpec: '商务蓝·标准款',
-      unitPriceCents: 1_200,
-      quantity: 2,
-      quantityInferred: false,
-    }]);
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual([
+      'order_product_section',
+      'shipping_contact',
+      'buyer_section',
+      'page_controls',
+      'amounts',
+      'order_identity',
+      'page_context',
+    ]);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人甲',
+      phoneNormalized: '13900000001',
+      productTotalCents: 2_400,
+      amountCents: 2_400,
+      items: [{
+        sourceTitle: '合成折叠订单商品',
+        sourceSpec: '商务蓝·标准款',
+        unitPriceCents: 1_200,
+        quantity: 2,
+        quantityInferred: false,
+      }],
+    });
+  });
+
+  it('扁平首轮同时缺联系人、商品、订单号和金额时唯一复核保留全部异常模块', async () => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          order_number: null,
+          alipay_transaction_number: null,
+          buyer_nickname_label: null,
+          buyer_nickname: null,
+          recipient: null,
+          recipient_phone_line_text: null,
+          phone: null,
+          address: null,
+          province: null,
+          city: null,
+          district: null,
+          order_time: null,
+          payment_time: null,
+          product_total: null,
+          shipping_fee: null,
+          amount: null,
+          platform_transaction_status: null,
+          fulfillment_status: null,
+          items: [],
+        }, 'request-flat-all-modules-primary');
+      }
+
+      return successfulKieResponse({
+        order_product_section: {
+          items: [{
+            title: '合成扁平全模块商品',
+            spec: '规格全',
+            unit_price: '23.00',
+            price_tag_text: '¥23.00',
+            quantity: '1',
+            quantity_text: '×1',
+          }],
+        },
+        shipping_contact: {
+          recipient: '合成收件人全',
+          phone: '13900000043',
+          address: '测试省测试市示例区安全路43号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          contact_line_text: '合成收件人全 13900000043',
+        },
+        buyer_section: {
+          label_text: null,
+          buyer_nickname: null,
+        },
+        page_controls: {
+          labels: ['复制', '去发货'],
+        },
+        amounts: {
+          product_total: '23.00',
+          shipping_fee: '0.00',
+          amount: '23.00',
+        },
+        order_identity: {
+          order_number: 'XY-SYNTH-FLAT-ALL-MODULES-0001',
+          alipay_transaction_number: null,
+        },
+        page_context: {
+          top_status_text: '买家已付款，请尽快发货',
+          global_controls: ['去发货'],
+          excluded_regions: [],
+        },
+      }, 'request-flat-all-modules-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-flat-all-modules',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-flat-all-modules.png',
+        originalName: '合成扁平全模块缺失订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-flat-all-modules',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual([
+      'order_product_section',
+      'shipping_contact',
+      'buyer_section',
+      'page_controls',
+      'amounts',
+      'order_identity',
+      'page_context',
+    ]);
+    expect(attempt.result).toMatchObject({
+      orderNumber: 'XY-SYNTH-FLAT-ALL-MODULES-0001',
+      recipient: '合成收件人全',
+      phoneNormalized: '13900000043',
+      productTotalCents: 2_300,
+      amountCents: 2_300,
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+      items: [{
+        sourceTitle: '合成扁平全模块商品',
+        sourceSpec: '规格全',
+        unitPriceCents: 2_300,
+        quantity: 1,
+        quantityInferred: false,
+      }],
+    });
   });
 
   it('复核明确看到买家昵称标签时纠正身份错位和金额漏识别', async () => {
@@ -4018,34 +5017,50 @@ describe('阿里云百炼 OCR 请求契约', () => {
   it('只从订单商品区复核与首轮标题一致的右侧价签原文', async () => {
     const responses = [
       successfulKieResponse({
-        order_number: 'XY-SYNTH-ORDER-PRICE-0001',
-        buyer_nickname_label: '买家昵称',
-        buyer_nickname: 'x***4',
-        recipient: '合成收件人甲',
-        phone: '13900000001',
-        address: '测试省测试市示例区安全路1号',
-        province: '测试省',
-        city: '测试市',
-        district: '示例区',
-        product_total: '8.00',
-        shipping_fee: '0.00',
-        amount: '8.00',
-        platform_transaction_status: 'paid',
-        fulfillment_status: 'pending_shipment',
-        items: [{
-          title: '合成订单商品甲',
-          spec: '规格A',
-          unit_price: null,
-          quantity: null,
-        }],
-      }, 'request-order-price-primary'),
-      successfulKieResponse({
-        amounts: {
+        purchased_items: {
+          items: [{
+            title: '合成订单商品甲',
+            spec: '规格A',
+            unit_price: null,
+            price_tag_text: null,
+            quantity: null,
+            quantity_text: null,
+          }],
+          controls: [],
+        },
+        shipping_information: {
+          recipient: '合成收件人甲',
+          recipient_phone_line_text: '合成收件人甲 13900000001',
+          phone: '13900000001',
+          address: '测试省测试市示例区安全路1号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: ['复制'],
+        },
+        transaction_information: {
+          detail_state: 'collapsed',
+          order_number: 'XY-SYNTH-ORDER-PRICE-0001',
+          alipay_transaction_number: null,
           product_total: '8.00',
           shipping_fee: '0.00',
           amount: '8.00',
+          platform_transaction_status: 'paid',
+          fulfillment_status: 'pending_shipment',
+          buyer_nickname_label: null,
+          buyer_nickname: null,
+          order_time: null,
+          payment_time: null,
+          controls: ['展开'],
         },
-        order_product_section: {
+        page_context: {
+          top_status_text: '买家已付款，请尽快发货',
+          global_controls: ['联系买家'],
+          excluded_regions: [],
+        },
+      }, 'request-order-price-primary'),
+      successfulKieResponse({
+        purchased_items: {
           items: [{
             title: '合成订单商品甲',
             spec: '规格A',
@@ -4054,6 +5069,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             quantity: null,
             quantity_text: null,
           }],
+          controls: [],
         },
       }, 'request-order-price-review'),
     ];
@@ -4088,7 +5104,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       };
     };
     const reviewSchema = secondBody.parameters.ocr_options.task_config.result_schema;
-    expect(reviewSchema).toHaveProperty('order_product_section');
+    expect(Object.keys(reviewSchema)).toEqual(['purchased_items']);
     expect(JSON.stringify(reviewSchema)).toContain('合成订单商品甲');
     expect(JSON.stringify(reviewSchema)).toContain('成交价');
     expect(JSON.stringify(reviewSchema)).toContain('推荐');
@@ -4156,7 +5172,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     ]);
   });
 
-  it('首轮返回订单商品右侧价签原文时直接解析单价且不再复核', async () => {
+  it('首轮返回有效商品价签时直接解析单价且不触发商品复核', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -4215,7 +5231,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     )).toContain('price_tag_text');
   });
 
-  it('首轮规范字段格式异常时改用有效价签与数量原文', async () => {
+  it('首轮规范字段格式异常时采用有效原文且不触发商品复核', async () => {
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
       order_number: 'XY-SYNTH-RAW-ITEM-FALLBACK-0001',
       buyer_nickname_label: '买家昵称',
@@ -4454,7 +5470,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(attempt.result).toMatchObject({ buyerNickname: 'x***4', recipient: '陈测试' });
   });
 
-  it('身份冲突复核仍无有效买家标签时清空昵称候选', async () => {
+  it('独立收货复核没有买家字段时不把缺失当作否定证据', async () => {
     const responses = [
       successfulKieResponse({
         order_number: 'XY-SYNTH-UNVERIFIED-BUYER-REVIEW-0001',
@@ -4509,7 +5525,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(request).toHaveBeenCalledTimes(2);
     expect(attempt.result).toMatchObject({
-      buyerNickname: '',
+      buyerNickname: '合成同名姓名',
       recipient: '合成同名姓名',
     });
   });
@@ -4950,6 +5966,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         controls: ['展开'],
       },
       page_context: {
+        top_status_text: '买家已付款，请尽快发货',
         global_controls: ['联系买家'],
         excluded_regions: [],
       },
