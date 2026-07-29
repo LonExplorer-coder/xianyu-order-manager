@@ -25,6 +25,87 @@ function successfulKieResponse(
   }), { status: 200 });
 }
 
+type SyntheticStatusControl = string | { text?: string; label?: string };
+
+function syntheticModularStatusExtraction(input: {
+  topStatusText?: string | null;
+  shippingControls?: SyntheticStatusControl[];
+  globalControls?: SyntheticStatusControl[];
+  purchasedItemControls?: SyntheticStatusControl[];
+  transactionControls?: SyntheticStatusControl[];
+  alipayTransactionNumber?: string | null;
+  platformTransactionStatus?: string | null;
+  fulfillmentStatus?: string | null;
+}): Record<string, unknown> {
+  return {
+    purchased_items: {
+      items: [{
+        title: '合成状态证据商品',
+        spec: '规格S',
+        unit_price: '31.00',
+        quantity: '1',
+        quantity_text: '×1',
+      }],
+      controls: input.purchasedItemControls ?? [],
+    },
+    shipping_information: {
+      recipient: '合成收件人S',
+      recipient_phone_line_text: '合成收件人S 13900000031',
+      phone: '13900000031',
+      address: '测试省测试市示例区安全路31号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      controls: input.shippingControls ?? [],
+    },
+    transaction_information: {
+      detail_state: 'expanded',
+      order_number: 'XY-SYNTH-STATUS-0001',
+      alipay_transaction_number:
+        input.alipayTransactionNumber === undefined
+          ? 'ALI-SYNTH-STATUS-0001'
+          : input.alipayTransactionNumber,
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '合成买家S',
+      order_time: '2026-07-30 08:31:00',
+      payment_time: '2026-07-30 08:31:08',
+      product_total: '31.00',
+      shipping_fee: '0.00',
+      amount: '31.00',
+      platform_transaction_status:
+        input.platformTransactionStatus === undefined
+          ? null
+          : input.platformTransactionStatus,
+      fulfillment_status:
+        input.fulfillmentStatus === undefined ? null : input.fulfillmentStatus,
+      controls: input.transactionControls ?? [],
+    },
+    page_context: {
+      ...(input.topStatusText === undefined
+        ? {}
+        : { top_status_text: input.topStatusText }),
+      global_controls: input.globalControls ?? [],
+      excluded_regions: [],
+    },
+  };
+}
+
+function syntheticStatusRecognitionInput(suffix: string) {
+  return {
+    workspaceId: 'ws-test123',
+    region: 'cn-beijing' as const,
+    apiKey: `sk-synthetic-status-${suffix}`,
+    sellerAccount: '默认闲鱼账号',
+    source: {
+      absolutePath: `/private/synthetic-status-${suffix}.png`,
+      originalName: `合成状态证据-${suffix}.png`,
+      mimeType: 'image/png',
+      sha256: `synthetic-status-${suffix}`,
+      bytes: Uint8Array.from([1]),
+    },
+  };
+}
+
 describe('阿里云百炼 OCR 请求契约', () => {
   it('把真实闲鱼截图识别为可校对的多商品订单，并保留原始响应', async () => {
     const sentinelApiKey = 'sk-real-order-contract-sentinel';
@@ -217,6 +298,9 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
       'page_context.global_controls',
     );
+    expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
+      'page_context.top_status_text',
+    );
     expect(JSON.stringify(body.parameters.ocr_options.task_config.result_schema)).toContain(
       '绝不是收货联系人',
     );
@@ -269,6 +353,367 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
     expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('顶部已付款原文与收货卡发货按钮在复核仍为空时仍推定已付款待发货', async () => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款，请尽快发货',
+      shippingControls: [{ text: '去发货' }],
+      globalControls: ['联系买家'],
+      alipayTransactionNumber: null,
+    });
+    const request = vi.fn(async (): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primaryExtraction,
+          'request-status-shipping-control-primary',
+        );
+      }
+
+      return successfulKieResponse({
+        transaction_information: {
+          detail_state: 'expanded',
+          order_number: 'XY-SYNTH-STATUS-0001',
+          alipay_transaction_number: 'ALI-SYNTH-STATUS-0001',
+          buyer_nickname_label: '买家昵称',
+          buyer_nickname: '合成买家S',
+          order_time: '2026-07-30 08:31:00',
+          payment_time: '2026-07-30 08:31:08',
+          product_total: '31.00',
+          shipping_fee: '0.00',
+          amount: '31.00',
+          platform_transaction_status: null,
+          fulfillment_status: null,
+          controls: [],
+        },
+      }, 'request-status-shipping-control-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('shipping-control-review-null'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.evidences).toHaveLength(2);
+    expect(attempt.result).toMatchObject({
+      alipayTransactionNumber: 'ALI-SYNTH-STATUS-0001',
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it.each([
+    { reviewedStatus: 'cancelled', expectedStatus: 'cancelled' },
+    { reviewedStatus: 'refunded', expectedStatus: 'refunded' },
+  ] as const)('复核明确的 $reviewedStatus 覆盖首轮顶部已付款推定', async ({
+    reviewedStatus,
+    expectedStatus,
+  }) => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款，请尽快发货',
+      shippingControls: [{ text: '去发货' }],
+      alipayTransactionNumber: null,
+    });
+    const request = vi.fn(async (): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primaryExtraction,
+          `request-explicit-${reviewedStatus}-primary`,
+        );
+      }
+      return successfulKieResponse({
+        transaction_information: {
+          detail_state: 'expanded',
+          order_number: 'XY-SYNTH-STATUS-0001',
+          alipay_transaction_number: 'ALI-SYNTH-STATUS-0001',
+          buyer_nickname_label: '买家昵称',
+          buyer_nickname: '合成买家S',
+          order_time: '2026-07-30 08:31:00',
+          payment_time: '2026-07-30 08:31:08',
+          product_total: '31.00',
+          shipping_fee: '0.00',
+          amount: '31.00',
+          platform_transaction_status: reviewedStatus,
+          fulfillment_status: null,
+          controls: [],
+        },
+      }, `request-explicit-${reviewedStatus}-review`);
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput(`explicit-${reviewedStatus}-review`),
+    );
+
+    expect(attempt.result.platformTransactionStatus).toBe(expectedStatus);
+  });
+
+  it('两轮顶部平台状态证据冲突时保守回落为未知', async () => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款',
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+    });
+    const reviewedExtraction = syntheticModularStatusExtraction({
+      topStatusText: '交易已取消',
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      request.mock.calls.length === 1 ? primaryExtraction : reviewedExtraction,
+      `request-conflicting-top-status-${request.mock.calls.length}`,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('conflicting-top-status'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result.platformTransactionStatus).toBe('unknown');
+  });
+
+  it('复核明确已发货覆盖首轮发货按钮的待发货推定', async () => {
+    const primaryExtraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款',
+      shippingControls: [{ text: '去发货' }],
+      globalControls: [{ label: '去发货' }],
+      alipayTransactionNumber: null,
+    });
+    const request = vi.fn(async (): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse(
+          primaryExtraction,
+          'request-explicit-shipped-review-primary',
+        );
+      }
+      return successfulKieResponse({
+        transaction_information: {
+          detail_state: 'expanded',
+          order_number: 'XY-SYNTH-STATUS-0001',
+          alipay_transaction_number: 'ALI-SYNTH-STATUS-0001',
+          buyer_nickname_label: '买家昵称',
+          buyer_nickname: '合成买家S',
+          order_time: '2026-07-30 08:31:00',
+          payment_time: '2026-07-30 08:31:08',
+          product_total: '31.00',
+          shipping_fee: '0.00',
+          amount: '31.00',
+          platform_transaction_status: 'paid',
+          fulfillment_status: 'shipped',
+          controls: [],
+        },
+      }, 'request-explicit-shipped-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('explicit-shipped-review'),
+    );
+
+    expect(attempt.result.fulfillmentStatus).toBe('shipped');
+  });
+
+  it('底部全局发货按钮不在收货卡内时仍推定待发货', async () => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款',
+      shippingControls: ['复制'],
+      globalControls: [{ label: '去发货' }],
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-status-global-control-${request.mock.calls.length}`,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('global-label-control'),
+    );
+
+    expect(attempt.result).toMatchObject({
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it.each([
+    {
+      topStatusCase: '缺失',
+      topStatusText: undefined,
+      shippingControls: [{ text: '去发货' }],
+      globalControls: ['联系买家'],
+    },
+    {
+      topStatusCase: '为空',
+      topStatusText: null,
+      shippingControls: ['复制'],
+      globalControls: [{ label: '去发货' }],
+    },
+  ])('OCR 顶部状态字段$topStatusCase时从原文恢复已付款证据', async ({
+    topStatusCase,
+    topStatusText,
+    shippingControls,
+    globalControls,
+  }) => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText,
+      shippingControls,
+      globalControls,
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-processed-status-fallback-${topStatusCase}-${request.mock.calls.length}`,
+      '买家已付款，请尽快发货',
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput(`processed-fallback-${topStatusCase}`),
+    );
+
+    expect(attempt.result).toMatchObject({
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+  });
+
+  it('OCR 原文顶部同时出现冲突平台状态时保守回落为未知', async () => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: null,
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-conflicting-processed-status-${request.mock.calls.length}`,
+      '买家已付款，请尽快发货\n退款成功',
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('conflicting-processed-status'),
+    );
+
+    expect(attempt.result.platformTransactionStatus).toBe('unknown');
+  });
+
+  it('OCR 原文下部区域的状态词不作为顶部平台状态兜底', async () => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: null,
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+    });
+    const processedText = [
+      '13:02',
+      '返回',
+      '订单详情',
+      '合成收件人S 13900000031',
+      '测试省测试市示例区安全路31号',
+      '合成状态证据商品',
+      '成交价 31.00',
+      '广告推荐',
+      '退款成功',
+    ].join('\n');
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-lower-processed-status-${request.mock.calls.length}`,
+      processedText,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('lower-processed-status'),
+    );
+
+    expect(attempt.result.platformTransactionStatus).toBe('unknown');
+  });
+
+  it('显式已发货状态不被收货卡或全局发货按钮覆盖', async () => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款',
+      shippingControls: [{ text: '去发货' }],
+      globalControls: [{ label: '去发货' }],
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'shipped',
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      'request-explicit-shipped-precedence',
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('explicit-shipped-precedence'),
+    );
+
+    expect(attempt.result).toMatchObject({
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'shipped',
+    });
+  });
+
+  it.each([
+    {
+      controlArea: '交易信息模块',
+      purchasedItemControls: [],
+      transactionControls: [{ text: '去发货' }],
+    },
+    {
+      controlArea: '已购商品模块',
+      purchasedItemControls: [{ label: '去发货' }],
+      transactionControls: [],
+    },
+  ])('只出现在$controlArea的发货按钮不参与待发货推定', async ({
+    controlArea,
+    purchasedItemControls,
+    transactionControls,
+  }) => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: '买家已付款',
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+      purchasedItemControls,
+      transactionControls,
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-status-unrelated-control-${controlArea}-${request.mock.calls.length}`,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput(`unrelated-control-${controlArea}`),
+    );
+
+    expect(attempt.result.platformTransactionStatus).toBe('paid');
+    expect(attempt.result.fulfillmentStatus).toBe('unknown');
+  });
+
+  it.each([
+    { visibleStatus: '交易已取消', expectedStatus: 'cancelled' },
+    { visibleStatus: '退款成功', expectedStatus: 'refunded' },
+  ] as const)('顶部明确的“$visibleStatus”原文保守映射平台交易状态', async ({
+    visibleStatus,
+    expectedStatus,
+  }) => {
+    const extraction = syntheticModularStatusExtraction({
+      topStatusText: visibleStatus,
+      shippingControls: ['复制'],
+      globalControls: ['联系买家'],
+    });
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse(
+      extraction,
+      `request-top-platform-status-${expectedStatus}-${request.mock.calls.length}`,
+    ));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput(`top-platform-${expectedStatus}`),
+    );
+
+    expect(attempt.result.platformTransactionStatus).toBe(expectedStatus);
+    expect(attempt.result.fulfillmentStatus).toBe('unknown');
   });
 
   it('首轮按商品、收货和交易三个模块识别折叠订单并排除控件与广告', async () => {
@@ -2242,7 +2687,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('模块化交易属性缺失时唯一一次复核只恢复交易模块', async () => {
+  it('模块化交易与状态证据缺失时唯一一次复核覆盖对应模块', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -2325,7 +2770,11 @@ describe('阿里云百炼 OCR 请求契约', () => {
     };
     expect(Object.keys(
       secondBody.parameters.ocr_options.task_config.result_schema,
-    )).toEqual(['transaction_information']);
+    )).toEqual([
+      'shipping_information',
+      'transaction_information',
+      'page_context',
+    ]);
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-TRANSACTION-REPAIR-0001',
       alipayTransactionNumber: 'ALI-SYNTH-TRANSACTION-REPAIR-0001',

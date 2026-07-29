@@ -25,9 +25,12 @@ const CONNECTION_TEST_IMAGE =
 
 const MAXIMUM_BASE64_DATA_URL_BYTES = 10 * 1024 * 1024;
 const ORDER_NUMBER_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;
+const XIANYU_STATUS_SIGNALS_KEY = '__xianyu_status_signals';
 
 const ORDER_EXTRACTION_USER_PROMPT = [
   '请严格按照 result_schema 分模块提取当前闲鱼订单，只依据截图中可见内容，不得猜测。',
+  '截图最顶部的状态标题是平台交易状态原文，必须单独填入 page_context.top_status_text；它不属于收货、商品或交易详情模块。',
+  'shipping_information.controls 只列收货卡内按钮；page_context.global_controls 只列页面底部等全局按钮。两处出现“去发货”都必须保留。',
   'shipping_information.recipient 只能填写收件人姓名，禁止包含手机号、手机号前后的分隔符以及“复制”“去发货”等功能按钮；它也绝不是买家昵称。',
   '收件人姓名同行出现唯一完整手机号时，必须把手机号单独填写到 phone；recipient_phone_line_text 从姓名开始并在手机号最后一位结束，不得带入后续按钮。',
   'buyer_nickname 只有在交易信息中明确看到“买家昵称”标签时才能填写，否则返回 null。',
@@ -38,6 +41,7 @@ const ORDER_EXTRACTION_USER_PROMPT = [
 
 const ORDER_REVIEW_USER_PROMPT = [
   '只复核 result_schema 中列出的异常模块，只依据截图中可见内容，不得猜测或补写未显示字段。',
+  '截图最顶部的状态标题必须填入 page_context.top_status_text；收货卡和页面底部的“去发货”分别保留在各自 controls 中。',
   'recipient 只能填写收件人姓名，禁止包含手机号、手机号前后的分隔符以及“复制”“去发货”等功能按钮；姓名同行的唯一完整手机号必须单独填写到 phone。',
   'controls 中的每一项只能是截图上可见的按钮文字字符串，不得返回对象或混入业务字段。',
   '商品只取订单商品卡，忽略广告与推荐内容。输出前自检：姓名、手机号、按钮必须各归其位，无法确认时返回 null。',
@@ -129,9 +133,9 @@ const TRANSACTION_INFORMATION_MODULE_SCHEMA = {
     shipping_fee: '“运费”一行的金额，只返回十进制金额字符串，看不到时返回 null',
     amount: '“成交价”或实付金额，只返回十进制金额字符串，看不到时返回 null',
     platform_transaction_status:
-      '仅返回 paid、cancelled、refunded、unknown 之一，根据截图可见状态判断，不可猜测',
+      '仅返回 paid、cancelled、refunded、unknown 之一，依据 page_context.top_status_text 判断，不可从按钮猜测',
     fulfillment_status:
-      '仅返回 pending_shipment、shipped 或 unknown；“买家已付款，请尽快发货”属于 pending_shipment',
+      '仅返回 pending_shipment、shipped 或 unknown；看不到明确履约状态时返回 unknown，不要把平台交易状态混入此字段',
     buyer_nickname_label:
       '只在交易详情中明确看到“买家昵称”标签时返回“买家昵称”；折叠或看不到时返回 null',
     buyer_nickname:
@@ -146,6 +150,8 @@ const TRANSACTION_INFORMATION_MODULE_SCHEMA = {
 
 const PAGE_CONTEXT_MODULE_SCHEMA = {
   page_context: {
+    top_status_text:
+      '原样复制截图最顶部、返回箭头下方的闲鱼订单状态标题，例如“买家已付款，请尽快发货”“交易已取消”“退款成功”；不要复制按钮或交易详情字段，看不到时返回 null',
     global_controls: [
       '原样列出三个订单模块之外的页面全局操作，例如底部“联系买家”“取消订单”“去发货”“一键转卖”',
     ],
@@ -204,6 +210,12 @@ const IDENTITY_REVIEW_SCHEMA = {
 type KieResponse = {
   extracted: Record<string, unknown>;
   evidence: RecognitionEvidence;
+};
+
+type XianyuStatusSignals = {
+  platformStatuses: PlatformTransactionStatus[];
+  shippingControls: string[];
+  globalControls: string[];
 };
 
 export type BailianOcrClientOptions = {
@@ -494,6 +506,15 @@ function enrichExtractionFromProcessedText(
   extracted: Record<string, unknown>,
   processedText: unknown,
 ): Record<string, unknown> {
+  const processedStatuses = processedTopStatusSignals(processedText);
+  let enriched: Record<string, unknown> = {
+    ...extracted,
+    [XIANYU_STATUS_SIGNALS_KEY]: {
+      platformStatuses: processedStatuses,
+      shippingControls: [],
+      globalControls: [],
+    } satisfies XianyuStatusSignals,
+  };
   const transaction = recordOrEmpty(extracted.transaction_information);
   const modularOrderNumber = transaction.order_number;
   const currentOrderNumber = Object.prototype.hasOwnProperty.call(
@@ -502,16 +523,17 @@ function enrichExtractionFromProcessedText(
   )
     ? modularOrderNumber
     : extracted.order_number;
-  if (usableOrderNumber(currentOrderNumber)) return extracted;
+  if (usableOrderNumber(currentOrderNumber)) return enriched;
   const orderNumber = orderNumberFromProcessedText(processedText);
-  if (!orderNumber) return extracted;
+  if (!orderNumber) return enriched;
   if (Object.prototype.hasOwnProperty.call(extracted, 'transaction_information')) {
-    return {
-      ...extracted,
+    enriched = {
+      ...enriched,
       transaction_information: { ...transaction, order_number: orderNumber },
     };
+    return enriched;
   }
-  return { ...extracted, order_number: orderNumber };
+  return { ...enriched, order_number: orderNumber };
 }
 
 function usableOrderNumber(value: unknown): boolean {
@@ -585,13 +607,27 @@ function buildModularReviewSchema(
   const productNeedsReview = purchasedItemsNeedReview(extracted, result);
   const shippingNeedsReview = shippingInformationNeedsReview(extracted, result);
   const transactionNeedsReview = transactionInformationNeedsReview(extracted, result);
-  if (!productNeedsReview && !shippingNeedsReview && !transactionNeedsReview) {
+  const platformStatusNeedsReview = result.platformTransactionStatus === 'unknown';
+  const fulfillmentStatusNeedsReview = result.fulfillmentStatus === 'unknown';
+  const pageContextNeedsReview =
+    platformStatusNeedsReview || fulfillmentStatusNeedsReview;
+  if (
+    !productNeedsReview &&
+    !shippingNeedsReview &&
+    !transactionNeedsReview &&
+    !pageContextNeedsReview
+  ) {
     return undefined;
   }
   return {
     ...(productNeedsReview ? buildPurchasedItemsReviewSchema(result) : {}),
-    ...(shippingNeedsReview ? SHIPPING_INFORMATION_MODULE_SCHEMA : {}),
+    ...(
+      shippingNeedsReview || fulfillmentStatusNeedsReview
+        ? SHIPPING_INFORMATION_MODULE_SCHEMA
+        : {}
+    ),
     ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
+    ...(pageContextNeedsReview ? PAGE_CONTEXT_MODULE_SCHEMA : {}),
   };
 }
 
@@ -807,6 +843,10 @@ function mergeReviewResult(
   fillMissingScalar(merged, flattened, 'amount');
   fillMissingStatus(merged, flattened, 'platform_transaction_status');
   fillMissingStatus(merged, flattened, 'fulfillment_status');
+  merged[XIANYU_STATUS_SIGNALS_KEY] = mergeXianyuStatusSignals(
+    readXianyuStatusSignals(primary),
+    readXianyuStatusSignals(flattened),
+  );
   merged.page_controls = { labels: controlLabels };
 
   if (
@@ -896,6 +936,7 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
     platform_transaction_status: review.platform_transaction_status,
     fulfillment_status: review.fulfillment_status,
     items: normalizeReviewedItems(orderProductSection.items ?? review.items),
+    [XIANYU_STATUS_SIGNALS_KEY]: readXianyuStatusSignals(review),
     page_controls: { labels: controlLabels },
   };
 }
@@ -918,6 +959,15 @@ function flattenModularExtraction(
   const shippingInformation = recordOrEmpty(extracted.shipping_information);
   const transactionInformation = recordOrEmpty(extracted.transaction_information);
   const pageContext = recordOrEmpty(extracted.page_context);
+  const inheritedStatusSignals = readXianyuStatusSignals(extracted);
+  const topStatuses = platformStatusSignals(pageContext.top_status_text);
+  const statusSignals: XianyuStatusSignals = {
+    platformStatuses: topStatuses.length > 0
+      ? topStatuses
+      : inheritedStatusSignals.platformStatuses,
+    shippingControls: stringList(shippingInformation.controls),
+    globalControls: stringList(pageContext.global_controls),
+  };
   const controlLabels = [...new Set([
     ...stringList(purchasedItems.controls),
     ...stringList(shippingInformation.controls),
@@ -997,6 +1047,7 @@ function flattenModularExtraction(
       'detail_state',
       extracted.detail_state,
     ),
+    [XIANYU_STATUS_SIGNALS_KEY]: statusSignals,
     page_controls: { labels: controlLabels },
   };
 }
@@ -1015,10 +1066,87 @@ function stringList(value: unknown): string[] {
     .map((entry) => {
       if (typeof entry === 'string') return entry.trim();
       const control = recordOrEmpty(entry);
-      return typeof control.text === 'string' ? control.text.trim() : '';
+      if (typeof control.text === 'string') return control.text.trim();
+      return typeof control.label === 'string' ? control.label.trim() : '';
     })
     .filter(Boolean)
     .slice(0, 100);
+}
+
+function readXianyuStatusSignals(
+  source: Record<string, unknown>,
+): XianyuStatusSignals {
+  const raw = recordOrEmpty(source[XIANYU_STATUS_SIGNALS_KEY]);
+  const platformStatuses = Array.isArray(raw.platformStatuses)
+    ? raw.platformStatuses.filter(
+        (status): status is PlatformTransactionStatus =>
+          status === 'paid' || status === 'cancelled' || status === 'refunded',
+      )
+    : [];
+  return {
+    platformStatuses: [...new Set(platformStatuses)],
+    shippingControls: [...new Set(stringList(raw.shippingControls))],
+    globalControls: [...new Set(stringList(raw.globalControls))],
+  };
+}
+
+function mergeXianyuStatusSignals(
+  ...signals: XianyuStatusSignals[]
+): XianyuStatusSignals {
+  return {
+    platformStatuses: [...new Set(signals.flatMap((entry) => entry.platformStatuses))],
+    shippingControls: [...new Set(signals.flatMap((entry) => entry.shippingControls))],
+    globalControls: [...new Set(signals.flatMap((entry) => entry.globalControls))],
+  };
+}
+
+function resolvedPlatformTransactionStatus(
+  extracted: Record<string, unknown>,
+): PlatformTransactionStatus {
+  const explicitStatus = normalizePlatformTransactionStatus(
+    extracted.platform_transaction_status,
+  );
+  if (explicitStatus !== 'unknown') return explicitStatus;
+  const signals = readXianyuStatusSignals(extracted);
+  const inferredStatuses = [...new Set(signals.platformStatuses)];
+  return inferredStatuses.length === 1 ? inferredStatuses[0] : 'unknown';
+}
+
+function resolvedFulfillmentStatus(
+  extracted: Record<string, unknown>,
+): FulfillmentStatus {
+  const explicitStatus = normalizeFulfillmentStatus(extracted.fulfillment_status);
+  if (explicitStatus !== 'unknown') return explicitStatus;
+  const signals = readXianyuStatusSignals(extracted);
+  return [...signals.shippingControls, ...signals.globalControls].some(isGoShipControl)
+    ? 'pending_shipment'
+    : 'unknown';
+}
+
+function processedTopStatusSignals(value: unknown): PlatformTransactionStatus[] {
+  if (typeof value !== 'string') return [];
+  const topLines = value
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return platformStatusSignals(topLines.join('\n'));
+}
+
+function platformStatusSignals(value: unknown): PlatformTransactionStatus[] {
+  if (typeof value !== 'string') return [];
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, '');
+  const statuses: PlatformTransactionStatus[] = [];
+  if (/(?:退款成功|退款完成|已退款)/u.test(normalized)) statuses.push('refunded');
+  if (/(?:交易已取消|订单已取消|交易已关闭|订单已关闭|交易关闭)/u.test(normalized)) {
+    statuses.push('cancelled');
+  }
+  if (/(?:买家已付款|交易成功)/u.test(normalized)) statuses.push('paid');
+  return [...new Set(statuses)];
+}
+
+function isGoShipControl(value: string): boolean {
+  return comparableText(value) === '去发货';
 }
 
 function buildPricingReviewSchema(result: RecognitionResult): Record<string, unknown> {
@@ -1671,6 +1799,7 @@ function sanitizeOrderExtraction(
     sanitized[key] = sanitizeMoneyValue(extracted[key]);
   }
   sanitized.items = sanitizeExtractedItems(extracted.items, controlLabels);
+  sanitized[XIANYU_STATUS_SIGNALS_KEY] = readXianyuStatusSignals(extracted);
   return sanitized;
 }
 
@@ -1787,10 +1916,8 @@ function normalizeOrderResult(
     productTotalCents: moneyToCents(extracted.product_total),
     shippingFeeCents: moneyToCents(extracted.shipping_fee),
     amountCents: moneyToCents(extracted.amount),
-    platformTransactionStatus: normalizePlatformTransactionStatus(
-      extracted.platform_transaction_status,
-    ),
-    fulfillmentStatus: normalizeFulfillmentStatus(extracted.fulfillment_status),
+    platformTransactionStatus: resolvedPlatformTransactionStatus(extracted),
+    fulfillmentStatus: resolvedFulfillmentStatus(extracted),
     items,
   };
 }
