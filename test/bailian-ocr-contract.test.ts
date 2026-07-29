@@ -163,10 +163,11 @@ describe('阿里云百炼 OCR 请求契约', () => {
       input: {
         messages: Array<{
           content: Array<{
-            image: string;
-            min_pixels: number;
-            max_pixels: number;
-            enable_rotate: boolean;
+            image?: string;
+            text?: string;
+            min_pixels?: number;
+            max_pixels?: number;
+            enable_rotate?: boolean;
           }>;
         }>;
       };
@@ -186,6 +187,19 @@ describe('阿里云百炼 OCR 请求契约', () => {
       max_pixels: 32 * 32 * 8192,
       enable_rotate: false,
     });
+    expect(body.input.messages[0].content[1]?.text).toContain(
+      'recipient 只能填写收件人姓名',
+    );
+    expect(body.input.messages[0].content[1]?.text).toContain(
+      '必须把手机号单独填写到 phone',
+    );
+    expect(body.input.messages[0].content[1]?.text).toContain(
+      'controls 中的每一项只能是截图上可见的按钮文字字符串',
+    );
+    expect(body.input.messages[0].content[1]?.text).toContain(
+      'recipient 不含手机号或按钮',
+    );
+    expect(body.input.messages[0].content[1]?.text).toContain('输出前自检');
     expect(init?.redirect).toBe('error');
     expect(body.parameters.ocr_options.task).toBe('key_information_extraction');
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
@@ -570,7 +584,13 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(request).toHaveBeenCalledOnce();
   });
 
-  it('模块化联系人行可证明误列为按钮的真实收件人姓名', async () => {
+  it.each([
+    { phoneCase: '独立手机号已识别', extractedPhone: '13900000008', calls: 1 },
+    { phoneCase: '独立手机号缺失', extractedPhone: null, calls: 2 },
+  ])('模块化联系人行在$phoneCase时可证明误列为按钮的真实收件人姓名', async ({
+    extractedPhone,
+    calls,
+  }) => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -589,7 +609,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       shipping_information: {
         controls: ['复制', '合成真实姓名戊'],
         recipient: '合成真实姓名戊',
-        phone: '13900000008',
+        phone: extractedPhone,
         recipient_phone_line_text: '合成真实姓名戊 (+86) 139–0000–0008',
         address: '测试省测试市示例区安全路5号',
         province: '测试省',
@@ -634,7 +654,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(attempt.result.recipient).toBe('合成真实姓名戊');
     expect(attempt.result.phoneNormalized).toBe('13900000008');
-    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledTimes(calls);
   });
 
   it('模块化联系人行的手机号缺少末端边界时不能恢复模型按钮', async () => {
@@ -717,6 +737,11 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(request).toHaveBeenCalledTimes(2);
     const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      input: {
+        messages: Array<{
+          content: Array<{ text?: string }>;
+        }>;
+      };
       parameters: {
         ocr_options: {
           task_config: { result_schema: Record<string, unknown> };
@@ -726,6 +751,10 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(Object.keys(
       secondBody.parameters.ocr_options.task_config.result_schema,
     )).toEqual(['shipping_information']);
+    expect(secondBody.input.messages[0].content[1]?.text).toContain(
+      '只复核 result_schema 中列出的异常模块',
+    );
+    expect(secondBody.input.messages[0].content[1]?.text).toContain('姓名、手机号、按钮必须各归其位');
     expect(attempt.result).toMatchObject({
       recipient: '合成收件人辛',
       phone: '13900000001',
@@ -1172,7 +1201,267 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('首轮同时缺失商品与收货信息时唯一一次复核只修复商品模块', async () => {
+  it.each([
+    { reviewCase: '手机号为空', reviewedPhone: '' },
+    { reviewCase: '手机号与首轮冲突', reviewedPhone: '13800000011' },
+  ])('复核误把发货按钮当收件人且$reviewCase时仍从首轮确定性拆出姓名和手机号', async ({
+    reviewedPhone,
+  }) => {
+    const request = vi.fn(async (
+      _input: string,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成完整商品子',
+              spec: '规格K',
+              unit_price: '18.00',
+              price_tag_text: '¥18.00',
+              quantity: '1',
+              quantity_text: '×1',
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: '合成收件人子 13900000011 | 复制',
+            recipient_phone_line_text: '',
+            address: '测试省测试市示例区安全路11号',
+            province: '测试省',
+            city: '测试市',
+            district: '示例区',
+            controls: [
+              { text: '复制', action: 'copy' },
+              { text: '去发货', action: 'ship' },
+            ],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-RECIPIENT-LOCAL-RECOVERY-0001',
+            alipay_transaction_number: null,
+            product_total: '18.00',
+            shipping_fee: '0.00',
+            amount: '18.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: [{ text: '展开', action: 'expand' }],
+          },
+          page_context: {
+            global_controls: [
+              { text: '联系买家', action: 'contact' },
+              { text: '取消订单', action: 'cancel' },
+              { text: '去发货', action: 'ship' },
+            ],
+            excluded_regions: [],
+          },
+        }, 'request-recipient-local-recovery-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '去发货',
+          recipient_phone_line_text: '',
+          phone: reviewedPhone,
+          address: '',
+          province: null,
+          city: null,
+          district: null,
+          controls: [{ text: '去发货', action: 'ship' }],
+        },
+      }, 'request-recipient-local-recovery-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-recipient-local-recovery',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-recipient-local-recovery.png',
+        originalName: '合成收件人本地恢复订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-recipient-local-recovery',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(request.mock.calls[1][1]?.body)) as {
+      parameters: {
+        ocr_options: {
+          task_config: { result_schema: Record<string, unknown> };
+        };
+      };
+    };
+    expect(Object.keys(
+      secondBody.parameters.ocr_options.task_config.result_schema,
+    )).toEqual(['shipping_information']);
+    expect(attempt.result).toMatchObject({
+      recipient: '合成收件人子',
+      phone: '13900000011',
+      phoneNormalized: '13900000011',
+      addressOriginal: '测试省测试市示例区安全路11号',
+    });
+  });
+
+  it('模型以对象返回未知功能控件时仍不会把控件文字保存为收件人', async () => {
+    const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
+      purchased_items: {
+        items: [{
+          title: '合成完整商品丑',
+          spec: '规格L',
+          unit_price: '20.00',
+          price_tag_text: '¥20.00',
+          quantity: '1',
+          quantity_text: '×1',
+        }],
+        controls: [],
+      },
+      shipping_information: {
+        recipient: '处理发运',
+        recipient_phone_line_text: '',
+        phone: '13900000012',
+        address: '测试省测试市示例区安全路12号',
+        province: '测试省',
+        city: '测试市',
+        district: '示例区',
+        controls: [{ text: '处理发运', action: 'ship' }],
+      },
+      transaction_information: {
+        detail_state: 'collapsed',
+        order_number: 'XY-SYNTH-OBJECT-CONTROL-0001',
+        alipay_transaction_number: null,
+        product_total: '20.00',
+        shipping_fee: '0.00',
+        amount: '20.00',
+        platform_transaction_status: 'paid',
+        fulfillment_status: 'pending_shipment',
+        buyer_nickname_label: null,
+        buyer_nickname: null,
+        order_time: null,
+        payment_time: null,
+        controls: [],
+      },
+      page_context: {
+        global_controls: [],
+        excluded_regions: [],
+      },
+    }, `request-object-control-${request.mock.calls.length}`));
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-object-control',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-object-control.png',
+        originalName: '合成对象功能控件订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-object-control',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '',
+      phone: '13900000012',
+      phoneNormalized: '13900000012',
+    });
+  });
+
+  it('收件人字段含多个手机号且复核无效时不猜测姓名或手机号', async () => {
+    const request = vi.fn(async (): Promise<Response> => {
+      if (request.mock.calls.length === 1) {
+        return successfulKieResponse({
+          purchased_items: {
+            items: [{
+              title: '合成完整商品卯',
+              spec: '规格M',
+              unit_price: '22.00',
+              price_tag_text: '¥22.00',
+              quantity: '1',
+              quantity_text: '×1',
+            }],
+            controls: [],
+          },
+          shipping_information: {
+            recipient: '合成收件人卯 13900000014 13800000014 | 复制',
+            recipient_phone_line_text: '',
+            phone: null,
+            address: '测试省测试市示例区安全路14号',
+            province: '测试省',
+            city: '测试市',
+            district: '示例区',
+            controls: ['复制', '去发货'],
+          },
+          transaction_information: {
+            detail_state: 'collapsed',
+            order_number: 'XY-SYNTH-AMBIGUOUS-CONTACT-0001',
+            alipay_transaction_number: null,
+            product_total: '22.00',
+            shipping_fee: '0.00',
+            amount: '22.00',
+            platform_transaction_status: 'paid',
+            fulfillment_status: 'pending_shipment',
+            buyer_nickname_label: null,
+            buyer_nickname: null,
+            order_time: null,
+            payment_time: null,
+            controls: [],
+          },
+          page_context: {
+            global_controls: ['联系买家', '取消订单', '去发货'],
+            excluded_regions: [],
+          },
+        }, 'request-ambiguous-contact-primary');
+      }
+
+      return successfulKieResponse({
+        shipping_information: {
+          recipient: '去发货',
+          recipient_phone_line_text: '',
+          phone: null,
+          address: null,
+          province: null,
+          city: null,
+          district: null,
+          controls: ['去发货'],
+        },
+      }, 'request-ambiguous-contact-review');
+    });
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-ambiguous-contact',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-ambiguous-contact.png',
+        originalName: '合成多手机号收件人订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-ambiguous-contact',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '',
+      phone: '',
+      phoneNormalized: '',
+    });
+  });
+
+  it('首轮同时缺失商品与收货信息时唯一一次复核同时修复两个模块', async () => {
     const request = vi.fn(async (
       _input: string,
       _init?: RequestInit,
@@ -1216,6 +1505,16 @@ describe('阿里云百炼 OCR 请求契约', () => {
           }],
           controls: [],
         },
+        shipping_information: {
+          recipient: '合成收件人寅',
+          recipient_phone_line_text: '合成收件人寅 13900000013',
+          phone: '13900000013',
+          address: '测试省测试市示例区安全路13号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+          controls: ['复制', '去发货'],
+        },
       }, 'request-product-only-repair-review');
     });
     const client = new BailianOcrClient(request);
@@ -1243,15 +1542,17 @@ describe('阿里云百炼 OCR 请求契约', () => {
       };
     };
     const secondSchema = secondBody.parameters.ocr_options.task_config.result_schema;
-    expect(Object.keys(secondSchema)).toEqual(['purchased_items']);
-    expect(secondSchema).not.toHaveProperty('shipping_information');
+    expect(Object.keys(secondSchema)).toEqual([
+      'purchased_items',
+      'shipping_information',
+    ]);
     expect(secondSchema).not.toHaveProperty('transaction_information');
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-PRODUCT-ONLY-REPAIR-0001',
-      recipient: '',
-      phone: '',
-      phoneNormalized: '',
-      addressOriginal: '',
+      recipient: '合成收件人寅',
+      phone: '13900000013',
+      phoneNormalized: '13900000013',
+      addressOriginal: '测试省测试市示例区安全路13号',
       productTotalCents: 3_000,
       amountCents: 3_000,
       items: [{
@@ -2225,7 +2526,12 @@ describe('阿里云百炼 OCR 请求契约', () => {
     };
     expect(Object.keys(
       secondBody.parameters.ocr_options.task_config.result_schema,
-    )).toEqual(['order_product_section']);
+    )).toEqual([
+      'order_product_section',
+      'shipping_contact',
+      'buyer_section',
+      'page_controls',
+    ]);
   });
 
   it('折叠订单首轮在付款时间后提前结束时优先修复并恢复商品明细', async () => {

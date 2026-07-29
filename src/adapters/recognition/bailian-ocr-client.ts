@@ -26,6 +26,23 @@ const CONNECTION_TEST_IMAGE =
 const MAXIMUM_BASE64_DATA_URL_BYTES = 10 * 1024 * 1024;
 const ORDER_NUMBER_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;
 
+const ORDER_EXTRACTION_USER_PROMPT = [
+  '请严格按照 result_schema 分模块提取当前闲鱼订单，只依据截图中可见内容，不得猜测。',
+  'shipping_information.recipient 只能填写收件人姓名，禁止包含手机号、手机号前后的分隔符以及“复制”“去发货”等功能按钮；它也绝不是买家昵称。',
+  '收件人姓名同行出现唯一完整手机号时，必须把手机号单独填写到 phone；recipient_phone_line_text 从姓名开始并在手机号最后一位结束，不得带入后续按钮。',
+  'buyer_nickname 只有在交易信息中明确看到“买家昵称”标签时才能填写，否则返回 null。',
+  'controls 中的每一项只能是截图上可见的按钮文字字符串，不得返回对象，也不得混入姓名、手机号、地址、商品、金额或订单号。',
+  '商品仅来自收货信息之后、交易信息之前的订单商品卡；忽略广告、推荐商品和页面全局操作。',
+  '无法确认的字段返回 null。输出前自检：recipient 不含手机号或按钮；若 recipient 行含手机号则 phone 不得为空；业务字段不得等于控件文字。',
+].join('\n');
+
+const ORDER_REVIEW_USER_PROMPT = [
+  '只复核 result_schema 中列出的异常模块，只依据截图中可见内容，不得猜测或补写未显示字段。',
+  'recipient 只能填写收件人姓名，禁止包含手机号、手机号前后的分隔符以及“复制”“去发货”等功能按钮；姓名同行的唯一完整手机号必须单独填写到 phone。',
+  'controls 中的每一项只能是截图上可见的按钮文字字符串，不得返回对象或混入业务字段。',
+  '商品只取订单商品卡，忽略广告与推荐内容。输出前自检：姓名、手机号、按钮必须各归其位，无法确认时返回 null。',
+].join('\n');
+
 const XIANYU_UI_CONTROL_LABELS = new Set([
   '去发货',
   '发货',
@@ -220,6 +237,7 @@ export class BailianOcrClient implements BailianConnectionTester {
       apiKey: input.apiKey,
       imageDataUrl,
       resultSchema: ORDER_RESULT_SCHEMA,
+      userPrompt: ORDER_EXTRACTION_USER_PROMPT,
     });
     const primaryExtracted = sanitizeOrderExtraction(
       flattenModularExtraction(primary.extracted),
@@ -237,6 +255,7 @@ export class BailianOcrClient implements BailianConnectionTester {
           apiKey: input.apiKey,
           imageDataUrl,
           resultSchema: reviewSchema,
+          userPrompt: ORDER_REVIEW_USER_PROMPT,
         });
         const merged = mergeReviewResult(
           primaryExtracted,
@@ -261,6 +280,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     apiKey: string;
     imageDataUrl: string;
     resultSchema: Record<string, unknown>;
+    userPrompt: string;
   }): Promise<KieResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMilliseconds);
@@ -285,6 +305,7 @@ export class BailianOcrClient implements BailianConnectionTester {
                     max_pixels: 32 * 32 * 8192,
                     enable_rotate: false,
                   },
+                  { text: input.userPrompt },
                 ],
               },
             ],
@@ -537,41 +558,41 @@ function buildReviewSchema(result: RecognitionResult): Record<string, unknown> |
     result.shippingFeeCents === null ||
     result.amountCents === null;
 
-  if (purchasedItemsNeedReview) {
-    const productReview = buildPricingReviewSchema(result);
-    return { order_product_section: productReview.order_product_section };
+  if (!purchasedItemsNeedReview && !shippingNeedsReview && !transactionNeedsReview) {
+    return undefined;
   }
-  if (shippingNeedsReview) return SHIPPING_REVIEW_SCHEMA;
-  if (transactionNeedsReview) {
-    return {
-      ...AMOUNTS_REVIEW_SCHEMA,
-      ...IDENTITY_REVIEW_SCHEMA,
-    };
-  }
-  return undefined;
+  const productReview = purchasedItemsNeedReview
+    ? buildPricingReviewSchema(result)
+    : undefined;
+  return {
+    ...(productReview
+      ? { order_product_section: productReview.order_product_section }
+      : {}),
+    ...(shippingNeedsReview ? SHIPPING_REVIEW_SCHEMA : {}),
+    ...(transactionNeedsReview
+      ? {
+          ...AMOUNTS_REVIEW_SCHEMA,
+          ...IDENTITY_REVIEW_SCHEMA,
+        }
+      : {}),
+  };
 }
 
 function buildModularReviewSchema(
   extracted: Record<string, unknown>,
   result: RecognitionResult,
 ): Record<string, unknown> | undefined {
+  const productNeedsReview = purchasedItemsNeedReview(extracted, result);
+  const shippingNeedsReview = shippingInformationNeedsReview(extracted, result);
   const transactionNeedsReview = transactionInformationNeedsReview(extracted, result);
-  if (purchasedItemsNeedReview(extracted, result)) {
-    return {
-      ...buildPurchasedItemsReviewSchema(result),
-      ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
-    };
+  if (!productNeedsReview && !shippingNeedsReview && !transactionNeedsReview) {
+    return undefined;
   }
-  if (shippingInformationNeedsReview(extracted, result)) {
-    return {
-      ...SHIPPING_INFORMATION_MODULE_SCHEMA,
-      ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
-    };
-  }
-  if (transactionNeedsReview) {
-    return TRANSACTION_INFORMATION_MODULE_SCHEMA;
-  }
-  return undefined;
+  return {
+    ...(productNeedsReview ? buildPurchasedItemsReviewSchema(result) : {}),
+    ...(shippingNeedsReview ? SHIPPING_INFORMATION_MODULE_SCHEMA : {}),
+    ...(transactionNeedsReview ? TRANSACTION_INFORMATION_MODULE_SCHEMA : {}),
+  };
 }
 
 function purchasedItemsNeedReview(
@@ -600,6 +621,9 @@ function shippingInformationNeedsReview(
   result: RecognitionResult,
 ): boolean {
   if (!Object.prototype.hasOwnProperty.call(extracted, 'shipping_information')) return true;
+  const phoneWasRecoveredFromContactText = Boolean(
+    result.phone && !chineseMobileCore(extracted.phone),
+  );
   const identitiesMatch = Boolean(
     result.recipient &&
     result.buyerNickname &&
@@ -608,6 +632,7 @@ function shippingInformationNeedsReview(
   return !result.recipient ||
     !result.phone ||
     !result.addressOriginal ||
+    phoneWasRecoveredFromContactText ||
     identitiesMatch ||
     isMaskedNickname(result.recipient);
 }
@@ -666,13 +691,19 @@ function mergeReviewResult(
   const flattened = flattenReviewResult(review);
   const merged: Record<string, unknown> = { ...primary };
   const controlLabels = uniquePageControlLabels(primary, flattened);
-  const primaryBuyer = businessText(primary.buyer_nickname, controlLabels);
-  const primaryRecipient = optionalText(recipientValue(
+  const recoveredPrimaryContact = recoverShippingContact(
     primary.recipient,
     primary.phone,
     primary.recipient_phone_line_text,
     controlLabels,
-  ));
+  );
+  const primaryBuyer = businessText(primary.buyer_nickname, controlLabels);
+  const primaryRecipient = optionalText(recoveredPrimaryContact.recipient);
+  const recoveredPrimaryPhone = chineseMobileCore(recoveredPrimaryContact.phone);
+  if (primaryRecipient) merged.recipient = primaryRecipient;
+  if (!chineseMobileCore(primary.phone) && recoveredPrimaryPhone) {
+    merged.phone = recoveredPrimaryContact.phone;
+  }
   const reviewedBuyer = businessText(flattened.buyer_nickname, controlLabels);
   const strictlyReviewedRecipient = optionalText(recipientValue(
     flattened.recipient,
@@ -958,8 +989,11 @@ function moduleField(
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
-    .filter((entry): entry is string => typeof entry === 'string')
-    .map((entry) => entry.trim())
+    .map((entry) => {
+      if (typeof entry === 'string') return entry.trim();
+      const control = recordOrEmpty(entry);
+      return typeof control.text === 'string' ? control.text.trim() : '';
+    })
     .filter(Boolean)
     .slice(0, 100);
 }
@@ -1074,12 +1108,7 @@ function uniquePageControlLabels(
 function pageControlLabels(source: Record<string, unknown>): string[] {
   const controls = recordOrEmpty(source.page_controls);
   const labels = controls.labels ?? source.ui_control_labels;
-  if (!Array.isArray(labels)) return [];
-  return labels
-    .filter((label): label is string => typeof label === 'string')
-    .map((label) => label.trim())
-    .filter(Boolean)
-    .slice(0, 100);
+  return stringList(labels);
 }
 
 function businessValue(value: unknown, controlLabels: string[]): unknown {
@@ -1131,6 +1160,118 @@ function recipientValue(
   return candidate;
 }
 
+type RecoveredShippingContact = {
+  recipient: unknown;
+  phone: unknown;
+};
+
+type RecoveredContactCandidate = {
+  core: string;
+  recipient: string;
+};
+
+function recoverShippingContact(
+  recipientInput: unknown,
+  phoneInput: unknown,
+  contactLineInput: unknown,
+  controlLabels: string[],
+): RecoveredShippingContact {
+  const recipientText = optionalText(recipientInput);
+  const contactLineText = optionalText(contactLineInput);
+  const cleanedRecipient = stripTrailingUiControlLabels(
+    recipientText,
+    controlLabels,
+    'contact-boundary',
+  );
+  const cleanedContactLine = stripTrailingUiControlLabels(
+    contactLineText,
+    controlLabels,
+    'contact-boundary',
+  );
+  const explicitPhone = chineseMobileCore(phoneInput);
+
+  if (explicitPhone) {
+    return {
+      recipient: recipientValue(
+        cleanedRecipient,
+        phoneInput,
+        cleanedContactLine,
+        controlLabels,
+      ),
+      phone: phoneInput,
+    };
+  }
+
+  const candidates = [cleanedRecipient, cleanedContactLine]
+    .map(recoveredContactCandidate)
+    .filter((candidate): candidate is RecoveredContactCandidate => Boolean(candidate));
+  const distinctPhones = [...new Set(candidates.map((candidate) => candidate.core))];
+  if (distinctPhones.length !== 1) {
+    const recipientHasAmbiguousContactDigits = countDigits(cleanedRecipient) >= 7;
+    return {
+      recipient: recipientHasAmbiguousContactDigits
+        ? null
+        : recipientValue(
+            cleanedRecipient,
+            phoneInput,
+            cleanedContactLine,
+            controlLabels,
+          ),
+      phone: phoneInput,
+    };
+  }
+
+  const recoveredPhone = distinctPhones[0];
+  const recipientCandidate = candidates.find(
+    (candidate) => candidate.core === recoveredPhone && candidate.recipient,
+  )?.recipient ?? (countDigits(cleanedRecipient) < 7 ? cleanedRecipient : '');
+  const recoveredRecipient = isUnsafeRecoveredRecipient(
+      recipientCandidate,
+      controlLabels,
+      cleanedContactLine,
+      recoveredPhone,
+    )
+    ? null
+    : recipientCandidate || null;
+
+  return {
+    recipient: recoveredRecipient,
+    phone: recoveredPhone,
+  };
+}
+
+function recoveredContactCandidate(value: string): RecoveredContactCandidate | undefined {
+  if (!value) return undefined;
+  const suffix = trailingChineseMobileSuffix(value);
+  if (!suffix) return undefined;
+  const recipient = trimTrailingRecipientSeparators(value.slice(0, suffix.start));
+  if (countDigits(recipient) >= 7) return undefined;
+  return { core: suffix.core, recipient };
+}
+
+function countDigits(value: string): number {
+  return value.replace(/\D/gu, '').length;
+}
+
+function isUnsafeRecoveredRecipient(
+  value: string,
+  controlLabels: string[],
+  contactLine: string,
+  phone: string,
+): boolean {
+  if (!value || isHighConfidenceUiControlText(value)) return true;
+  if (/^(?:订单编号|支付宝交易号|交易号|买家昵称)(?:\s*[:：])?$/u.test(value)) {
+    return true;
+  }
+  const contactLineConfirmed = contactLineConfirmsRecipient(
+    contactLine,
+    value,
+    phone,
+  );
+  return isModelClassifiedUiControlText(value, controlLabels) &&
+    !contactLineConfirmed;
+}
+
 function phoneOnlyContactLine(lineValue: unknown, phoneValue: unknown): boolean {
   const line = optionalText(lineValue).normalize('NFKC');
   const phone = chineseMobileCore(phoneValue);
@@ -1155,7 +1296,11 @@ function contaminatedRecipientMatchesReview(
   );
 }
 
-function stripTrailingUiControlLabels(value: string, controlLabels: string[]): string {
+function stripTrailingUiControlLabels(
+  value: string,
+  controlLabels: string[],
+  policy: 'classified-suffix' | 'contact-boundary' = 'classified-suffix',
+): string {
   const labels = [...new Set([
     ...XIANYU_UI_CONTROL_LABELS,
     ...controlLabels,
@@ -1173,7 +1318,24 @@ function stripTrailingUiControlLabels(value: string, controlLabels: string[]): s
         'u',
       ).exec(candidate);
       if (!match) continue;
-      candidate = trimTrailingRecipientSeparators(candidate.slice(0, match.index));
+      const prefix = candidate.slice(0, match.index);
+      const trimmedPrefix = trimTrailingRecipientSeparators(prefix);
+      if (policy === 'contact-boundary') {
+        const hasLayoutBoundary = /[\s,，:：|｜·\p{Pd}()（）]$/u.test(prefix);
+        const prefixEndsWithPhone = Boolean(
+          trailingChineseMobileSuffix(trimmedPrefix),
+        );
+        const isKnownStandaloneControl = !prefix &&
+          isHighConfidenceUiControlText(label);
+        if (
+          !hasLayoutBoundary &&
+          !prefixEndsWithPhone &&
+          !isKnownStandaloneControl
+        ) {
+          continue;
+        }
+      }
+      candidate = trimmedPrefix;
       removed = true;
       break;
     }
@@ -1489,7 +1651,13 @@ function normalizeOrderResult(
 ): RecognitionResult {
   const addressOriginal = optionalText(extracted.address);
   const addressNormalized = normalizeAddress(addressOriginal);
-  const phone = identifierText(extracted.phone, '手机号');
+  const recoveredContact = recoverShippingContact(
+    extracted.recipient,
+    extracted.phone,
+    extracted.recipient_phone_line_text,
+    pageControlLabels(extracted),
+  );
+  const phone = identifierText(recoveredContact.phone, '手机号');
   const phoneNormalized = normalizePhone(phone);
   const addressParts = deriveAddressParts(addressNormalized, {
     province: optionalText(extracted.province),
@@ -1499,13 +1667,7 @@ function normalizeOrderResult(
   const buyerNickname = isBuyerNicknameLabel(extracted.buyer_nickname_label)
     ? optionalText(extracted.buyer_nickname)
     : '';
-  const recipientCandidate = recipientValue(
-    extracted.recipient,
-    extracted.phone,
-    extracted.recipient_phone_line_text,
-    pageControlLabels(extracted),
-  );
-  const recipient = optionalText(recipientCandidate);
+  const recipient = optionalText(recoveredContact.recipient);
   const items = normalizeItems(extracted.items);
   return {
     platform: 'xianyu',
