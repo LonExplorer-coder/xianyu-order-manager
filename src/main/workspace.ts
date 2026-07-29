@@ -143,6 +143,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 1) migrateToVersion1(database);
   if (row.version < 2) migrateToVersion2(database);
   if (row.version < 3) migrateToVersion3(database);
+  if (row.version < 4) migrateToVersion4(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -407,6 +408,91 @@ function migrateToVersion3(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion4(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE recognition_batch_items (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL REFERENCES recognition_batches(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 49),
+        source_name TEXT NOT NULL,
+        content_sha256 TEXT,
+        status TEXT NOT NULL CHECK (status IN (
+          'waiting_recognition', 'recognizing', 'validating',
+          'awaiting_confirmation', 'imported', 'waiting_retry', 'failed',
+          'duplicate_skipped', 'cancelled'
+        )),
+        draft_id TEXT UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (batch_id, position),
+        CHECK (
+          error_message IS NULL
+          OR status IN ('waiting_retry', 'failed')
+        )
+      ) STRICT;
+
+      INSERT INTO recognition_batch_items (
+        id, batch_id, position, source_name, content_sha256, status,
+        draft_id, error_message, created_at, updated_at
+      )
+      SELECT
+        screenshot_id,
+        batch_id,
+        position,
+        original_name,
+        content_sha256,
+        CASE
+          WHEN draft_id IS NULL THEN 'failed'
+          WHEN review_cancelled_at IS NOT NULL THEN 'cancelled'
+          WHEN draft_status = 'confirmed' THEN 'imported'
+          ELSE 'awaiting_confirmation'
+        END,
+        draft_id,
+        CASE
+          WHEN draft_id IS NULL THEN '旧版来源截图未关联订单草稿，无法恢复'
+          ELSE NULL
+        END,
+        created_at,
+        COALESCE(review_cancelled_at, confirmed_at, created_at)
+      FROM (
+        SELECT
+          screenshots.id AS screenshot_id,
+          screenshots.batch_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY screenshots.batch_id
+            ORDER BY screenshots.created_at, screenshots.id
+          ) - 1 AS position,
+          screenshots.original_name,
+          screenshots.content_sha256,
+          screenshots.created_at,
+          drafts.id AS draft_id,
+          drafts.status AS draft_status,
+          drafts.confirmed_at,
+          drafts.review_cancelled_at
+        FROM source_screenshots AS screenshots
+        LEFT JOIN order_drafts AS drafts
+          ON drafts.screenshot_id = screenshots.id
+          AND drafts.batch_id = screenshots.batch_id
+      );
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

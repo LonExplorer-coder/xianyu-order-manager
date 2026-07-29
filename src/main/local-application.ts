@@ -7,6 +7,8 @@ import type {
   OrderDraft,
   OrderItem,
   RecognitionBatch,
+  RecognitionBatchItemStatus,
+  RecognitionBatchView,
   RecognitionEvidence,
   OrderSummary,
   OriginalOrder,
@@ -21,9 +23,22 @@ import {
   normalizeAddress,
   normalizeShanghaiDateTime,
 } from '../core/order-normalization';
+import {
+  isRecognitionBatchItemStatus,
+  summarizeRecognitionBatchItems,
+} from '../core/recognition-batches';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
+
+export type RecognitionBatchItemUpdate = {
+  batchId: string;
+  itemId: string;
+  status: RecognitionBatchItemStatus;
+  draftId?: string;
+  sha256?: string;
+  errorMessage?: string;
+};
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
@@ -45,10 +60,161 @@ export class LocalApplication {
     this.workspace = Workspace.open(dataDirectory);
   }
 
+  public createRecognitionBatch(input: {
+    id: string;
+    createdAt: string;
+    items: Array<{ id: string; sourceName: string }>;
+  }): void {
+    if (input.items.length === 0) throw new Error('识别批次必须包含来源截图');
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      workspace.database
+        .prepare(`
+          INSERT INTO recognition_batches (
+            id, platform, seller_account, status, created_at
+          ) VALUES (?, 'xianyu', '', 'awaiting_review', ?)
+        `)
+        .run(input.id, input.createdAt);
+      const insertItem = workspace.database.prepare(`
+        INSERT INTO recognition_batch_items (
+          id, batch_id, position, source_name, content_sha256, status,
+          draft_id, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, NULL, 'waiting_recognition', NULL, NULL, ?, ?)
+      `);
+      input.items.forEach((item, position) => {
+        insertItem.run(
+          item.id,
+          input.id,
+          position,
+          item.sourceName,
+          input.createdAt,
+          input.createdAt,
+        );
+      });
+    });
+  }
+
+  public restoreRecognitionBatches(): RecognitionBatchView[] {
+    const workspace = this.requireWorkspace();
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'failed',
+            error_message = '上次退出时处理未完成，请重新上传这张截图',
+            updated_at = ?
+          WHERE status IN ('waiting_recognition', 'recognizing', 'validating')
+        `)
+        .run(now);
+      workspace.database.exec(`
+        UPDATE recognition_batches
+        SET status = CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM recognition_batch_items AS items
+            WHERE items.batch_id = recognition_batches.id
+              AND items.status = 'awaiting_confirmation'
+          ) THEN 'awaiting_review'
+          ELSE 'completed'
+        END
+        WHERE EXISTS (
+          SELECT 1
+          FROM recognition_batch_items AS items
+          WHERE items.batch_id = recognition_batches.id
+        );
+      `);
+    });
+    return this.listRecognitionBatches();
+  }
+
+  public listRecognitionBatches(): RecognitionBatchView[] {
+    const workspace = this.requireWorkspace();
+    const batchRows = workspace.database
+      .prepare(`
+        SELECT batches.id, batches.created_at
+        FROM recognition_batches AS batches
+        WHERE EXISTS (
+          SELECT 1
+          FROM recognition_batch_items AS items
+          WHERE items.batch_id = batches.id
+        )
+        ORDER BY batches.created_at DESC, batches.id DESC
+      `)
+      .all() as unknown as SqlRow[];
+    const itemRows = workspace.database
+      .prepare(`
+        SELECT items.id, items.batch_id, items.source_name, items.status,
+          items.draft_id, items.error_message
+        FROM recognition_batch_items AS items
+        JOIN recognition_batches AS batches ON batches.id = items.batch_id
+        ORDER BY batches.created_at DESC, batches.id DESC, items.position, items.id
+      `)
+      .all() as unknown as SqlRow[];
+    const itemsByBatch = new Map<string, SqlRow[]>();
+    for (const row of itemRows) {
+      const batchId = asString(row.batch_id);
+      const rows = itemsByBatch.get(batchId) ?? [];
+      rows.push(row);
+      itemsByBatch.set(batchId, rows);
+    }
+
+    return batchRows.map((batchRow) => {
+      const batchId = asString(batchRow.id);
+      const items = (itemsByBatch.get(batchId) ?? [])
+        .map((row) => ({
+          id: asString(row.id),
+          batchId: asString(row.batch_id),
+          sourceName: asString(row.source_name),
+          status: asRecognitionBatchItemStatus(row.status),
+          ...(row.draft_id === null ? {} : { draftId: asString(row.draft_id) }),
+          ...(row.error_message === null
+            ? {}
+            : { errorMessage: asString(row.error_message) }),
+        }));
+      return {
+        id: batchId,
+        items,
+        ...summarizeRecognitionBatchItems(items),
+        createdAt: asString(batchRow.created_at),
+      };
+    });
+  }
+
+  public updateRecognitionBatchItem(input: RecognitionBatchItemUpdate): void {
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      const result = workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = ?,
+            draft_id = COALESCE(?, draft_id),
+            content_sha256 = COALESCE(?, content_sha256),
+            error_message = ?,
+            updated_at = ?
+          WHERE id = ? AND batch_id = ?
+        `)
+        .run(
+          input.status,
+          input.draftId ?? null,
+          input.sha256 ?? null,
+          input.errorMessage ?? null,
+          new Date().toISOString(),
+          input.itemId,
+          input.batchId,
+        );
+      if (result.changes !== 1) throw new Error('未找到识别批次中的来源截图');
+      this.refreshRecognitionBatchStatus(input.batchId);
+    });
+  }
+
   public async submitRecognitionSource(
     sourcePath: string,
     batchId: string,
     onPhase?: (phase: 'validating') => void,
+    batchItemId?: string,
   ): Promise<OrderDraft> {
     const workspace = this.requireWorkspace();
     const extension = extname(sourcePath).toLowerCase();
@@ -205,6 +371,24 @@ export class LocalApplication {
             new Date(Date.parse(now) + index).toISOString(),
           );
         });
+
+        if (batchItemId) {
+          const linkedItem = workspace.database
+            .prepare(`
+              UPDATE recognition_batch_items
+              SET
+                status = 'awaiting_confirmation',
+                draft_id = ?,
+                content_sha256 = ?,
+                error_message = NULL,
+                updated_at = ?
+              WHERE id = ? AND batch_id = ?
+            `)
+            .run(draftId, sha256, now, batchItemId, batchId);
+          if (linkedItem.changes !== 1) {
+            throw new Error('未找到识别批次中的来源截图');
+          }
+        }
       });
 
       return this.getDraft(draftId);
@@ -224,9 +408,43 @@ export class LocalApplication {
       );
     }
     const batchId = randomUUID();
+    const batchItemIds = sourcePaths.map(() => randomUUID());
+    this.createRecognitionBatch({
+      id: batchId,
+      createdAt: new Date().toISOString(),
+      items: sourcePaths.map((sourcePath, index) => ({
+        id: batchItemIds[index],
+        sourceName: basename(sourcePath),
+      })),
+    });
     const drafts: OrderDraft[] = [];
-    for (const sourcePath of sourcePaths) {
-      drafts.push(await this.submitRecognitionSource(sourcePath, batchId));
+    for (const [index, sourcePath] of sourcePaths.entries()) {
+      const itemId = batchItemIds[index];
+      this.updateRecognitionBatchItem({
+        batchId,
+        itemId,
+        status: 'recognizing',
+      });
+      try {
+        drafts.push(await this.submitRecognitionSource(
+          sourcePath,
+          batchId,
+          () => this.updateRecognitionBatchItem({
+            batchId,
+            itemId,
+            status: 'validating',
+          }),
+          itemId,
+        ));
+      } catch (error) {
+        this.updateRecognitionBatchItem({
+          batchId,
+          itemId,
+          status: 'failed',
+          errorMessage: '来源截图识别失败，请检查图片完整清晰后重试',
+        });
+        throw error;
+      }
     }
     return { id: batchId, drafts };
   }
@@ -295,10 +513,23 @@ export class LocalApplication {
     };
   }
 
-  public hasSourceScreenshotSha256(sha256: string): boolean {
+  public hasActiveSourceScreenshotSha256(sha256: string): boolean {
     const workspace = this.requireWorkspace();
     const row = workspace.database
-      .prepare('SELECT 1 AS found FROM source_screenshots WHERE content_sha256 = ? LIMIT 1')
+      .prepare(`
+        SELECT 1 AS found
+        FROM source_screenshots AS screenshots
+        JOIN order_drafts AS drafts ON drafts.screenshot_id = screenshots.id
+        WHERE screenshots.content_sha256 = ?
+          AND (
+            drafts.status = 'confirmed'
+            OR (
+              drafts.status = 'awaiting_review'
+              AND drafts.review_cancelled_at IS NULL
+            )
+          )
+        LIMIT 1
+      `)
       .get(sha256) as SqlRow | undefined;
     return row !== undefined;
   }
@@ -306,6 +537,7 @@ export class LocalApplication {
   public cancelDraft(draftId: string): void {
     const workspace = this.requireWorkspace();
     workspace.transaction(() => {
+      const now = new Date().toISOString();
       const row = workspace.database
         .prepare(`
           SELECT batch_id, status, review_cancelled_at
@@ -327,10 +559,17 @@ export class LocalApplication {
             AND status = 'awaiting_review'
             AND review_cancelled_at IS NULL
         `)
-        .run(new Date().toISOString(), draftId);
+        .run(now, draftId);
       if (result.changes !== 1) {
         throw new Error('该订单草稿状态已变化，请刷新后重试');
       }
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET status = 'cancelled', error_message = NULL, updated_at = ?
+          WHERE draft_id = ?
+        `)
+        .run(now, draftId);
       this.completeBatchWhenReviewed(asString(row.batch_id));
     });
   }
@@ -441,6 +680,13 @@ export class LocalApplication {
       workspace.database
         .prepare("UPDATE order_drafts SET status = 'confirmed', confirmed_at = ? WHERE id = ?")
         .run(now, draft.id);
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET status = 'imported', error_message = NULL, updated_at = ?
+          WHERE draft_id = ?
+        `)
+        .run(now, draft.id);
       this.completeBatchWhenReviewed(persistedDraft.batchId);
     });
 
@@ -498,6 +744,28 @@ export class LocalApplication {
     workspace.database
       .prepare("UPDATE recognition_batches SET status = 'completed' WHERE id = ?")
       .run(batchId);
+  }
+
+  private refreshRecognitionBatchStatus(batchId: string): void {
+    const workspace = this.requireWorkspace();
+    workspace.database
+      .prepare(`
+        UPDATE recognition_batches
+        SET status = CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM recognition_batch_items
+            WHERE batch_id = ?
+              AND status IN (
+                'waiting_recognition', 'recognizing', 'validating',
+                'awaiting_confirmation'
+              )
+          ) THEN 'awaiting_review'
+          ELSE 'completed'
+        END
+        WHERE id = ?
+      `)
+      .run(batchId, batchId);
   }
 
   public getOrder(orderId: string): OrderDetails {
@@ -859,6 +1127,15 @@ function asLifecycleStatus(
 ): OriginalOrder['lifecycleStatus'] {
   if (value !== 'active' && value !== 'trashed' && value !== 'deleted') {
     throw new Error('数据库生命周期状态格式错误');
+  }
+  return value;
+}
+
+function asRecognitionBatchItemStatus(
+  value: string | number | null | undefined,
+): RecognitionBatchItemStatus {
+  if (!isRecognitionBatchItemStatus(value)) {
+    throw new Error('数据库来源截图识别状态格式错误');
   }
   return value;
 }

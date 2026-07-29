@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v3', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v4 并回填识别批次记录', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -18,7 +18,7 @@ describe('数据库升级', () => {
       first.database
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     expect(
       (
         first.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
@@ -42,6 +42,37 @@ describe('数据库升级', () => {
         .get(),
     ).toEqual({ review_cancelled_at: null });
     expect(first.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(
+      first.database
+        .prepare(`
+          SELECT batch_id, source_name, content_sha256, status, draft_id
+          FROM recognition_batch_items
+          WHERE draft_id = 'draft-v1'
+        `)
+        .get(),
+    ).toEqual({
+      batch_id: 'batch-v1',
+      source_name: '旧订单.png',
+      content_sha256: 'abc123',
+      status: 'imported',
+      draft_id: 'draft-v1',
+    });
+    expect(
+      first.database
+        .prepare(`
+          SELECT batch_id, source_name, content_sha256, status, draft_id, error_message
+          FROM recognition_batch_items
+          WHERE id = 'screenshot-orphan-v1'
+        `)
+        .get(),
+    ).toEqual({
+      batch_id: 'batch-v1',
+      source_name: '旧版残缺记录.png',
+      content_sha256: 'orphan123',
+      status: 'failed',
+      draft_id: null,
+      error_message: '旧版来源截图未关联订单草稿，无法恢复',
+    });
     expect(first.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
     expect(
       first.database
@@ -124,7 +155,7 @@ describe('数据库升级', () => {
       reopened.database
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     expect(
       (
         reopened.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
@@ -148,6 +179,24 @@ describe('数据库升级', () => {
     };
     const application = new LocalApplication(unusedRecognizer);
     application.openDataDirectory(dataDirectory);
+    expect(application.listRecognitionBatches()).toMatchObject([{
+      id: 'batch-v1',
+      totalCount: 2,
+      processedCount: 2,
+      counts: { imported: 1, failed: 1 },
+      items: [
+        {
+          sourceName: '旧订单.png',
+          status: 'imported',
+          draftId: 'draft-v1',
+        },
+        {
+          sourceName: '旧版残缺记录.png',
+          status: 'failed',
+          errorMessage: '旧版来源截图未关联订单草稿，无法恢复',
+        },
+      ],
+    }]);
     expect(application.getOrder('order-v1')).toMatchObject({
       order: {
         orderNumber: 'XY-V1-001',
@@ -291,6 +340,10 @@ function createVersion1Database(dataDirectory: string): void {
     INSERT INTO source_screenshots VALUES (
       'screenshot-v1', 'batch-v1', '旧订单.png', 'screenshots/old.png', 'abc123',
       'image/png', '2026-07-27T00:00:00.000Z'
+    );
+    INSERT INTO source_screenshots VALUES (
+      'screenshot-orphan-v1', 'batch-v1', '旧版残缺记录.png',
+      'screenshots/orphan.png', 'orphan123', 'image/png', '2026-07-27T00:00:02.000Z'
     );
   `);
 

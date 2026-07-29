@@ -418,6 +418,150 @@ describe('批量来源截图识别队列', () => {
     expect(recognize).toHaveBeenCalledTimes(2);
   });
 
+  it('取消未入库草稿后再次提交相同内容会重新识别而不是重复跳过', async () => {
+    let recognitionCount = 0;
+    const recognize = vi.fn<Recognizer['recognize']>(async () => {
+      recognitionCount += 1;
+      return attempt(`CANCELLED-RETRY-${recognitionCount}`);
+    });
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-batch-cancelled-retry-'));
+    const firstPath = join(root, '首次处理.png');
+    const retryPath = join(root, '取消后重试.png');
+    await Promise.all([
+      writeFile(firstPath, 'same-cancelled-image'),
+      writeFile(retryPath, 'same-cancelled-image'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]?.items[0]?.status)
+        .toBe('awaiting_confirmation');
+    });
+    session.cancelDraft(session.listRecognitionBatches()[0].items[0].draftId!);
+    expect(session.listOrders()).toEqual([]);
+
+    const retry = await session.submitSourceScreenshots([retryPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches().find((batch) => batch.id === retry.id))
+        .toMatchObject({
+          counts: { awaiting_confirmation: 1, duplicate_skipped: 0 },
+        });
+    });
+    expect(recognize).toHaveBeenCalledTimes(2);
+  });
+
+  it('重新打开同一数据目录后恢复完整识别批次记录并允许重传已取消截图', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-batch-persisted-history-'));
+    const dataDirectory = join(root, '订单数据');
+    const preferencesDirectory = join(root, '启动配置');
+    const sourcePaths = [
+      join(root, '已取消.png'),
+      join(root, '批内重复.png'),
+      join(root, '已入库.png'),
+      join(root, '等待重试.png'),
+      join(root, '识别失败.png'),
+    ];
+    await Promise.all([
+      writeFile(sourcePaths[0], 'persisted-shared-image'),
+      writeFile(sourcePaths[1], 'persisted-shared-image'),
+      writeFile(sourcePaths[2], 'persisted-imported-image'),
+      writeFile(sourcePaths[3], 'persisted-temporary-error'),
+      writeFile(sourcePaths[4], 'persisted-permanent-error'),
+    ]);
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(attempt('PERSISTED-HISTORY'))
+      .mockResolvedValueOnce(attempt('PERSISTED-IMPORTED'))
+      .mockRejectedValueOnce(new Error('百炼 OCR 当前限流或额度不足，请稍后再试'))
+      .mockRejectedValueOnce(new Error('百炼 OCR 无法识别这张截图，请确认图片完整清晰'));
+    const first = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize },
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+
+    const originalBatch = await first.submitSourceScreenshots(sourcePaths);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0]?.processedCount).toBe(5);
+    });
+    first.cancelDraft(first.listRecognitionBatches()[0].items[0].draftId!);
+    const importedDraft = first.getDraft(
+      first.listRecognitionBatches()[0].items[2].draftId!,
+    );
+    first.confirmDraft(importedDraft);
+    expect(first.listRecognitionBatches()[0]).toMatchObject({
+      id: originalBatch.id,
+      totalCount: 5,
+      processedCount: 5,
+      counts: {
+        cancelled: 1,
+        duplicate_skipped: 1,
+        imported: 1,
+        waiting_retry: 1,
+        failed: 1,
+      },
+    });
+    await eventuallyMissing(join(
+      dataDirectory,
+      '.recognition-queue',
+      originalBatch.id,
+    ));
+    first.close();
+
+    const retryRecognition = vi.fn<Recognizer['recognize']>(async () => (
+      attempt('PERSISTED-CANCELLED-RETRY')
+    ));
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: retryRecognition },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    reopened.useDataDirectory(dataDirectory);
+
+    expect(reopened.listRecognitionBatches()).toMatchObject([{
+      id: originalBatch.id,
+      totalCount: 5,
+      processedCount: 5,
+      counts: {
+        cancelled: 1,
+        duplicate_skipped: 1,
+        imported: 1,
+        waiting_retry: 1,
+        failed: 1,
+      },
+      items: [
+        { sourceName: '已取消.png', status: 'cancelled' },
+        { sourceName: '批内重复.png', status: 'duplicate_skipped' },
+        { sourceName: '已入库.png', status: 'imported' },
+        {
+          sourceName: '等待重试.png',
+          status: 'waiting_retry',
+          errorMessage: '百炼 OCR 当前限流或额度不足，请稍后再试',
+        },
+        {
+          sourceName: '识别失败.png',
+          status: 'failed',
+          errorMessage: '百炼 OCR 无法识别这张截图，请确认图片完整清晰',
+        },
+      ],
+    }]);
+
+    const retryPath = join(root, '重启后重试已取消.png');
+    await writeFile(retryPath, 'persisted-shared-image');
+    const retryBatch = await reopened.submitSourceScreenshots([retryPath]);
+    await eventually(() => {
+      expect(reopened.listRecognitionBatches().find((batch) => (
+        batch.id === retryBatch.id
+      ))).toMatchObject({
+        counts: { awaiting_confirmation: 1, duplicate_skipped: 0 },
+      });
+    });
+    expect(retryRecognition).toHaveBeenCalledOnce();
+  });
+
   it('按内容哈希在批内和跨批次跳过重复截图且不再次调用 OCR', async () => {
     const recognize = vi.fn<Recognizer['recognize']>()
       .mockResolvedValue(attempt('BATCH-DEDUPLICATED'));

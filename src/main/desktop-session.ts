@@ -9,6 +9,7 @@ import type {
   Recognizer,
   RecognitionBatchView,
 } from '../core/contracts';
+import { summarizeRecognitionBatchItems } from '../core/recognition-batches';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
@@ -18,7 +19,10 @@ import type {
   OcrSettingsView,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
-import { LocalApplication } from './local-application';
+import {
+  LocalApplication,
+  type RecognitionBatchItemUpdate,
+} from './local-application';
 import { OcrSettingsService } from './ocr-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
@@ -126,29 +130,32 @@ export class DesktopSession {
           .catch(() => undefined);
         throw new Error('数据目录已切换，本次截图未加入识别队列，请重新选择');
       }
+      const items: RecognitionBatchView['items'] = sourcePaths.map((sourcePath, index) => ({
+        id: itemIds[index],
+        batchId,
+        sourceName: basename(sourcePath),
+        status: 'waiting_recognition',
+      }));
       const batch: RecognitionBatchView = {
         id: batchId,
-        items: sourcePaths.map((sourcePath, index) => ({
-          id: itemIds[index],
-          batchId,
-          sourceName: basename(sourcePath),
-          status: 'waiting_recognition',
-        })),
-        totalCount: sourcePaths.length,
-        processedCount: 0,
-        counts: {
-          waiting_recognition: sourcePaths.length,
-          recognizing: 0,
-          validating: 0,
-          awaiting_confirmation: 0,
-          imported: 0,
-          waiting_retry: 0,
-          failed: 0,
-          duplicate_skipped: 0,
-          cancelled: 0,
-        },
+        items,
+        ...summarizeRecognitionBatchItems(items),
         createdAt: new Date().toISOString(),
       };
+      try {
+        application.createRecognitionBatch({
+          id: batch.id,
+          createdAt: batch.createdAt,
+          items: batch.items.map((item) => ({
+            id: item.id,
+            sourceName: item.sourceName,
+          })),
+        });
+      } catch {
+        await rm(stagingBatchDirectory, { recursive: true, force: true })
+          .catch(() => undefined);
+        throw new Error('无法创建识别批次，请检查数据目录后重试');
+      }
       this.recognitionBatches.unshift(batch);
       this.notifyRecognitionBatchesChanged();
       stagedPaths.forEach((sourcePath, index) => {
@@ -280,8 +287,10 @@ export class DesktopSession {
     const application = new LocalApplication(this.recognizer);
     try {
       application.openDataDirectory(dataDirectory);
-      this.application = application;
+      const recognitionBatches = application.restoreRecognitionBatches();
       if (remember) this.preferences.setLastDataDirectory(dataDirectory);
+      this.application = application;
+      this.recognitionBatches.push(...recognitionBatches);
       this.state = {
         kind: 'ready',
         dataDirectory,
@@ -321,21 +330,24 @@ export class DesktopSession {
     itemId: string,
     sourcePath: string,
   ): Promise<void> {
-    this.setRecognitionItemStatus(generation, batchId, itemId, 'recognizing');
     let reservedHash: string | undefined;
     try {
+      this.setRecognitionItemStatus(
+        application,
+        generation,
+        { batchId, itemId, status: 'recognizing' },
+      );
       const sha256 = createHash('sha256')
         .update(await readFile(sourcePath))
         .digest('hex');
       if (
         this.seenSourceHashes.has(sha256) ||
-        application.hasSourceScreenshotSha256(sha256)
+        application.hasActiveSourceScreenshotSha256(sha256)
       ) {
         this.setRecognitionItemStatus(
+          application,
           generation,
-          batchId,
-          itemId,
-          'duplicate_skipped',
+          { batchId, itemId, status: 'duplicate_skipped', sha256 },
         );
         return;
       }
@@ -346,29 +358,36 @@ export class DesktopSession {
         batchId,
         () => {
           this.setRecognitionItemStatus(
+            application,
             generation,
-            batchId,
-            itemId,
-            'validating',
+            { batchId, itemId, status: 'validating', sha256 },
           );
         },
+        itemId,
       );
       this.setRecognitionItemStatus(
+        application,
         generation,
-        batchId,
-        itemId,
-        'awaiting_confirmation',
-        draft.id,
+        {
+          batchId,
+          itemId,
+          status: 'awaiting_confirmation',
+          draftId: draft.id,
+          sha256,
+        },
       );
     } catch (error) {
       const isTemporary = isTemporaryRecognitionError(error);
       this.setRecognitionItemStatus(
+        application,
         generation,
-        batchId,
-        itemId,
-        isTemporary ? 'waiting_retry' : 'failed',
-        undefined,
-        userFacingRecognitionError(error),
+        {
+          batchId,
+          itemId,
+          status: isTemporary ? 'waiting_retry' : 'failed',
+          errorMessage: userFacingRecognitionError(error),
+          sha256: reservedHash,
+        },
       );
     } finally {
       if (reservedHash) this.seenSourceHashes.delete(reservedHash);
@@ -378,20 +397,21 @@ export class DesktopSession {
   }
 
   private setRecognitionItemStatus(
+    application: LocalApplication,
     generation: number,
-    batchId: string,
-    itemId: string,
-    status: RecognitionBatchView['items'][number]['status'],
-    draftId?: string,
-    errorMessage?: string,
+    update: RecognitionBatchItemUpdate,
   ): void {
+    application.updateRecognitionBatchItem(update);
     if (generation !== this.workspaceGeneration) return;
-    const batch = this.recognitionBatches.find((candidate) => candidate.id === batchId);
-    const item = batch?.items.find((candidate) => candidate.id === itemId);
+    const batch = this.recognitionBatches.find((candidate) => (
+      candidate.id === update.batchId
+    ));
+    const item = batch?.items.find((candidate) => candidate.id === update.itemId);
     if (!batch || !item) return;
-    item.status = status;
-    if (draftId) item.draftId = draftId;
-    if (errorMessage) item.errorMessage = errorMessage;
+    item.status = update.status;
+    if (update.draftId) item.draftId = update.draftId;
+    if (update.errorMessage) item.errorMessage = update.errorMessage;
+    else delete item.errorMessage;
     updateBatchProgress(batch);
     this.notifyRecognitionBatchesChanged();
   }
@@ -455,25 +475,8 @@ export class DesktopSession {
   }
 }
 
-const PROCESSED_RECOGNITION_STATUSES = new Set<
-  RecognitionBatchView['items'][number]['status']
->([
-  'awaiting_confirmation',
-  'imported',
-  'waiting_retry',
-  'failed',
-  'duplicate_skipped',
-  'cancelled',
-]);
-
 function updateBatchProgress(batch: RecognitionBatchView): void {
-  for (const status of Object.keys(batch.counts) as Array<keyof typeof batch.counts>) {
-    batch.counts[status] = 0;
-  }
-  for (const item of batch.items) batch.counts[item.status] += 1;
-  batch.processedCount = batch.items.filter((item) => (
-    PROCESSED_RECOGNITION_STATUSES.has(item.status)
-  )).length;
+  Object.assign(batch, summarizeRecognitionBatchItems(batch.items));
 }
 
 function readableError(error: unknown): string {
