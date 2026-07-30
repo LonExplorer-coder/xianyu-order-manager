@@ -4,8 +4,11 @@ import type {
 import type {
   OrderDetails,
   OrderDraft,
+  OrderDraftConfirmation,
+  OrderDraftReview,
   OrderReviewIssueCode,
   OrderSummary,
+  OrderUpdateConfirmation,
   OriginalOrder,
   Recognizer,
   RecognitionBatchView,
@@ -20,6 +23,7 @@ import {
   type OrderIntakeSettingsView,
   type SaveOrderIntakeSettingsInput,
 } from '../core/order-intake';
+import { hasEquivalentOrderContent } from '../core/order-comparison';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
@@ -238,6 +242,10 @@ export class DesktopSession {
     return structuredClone(this.requireApplication().getDraft(draftId));
   }
 
+  public getDraftReview(draftId: string): OrderDraftReview {
+    return structuredClone(this.requireApplication().getDraftReview(draftId));
+  }
+
   public onRecognitionBatchesChanged(
     listener: (batches: RecognitionBatchView[]) => void,
   ): () => void {
@@ -271,11 +279,53 @@ export class DesktopSession {
     this.setItemStatusByDraftId(draftId, 'cancelled');
   }
 
-  public confirmDraft(draft: OrderDraft): OriginalOrder {
-    const order = this.requireApplication().confirmDraft(draft);
+  public confirmDraft(draft: OrderDraft): OrderDraftConfirmation {
+    const application = this.requireApplication();
+    const existingOrder = application.findOriginalOrderByIdentity(draft);
+    if (existingOrder) {
+      if (!hasEquivalentOrderContent(existingOrder, draft)) {
+        application.saveDraftOrderMatch(
+          draft.id,
+          existingOrder.id,
+          uniqueReviewIssues([
+            ...(draft.reviewIssues ?? []),
+            'order_content_changed',
+          ]),
+          draft,
+        );
+        throw new Error('该订单已存在且内容有变化，已转为订单更新，请核对新旧对比后再次确认');
+      }
+      const resolvedOrder = application.resolveEquivalentDraft(
+        draft.id,
+        existingOrder.id,
+        draft,
+      );
+      this.refreshOrders();
+      this.setItemStatusByDraftId(
+        draft.id,
+        'duplicate_skipped',
+        'equivalent_order',
+      );
+      return { order: resolvedOrder, resolution: 'equivalent_order' };
+    }
+    const order = application.confirmDraft(draft);
     this.refreshOrders();
-    this.setItemStatusByDraftId(draft.id, 'imported');
-    return order;
+    this.setItemStatusByDraftId(draft.id, 'imported', 'new_order');
+    return { order, resolution: 'new_order' };
+  }
+
+  public confirmOrderUpdate(
+    draft: OrderDraft,
+    expectedRevision: number,
+  ): OrderUpdateConfirmation {
+    const outcome = this.requireApplication().confirmOrderUpdate(draft, expectedRevision);
+    this.refreshOrders();
+    this.setItemStatusByDraftId(
+      draft.id,
+      outcome.resolution === 'equivalent_order' ? 'duplicate_skipped' : 'imported',
+      outcome.resolution,
+    );
+    return outcome;
   }
 
   public listOrders(): OrderSummary[] {
@@ -465,17 +515,35 @@ export class DesktopSession {
         .digest('hex');
       if (
         this.seenSourceHashes.has(sha256) ||
-        application.hasActiveSourceScreenshotSha256(sha256)
+        application.hasActiveSourceScreenshotSha256(sha256, itemId)
       ) {
         this.setRecognitionItemStatus(
           application,
           generation,
-          { batchId, itemId, status: 'duplicate_skipped', sha256 },
+          {
+            batchId,
+            itemId,
+            status: 'duplicate_skipped',
+            sha256,
+            resolution: 'identical_image',
+          },
         );
         return;
       }
-      this.seenSourceHashes.add(sha256);
       reservedHash = sha256;
+      this.setRecognitionItemStatus(
+        application,
+        generation,
+        {
+          batchId,
+          itemId,
+          status: 'recognizing',
+          sha256,
+          retryCount,
+          nextRetryAt: null,
+        },
+      );
+      this.seenSourceHashes.add(sha256);
       const draft = await application.submitRecognitionSource(
         sourcePath,
         batchId,
@@ -509,6 +577,24 @@ export class DesktopSession {
             retryCount,
             nextRetryAt: null,
             reviewIssues: [],
+            resolution: 'new_order',
+          },
+        );
+        return;
+      }
+      if (intake.status === 'duplicate_skipped') {
+        this.applyRecognitionItemStatusToView(
+          generation,
+          {
+            batchId,
+            itemId,
+            status: 'duplicate_skipped',
+            draftId: draft.id,
+            sha256,
+            retryCount,
+            nextRetryAt: null,
+            reviewIssues: [],
+            resolution: 'equivalent_order',
           },
         );
         return;
@@ -659,6 +745,10 @@ export class DesktopSession {
     if (update.errorMessage) item.errorMessage = update.errorMessage;
     else delete item.errorMessage;
     if (update.reviewIssues) item.reviewIssues = [...update.reviewIssues];
+    if (update.resolution) item.resolution = update.resolution;
+    else if (!['imported', 'duplicate_skipped'].includes(update.status)) {
+      delete item.resolution;
+    }
     if (update.retryCount !== undefined) item.retryCount = update.retryCount;
     if (update.nextRetryAt) item.nextRetryAt = update.nextRetryAt;
     else if (update.nextRetryAt === null) delete item.nextRetryAt;
@@ -668,7 +758,8 @@ export class DesktopSession {
 
   private setItemStatusByDraftId(
     draftId: string,
-    status: 'imported' | 'cancelled',
+    status: 'imported' | 'duplicate_skipped' | 'cancelled',
+    resolution?: RecognitionBatchView['items'][number]['resolution'],
   ): void {
     for (const batch of this.recognitionBatches) {
       const item = batch.items.find((candidate) => candidate.draftId === draftId);
@@ -676,6 +767,8 @@ export class DesktopSession {
       item.status = status;
       delete item.errorMessage;
       item.reviewIssues = [];
+      if (resolution) item.resolution = resolution;
+      else delete item.resolution;
       updateBatchProgress(batch);
       this.notifyRecognitionBatchesChanged();
       return;
@@ -744,13 +837,47 @@ export class DesktopSession {
   private decideOrderIntake(
     application: LocalApplication,
     draft: OrderDraft,
-  ): { status: 'imported' | 'awaiting_confirmation'; draft: OrderDraft } {
+  ): {
+    status: 'imported' | 'duplicate_skipped' | 'awaiting_confirmation';
+    draft: OrderDraft;
+  } {
     const automaticImportEnabled = this.automaticImportEnabledForBackgroundWork();
-    const reviewIssues = uniqueReviewIssues([
+    const deterministicReviewIssues = uniqueReviewIssues([
       ...(draft.reviewIssues ?? []),
       ...assessAutomaticImport(draft),
+    ]);
+    const existingOrder = application.findOriginalOrderByIdentity(draft);
+    const equivalentToExisting = existingOrder
+      ? hasEquivalentOrderContent(existingOrder, draft)
+      : false;
+    if (
+      existingOrder &&
+      deterministicReviewIssues.length === 0 &&
+      equivalentToExisting
+    ) {
+      application.resolveEquivalentDraft(draft.id, existingOrder.id);
+      return {
+        status: 'duplicate_skipped',
+        draft: { ...draft, status: 'confirmed', reviewIssues: [] },
+      };
+    }
+    const reviewIssues = uniqueReviewIssues([
+      ...deterministicReviewIssues,
       ...(automaticImportEnabled ? [] : ['automatic_import_disabled'] as const),
     ]);
+    if (existingOrder) {
+      reviewIssues.push(
+        equivalentToExisting ? 'duplicate_order' : 'order_content_changed',
+      );
+      return {
+        status: 'awaiting_confirmation',
+        draft: application.saveDraftOrderMatch(
+          draft.id,
+          existingOrder.id,
+          uniqueReviewIssues(reviewIssues),
+        ),
+      };
+    }
     if (
       automaticImportEnabled &&
       reviewIssues.length === 0 &&

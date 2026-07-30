@@ -2,6 +2,8 @@ import { mkdirSync } from 'node:fs';
 import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { normalizedOrderIdentityPart } from '../core/order-comparison';
+
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
 
@@ -146,6 +148,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 4) migrateToVersion4(database);
   if (row.version < 5) migrateToVersion5(database);
   if (row.version < 6) migrateToVersion6(database);
+  if (row.version < 7) migrateToVersion7(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -553,6 +556,223 @@ function migrateToVersion6(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  }
+}
+
+function migrateToVersion7(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE original_orders ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+        CHECK (revision >= 1);
+      ALTER TABLE original_orders ADD COLUMN seller_account_normalized TEXT NOT NULL DEFAULT '';
+      ALTER TABLE original_orders ADD COLUMN platform_order_number_normalized TEXT NOT NULL DEFAULT '';
+      ALTER TABLE order_drafts ADD COLUMN matched_order_id TEXT
+        REFERENCES original_orders(id) ON DELETE RESTRICT;
+
+      ALTER TABLE recognition_batch_items ADD COLUMN resolution_kind TEXT
+        CHECK (resolution_kind IS NULL OR resolution_kind IN (
+          'new_order', 'identical_image', 'equivalent_order', 'order_updated'
+        ));
+
+      UPDATE recognition_batch_items
+      SET resolution_kind = CASE
+        WHEN status = 'imported' THEN 'new_order'
+        WHEN status = 'duplicate_skipped' THEN 'identical_image'
+        ELSE NULL
+      END;
+
+      CREATE INDEX source_screenshots_by_content_sha256
+      ON source_screenshots (content_sha256);
+
+      DROP TRIGGER IF EXISTS source_snapshots_are_immutable;
+      ALTER TABLE source_snapshots RENAME TO source_snapshots_v6;
+
+      CREATE TABLE source_snapshots (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+        screenshot_id TEXT NOT NULL UNIQUE
+          REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        recognition_json TEXT NOT NULL CHECK (json_valid(recognition_json)),
+        confirmed_json TEXT CHECK (
+          confirmed_json IS NULL OR json_valid(confirmed_json)
+        ),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK (
+          (
+            order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
+          ) OR (
+            order_id IS NOT NULL
+            AND confirmed_json IS NOT NULL
+            AND resolved_at IS NOT NULL
+          )
+        )
+      ) STRICT;
+
+      INSERT INTO source_snapshots (
+        id, draft_id, order_id, screenshot_id,
+        recognition_json, confirmed_json, created_at, resolved_at
+      )
+      SELECT
+        snapshots.id,
+        orders.draft_id,
+        snapshots.order_id,
+        snapshots.screenshot_id,
+        snapshots.recognition_json,
+        snapshots.confirmed_json,
+        snapshots.created_at,
+        snapshots.created_at
+      FROM source_snapshots_v6 AS snapshots
+      JOIN original_orders AS orders ON orders.id = snapshots.order_id;
+
+      INSERT INTO source_snapshots (
+        id, draft_id, order_id, screenshot_id,
+        recognition_json, confirmed_json, created_at, resolved_at
+      )
+      SELECT
+        'migrated-pending:' || drafts.id,
+        drafts.id,
+        NULL,
+        drafts.screenshot_id,
+        drafts.recognition_json,
+        NULL,
+        drafts.created_at,
+        NULL
+      FROM order_drafts AS drafts
+      LEFT JOIN source_snapshots_v6 AS snapshots
+        ON snapshots.screenshot_id = drafts.screenshot_id
+      WHERE drafts.status = 'awaiting_review'
+        AND snapshots.id IS NULL;
+
+      DROP TABLE source_snapshots_v6;
+
+      CREATE TRIGGER source_snapshots_only_finalize_once
+      BEFORE UPDATE ON source_snapshots
+      WHEN
+        OLD.order_id IS NOT NULL
+        OR OLD.confirmed_json IS NOT NULL
+        OR OLD.resolved_at IS NOT NULL
+        OR NEW.id != OLD.id
+        OR NEW.draft_id != OLD.draft_id
+        OR NEW.screenshot_id != OLD.screenshot_id
+        OR NEW.recognition_json != OLD.recognition_json
+        OR NEW.created_at != OLD.created_at
+        OR NEW.order_id IS NULL
+        OR NEW.confirmed_json IS NULL
+        OR NEW.resolved_at IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'source snapshots are immutable after finalization');
+      END;
+
+      CREATE TRIGGER source_snapshots_are_immutable_on_delete
+      BEFORE DELETE ON source_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'source snapshots are immutable');
+      END;
+
+      CREATE TABLE order_change_events (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE RESTRICT,
+        source_snapshot_id TEXT UNIQUE
+          REFERENCES source_snapshots(id) ON DELETE RESTRICT,
+        source TEXT NOT NULL CHECK (source IN ('source_update', 'manual_edit')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE order_field_changes (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL REFERENCES order_change_events(id) ON DELETE RESTRICT,
+        field_path TEXT NOT NULL,
+        before_json TEXT NOT NULL CHECK (json_valid(before_json)),
+        after_json TEXT NOT NULL CHECK (json_valid(after_json)),
+        UNIQUE (event_id, field_path)
+      ) STRICT;
+
+      CREATE INDEX order_change_events_by_order
+      ON order_change_events (order_id, created_at DESC, id DESC);
+
+      CREATE TRIGGER order_change_events_are_immutable_on_update
+      BEFORE UPDATE ON order_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order change events are immutable');
+      END;
+
+      CREATE TRIGGER order_change_events_are_immutable_on_delete
+      BEFORE DELETE ON order_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order change events are immutable');
+      END;
+
+      CREATE TRIGGER order_field_changes_are_immutable_on_update
+      BEFORE UPDATE ON order_field_changes
+      BEGIN
+        SELECT RAISE(ABORT, 'order field changes are immutable');
+      END;
+
+      CREATE TRIGGER order_field_changes_are_immutable_on_delete
+      BEFORE DELETE ON order_field_changes
+      BEGIN
+        SELECT RAISE(ABORT, 'order field changes are immutable');
+      END;
+    `);
+    backfillNormalizedOrderIdentities(database);
+    database.exec(`
+      CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (
+        platform,
+        seller_account_normalized,
+        platform_order_number_normalized
+      );
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function backfillNormalizedOrderIdentities(database: DatabaseSync): void {
+  const rows = database.prepare(`
+    SELECT id, platform, seller_account, platform_order_number
+    FROM original_orders
+    ORDER BY created_at, id
+  `).all() as unknown as Array<{
+    id: string;
+    platform: string;
+    seller_account: string;
+    platform_order_number: string;
+  }>;
+  const seen = new Set<string>();
+  const update = database.prepare(`
+    UPDATE original_orders
+    SET seller_account_normalized = ?, platform_order_number_normalized = ?
+    WHERE id = ?
+  `);
+  for (const row of rows) {
+    const sellerAccount = normalizedOrderIdentityPart(row.seller_account);
+    const orderNumber = normalizedOrderIdentityPart(row.platform_order_number);
+    const identityKey = JSON.stringify([row.platform, sellerAccount, orderNumber]);
+    if (seen.has(identityKey)) {
+      throw new Error(
+        '数据库升级发现规范化后存在重复订单身份；请保留备份并先处理全角、半角或空格等价的重复订单',
+      );
+    }
+    seen.add(identityKey);
+    update.run(sellerAccount, orderNumber, row.id);
   }
 }
 

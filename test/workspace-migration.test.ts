@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v6 并回填待确认原因', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v7 并保留来源与更新约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -25,6 +25,7 @@ describe('数据库升级', () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
     expect(
       (
@@ -81,7 +82,7 @@ describe('数据库升级', () => {
       first.database
         .prepare(`
           SELECT batch_id, source_name, content_sha256, status, draft_id,
-            queue_relative_path, retry_count, next_retry_at
+            queue_relative_path, retry_count, next_retry_at, resolution_kind
           FROM recognition_batch_items
           WHERE draft_id = 'draft-v1'
         `)
@@ -95,6 +96,7 @@ describe('数据库升级', () => {
       queue_relative_path: null,
       retry_count: 0,
       next_retry_at: null,
+      resolution_kind: 'new_order',
     });
     expect(
       first.database
@@ -117,16 +119,19 @@ describe('数据库升级', () => {
       first.database
         .prepare(`
           SELECT
-            platform_order_number, alipay_transaction_number,
+            seller_account_normalized, platform_order_number,
+            platform_order_number_normalized, alipay_transaction_number,
             phone, phone_normalized, address_original, address_normalized,
-            product_total_cents, shipping_fee_cents, amount_cents,
+            product_total_cents, shipping_fee_cents, amount_cents, revision,
             platform_transaction_status, fulfillment_status, lifecycle_status
           FROM original_orders
           WHERE id = 'order-v1'
         `)
         .get(),
     ).toEqual({
+      seller_account_normalized: '旧账号',
       platform_order_number: 'XY-V1-001',
+      platform_order_number_normalized: 'XY-V1-001',
       alipay_transaction_number: '',
       phone: '13800000000',
       phone_normalized: '13800000000',
@@ -135,6 +140,7 @@ describe('数据库升级', () => {
       product_total_cents: null,
       shipping_fee_cents: null,
       amount_cents: 880,
+      revision: 1,
       platform_transaction_status: 'paid',
       fulfillment_status: 'pending_shipment',
       lifecycle_status: 'active',
@@ -144,9 +150,29 @@ describe('数据库升级', () => {
     ).toEqual({ count: 1 });
     expect(
       first.database
-        .prepare("SELECT COUNT(*) AS count FROM source_snapshots WHERE order_id = 'order-v1'")
+        .prepare(`
+          SELECT draft_id, order_id, confirmed_json IS NOT NULL AS confirmed,
+            resolved_at IS NOT NULL AS resolved
+          FROM source_snapshots
+          WHERE order_id = 'order-v1'
+        `)
         .get(),
-    ).toEqual({ count: 1 });
+    ).toEqual({
+      draft_id: 'draft-v1',
+      order_id: 'order-v1',
+      confirmed: 1,
+      resolved: 1,
+    });
+    expect(() => first.database.prepare(`
+      UPDATE source_snapshots
+      SET confirmed_json = recognition_json
+      WHERE order_id = 'order-v1'
+    `).run()).toThrow('source snapshots are immutable after finalization');
+    expect(
+      first.database
+        .prepare("SELECT COUNT(*) AS count FROM order_change_events")
+        .get(),
+    ).toEqual({ count: 0 });
 
     const updatePlatformStatus = first.database.prepare(
       "UPDATE original_orders SET platform_transaction_status = ? WHERE id = 'order-v1'",
@@ -201,6 +227,7 @@ describe('数据库升级', () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
     expect(
       (
@@ -245,6 +272,7 @@ describe('数据库升级', () => {
           sourceName: '旧订单.png',
           status: 'imported',
           draftId: 'draft-v1',
+          resolution: 'new_order',
         },
         {
           sourceName: '旧版残缺记录.png',
@@ -265,6 +293,7 @@ describe('数据库升级', () => {
         platformTransactionStatus: 'unknown',
         fulfillmentStatus: 'unknown',
         lifecycleStatus: 'deleted',
+        revision: 1,
       },
       sourceSnapshot: {
         recognition: {
@@ -284,8 +313,89 @@ describe('数据库升级', () => {
           fulfillmentStatus: 'pending_shipment',
         },
       },
+      sources: [{
+        sourceSnapshot: {
+          recognition: { orderNumber: 'XY-V1-001' },
+          confirmed: { orderNumber: 'XY-V1-001' },
+        },
+      }],
+      changeEvents: [],
     });
     application.close();
+  });
+
+  it('升级前发现全角半角归一化后的订单身份碰撞时拒绝部分升级', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-identity-collision-'));
+    createVersion1Database(dataDirectory);
+    addVersion1CollidingOrder(dataDirectory);
+
+    expect(() => Workspace.open(dataDirectory)).toThrowError(/规范化后存在重复订单身份/);
+
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      expect(database.prepare(
+        'SELECT version FROM schema_migrations ORDER BY version',
+      ).all()).toEqual([
+        { version: 1 },
+        { version: 2 },
+        { version: 3 },
+        { version: 4 },
+        { version: 5 },
+        { version: 6 },
+      ]);
+      const columns = database.prepare('PRAGMA table_info(original_orders)').all() as unknown as Array<{
+        name: string;
+      }>;
+      expect(columns.map((column) => column.name)).not.toContain('seller_account_normalized');
+      expect(columns.map((column) => column.name)).not.toContain(
+        'platform_order_number_normalized',
+      );
+      expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('升级时为旧版待确认草稿补建未决来源快照并允许继续确认', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-pending-snapshot-'));
+    createVersion1Database(dataDirectory);
+    addVersion1PendingDraft(dataDirectory);
+
+    const workspace = Workspace.open(dataDirectory);
+    expect(workspace.database.prepare(`
+      SELECT draft_id, order_id, confirmed_json, resolved_at
+      FROM source_snapshots
+      WHERE draft_id = 'draft-pending-v1'
+    `).get()).toEqual({
+      draft_id: 'draft-pending-v1',
+      order_id: null,
+      confirmed_json: null,
+      resolved_at: null,
+    });
+    workspace.close();
+
+    const application = new LocalApplication({
+      recognize: async () => {
+        throw new Error('该测试不应发起识别');
+      },
+    });
+    application.openDataDirectory(dataDirectory);
+    try {
+      const order = application.confirmDraft({
+        ...application.getDraft('draft-pending-v1'),
+        productTotalCents: 660,
+        shippingFeeCents: 0,
+      });
+      expect(order).toMatchObject({
+        orderNumber: 'XY-PENDING-001',
+        revision: 1,
+      });
+      expect(application.getOrder(order.id).sources).toHaveLength(1);
+    } finally {
+      application.close();
+    }
   });
 });
 
@@ -453,4 +563,120 @@ function createVersion1Database(dataDirectory: string): void {
     `)
     .run(legacyRecognition, legacyRecognition);
   database.close();
+}
+
+function addVersion1CollidingOrder(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  const fullWidthOrderNumber = 'ＸＹ－Ｖ１－００１';
+  const recognition = JSON.stringify({
+    platform: 'xianyu',
+    sellerAccount: '旧账号',
+    orderNumber: fullWidthOrderNumber,
+    buyerNickname: '碰撞买家',
+    recipient: '碰撞收件人',
+    phone: '13900000000',
+    addressOriginal: '广东省深圳市南山区旧数据2号',
+    amountCents: 990,
+    items: [{
+      sourceTitle: '碰撞商品',
+      sourceSpec: '碰撞规格',
+      unitPriceCents: 990,
+      quantity: 1,
+      quantityInferred: true,
+    }],
+  });
+  try {
+    database.exec(`
+      INSERT INTO source_screenshots VALUES (
+        'screenshot-collision-v1', 'batch-v1', '全角订单.png',
+        'screenshots/collision.png', 'collision123', 'image/png',
+        '2026-07-27T00:02:00.000Z'
+      );
+    `);
+    database.prepare(`
+      INSERT INTO order_drafts VALUES (
+        'draft-collision-v1', 'batch-v1', 'screenshot-collision-v1',
+        'xianyu', '旧账号', ?, '碰撞买家', '碰撞收件人', '13900000000',
+        '广东省深圳市南山区旧数据2号', 990, 'confirmed', ?,
+        '2026-07-27T00:02:00.000Z', '2026-07-27T00:03:00.000Z'
+      )
+    `).run(fullWidthOrderNumber, recognition);
+    database.prepare(`
+      INSERT INTO original_orders VALUES (
+        'order-collision-v1', 'draft-collision-v1', 'screenshot-collision-v1',
+        'xianyu', '旧账号', ?, '碰撞买家', '碰撞收件人', '13900000000',
+        '广东省深圳市南山区旧数据2号', 990,
+        'paid', 'pending_shipment', 'active',
+        '2026-07-27T00:03:00.000Z', '2026-07-27T00:03:00.000Z'
+      )
+    `).run(fullWidthOrderNumber);
+    database.exec(`
+      INSERT INTO draft_items VALUES (
+        'draft-item-collision-v1', 'draft-collision-v1', 0,
+        '碰撞商品', '碰撞规格', 990, 1, 1
+      );
+      INSERT INTO order_items VALUES (
+        'order-item-collision-v1', 'order-collision-v1', 0,
+        '碰撞商品', '碰撞规格', 990, 1, 1, 990
+      );
+    `);
+    database.prepare(`
+      INSERT INTO source_snapshots VALUES (
+        'snapshot-collision-v1', 'order-collision-v1', 'screenshot-collision-v1',
+        ?, ?, '2026-07-27T00:03:00.000Z'
+      )
+    `).run(recognition, recognition);
+  } finally {
+    database.close();
+  }
+}
+
+function addVersion1PendingDraft(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  const recognition = JSON.stringify({
+    platform: 'xianyu',
+    sellerAccount: '旧账号',
+    orderNumber: 'XY-PENDING-001',
+    buyerNickname: '待确认买家',
+    recipient: '待确认收件人',
+    phone: '13700000000',
+    addressOriginal: '广东省深圳市南山区待确认路1号',
+    amountCents: 660,
+    items: [{
+      sourceTitle: '待确认商品',
+      sourceSpec: '待确认规格',
+      unitPriceCents: 660,
+      quantity: 1,
+      quantityInferred: true,
+    }],
+  });
+  try {
+    database.exec(`
+      INSERT INTO source_screenshots VALUES (
+        'screenshot-pending-v1', 'batch-v1', '待确认订单.png',
+        'screenshots/pending.png', 'pending123', 'image/png',
+        '2026-07-27T00:04:00.000Z'
+      );
+    `);
+    database.prepare(`
+      INSERT INTO order_drafts VALUES (
+        'draft-pending-v1', 'batch-v1', 'screenshot-pending-v1',
+        'xianyu', '旧账号', 'XY-PENDING-001', '待确认买家', '待确认收件人',
+        '13700000000', '广东省深圳市南山区待确认路1号', 660,
+        'awaiting_review', ?, '2026-07-27T00:04:00.000Z', NULL
+      )
+    `).run(recognition);
+    database.exec(`
+      INSERT INTO draft_items VALUES (
+        'draft-item-pending-v1', 'draft-pending-v1', 0,
+        '待确认商品', '待确认规格', 660, 1, 1
+      );
+    `);
+  } finally {
+    database.close();
+  }
 }

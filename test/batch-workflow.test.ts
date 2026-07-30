@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -160,10 +161,24 @@ describe('批量来源截图识别队列', () => {
     expect(observedOrders.at(-1)).toMatchObject([{ orderNumber: 'AUTO-IMPORT-COMPLETE' }]);
   });
 
-  it('已入库订单的同平台账号与订单号不会被静默重复导入', async () => {
-    const session = await openSession({
-      recognize: async () => attempt('AUTO-DUPLICATE-IDENTITY'),
-    });
+  it('已入库订单的同平台账号与订单号但内容变化时不会被静默重复导入', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'AUTO-DUPLICATE-IDENTITY',
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      productTotalCents: 900,
+      amountCents: 900,
+      items: [{
+        ...firstRecognition.items[0],
+        unitPriceCents: 900,
+      }],
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
     session.saveOrderIntakeSettings({ automaticImportEnabled: true });
     const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-duplicate-'));
     const firstPath = join(root, '首次识别.png');
@@ -182,11 +197,1096 @@ describe('批量来源截图识别队列', () => {
         counts: { awaiting_confirmation: 1, imported: 0 },
         items: [{
           status: 'awaiting_confirmation',
-          reviewIssues: ['duplicate_order'],
+          reviewIssues: ['order_content_changed'],
         }],
       });
     });
     expect(session.listOrders()).toHaveLength(1);
+  });
+
+  it('不同图片识别为内容等价的同一订单时自动记录重复来源且不创建第二笔订单', async () => {
+    const recognize = vi.fn<Recognizer['recognize']>().mockResolvedValue(
+      attempt('EQUIVALENT-ORDER-001'),
+    );
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-equivalent-order-'));
+    const firstPath = join(root, '首次订单.png');
+    const repeatedPath = join(root, '不同截图但订单内容相同.png');
+    await Promise.all([
+      writeFile(firstPath, 'equivalent-order-first-image'),
+      writeFile(repeatedPath, 'equivalent-order-later-image'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstItem = session.listRecognitionBatches()[0].items[0];
+    session.confirmDraft(session.getDraft(firstItem.draftId!));
+
+    const repeatedBatch = await session.submitSourceScreenshots([repeatedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: repeatedBatch.id,
+        counts: { duplicate_skipped: 1, awaiting_confirmation: 0 },
+        items: [{
+          status: 'duplicate_skipped',
+          resolution: 'equivalent_order',
+        }],
+      });
+    });
+
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(session.listOrders()).toHaveLength(1);
+    expect(session.getOrder(session.listOrders()[0].id).sources).toHaveLength(2);
+  });
+
+  it('自动入库关闭时同一订单内容变化仍保存未决来源并提供新旧对比', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'CHANGED-ORDER-001',
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      recipient: '更新后的收件人',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-changed-order-review-'));
+    const firstPath = join(root, '原订单.png');
+    const changedPath = join(root, '订单变化.png');
+    await Promise.all([
+      writeFile(firstPath, 'changed-order-original-image'),
+      writeFile(changedPath, 'changed-order-new-image'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    const changedBatch = await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: changedBatch.id,
+        counts: { awaiting_confirmation: 1, imported: 0 },
+        items: [{
+          status: 'awaiting_confirmation',
+          reviewIssues: expect.arrayContaining(['order_content_changed']),
+        }],
+      });
+    });
+
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    expect(session.getDraftReview(changedDraftId)).toMatchObject({
+      kind: 'order_update',
+      draft: { id: changedDraftId, recipient: '更新后的收件人' },
+      currentOrder: {
+        id: originalOrder.id,
+        recipient: '批次收件人',
+      },
+      expectedRevision: 1,
+      changes: [{
+        path: 'recipient',
+        before: '批次收件人',
+        after: '更新后的收件人',
+      }],
+      sourceSnapshot: {
+        recognition: { recipient: '更新后的收件人' },
+        confirmed: null,
+      },
+    });
+    expect(session.getOrder(originalOrder.id).order.recipient).toBe('批次收件人');
+  });
+
+  it('确认订单更新只修改当前值并记录最小字段变化和新来源', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'CONFIRM-UPDATE-001',
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      recipient: '确认后的新收件人',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-confirm-order-update-'));
+    const firstPath = join(root, '订单原值.png');
+    const changedPath = join(root, '订单更新来源.png');
+    await Promise.all([
+      writeFile(firstPath, 'confirm-update-original-image'),
+      writeFile(changedPath, 'confirm-update-changed-image'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    const changedBatch = await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: changedBatch.id,
+        counts: { awaiting_confirmation: 1 },
+      });
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    const updated = session.confirmOrderUpdate(review.draft, review.expectedRevision);
+
+    expect(updated).toMatchObject({
+      order: {
+        id: originalOrder.id,
+        recipient: '确认后的新收件人',
+        revision: 2,
+      },
+      resolution: 'order_updated',
+    });
+    expect(session.listOrders()).toHaveLength(1);
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: changedBatch.id,
+      counts: { imported: 1, awaiting_confirmation: 0 },
+      items: [{ status: 'imported', resolution: 'order_updated' }],
+    });
+    expect(session.getOrder(originalOrder.id)).toMatchObject({
+      order: {
+        recipient: '确认后的新收件人',
+        revision: 2,
+      },
+      sources: [
+        {
+          sourceSnapshot: {
+            recognition: { recipient: '确认后的新收件人' },
+            confirmed: { recipient: '确认后的新收件人' },
+          },
+        },
+        {
+          sourceSnapshot: {
+            recognition: { recipient: '批次收件人' },
+            confirmed: { recipient: '批次收件人' },
+          },
+        },
+      ],
+      changeEvents: [{
+        source: 'source_update',
+        baseRevision: 1,
+        resultRevision: 2,
+        changes: [{
+          path: 'recipient',
+          before: '批次收件人',
+          after: '确认后的新收件人',
+        }],
+      }],
+    });
+  });
+
+  it('把变化草稿全部改回当前值时只保留新来源且即时状态与持久化结果一致', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'REVERT-TO-CURRENT-001',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: 'OCR 识别出的变化值',
+      }));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-revert-order-update-'));
+    const firstPath = join(root, '订单原值.png');
+    const changedPath = join(root, '误识别变化.png');
+    await Promise.all([
+      writeFile(firstPath, 'revert-current-original'),
+      writeFile(changedPath, 'revert-current-changed'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    const changedBatch = await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: changedBatch.id,
+        counts: { awaiting_confirmation: 1 },
+      });
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    const outcome = session.confirmOrderUpdate({
+      ...review.draft,
+      recipient: review.currentOrder.recipient,
+    }, review.expectedRevision);
+
+    expect(outcome).toMatchObject({
+      order: { id: originalOrder.id, recipient: '批次收件人', revision: 1 },
+      resolution: 'equivalent_order',
+    });
+    expect(session.getOrder(originalOrder.id)).toMatchObject({
+      order: { recipient: '批次收件人', revision: 1 },
+      sources: [{}, {}],
+      changeEvents: [],
+    });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: changedBatch.id,
+      counts: { duplicate_skipped: 1, imported: 0 },
+      items: [{ status: 'duplicate_skipped', resolution: 'equivalent_order' }],
+    });
+  });
+
+  it('多商品重排且一项变化时修改记录只包含真正变化的商品和订单字段', async () => {
+    const items = [
+      {
+        sourceTitle: '商品 A',
+        sourceSpec: '规格 A',
+        unitPriceCents: 300,
+        quantity: 1,
+        quantityInferred: false,
+      },
+      {
+        sourceTitle: '商品 B',
+        sourceSpec: '规格 B',
+        unitPriceCents: 500,
+        quantity: 1,
+        quantityInferred: false,
+      },
+    ];
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'REORDERED-ITEMS-001',
+      items,
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: '商品重排后的新收件人',
+        items: [items[1], { ...items[0], sourceSpec: '规格 A 升级版' }],
+      }));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-reordered-items-update-'));
+    const firstPath = join(root, '原商品顺序.png');
+    const changedPath = join(root, '商品顺序变化.png');
+    await Promise.all([
+      writeFile(firstPath, 'reordered-items-original'),
+      writeFile(changedPath, 'reordered-items-changed'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+    await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    session.confirmOrderUpdate(review.draft, review.expectedRevision);
+
+    expect(session.getOrder(originalOrder.id).changeEvents[0].changes).toEqual([
+      {
+        path: 'items[1].sourceSpec',
+        before: '规格 A',
+        after: '规格 A 升级版',
+      },
+      {
+        path: 'recipient',
+        before: '批次收件人',
+        after: '商品重排后的新收件人',
+      },
+    ]);
+  });
+
+  it('多商品变化使用全局最小匹配，只记录最少的字段变化', async () => {
+    const featureItem = (features: string): RecognitionResult['items'][number] => ({
+      sourceTitle: features[0] === '1' ? '特征标题 1' : '特征标题 0',
+      sourceSpec: features[1] === '1' ? '特征规格 1' : '特征规格 0',
+      unitPriceCents: features[2] === '1' ? 200 : 100,
+      quantity: features[3] === '1' ? 2 : 1,
+      quantityInferred: features[4] === '1',
+    });
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'GLOBAL-MINIMUM-ITEM-DIFF-001',
+      productTotalCents: 300,
+      amountCents: 300,
+      items: ['00000', '10000', '01000'].map(featureItem),
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      items: ['11000', '00100', '10100'].map(featureItem),
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-global-minimum-item-diff-'));
+    const firstPath = join(root, '全局匹配原值.png');
+    const changedPath = join(root, '全局匹配变化.png');
+    await Promise.all([
+      writeFile(firstPath, 'global-minimum-item-diff-before'),
+      writeFile(changedPath, 'global-minimum-item-diff-after'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    session.confirmOrderUpdate(review.draft, review.expectedRevision);
+
+    expect(session.getOrder(originalOrder.id).changeEvents[0].changes).toEqual([
+      {
+        path: 'items[0].sourceTitle',
+        before: '特征标题 0',
+        after: '特征标题 1',
+      },
+      {
+        path: 'items[1].unitPriceCents',
+        before: 100,
+        after: 200,
+      },
+      {
+        path: 'items[2].unitPriceCents',
+        before: 100,
+        after: 200,
+      },
+    ]);
+  });
+
+  it('商品标题的空白和全角变化实际落盘时同步记录字段审计', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'RAW-ITEM-TEXT-AUDIT-001',
+      items: [{
+        ...recognition.items[0],
+        sourceTitle: 'Ａ  商品',
+      }],
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      recipient: '标题更新后的收件人',
+      items: [{
+        ...firstRecognition.items[0],
+        sourceTitle: 'A 商品',
+      }],
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-raw-item-text-audit-'));
+    const firstPath = join(root, '商品标题原值.png');
+    const changedPath = join(root, '商品标题更新.png');
+    await Promise.all([
+      writeFile(firstPath, 'raw-item-text-audit-before'),
+      writeFile(changedPath, 'raw-item-text-audit-after'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    session.confirmOrderUpdate(review.draft, review.expectedRevision);
+
+    const details = session.getOrder(originalOrder.id);
+    expect(details.order).toMatchObject({
+      recipient: '标题更新后的收件人',
+      items: [{ sourceTitle: 'A 商品' }],
+    });
+    expect(details.changeEvents[0].changes).toEqual([
+      {
+        path: 'items[0].sourceTitle',
+        before: 'Ａ  商品',
+        after: 'A 商品',
+      },
+      {
+        path: 'recipient',
+        before: '批次收件人',
+        after: '标题更新后的收件人',
+      },
+    ]);
+  });
+
+  it('规范化相同但原始标题互换时按落盘值配对且不误报商品变化', async () => {
+    const itemWithTitle = (sourceTitle: string): RecognitionResult['items'][number] => ({
+      ...recognition.items[0],
+      sourceTitle,
+    });
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'REORDERED-RAW-TITLES-001',
+      productTotalCents: 1_600,
+      amountCents: 1_600,
+      items: ['Ａ', 'A'].map(itemWithTitle),
+    };
+    const changedRecognition = {
+      ...firstRecognition,
+      recipient: '原始标题互换后的收件人',
+      items: ['A', 'Ａ'].map(itemWithTitle),
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(changedRecognition));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-reordered-raw-titles-'));
+    const firstPath = join(root, '原始标题顺序.png');
+    const changedPath = join(root, '原始标题互换.png');
+    await Promise.all([
+      writeFile(firstPath, 'reordered-raw-titles-before'),
+      writeFile(changedPath, 'reordered-raw-titles-after'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    await session.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(changedDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    session.confirmOrderUpdate(review.draft, review.expectedRevision);
+
+    const details = session.getOrder(originalOrder.id);
+    expect(details.order.items.map((item) => item.sourceTitle)).toEqual(['A', 'Ａ']);
+    expect(details.changeEvents[0].changes).toEqual([{
+      path: 'recipient',
+      before: '批次收件人',
+      after: '原始标题互换后的收件人',
+    }]);
+  });
+
+  it('两个变化草稿基于同一旧版本时只允许第一个确认且第二个不产生部分写入', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'CONCURRENT-UPDATE-001',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: '第一次确认的收件人',
+      }))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: '过期草稿里的收件人',
+      }));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-concurrent-order-update-'));
+    const paths = [
+      join(root, '订单原值.png'),
+      join(root, '变化来源一.png'),
+      join(root, '变化来源二.png'),
+    ];
+    await Promise.all(paths.map((path, index) => writeFile(path, `concurrent-${index}`)));
+
+    await session.submitSourceScreenshots([paths[0]]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const originalDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(originalDraftId)).order;
+
+    const changesBatch = await session.submitSourceScreenshots(paths.slice(1));
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: changesBatch.id,
+        counts: { awaiting_confirmation: 2 },
+      });
+    });
+    const [firstItem, staleItem] = session.listRecognitionBatches()[0].items;
+    const firstReview = session.getDraftReview(firstItem.draftId!);
+    const staleReview = session.getDraftReview(staleItem.draftId!);
+    if (firstReview.kind !== 'order_update' || staleReview.kind !== 'order_update') {
+      throw new Error('预期两个订单更新校对');
+    }
+    expect(firstReview.expectedRevision).toBe(1);
+    expect(staleReview.expectedRevision).toBe(1);
+
+    session.confirmOrderUpdate(firstReview.draft, firstReview.expectedRevision);
+    expect(() => session.confirmOrderUpdate(staleReview.draft, staleReview.expectedRevision))
+      .toThrowError(/订单已在其他操作中更新/);
+
+    expect(session.getOrder(originalOrder.id)).toMatchObject({
+      order: { recipient: '第一次确认的收件人', revision: 2 },
+      changeEvents: [{
+        baseRevision: 1,
+        resultRevision: 2,
+        changes: [{
+          path: 'recipient',
+          before: '批次收件人',
+          after: '第一次确认的收件人',
+        }],
+      }],
+    });
+    expect(session.getDraftReview(staleItem.draftId!)).toMatchObject({
+      kind: 'order_update',
+      sourceSnapshot: { confirmed: null },
+    });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: changesBatch.id,
+      counts: { imported: 1, awaiting_confirmation: 1 },
+      items: [
+        { status: 'imported', resolution: 'order_updated' },
+        { status: 'awaiting_confirmation' },
+      ],
+    });
+  });
+
+  it('多个变化来源逆上传顺序确认时详情主来源跟随最后实际更新', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-30T10:00:00.000Z'));
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'OUT-OF-ORDER-SOURCES-001',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: '较早上传但最后确认的收件人',
+      }))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        recipient: '较晚上传但先确认的收件人',
+      }));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-out-of-order-sources-'));
+    const originalPath = join(root, '订单原值.png');
+    const earlierPath = join(root, '较早变化来源.png');
+    const laterPath = join(root, '较晚变化来源.png');
+    await Promise.all([
+      writeFile(originalPath, 'out-of-order-original'),
+      writeFile(earlierPath, 'out-of-order-earlier'),
+      writeFile(laterPath, 'out-of-order-later'),
+    ]);
+
+    await session.submitSourceScreenshots([originalPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const originalDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(originalDraftId)).order;
+
+    await session.submitSourceScreenshots([earlierPath, laterPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(2);
+    });
+    const [earlierItem, laterItem] = session.listRecognitionBatches()[0].items;
+    const laterReview = session.getDraftReview(laterItem.draftId!);
+    if (laterReview.kind !== 'order_update') throw new Error('预期较晚来源为订单更新');
+    session.confirmOrderUpdate(laterReview.draft, laterReview.expectedRevision);
+
+    const refreshedEarlierReview = session.getDraftReview(earlierItem.draftId!);
+    if (refreshedEarlierReview.kind !== 'order_update') {
+      throw new Error('预期较早来源仍可基于新版本确认');
+    }
+    session.confirmOrderUpdate(
+      refreshedEarlierReview.draft,
+      refreshedEarlierReview.expectedRevision,
+    );
+
+    expect(session.getOrder(originalOrder.id)).toMatchObject({
+      order: {
+        recipient: '较早上传但最后确认的收件人',
+        revision: 3,
+      },
+      sourceScreenshot: { originalName: '较早变化来源.png' },
+      sourceSnapshot: {
+        confirmed: { recipient: '较早上传但最后确认的收件人' },
+      },
+      sources: [
+        { sourceScreenshot: { originalName: '较早变化来源.png' } },
+        { sourceScreenshot: { originalName: '较晚变化来源.png' } },
+        { sourceScreenshot: { originalName: '订单原值.png' } },
+      ],
+      changeEvents: [
+        { resultRevision: 3 },
+        { resultRevision: 2 },
+      ],
+    });
+  });
+
+  it('待确认的订单变化及原始来源在关闭重开后仍可继续对比确认', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-order-update-restart-'));
+    const preferencesDirectory = join(root, '启动配置');
+    const dataDirectory = join(root, '订单数据');
+    const originalPath = join(root, '订单原值.png');
+    const changedPath = join(root, '待确认变化.png');
+    await Promise.all([
+      writeFile(originalPath, 'restart-update-original'),
+      writeFile(changedPath, 'restart-update-changed'),
+    ]);
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'RESTART-UPDATE-001',
+    };
+    const first = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      {
+        recognize: vi.fn<Recognizer['recognize']>()
+          .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+          .mockResolvedValueOnce(recognitionAttempt({
+            ...firstRecognition,
+            recipient: '重启后待确认的收件人',
+          })),
+      },
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+
+    await first.submitSourceScreenshots([originalPath]);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const originalDraftId = first.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = first.confirmDraft(first.getDraft(originalDraftId)).order;
+    const changedBatch = await first.submitSourceScreenshots([changedPath]);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0]).toMatchObject({
+        id: changedBatch.id,
+        counts: { awaiting_confirmation: 1 },
+      });
+    });
+    const changedDraftId = first.listRecognitionBatches()[0].items[0].draftId!;
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: async () => attempt('SHOULD-NOT-RUN') },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    await eventually(() => {
+      expect(reopened.restore()).toMatchObject({ kind: 'ready', dataDirectory });
+    });
+    expect(reopened.listRecognitionBatches()[0]).toMatchObject({
+      id: changedBatch.id,
+      counts: { awaiting_confirmation: 1 },
+      items: [{
+        status: 'awaiting_confirmation',
+        reviewIssues: expect.arrayContaining(['order_content_changed']),
+      }],
+    });
+    const reopenedReview = reopened.getDraftReview(changedDraftId);
+    expect(reopenedReview).toMatchObject({
+      kind: 'order_update',
+      currentOrder: {
+        id: originalOrder.id,
+        recipient: '批次收件人',
+        revision: 1,
+      },
+      expectedRevision: 1,
+      changes: [{
+        path: 'recipient',
+        before: '批次收件人',
+        after: '重启后待确认的收件人',
+      }],
+      sourceSnapshot: {
+        recognition: { recipient: '重启后待确认的收件人' },
+        confirmed: null,
+      },
+    });
+    if (reopenedReview.kind !== 'order_update') {
+      throw new Error('预期重启后仍为订单更新校对');
+    }
+    expect(reopened.confirmOrderUpdate(
+      reopenedReview.draft,
+      reopenedReview.expectedRevision,
+    )).toMatchObject({
+      order: {
+        id: originalOrder.id,
+        recipient: '重启后待确认的收件人',
+        revision: 2,
+      },
+      resolution: 'order_updated',
+    });
+  });
+
+  it('内容等价但仍有确定性校对问题时不会自动按重复订单跳过', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'UNSAFE-EQUIVALENT-001',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt(
+        firstRecognition,
+        ['targeted_review_conflict'],
+      ));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-unsafe-equivalent-'));
+    const firstPath = join(root, '首次来源.png');
+    const uncertainPath = join(root, '仍有冲突的等价来源.png');
+    await Promise.all([
+      writeFile(firstPath, 'unsafe-equivalent-original'),
+      writeFile(uncertainPath, 'unsafe-equivalent-conflict'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const originalDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    session.confirmDraft(session.getDraft(originalDraftId));
+    const uncertainBatch = await session.submitSourceScreenshots([uncertainPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: uncertainBatch.id,
+        counts: { awaiting_confirmation: 1, duplicate_skipped: 0 },
+        items: [{
+          status: 'awaiting_confirmation',
+          reviewIssues: expect.arrayContaining([
+            'targeted_review_conflict',
+            'duplicate_order',
+          ]),
+        }],
+      });
+    });
+    expect(session.listOrders()).toHaveLength(1);
+  });
+
+  it('校对时把订单号改为已有身份的全角等价值也不会创建第二笔订单', async () => {
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(attempt('IDENTITY-NFKC-001'))
+      .mockResolvedValueOnce(attempt('TEMPORARY-NEW-ORDER'));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-confirm-identity-dedup-'));
+    const firstPath = join(root, '已有订单.png');
+    const correctedPath = join(root, '校对订单号.png');
+    await Promise.all([
+      writeFile(firstPath, 'identity-dedup-original-image'),
+      writeFile(correctedPath, 'identity-dedup-corrected-image'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    const correctedBatch = await session.submitSourceScreenshots([correctedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const correctedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const correctedDraft = {
+      ...session.getDraft(correctedDraftId),
+      orderNumber: 'ＩＤＥＮＴＩＴＹ－ＮＦＫＣ－００１',
+    };
+
+    const resolution = session.confirmDraft(correctedDraft);
+    const resolvedOrder = resolution.order;
+
+    expect(resolvedOrder.id).toBe(originalOrder.id);
+    expect(resolution.resolution).toBe('equivalent_order');
+    expect(session.listOrders()).toHaveLength(1);
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: correctedBatch.id,
+      counts: { duplicate_skipped: 1, imported: 0 },
+      items: [{ status: 'duplicate_skipped', resolution: 'equivalent_order' }],
+    });
+    expect(session.getOrder(originalOrder.id).sources).toHaveLength(2);
+  });
+
+  it('校对新订单时改为已有身份且内容变化会保留修正值并转入订单更新对比', async () => {
+    const firstRecognition = {
+      ...recognition,
+      orderNumber: 'REVIEW-TRANSITION-001',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...firstRecognition,
+        orderNumber: 'TEMPORARY-ORDER-001',
+        recipient: '校对后需要更新的收件人',
+      }));
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-review-transition-'));
+    const firstPath = join(root, '已有订单.png');
+    const correctedPath = join(root, '校正身份且内容变化.png');
+    await Promise.all([
+      writeFile(firstPath, 'review-transition-original'),
+      writeFile(correctedPath, 'review-transition-candidate'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+
+    await session.submitSourceScreenshots([correctedPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const candidateDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const correctedDraft = {
+      ...session.getDraft(candidateDraftId),
+      orderNumber: firstRecognition.orderNumber,
+    };
+
+    expect(() => session.confirmDraft(correctedDraft)).toThrowError(/已转为订单更新/);
+    const transitionedReview = session.getDraftReview(candidateDraftId);
+    expect(transitionedReview).toMatchObject({
+      kind: 'order_update',
+      draft: {
+        orderNumber: firstRecognition.orderNumber,
+        recipient: '校对后需要更新的收件人',
+      },
+      currentOrder: { id: originalOrder.id, recipient: '批次收件人' },
+      changes: [{
+        path: 'recipient',
+        before: '批次收件人',
+        after: '校对后需要更新的收件人',
+      }],
+    });
+    if (transitionedReview.kind !== 'order_update') {
+      throw new Error('预期已转为订单更新校对');
+    }
+    expect(session.confirmOrderUpdate(
+      transitionedReview.draft,
+      transitionedReview.expectedRevision,
+    )).toMatchObject({
+      order: { id: originalOrder.id, revision: 2 },
+      resolution: 'order_updated',
+    });
+  });
+
+  it('订单更新校对中修正为全新身份会创建新订单且不改动误命中的旧订单', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-update-reroute-new-order-'));
+    const dataDirectory = join(root, '订单数据');
+    const originalPath = join(root, '已有订单.png');
+    const mistakenPath = join(root, '误命中已有订单.png');
+    await Promise.all([
+      writeFile(originalPath, 'update-reroute-existing-order'),
+      writeFile(mistakenPath, 'update-reroute-mistaken-candidate'),
+    ]);
+    const existingRecognition = {
+      ...recognition,
+      orderNumber: 'OCR-MISTAKEN-IDENTITY',
+      recipient: '旧订单收件人',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(existingRecognition))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...existingRecognition,
+        recipient: '实际新订单收件人',
+      }));
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      { recognize },
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+
+    await session.submitSourceScreenshots([originalPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+    });
+    const originalDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const originalOrder = session.confirmDraft(session.getDraft(originalDraftId)).order;
+
+    const mistakenBatch = await session.submitSourceScreenshots([mistakenPath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: mistakenBatch.id,
+        counts: { awaiting_confirmation: 1 },
+      });
+    });
+    const mistakenDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const review = session.getDraftReview(mistakenDraftId);
+    if (review.kind !== 'order_update') throw new Error('预期先误命中已有订单');
+
+    const outcome = session.confirmOrderUpdate({
+      ...review.draft,
+      orderNumber: 'ACTUAL-NEW-ORDER-002',
+    }, review.expectedRevision);
+
+    expect(outcome).toMatchObject({
+      resolution: 'new_order',
+      order: {
+        orderNumber: 'ACTUAL-NEW-ORDER-002',
+        recipient: '实际新订单收件人',
+        revision: 1,
+      },
+    });
+    expect(outcome.order.id).not.toBe(originalOrder.id);
+    expect(session.listOrders()).toHaveLength(2);
+    expect(session.getOrder(originalOrder.id)).toMatchObject({
+      order: { recipient: '旧订单收件人', revision: 1 },
+      sources: [{}],
+      changeEvents: [],
+    });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: mistakenBatch.id,
+      items: [{ status: 'imported', resolution: 'new_order' }],
+    });
+    expect(readStoredDraftResolution(dataDirectory, mistakenDraftId)).toEqual({
+      status: 'confirmed',
+      matchedOrderId: null,
+      resolution: 'new_order',
+    });
+  });
+
+  it('订单更新校对中修正为另一已有身份时先切换候选再只更新正确订单', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-update-reroute-existing-order-'));
+    const dataDirectory = join(root, '订单数据');
+    const paths = [
+      join(root, '误候选订单.png'),
+      join(root, '正确候选订单.png'),
+      join(root, '待纠正来源.png'),
+    ];
+    await Promise.all(paths.map((path, index) => writeFile(path, `reroute-existing-${index}`)));
+    const wrongCandidate = {
+      ...recognition,
+      orderNumber: 'WRONG-CANDIDATE-ORDER',
+      recipient: '误候选当前收件人',
+    };
+    const correctCandidate = {
+      ...recognition,
+      orderNumber: 'CORRECT-CANDIDATE-ORDER',
+      recipient: '正确候选当前收件人',
+    };
+    const recognize = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValueOnce(recognitionAttempt(wrongCandidate))
+      .mockResolvedValueOnce(recognitionAttempt(correctCandidate))
+      .mockResolvedValueOnce(recognitionAttempt({
+        ...wrongCandidate,
+        recipient: '新来源确认收件人',
+      }));
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      { recognize },
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+
+    const importedOrders = [];
+    for (const path of paths.slice(0, 2)) {
+      await session.submitSourceScreenshots([path]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+      });
+      const draftId = session.listRecognitionBatches()[0].items[0].draftId!;
+      importedOrders.push(session.confirmDraft(session.getDraft(draftId)).order);
+    }
+    const [wrongOrder, correctOrder] = importedOrders;
+
+    const updateBatch = await session.submitSourceScreenshots([paths[2]]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        id: updateBatch.id,
+        counts: { awaiting_confirmation: 1 },
+      });
+    });
+    const updateDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+    const initialReview = session.getDraftReview(updateDraftId);
+    if (initialReview.kind !== 'order_update') throw new Error('预期先进入误候选更新');
+    expect(initialReview.currentOrder.id).toBe(wrongOrder.id);
+
+    const correctedDraft = {
+      ...initialReview.draft,
+      orderNumber: correctCandidate.orderNumber,
+    };
+    expect(() => session.confirmOrderUpdate(
+      correctedDraft,
+      initialReview.expectedRevision,
+    )).toThrowError(/已切换对比/);
+
+    const reroutedReview = session.getDraftReview(updateDraftId);
+    expect(reroutedReview).toMatchObject({
+      kind: 'order_update',
+      draft: {
+        orderNumber: correctCandidate.orderNumber,
+        recipient: '新来源确认收件人',
+      },
+      currentOrder: {
+        id: correctOrder.id,
+        recipient: '正确候选当前收件人',
+      },
+    });
+    if (reroutedReview.kind !== 'order_update') throw new Error('预期切换到正确候选');
+    const outcome = session.confirmOrderUpdate(
+      reroutedReview.draft,
+      reroutedReview.expectedRevision,
+    );
+
+    expect(outcome).toMatchObject({
+      resolution: 'order_updated',
+      order: {
+        id: correctOrder.id,
+        recipient: '新来源确认收件人',
+        revision: 2,
+      },
+    });
+    expect(session.getOrder(wrongOrder.id)).toMatchObject({
+      order: { recipient: '误候选当前收件人', revision: 1 },
+      changeEvents: [],
+    });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: updateBatch.id,
+      items: [{ status: 'imported', resolution: 'order_updated' }],
+    });
+    expect(readStoredDraftResolution(dataDirectory, updateDraftId)).toEqual({
+      status: 'confirmed',
+      matchedOrderId: correctOrder.id,
+      resolution: 'order_updated',
+    });
   });
 
   it('开启后对六类关键信息缺失逐项给出确定性原因', async () => {
@@ -609,6 +1709,40 @@ describe('批量来源截图识别队列', () => {
     await eventually(() => {
       expect(session.listRecognitionBatches().map((batch) => batch.processedCount))
         .toEqual([1, 2]);
+    });
+  });
+
+  it('在发起付费 OCR 请求前先把内容哈希持久化到批次项', async () => {
+    let finishRecognition!: (
+      value: Awaited<ReturnType<Recognizer['recognize']>>,
+    ) => void;
+    const recognize = vi.fn<Recognizer['recognize']>(() => new Promise((resolve) => {
+      finishRecognition = resolve;
+    }));
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-paid-hash-before-ocr-'));
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '请求中的订单.png');
+    const bytes = Buffer.from('paid-hash-before-ocr-result');
+    await writeFile(sourcePath, bytes);
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      { recognize },
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+
+    const batch = await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => expect(recognize).toHaveBeenCalledOnce());
+
+    expect(session.listRecognitionBatches()[0].items[0].status).toBe('recognizing');
+    expect(readStoredBatchItemHash(dataDirectory, batch.items[0].id)).toBe(
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+
+    finishRecognition(attempt('PAID-HASH-PERSISTED'));
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
     });
   });
 
@@ -1111,7 +2245,7 @@ describe('批量来源截图识别队列', () => {
         unitPriceCents: 800,
       }],
     };
-    const order = session.confirmDraft(completedDraft);
+    const order = session.confirmDraft(completedDraft).order;
     const details = session.getOrder(order.id);
 
     expect(details).toMatchObject({
@@ -1222,10 +2356,9 @@ describe('批量来源截图识别队列', () => {
     expect(session.listRecognitionBatches()).toEqual([]);
   });
 
-  it('识别失败后释放内容哈希预留，让相同内容的后续截图仍可识别', async () => {
+  it('识别失败后持久保留已付费内容哈希，让相同内容的后续截图在 OCR 前跳过', async () => {
     const recognize = vi.fn<Recognizer['recognize']>()
-      .mockRejectedValueOnce(new Error('无法连接百炼服务，请检查网络后重试'))
-      .mockResolvedValueOnce(attempt('BATCH-RETRY-SAME-CONTENT'));
+      .mockRejectedValueOnce(new Error('无法连接百炼服务，请检查网络后重试'));
     const session = await openSession({ recognize });
     const root = await mkdtemp(join(tmpdir(), 'xianyu-batch-released-hash-'));
     const paths = [join(root, '首次失败.png'), join(root, '相同内容.png')];
@@ -1236,12 +2369,63 @@ describe('批量来源截图识别队列', () => {
       expect(session.listRecognitionBatches()[0]).toMatchObject({
         counts: {
           waiting_retry: 1,
-          awaiting_confirmation: 1,
-          duplicate_skipped: 0,
+          awaiting_confirmation: 0,
+          duplicate_skipped: 1,
         },
       });
     });
-    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(session.listRecognitionBatches()[0].items).toMatchObject([
+      { status: 'waiting_retry' },
+      { status: 'duplicate_skipped', resolution: 'identical_image' },
+    ]);
+    expect(recognize).toHaveBeenCalledOnce();
+  });
+
+  it('重启后仍用失败项的已付费内容哈希跳过重复上传且不再次调用 OCR', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-failed-hash-restart-'));
+    const dataDirectory = join(root, '订单数据');
+    const preferencesDirectory = join(root, '启动配置');
+    const failedPath = join(root, '首次永久失败.png');
+    const repeatedPath = join(root, '重启后相同内容.png');
+    await Promise.all([
+      writeFile(failedPath, 'paid-failure-persisted-hash'),
+      writeFile(repeatedPath, 'paid-failure-persisted-hash'),
+    ]);
+    const firstRecognizer = vi.fn<Recognizer['recognize']>()
+      .mockRejectedValue(new Error('百炼 OCR 无法识别这张截图，请确认图片完整清晰'));
+    const first = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: firstRecognizer },
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+    await first.submitSourceScreenshots([failedPath]);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0].counts.failed).toBe(1);
+    });
+    first.close();
+
+    const reopenedRecognizer = vi.fn<Recognizer['recognize']>()
+      .mockResolvedValue(attempt('MUST-NOT-CALL-OCR'));
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: reopenedRecognizer },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    reopened.useDataDirectory(dataDirectory);
+    const repeatedBatch = await reopened.submitSourceScreenshots([repeatedPath]);
+
+    await eventually(() => {
+      expect(reopened.listRecognitionBatches().find(({ id }) => id === repeatedBatch.id))
+        .toMatchObject({
+          counts: { duplicate_skipped: 1 },
+          items: [{ status: 'duplicate_skipped', resolution: 'identical_image' }],
+        });
+    });
+    expect(firstRecognizer).toHaveBeenCalledOnce();
+    expect(reopenedRecognizer).not.toHaveBeenCalled();
   });
 
   it('取消未入库草稿后再次提交相同内容会重新识别而不是重复跳过', async () => {
@@ -1551,6 +2735,54 @@ async function eventually(assertion: () => void): Promise<void> {
     }
   }
   assertion();
+}
+
+function readStoredBatchItemHash(dataDirectory: string, itemId: string): string | null {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    readOnly: true,
+  });
+  try {
+    const row = database
+      .prepare('SELECT content_sha256 FROM recognition_batch_items WHERE id = ?')
+      .get(itemId) as { content_sha256: string | null };
+    return row.content_sha256;
+  } finally {
+    database.close();
+  }
+}
+
+function readStoredDraftResolution(dataDirectory: string, draftId: string): {
+  status: string;
+  matchedOrderId: string | null;
+  resolution: string | null;
+} {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    readOnly: true,
+  });
+  try {
+    const row = database
+      .prepare(`
+        SELECT
+          drafts.status,
+          drafts.matched_order_id,
+          items.resolution_kind
+        FROM order_drafts AS drafts
+        JOIN recognition_batch_items AS items ON items.draft_id = drafts.id
+        WHERE drafts.id = ?
+      `)
+      .get(draftId) as {
+        status: string;
+        matched_order_id: string | null;
+        resolution_kind: string | null;
+      };
+    return {
+      status: row.status,
+      matchedOrderId: row.matched_order_id,
+      resolution: row.resolution_kind,
+    };
+  } finally {
+    database.close();
+  }
 }
 
 function readStoredBatchStatus(dataDirectory: string, batchId: string): string {

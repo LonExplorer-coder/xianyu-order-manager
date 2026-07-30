@@ -14,6 +14,7 @@ export const ORDER_REVIEW_ISSUE_CODES = [
   'automatic_import_disabled',
   'automatic_import_failed',
   'duplicate_order',
+  'order_content_changed',
   'screenshot_content_incomplete',
   'targeted_review_failed',
   'targeted_review_conflict',
@@ -132,6 +133,12 @@ export type RecognitionBatchItemStatus =
   | 'duplicate_skipped'
   | 'cancelled';
 
+export type RecognitionBatchItemResolution =
+  | 'new_order'
+  | 'identical_image'
+  | 'equivalent_order'
+  | 'order_updated';
+
 export type RecognitionBatchItem = {
   id: string;
   batchId: string;
@@ -142,6 +149,7 @@ export type RecognitionBatchItem = {
   retryCount?: number;
   nextRetryAt?: string;
   reviewIssues?: OrderReviewIssueCode[];
+  resolution?: RecognitionBatchItemResolution;
 };
 
 export type RecognitionBatchView = {
@@ -163,10 +171,21 @@ export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
 export type OriginalOrder = Omit<RecognitionResult, 'items' | 'amountCents'> & {
   id: string;
   amountCents: number;
+  revision: number;
   lifecycleStatus: 'active' | 'trashed' | 'deleted';
   createdAt: string;
   updatedAt: string;
   items: OrderItem[];
+};
+
+export type OrderUpdateConfirmation = {
+  order: OriginalOrder;
+  resolution: 'new_order' | 'order_updated' | 'equivalent_order';
+};
+
+export type OrderDraftConfirmation = {
+  order: OriginalOrder;
+  resolution: 'new_order' | 'equivalent_order';
 };
 
 export type OrderSummary = {
@@ -194,11 +213,56 @@ export type SourceSnapshot = {
   id: string;
   createdAt: string;
   recognition: RecognitionResult;
-  confirmed: RecognitionResult;
+  confirmed: RecognitionResult | null;
+};
+
+export type OrderChangeValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OrderChangeValue[]
+  | { [key: string]: OrderChangeValue };
+
+export type OrderFieldChange = {
+  path: string;
+  before: OrderChangeValue;
+  after: OrderChangeValue;
+};
+
+export type OrderChangeEvent = {
+  id: string;
+  sourceSnapshotId: string | null;
+  source: 'source_update' | 'manual_edit';
+  baseRevision: number;
+  resultRevision: number;
+  createdAt: string;
+  changes: OrderFieldChange[];
+};
+
+export type OrderDraftReview =
+  | {
+    kind: 'new_order';
+    draft: OrderDraft;
+  }
+  | {
+    kind: 'order_update';
+    draft: OrderDraft;
+    currentOrder: OriginalOrder;
+    expectedRevision: number;
+    changes: OrderFieldChange[];
+    sourceSnapshot: SourceSnapshot;
+  };
+
+export type OrderSource = {
+  sourceScreenshot: SourceScreenshot;
+  sourceSnapshot: SourceSnapshot;
 };
 
 export type OrderDetails = {
   order: OriginalOrder;
   sourceScreenshot: SourceScreenshot;
   sourceSnapshot: SourceSnapshot;
+  sources: OrderSource[];
+  changeEvents: OrderChangeEvent[];
 };

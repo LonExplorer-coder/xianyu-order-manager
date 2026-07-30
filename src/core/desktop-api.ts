@@ -1,7 +1,10 @@
 import type {
   OrderDetails,
   OrderDraft,
+  OrderDraftConfirmation,
+  OrderDraftReview,
   OrderSummary,
+  OrderUpdateConfirmation,
   OriginalOrder,
   RecognitionBatchView,
 } from './contracts';
@@ -31,11 +34,16 @@ export interface DesktopApi {
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;
   createManualDraft(batchId: string, itemId: string): Promise<OrderDraft>;
   getDraft(draftId: string): Promise<OrderDraft>;
+  getDraftReview(draftId: string): Promise<OrderDraftReview>;
   onRecognitionBatchesChanged(
     listener: (batches: RecognitionBatchView[]) => void,
   ): () => void;
   cancelDraft(draftId: string): Promise<void>;
-  confirmDraft(draft: OrderDraft): Promise<OriginalOrder>;
+  confirmDraft(draft: OrderDraft): Promise<OrderDraftConfirmation>;
+  confirmOrderUpdate(
+    draft: OrderDraft,
+    expectedRevision: number,
+  ): Promise<OrderUpdateConfirmation>;
   listOrders(): Promise<OrderSummary[]>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

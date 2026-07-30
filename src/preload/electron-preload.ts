@@ -15,6 +15,7 @@ const api: DesktopApi = {
     ipcRenderer.invoke('workflow:create-manual-draft', batchId, itemId)
   ),
   getDraft: (draftId) => ipcRenderer.invoke('workflow:get-draft', draftId),
+  getDraftReview: (draftId) => ipcRenderer.invoke('workflow:get-draft-review', draftId),
   onRecognitionBatchesChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,
@@ -27,6 +28,9 @@ const api: DesktopApi = {
   },
   cancelDraft: (draftId) => ipcRenderer.invoke('workflow:cancel-draft', draftId),
   confirmDraft: (draft) => ipcRenderer.invoke('workflow:confirm-draft', draft),
+  confirmOrderUpdate: (draft, expectedRevision) => (
+    ipcRenderer.invoke('workflow:confirm-order-update', draft, expectedRevision)
+  ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
   onOrdersChanged: (listener) => {
     const ipcListener = (

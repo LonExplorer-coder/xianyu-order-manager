@@ -110,6 +110,9 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('workflow:get-draft', (_event, draftId: unknown) => {
     return desktopSession.getDraft(parseDraftId(draftId));
   });
+  ipcMain.handle('workflow:get-draft-review', (_event, draftId: unknown) => {
+    return desktopSession.getDraftReview(parseDraftId(draftId));
+  });
   desktopSession.onRecognitionBatchesChanged((batches) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('workflow:recognition-batches-changed', batches);
@@ -122,6 +125,15 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('workflow:confirm-draft', (_event, draft: OrderDraft) => {
     return desktopSession.confirmDraft(draft);
   });
+  ipcMain.handle(
+    'workflow:confirm-order-update',
+    (_event, draft: OrderDraft, expectedRevision: unknown) => (
+      desktopSession.confirmOrderUpdate(
+        draft,
+        parseExpectedRevision(expectedRevision),
+      )
+    ),
+  );
   ipcMain.handle('workflow:cancel-draft', (_event, draftId: unknown) => {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
@@ -150,6 +162,13 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
 
 function parseDraftId(draftId: unknown): string {
   return parseWorkflowId(draftId, '订单草稿');
+}
+
+function parseExpectedRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new Error('订单版本无效，请刷新后重试');
+  }
+  return value as number;
 }
 
 function parseWorkflowId(value: unknown, label: string): string {

@@ -32,6 +32,7 @@ const ORDER_REVIEW_ISSUE_LABELS: Record<OrderReviewIssueCode, string> = {
   automatic_import_disabled: '自动入库已关闭',
   automatic_import_failed: '自动入库失败，请人工确认',
   duplicate_order: '已存在相同订单身份的记录',
+  order_content_changed: '同一订单的新截图包含字段变化，请确认是否更新',
   screenshot_content_incomplete: '截图关键区域未显示完整或未识别',
   targeted_review_failed: '关键字段定向复核未完成',
   targeted_review_conflict: '关键字段两次识别仍有冲突',

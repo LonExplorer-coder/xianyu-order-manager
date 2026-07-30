@@ -10,12 +10,15 @@ import {
 import type { BootstrapState, DesktopApi } from '../core/desktop-api';
 import type {
   DraftItem,
+  OrderChangeValue,
   OrderDetails,
   OrderDraft,
+  OrderDraftReview,
   OrderSummary,
   RecognitionBatchView,
   RecognitionBatchItemStatus,
 } from '../core/contracts';
+import { diffOrderCurrentValues } from '../core/order-comparison';
 import type { OcrSettingsView } from '../core/ocr-settings';
 import {
   orderReviewIssueLabel,
@@ -46,9 +49,11 @@ const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，�
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [draft, setDraft] = useState<OrderDraft | null>(null);
+  const [draftReview, setDraftReview] = useState<OrderDraftReview | null>(null);
   const [reviewScreenshotUrl, setReviewScreenshotUrl] = useState('');
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
+  const [detailScreenshotId, setDetailScreenshotId] = useState('');
   const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
   const [reviewBatchId, setReviewBatchId] = useState('');
@@ -57,6 +62,7 @@ export function App({ api }: AppProps) {
   const [operationError, setOperationError] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('orders');
   const orderSnapshotVersion = useRef(0);
+  const detailSourceRequestVersion = useRef(0);
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
     : '';
@@ -81,10 +87,13 @@ export function App({ api }: AppProps) {
     setRecognitionBatches([]);
     setActiveBatchId('');
     setDraft(null);
+    setDraftReview(null);
     setReviewScreenshotUrl('');
     setReviewBatchId('');
     setOrderDetails(null);
     setDetailScreenshotUrl('');
+    setDetailScreenshotId('');
+    detailSourceRequestVersion.current += 1;
     setActivePage('orders');
     setOperationError('');
   }, [readyDataDirectory]);
@@ -178,10 +187,12 @@ export function App({ api }: AppProps) {
     setBusyAction('review');
     setOperationError('');
     try {
-      const selectedDraft = await api.getDraft(draftId);
+      const selectedReview = await api.getDraftReview(draftId);
+      const selectedDraft = selectedReview.draft;
       const screenshotUrl = await api.getScreenshotDataUrl(selectedDraft.screenshotId);
       setReviewScreenshotUrl(screenshotUrl);
       setDraft(selectedDraft);
+      setDraftReview(selectedReview);
       setReviewBatchId(batchId);
       setOrderDetails(null);
     } catch (error) {
@@ -218,6 +229,7 @@ export function App({ api }: AppProps) {
       ));
       setReviewScreenshotUrl(screenshotUrl);
       setDraft(selectedDraft);
+      setDraftReview({ kind: 'new_order', draft: selectedDraft });
       setReviewBatchId(batchId);
       setOrderDetails(null);
     } catch (error) {
@@ -232,8 +244,16 @@ export function App({ api }: AppProps) {
     if (!draft || bootstrap?.kind !== 'ready') return;
     setBusyAction('confirm');
     setOperationError('');
+    const isOrderUpdate = draftReview?.kind === 'order_update';
     try {
-      await api.confirmDraft(draft);
+      let resolution: RecognitionBatchView['items'][number]['resolution'] = 'new_order';
+      if (isOrderUpdate) {
+        const outcome = await api.confirmOrderUpdate(draft, draftReview.expectedRevision);
+        resolution = outcome.resolution;
+      } else {
+        const outcome = await api.confirmDraft(draft);
+        resolution = outcome.resolution;
+      }
       const requestedAtVersion = orderSnapshotVersion.current;
       const orders = await api.listOrders();
       if (requestedAtVersion === orderSnapshotVersion.current) {
@@ -243,8 +263,14 @@ export function App({ api }: AppProps) {
             : current
         ));
       }
-      setRecognitionBatches((current) => updateBatchDraftStatus(current, draft.id, 'imported'));
+      setRecognitionBatches((current) => updateBatchDraftStatus(
+        current,
+        draft.id,
+        resolution === 'equivalent_order' ? 'duplicate_skipped' : 'imported',
+        resolution,
+      ));
       setDraft(null);
+      setDraftReview(null);
       setReviewScreenshotUrl('');
       if (reviewBatchId) {
         setActiveBatchId(reviewBatchId);
@@ -252,6 +278,30 @@ export function App({ api }: AppProps) {
       }
       setReviewBatchId('');
     } catch (error) {
+      if (!isOrderUpdate) {
+        try {
+          const transitionedReview = await api.getDraftReview(draft.id);
+          if (transitionedReview.kind === 'order_update') {
+            setDraft(transitionedReview.draft);
+            setDraftReview(transitionedReview);
+          }
+        } catch {
+          // Keep the current review form when the failure was unrelated to a review transition.
+        }
+      } else {
+        try {
+          const transitionedReview = await api.getDraftReview(draft.id);
+          if (transitionedReview.kind === 'order_update') {
+            const changedTarget = transitionedReview.currentOrder.id !==
+              draftReview.currentOrder.id;
+            const nextDraft = changedTarget ? transitionedReview.draft : draft;
+            setDraft(nextDraft);
+            setDraftReview({ ...transitionedReview, draft: nextDraft });
+          }
+        } catch {
+          // Keep the current comparison and unsaved edits if refreshing also fails.
+        }
+      }
       setOperationError(errorMessage(error));
     } finally {
       setBusyAction(null);
@@ -266,6 +316,7 @@ export function App({ api }: AppProps) {
       await api.cancelDraft(draft.id);
       setRecognitionBatches((current) => updateBatchDraftStatus(current, draft.id, 'cancelled'));
       setDraft(null);
+      setDraftReview(null);
       setReviewScreenshotUrl('');
       if (reviewBatchId) {
         setActiveBatchId(reviewBatchId);
@@ -280,17 +331,45 @@ export function App({ api }: AppProps) {
   }
 
   async function openOrder(orderId: string) {
+    const requestVersion = ++detailSourceRequestVersion.current;
     setBusyAction('detail');
     setOperationError('');
     try {
       const details = await api.getOrder(orderId);
       const screenshotUrl = await api.getScreenshotDataUrl(details.sourceScreenshot.id);
+      if (requestVersion !== detailSourceRequestVersion.current) return;
       setDetailScreenshotUrl(screenshotUrl);
+      setDetailScreenshotId(details.sourceScreenshot.id);
       setOrderDetails(details);
     } catch (error) {
-      setOperationError(errorMessage(error));
+      if (requestVersion === detailSourceRequestVersion.current) {
+        setOperationError(errorMessage(error));
+      }
     } finally {
-      setBusyAction(null);
+      if (requestVersion === detailSourceRequestVersion.current) {
+        setBusyAction(null);
+      }
+    }
+  }
+
+  async function selectDetailSource(screenshotId: string) {
+    if (screenshotId === detailScreenshotId) return;
+    const requestVersion = ++detailSourceRequestVersion.current;
+    setBusyAction('detail');
+    setOperationError('');
+    try {
+      const screenshotUrl = await api.getScreenshotDataUrl(screenshotId);
+      if (requestVersion !== detailSourceRequestVersion.current) return;
+      setDetailScreenshotUrl(screenshotUrl);
+      setDetailScreenshotId(screenshotId);
+    } catch (error) {
+      if (requestVersion === detailSourceRequestVersion.current) {
+        setOperationError(errorMessage(error));
+      }
+    } finally {
+      if (requestVersion === detailSourceRequestVersion.current) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -318,9 +397,12 @@ export function App({ api }: AppProps) {
   }
 
   function closeDetails() {
+    detailSourceRequestVersion.current += 1;
     setOrderDetails(null);
     setDetailScreenshotUrl('');
+    setDetailScreenshotId('');
     setOperationError('');
+    setBusyAction(null);
   }
 
   if (!bootstrap) {
@@ -367,6 +449,7 @@ export function App({ api }: AppProps) {
     workspace = (
       <ReviewWorkspace
         draft={draft}
+        review={draftReview ?? { kind: 'new_order', draft }}
         screenshotUrl={reviewScreenshotUrl}
         error={operationError}
         cancelling={busyAction === 'cancel'}
@@ -381,8 +464,11 @@ export function App({ api }: AppProps) {
       <DetailWorkspace
         details={orderDetails}
         screenshotUrl={detailScreenshotUrl}
+        selectedScreenshotId={detailScreenshotId}
+        sourceLoading={busyAction === 'detail'}
         error={operationError}
         onBack={closeDetails}
+        onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
       />
     );
   } else if (activePage === 'batches') {
@@ -822,7 +908,7 @@ function BatchesWorkspace({
                       <td className="batch-filename" title={item.sourceName}>{item.sourceName}</td>
                       <td>
                         <span className={`status-chip batch-status batch-status--${item.status}`}>
-                          {recognitionBatchStatusLabel(item.status)}
+                          {recognitionBatchStatusLabel(item)}
                         </span>
                       </td>
                       <td
@@ -1275,6 +1361,7 @@ function SettingsNotice({ feedback }: { feedback: SettingsFeedback }) {
 
 type ReviewWorkspaceProps = {
   draft: OrderDraft;
+  review: OrderDraftReview;
   screenshotUrl: string;
   error: string;
   cancelling: boolean;
@@ -1286,6 +1373,7 @@ type ReviewWorkspaceProps = {
 
 function ReviewWorkspace({
   draft,
+  review,
   screenshotUrl,
   error,
   cancelling,
@@ -1295,6 +1383,10 @@ function ReviewWorkspace({
   onConfirm,
 }: ReviewWorkspaceProps) {
   const [moneyErrors, setMoneyErrors] = useState<Record<string, string>>({});
+  const isOrderUpdate = review.kind === 'order_update';
+  const updateChanges = isOrderUpdate
+    ? diffOrderCurrentValues(review.currentOrder, draft)
+    : [];
   const hasMoneyErrors = Object.keys(moneyErrors).length > 0;
   const isComplete =
     draft.orderNumber.trim() !== '' &&
@@ -1398,9 +1490,15 @@ function ReviewWorkspace({
       <header className="workspace-header workspace-header--review">
         <div className="header-title-row">
           <div>
-            <span className="section-kicker">识别结果 · 待确认</span>
-            <h1>校对识别结果</h1>
-            <p>左侧是来源截图，修正右侧字段后再入库。</p>
+            <span className="section-kicker">
+              {isOrderUpdate ? '订单变化 · 待确认' : '识别结果 · 待确认'}
+            </span>
+            <h1>{isOrderUpdate ? '确认订单更新' : '校对识别结果'}</h1>
+            <p>
+              {isOrderUpdate
+                ? '左侧是新的来源截图，请核对变化后再更新订单当前值。'
+                : '左侧是来源截图，修正右侧字段后再入库。'}
+            </p>
           </div>
         </div>
         <div className="header-actions">
@@ -1419,7 +1517,9 @@ function ReviewWorkspace({
             disabled={cancelling || confirming || !isComplete}
           >
             <Icon name="check" />
-            {confirming ? '正在入库…' : '确认并入库'}
+            {confirming
+              ? (isOrderUpdate ? '正在更新…' : '正在入库…')
+              : (isOrderUpdate ? '确认更新订单' : '确认并入库')}
           </button>
         </div>
       </header>
@@ -1438,6 +1538,11 @@ function ReviewWorkspace({
         </figure>
 
         <form id="review-form" className="review-form" onSubmit={onConfirm}>
+          <fieldset
+            className="review-form__controls"
+            disabled={confirming || cancelling}
+            aria-busy={confirming || cancelling}
+          >
           {draft.reviewIssues && draft.reviewIssues.length > 0 && (
             <section className="review-issues" aria-labelledby="review-issues-heading">
               <div>
@@ -1450,6 +1555,9 @@ function ReviewWorkspace({
                 ))}
               </ul>
             </section>
+          )}
+          {isOrderUpdate && (
+            <OrderUpdateComparison changes={updateChanges} />
           )}
           <div className="review-summary">
             <div>
@@ -1466,16 +1574,24 @@ function ReviewWorkspace({
             </div>
           </div>
 
-          <FormSection title="订单信息" description="平台只读；卖家账号与订单号共同确定订单归属。">
+          <FormSection title="订单信息" description="平台只读；卖家账号与订单号共同确定订单归属，识别有误时可在确认前修正。">
             <div className="field-grid field-grid--two">
               <Field label="平台">
                 <input value={platformLabel(draft.platform)} readOnly />
               </Field>
               <Field label="卖家账号" required>
-                <input required value={draft.sellerAccount} onChange={(event) => patchDraft({ sellerAccount: event.target.value })} />
+                <input
+                  required
+                  value={draft.sellerAccount}
+                  onChange={(event) => patchDraft({ sellerAccount: event.target.value })}
+                />
               </Field>
               <Field label="订单号" required>
-                <input required value={draft.orderNumber} onChange={(event) => patchDraft({ orderNumber: event.target.value })} />
+                <input
+                  required
+                  value={draft.orderNumber}
+                  onChange={(event) => patchDraft({ orderNumber: event.target.value })}
+                />
               </Field>
               <Field label="支付宝交易号">
                 <input value={draft.alipayTransactionNumber} onChange={(event) => patchDraft({ alipayTransactionNumber: event.target.value })} />
@@ -1718,10 +1834,116 @@ function ReviewWorkspace({
               <span aria-hidden="true">+</span>添加商品
             </button>
           </FormSection>
+          </fieldset>
         </form>
       </div>
     </section>
   );
+}
+
+function OrderUpdateComparison({
+  changes,
+}: {
+  changes: ReturnType<typeof diffOrderCurrentValues>;
+}) {
+  return (
+    <section className="order-update-comparison" aria-labelledby="order-update-heading">
+      <div className="order-update-comparison__heading">
+        <div>
+          <span className="section-kicker">同一订单 · 新来源</span>
+          <h2 id="order-update-heading">订单变化对比</h2>
+        </div>
+        <span>{changes.length} 个字段变化</span>
+      </div>
+      {changes.length === 0 ? (
+        <p className="order-update-comparison__empty">当前没有字段变化，将只保留新的来源记录。</p>
+      ) : (
+        <div className="order-update-comparison__table-frame">
+          <table aria-label="订单变化对比">
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>当前值</th>
+                <th>新识别值</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changes.map((change) => (
+                <tr key={change.path}>
+                  <th scope="row">{orderChangeFieldLabel(change.path)}</th>
+                  <td>{formatOrderChangeValue(change.path, change.before)}</td>
+                  <td className="order-update-comparison__new-value">
+                    {formatOrderChangeValue(change.path, change.after)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+const ORDER_CHANGE_FIELD_LABELS: Record<string, string> = {
+  alipayTransactionNumber: '支付宝交易号',
+  buyerNickname: '买家昵称',
+  recipient: '收件人',
+  phone: '手机号',
+  phoneNormalized: '规范化手机号',
+  addressOriginal: '完整地址（原文）',
+  addressNormalized: '规范化地址',
+  province: '省',
+  city: '市',
+  district: '区 / 县',
+  orderedAtOriginal: '下单时间（原文）',
+  orderedAtNormalized: '下单时间（规范化）',
+  paidAtOriginal: '付款时间（原文）',
+  paidAtNormalized: '付款时间（规范化）',
+  productTotalCents: '商品总价',
+  shippingFeeCents: '运费',
+  amountCents: '成交金额',
+  platformTransactionStatus: '平台交易状态',
+  fulfillmentStatus: '履约状态',
+};
+
+function orderChangeFieldLabel(path: string): string {
+  const direct = ORDER_CHANGE_FIELD_LABELS[path];
+  if (direct) return direct;
+  const removedItemMatch = /^items\.removed\[(\d+)\]$/u.exec(path);
+  if (removedItemMatch) {
+    return `原商品 ${Number(removedItemMatch[1]) + 1} · 已移除`;
+  }
+  const itemMatch = /^items\[(\d+)\](?:\.(.+))?$/u.exec(path);
+  if (!itemMatch) return path;
+  const position = Number(itemMatch[1]) + 1;
+  const field = itemMatch[2];
+  const label = field ? ({
+    sourceTitle: '标题',
+    sourceSpec: '规格',
+    unitPriceCents: '单价',
+    quantity: '数量',
+    quantityInferred: '数量来源',
+  } as Record<string, string>)[field] : '整项';
+  return `商品 ${position} · ${label ?? field}`;
+}
+
+function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
+  if (value === null) return '—';
+  if (typeof value === 'boolean') return value ? '系统推定' : '截图明确';
+  if (typeof value === 'number') {
+    return /(?:Cents|unitPriceCents)$/u.test(path) ? formatMoney(value) : String(value);
+  }
+  if (typeof value === 'string') {
+    if (path === 'platformTransactionStatus') {
+      return platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus']);
+    }
+    if (path === 'fulfillmentStatus') {
+      return fulfillmentStatusLabel(value as OrderDraft['fulfillmentStatus']);
+    }
+    return value || '—';
+  }
+  return JSON.stringify(value);
 }
 
 function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
@@ -1763,16 +1985,30 @@ function Field({
 function DetailWorkspace({
   details,
   screenshotUrl,
+  selectedScreenshotId,
+  sourceLoading,
   error,
   onBack,
+  onSelectSource,
 }: {
   details: OrderDetails;
   screenshotUrl: string;
+  selectedScreenshotId: string;
+  sourceLoading: boolean;
   error: string;
   onBack: () => void;
+  onSelectSource: (screenshotId: string) => void;
 }) {
-  const { order, sourceScreenshot, sourceSnapshot } = details;
-  const recipientChanged = sourceSnapshot.recognition.recipient !== order.recipient;
+  const { order } = details;
+  const selectedSource = details.sources.find(({ sourceScreenshot: source }) => (
+    source.id === selectedScreenshotId
+  )) ?? {
+    sourceScreenshot: details.sourceScreenshot,
+    sourceSnapshot: details.sourceSnapshot,
+  };
+  const { sourceScreenshot, sourceSnapshot } = selectedSource;
+  const recipientChanged = sourceSnapshot.confirmed !== null &&
+    sourceSnapshot.recognition.recipient !== sourceSnapshot.confirmed.recipient;
 
   return (
     <section className="detail-workspace detail-enter">
@@ -1870,7 +2106,10 @@ function DetailWorkspace({
             {recipientChanged && (
               <div className="source-change-note">
                 <Icon name="history" />
-                <span>识别原值“{sourceSnapshot.recognition.recipient}”已在入库前修正。</span>
+                <span>
+                  识别原值“{sourceSnapshot.recognition.recipient}”已在本次来源确认时修正为“
+                  {sourceSnapshot.confirmed?.recipient}”。
+                </span>
               </div>
             )}
           </section>
@@ -1892,6 +2131,96 @@ function DetailWorkspace({
                   <strong>{formatMoney(item.subtotalCents)}</strong>
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section className="detail-section" aria-label="来源与修改记录">
+            <div className="detail-section-title">
+              <h2>来源与修改记录</h2>
+              <span>{details.sources.length} 份来源 · {details.changeEvents.length} 次更新</span>
+            </div>
+
+            <div className="evidence-block">
+              <h3>来源证据</h3>
+              <ol className="evidence-source-list" aria-label="来源证据">
+                {details.sources.map(({ sourceScreenshot: source, sourceSnapshot: snapshot }) => {
+                  const selected = source.id === sourceScreenshot.id;
+                  const currentValueSource = snapshot.id === details.sourceSnapshot.id;
+                  return (
+                    <li key={snapshot.id}>
+                      <button
+                        className={`evidence-source${selected ? ' is-selected' : ''}`}
+                        type="button"
+                        aria-label={`查看来源 ${source.originalName}`}
+                        aria-pressed={selected}
+                        disabled={sourceLoading}
+                        onClick={() => onSelectSource(source.id)}
+                      >
+                        <span className="evidence-source__copy">
+                          <strong>{source.originalName}</strong>
+                          <small>{formatDateTime(snapshot.createdAt)}</small>
+                        </span>
+                        <span className="evidence-source__status">
+                          {currentValueSource ? '当前值来源' : '历史来源'}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+
+            <div className="evidence-block evidence-block--history">
+              <h3>修改记录</h3>
+              {details.changeEvents.length === 0 ? (
+                <p className="evidence-empty">暂无修改记录，当前订单仍为首次确认值。</p>
+              ) : (
+                <ol className="change-event-list" aria-label="修改记录">
+                  {details.changeEvents.map((event) => {
+                    const eventSource = details.sources.find(({ sourceSnapshot: snapshot }) => (
+                      snapshot.id === event.sourceSnapshotId
+                    ));
+                    return (
+                      <li className="change-event" key={event.id}>
+                        <header>
+                          <span>
+                            <strong>v{event.baseRevision} → v{event.resultRevision}</strong>
+                            <small>
+                              {event.source === 'source_update' ? '截图确认更新' : '手动修改'}
+                              {' · '}
+                              {eventSource ? (
+                                <button
+                                  className="change-event__source"
+                                  type="button"
+                                  aria-label={`查看修改来源 ${eventSource.sourceScreenshot.originalName}`}
+                                  disabled={sourceLoading}
+                                  onClick={() => onSelectSource(eventSource.sourceScreenshot.id)}
+                                >
+                                  {eventSource.sourceScreenshot.originalName}
+                                </button>
+                              ) : '无截图来源'}
+                              {' · '}{formatDateTime(event.createdAt)}
+                            </small>
+                          </span>
+                          <em>{event.changes.length} 个字段</em>
+                        </header>
+                        <dl>
+                          {event.changes.map((change) => (
+                            <div key={change.path}>
+                              <dt>{orderChangeFieldLabel(change.path)}</dt>
+                              <dd>
+                                <span>{formatOrderChangeValue(change.path, change.before)}</span>
+                                <b aria-hidden="true">→</b>
+                                <strong>{formatOrderChangeValue(change.path, change.after)}</strong>
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
             </div>
           </section>
         </div>
@@ -2030,7 +2359,11 @@ function formatBatchTime(value: string): string {
   }).format(date);
 }
 
-function recognitionBatchStatusLabel(status: RecognitionBatchItemStatus): string {
+function recognitionBatchStatusLabel(
+  item: RecognitionBatchView['items'][number],
+): string {
+  if (item.resolution === 'order_updated') return '已更新';
+  const { status } = item;
   const labels: Record<RecognitionBatchItemStatus, string> = {
     waiting_recognition: '等待识别',
     recognizing: '识别中',
@@ -2045,10 +2378,21 @@ function recognitionBatchStatusLabel(status: RecognitionBatchItemStatus): string
   return labels[status];
 }
 
-function recognitionBatchResultLabel(status: RecognitionBatchItemStatus): string {
+function recognitionBatchResultLabel(
+  item: RecognitionBatchView['items'][number],
+): string {
+  const { status } = item;
   if (status === 'awaiting_confirmation') return '识别完成，请对照截图校对';
-  if (status === 'imported') return '已确认并写入原始订单表';
-  if (status === 'duplicate_skipped') return '相同截图已接收过，本次未重复调用 OCR';
+  if (status === 'imported') {
+    return item.resolution === 'order_updated'
+      ? '已确认字段变化并更新订单当前值'
+      : '已确认并写入原始订单表';
+  }
+  if (status === 'duplicate_skipped') {
+    return item.resolution === 'equivalent_order'
+      ? '不同来源截图的订单内容等价，已记录来源且未创建重复订单'
+      : '相同截图已接收过，本次未重复调用 OCR';
+  }
   if (status === 'cancelled') return '已取消本张截图的校对';
   if (status === 'waiting_retry') return '已保留原图，将按受控退避自动重试';
   if (status === 'failed') return '未能形成可校对结果';
@@ -2059,7 +2403,7 @@ function recognitionBatchItemResult(
   item: RecognitionBatchView['items'][number],
 ): string {
   if (item.status !== 'waiting_retry') {
-    return item.errorMessage || recognitionBatchResultLabel(item.status);
+    return item.errorMessage || recognitionBatchResultLabel(item);
   }
   const retryNumber = item.retryCount && item.retryCount > 0
     ? `（第 ${item.retryCount}/${MAX_AUTOMATIC_RECOGNITION_RETRIES} 次）`
@@ -2095,13 +2439,20 @@ function mergeRecognitionBatch(
 function updateBatchDraftStatus(
   batches: RecognitionBatchView[],
   draftId: string,
-  status: 'imported' | 'cancelled',
+  status: 'imported' | 'duplicate_skipped' | 'cancelled',
+  resolution?: RecognitionBatchView['items'][number]['resolution'],
 ): RecognitionBatchView[] {
   return batches.map((batch) => {
     if (!batch.items.some((item) => item.draftId === draftId)) return batch;
     const items = batch.items.map((item) => (
       item.draftId === draftId
-        ? { ...item, status, errorMessage: undefined, reviewIssues: [] }
+        ? {
+          ...item,
+          status,
+          errorMessage: undefined,
+          reviewIssues: [],
+          resolution,
+        }
         : item
     ));
     return {

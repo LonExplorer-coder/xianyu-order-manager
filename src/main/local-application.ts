@@ -4,14 +4,19 @@ import { basename, dirname, extname, join } from 'node:path';
 
 import type {
   OrderDetails,
+  OrderChangeEvent,
+  OrderChangeValue,
   OrderDraft,
+  OrderDraftReview,
   OrderItem,
   OrderReviewIssueCode,
+  RecognitionBatchItemResolution,
   RecognitionBatch,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
   RecognitionEvidence,
   OrderSummary,
+  OrderUpdateConfirmation,
   OriginalOrder,
   RecognitionItem,
   RecognitionResult,
@@ -19,6 +24,12 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import {
+  diffOrderCurrentValues,
+  hasEquivalentOrderContent,
+  hasSameOrderIdentity,
+  normalizedOrderIdentityPart,
+} from '../core/order-comparison';
 import {
   assessAutomaticImport,
   isOrderReviewIssueCode,
@@ -47,6 +58,7 @@ export type RecognitionBatchItemUpdate = {
   retryCount?: number;
   nextRetryAt?: string | null;
   reviewIssues?: OrderReviewIssueCode[];
+  resolution?: RecognitionBatchItemResolution;
 };
 
 export type PersistedRecognitionQueueItem = {
@@ -426,7 +438,7 @@ export class LocalApplication {
       .prepare(`
         SELECT items.id, items.batch_id, items.source_name, items.status,
           items.draft_id, items.error_message, items.retry_count, items.next_retry_at,
-          drafts.review_issues_json
+          items.resolution_kind, drafts.review_issues_json
         FROM recognition_batch_items AS items
         JOIN recognition_batches AS batches ON batches.id = items.batch_id
         LEFT JOIN order_drafts AS drafts ON drafts.id = items.draft_id
@@ -457,6 +469,9 @@ export class LocalApplication {
           ...(row.next_retry_at === null
             ? {}
             : { nextRetryAt: asString(row.next_retry_at) }),
+          ...(row.resolution_kind === null
+            ? {}
+            : { resolution: asRecognitionBatchItemResolution(row.resolution_kind) }),
           ...(row.review_issues_json === null
             ? {}
             : { reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json) }),
@@ -483,6 +498,10 @@ export class LocalApplication {
             error_message = ?,
             retry_count = COALESCE(?, retry_count),
             next_retry_at = ?,
+            resolution_kind = CASE
+              WHEN ? IN ('imported', 'duplicate_skipped') THEN ?
+              ELSE NULL
+            END,
             queue_relative_path = CASE
               WHEN ? IN ('awaiting_confirmation', 'duplicate_skipped', 'imported', 'cancelled')
                 THEN NULL
@@ -498,6 +517,8 @@ export class LocalApplication {
           input.errorMessage ?? null,
           input.retryCount ?? null,
           input.nextRetryAt ?? null,
+          input.status,
+          input.resolution ?? null,
           input.status,
           new Date().toISOString(),
           input.itemId,
@@ -736,6 +757,166 @@ export class LocalApplication {
     };
   }
 
+  public getDraftReview(draftId: string): OrderDraftReview {
+    const workspace = this.requireWorkspace();
+    const draft = this.getDraft(draftId);
+    const row = workspace.database
+      .prepare('SELECT matched_order_id FROM order_drafts WHERE id = ?')
+      .get(draftId) as SqlRow;
+    if (row.matched_order_id === null) return { kind: 'new_order', draft };
+
+    const currentOrder = this.getOrder(asString(row.matched_order_id)).order;
+    const snapshotRow = workspace.database
+      .prepare(`
+        SELECT id, recognition_json, confirmed_json, created_at
+        FROM source_snapshots
+        WHERE draft_id = ?
+      `)
+      .get(draftId) as SqlRow | undefined;
+    if (!snapshotRow) throw new Error('订单草稿缺少来源快照');
+    return {
+      kind: 'order_update',
+      draft,
+      currentOrder,
+      expectedRevision: currentOrder.revision,
+      changes: diffOrderCurrentValues(currentOrder, draft),
+      sourceSnapshot: {
+        id: asString(snapshotRow.id),
+        createdAt: asString(snapshotRow.created_at),
+        recognition: parseStoredRecognition(asString(snapshotRow.recognition_json)),
+        confirmed: snapshotRow.confirmed_json === null
+          ? null
+          : parseStoredRecognition(asString(snapshotRow.confirmed_json)),
+      },
+    };
+  }
+
+  public saveDraftOrderMatch(
+    draftId: string,
+    orderId: string,
+    reviewIssues: readonly OrderReviewIssueCode[],
+    reviewedDraft?: OrderDraft,
+  ): OrderDraft {
+    const workspace = this.requireWorkspace();
+    const persistedDraft = this.getDraft(draftId);
+    const draft = reviewedDraft ?? persistedDraft;
+    if (draft.id !== draftId) {
+      throw new Error('校对订单与来源草稿不一致');
+    }
+    if (reviewedDraft) validateDraft(reviewedDraft);
+    const existing = this.getOrder(orderId).order;
+    if (!hasSameOrderIdentity(existing, draft)) {
+      throw new Error('订单草稿与候选原始订单身份不一致');
+    }
+    workspace.transaction(() => {
+      const result = reviewedDraft
+        ? workspace.database
+          .prepare(`
+            UPDATE order_drafts
+            SET
+              platform = ?,
+              seller_account = ?,
+              order_number = ?,
+              alipay_transaction_number = ?,
+              buyer_nickname = ?,
+              recipient = ?,
+              phone = ?,
+              phone_normalized = ?,
+              address_original = ?,
+              address_normalized = ?,
+              province = ?,
+              city = ?,
+              district = ?,
+              ordered_at_original = ?,
+              ordered_at_normalized = ?,
+              paid_at_original = ?,
+              paid_at_normalized = ?,
+              product_total_cents = ?,
+              product_total_present = ?,
+              shipping_fee_cents = ?,
+              shipping_fee_present = ?,
+              amount_cents = ?,
+              amount_present = ?,
+              platform_transaction_status = ?,
+              fulfillment_status = ?,
+              matched_order_id = ?,
+              review_issues_json = ?,
+              intake_decision_pending = 0
+            WHERE id = ?
+              AND status = 'awaiting_review'
+              AND review_cancelled_at IS NULL
+          `)
+          .run(
+            draft.platform,
+            draft.sellerAccount,
+            draft.orderNumber,
+            draft.alipayTransactionNumber,
+            draft.buyerNickname,
+            draft.recipient,
+            draft.phone,
+            draft.phoneNormalized,
+            draft.addressOriginal,
+            draft.addressNormalized,
+            draft.province,
+            draft.city,
+            draft.district,
+            draft.orderedAtOriginal,
+            draft.orderedAtNormalized,
+            draft.paidAtOriginal,
+            draft.paidAtNormalized,
+            draft.productTotalCents ?? 0,
+            draft.productTotalCents === null ? 0 : 1,
+            draft.shippingFeeCents ?? 0,
+            draft.shippingFeeCents === null ? 0 : 1,
+            draft.amountCents ?? 0,
+            draft.amountCents === null ? 0 : 1,
+            draft.platformTransactionStatus,
+            draft.fulfillmentStatus,
+            orderId,
+            serializeOrderReviewIssues(reviewIssues),
+            draftId,
+          )
+        : workspace.database
+          .prepare(`
+            UPDATE order_drafts
+            SET
+              matched_order_id = ?,
+              review_issues_json = ?,
+              intake_decision_pending = 0
+            WHERE id = ?
+              AND status = 'awaiting_review'
+              AND review_cancelled_at IS NULL
+          `)
+          .run(orderId, serializeOrderReviewIssues(reviewIssues), draftId);
+      if (result.changes !== 1) {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
+      if (!reviewedDraft) return;
+
+      workspace.database.prepare('DELETE FROM draft_items WHERE draft_id = ?').run(draftId);
+      const insertItem = workspace.database.prepare(`
+        INSERT INTO draft_items (
+          id, draft_id, position, source_title, source_spec,
+          unit_price_cents, unit_price_present, quantity, quantity_inferred
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      draft.items.forEach((item, position) => {
+        insertItem.run(
+          randomUUID(),
+          draftId,
+          position,
+          item.sourceTitle,
+          item.sourceSpec,
+          item.unitPriceCents ?? 0,
+          item.unitPriceCents === null ? 0 : 1,
+          item.quantity,
+          item.quantityInferred ? 1 : 0,
+        );
+      });
+    });
+    return this.getDraft(draftId);
+  }
+
   public saveDraftReviewIssues(
     draftId: string,
     reviewIssues: readonly OrderReviewIssueCode[],
@@ -800,8 +981,8 @@ export class LocalApplication {
           ...identityOrPlatform,
           excludedDraftId: sellerAccountOrExcludedDraftId ?? identityOrPlatform.id,
         };
-    const sellerAccount = normalizedIdentityPart(identity.sellerAccount);
-    const platformOrderNumber = normalizedIdentityPart(identity.orderNumber);
+    const sellerAccount = normalizedOrderIdentityPart(identity.sellerAccount);
+    const platformOrderNumber = normalizedOrderIdentityPart(identity.orderNumber);
     if (!sellerAccount || !platformOrderNumber) return false;
 
     const workspace = this.requireWorkspace();
@@ -819,14 +1000,122 @@ export class LocalApplication {
       .all(identity.platform, identity.platform) as unknown as SqlRow[];
     return rows.some((row) => (
       asString(row.draft_id) !== identity.excludedDraftId &&
-      normalizedIdentityPart(asString(row.seller_account)) === sellerAccount &&
-      normalizedIdentityPart(asString(row.platform_order_number)) === platformOrderNumber
+      normalizedOrderIdentityPart(asString(row.seller_account)) === sellerAccount &&
+      normalizedOrderIdentityPart(asString(row.platform_order_number)) === platformOrderNumber
     ));
   }
 
-  public hasActiveSourceScreenshotSha256(sha256: string): boolean {
+  public findOriginalOrderByIdentity(
+    identity: Pick<RecognitionResult, 'platform' | 'sellerAccount' | 'orderNumber'>,
+  ): OriginalOrder | null {
+    const sellerAccount = normalizedOrderIdentityPart(identity.sellerAccount);
+    const platformOrderNumber = normalizedOrderIdentityPart(identity.orderNumber);
+    if (!sellerAccount || !platformOrderNumber) return null;
     const workspace = this.requireWorkspace();
-    const row = workspace.database
+    const matched = workspace.database
+      .prepare(`
+        SELECT id
+        FROM original_orders
+        WHERE platform = ?
+          AND seller_account_normalized = ?
+          AND platform_order_number_normalized = ?
+      `)
+      .get(identity.platform, sellerAccount, platformOrderNumber) as SqlRow | undefined;
+    return matched ? this.getOrder(asString(matched.id)).order : null;
+  }
+
+  public resolveEquivalentDraft(
+    draftId: string,
+    orderId: string,
+    reviewedDraft?: OrderDraft,
+  ): OriginalOrder {
+    const workspace = this.requireWorkspace();
+    const persistedDraft = this.getDraft(draftId);
+    const draft = reviewedDraft ?? persistedDraft;
+    if (draft.id !== draftId) {
+      throw new Error('校对订单与来源草稿不一致');
+    }
+    const existing = this.getOrder(orderId).order;
+    if (!hasSameOrderIdentity(existing, draft) || !hasEquivalentOrderContent(existing, draft)) {
+      throw new Error('订单内容已经变化，不能按重复来源跳过');
+    }
+    if (persistedDraft.status !== 'awaiting_review') {
+      throw new Error('该订单草稿已经处理');
+    }
+
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      const current = workspace.database
+        .prepare(`
+          SELECT batch_id, screenshot_id, status, review_cancelled_at
+          FROM order_drafts
+          WHERE id = ?
+        `)
+        .get(draftId) as SqlRow | undefined;
+      if (!current || asString(current.status) !== 'awaiting_review') {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
+      if (current.review_cancelled_at !== null) {
+        throw new Error('该订单草稿已取消，不能记录为重复来源');
+      }
+
+      const finalizedSnapshot = workspace.database
+        .prepare(`
+          UPDATE source_snapshots
+          SET order_id = ?, confirmed_json = ?, resolved_at = ?
+          WHERE draft_id = ?
+            AND order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
+        `)
+        .run(
+          orderId,
+          JSON.stringify(toRecognitionResult(existing)),
+          now,
+          draftId,
+        );
+      if (finalizedSnapshot.changes !== 1) {
+        throw new Error('该订单来源快照状态已变化，请刷新后重试');
+      }
+      const resolved = workspace.database
+        .prepare(`
+          UPDATE order_drafts
+          SET
+            status = 'confirmed',
+            confirmed_at = ?,
+            matched_order_id = ?,
+            review_issues_json = '[]',
+            intake_decision_pending = 0
+          WHERE id = ?
+            AND status = 'awaiting_review'
+            AND review_cancelled_at IS NULL
+        `)
+        .run(now, orderId, draftId);
+      if (resolved.changes !== 1) {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'duplicate_skipped',
+            error_message = NULL,
+            resolution_kind = 'equivalent_order',
+            updated_at = ?
+          WHERE draft_id = ?
+        `)
+        .run(now, draftId);
+      this.completeBatchWhenReviewed(asString(current.batch_id));
+    });
+    return existing;
+  }
+
+  public hasActiveSourceScreenshotSha256(
+    sha256: string,
+    excludedBatchItemId = '',
+  ): boolean {
+    const workspace = this.requireWorkspace();
+    const sourceRow = workspace.database
       .prepare(`
         SELECT 1 AS found
         FROM source_screenshots AS screenshots
@@ -842,7 +1131,22 @@ export class LocalApplication {
         LIMIT 1
       `)
       .get(sha256) as SqlRow | undefined;
-    return row !== undefined;
+    if (sourceRow !== undefined) return true;
+
+    const paidAttemptRow = workspace.database
+      .prepare(`
+        SELECT 1 AS found
+        FROM recognition_batch_items
+        WHERE content_sha256 = ?
+          AND id <> ?
+          AND status IN (
+            'recognizing', 'validating', 'awaiting_confirmation',
+            'imported', 'waiting_retry', 'failed'
+          )
+        LIMIT 1
+      `)
+      .get(sha256, excludedBatchItemId) as SqlRow | undefined;
+    return paidAttemptRow !== undefined;
   }
 
   public cancelDraft(draftId: string): void {
@@ -880,7 +1184,11 @@ export class LocalApplication {
       workspace.database
         .prepare(`
           UPDATE recognition_batch_items
-          SET status = 'cancelled', error_message = NULL, updated_at = ?
+          SET
+            status = 'cancelled',
+            error_message = NULL,
+            resolution_kind = NULL,
+            updated_at = ?
           WHERE draft_id = ?
         `)
         .run(now, draftId);
@@ -899,9 +1207,14 @@ export class LocalApplication {
       throw new Error('该订单草稿已经确认');
     }
 
-    const recognitionRow = workspace.database
-      .prepare('SELECT recognition_json FROM order_drafts WHERE id = ?')
-      .get(draft.id) as SqlRow;
+    const existingOrder = this.findOriginalOrderByIdentity(draft);
+    if (existingOrder) {
+      if (hasEquivalentOrderContent(existingOrder, draft)) {
+        return this.resolveEquivalentDraft(draft.id, existingOrder.id, draft);
+      }
+      throw new Error('该订单已存在且内容有变化，请重新打开校对查看新旧对比');
+    }
+
     const orderId = randomUUID();
     const now = new Date().toISOString();
     const confirmedRecognition = toRecognitionResult(draft);
@@ -913,7 +1226,9 @@ export class LocalApplication {
       workspace.database
         .prepare(`
           INSERT INTO original_orders (
-            id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+            id, draft_id, screenshot_id, platform,
+            seller_account, seller_account_normalized,
+            platform_order_number, platform_order_number_normalized,
             alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
             address_original, address_normalized, province, city, district,
             ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
@@ -921,7 +1236,7 @@ export class LocalApplication {
             platform_transaction_status, fulfillment_status, lifecycle_status,
             created_at, updated_at
           ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'active', ?, ?
           )
         `)
@@ -931,7 +1246,9 @@ export class LocalApplication {
           persistedDraft.screenshotId,
           draft.platform,
           draft.sellerAccount,
+          normalizedOrderIdentityPart(draft.sellerAccount),
           draft.orderNumber,
+          normalizedOrderIdentityPart(draft.orderNumber),
           draft.alipayTransactionNumber,
           draft.buyerNickname,
           draft.recipient,
@@ -976,22 +1293,296 @@ export class LocalApplication {
         );
       });
 
-      workspace.database
+      const finalizedSnapshot = workspace.database
         .prepare(`
-          INSERT INTO source_snapshots (
-            id, order_id, screenshot_id, recognition_json, confirmed_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
+          UPDATE source_snapshots
+          SET order_id = ?, confirmed_json = ?, resolved_at = ?
+          WHERE draft_id = ?
+            AND order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
         `)
         .run(
-          randomUUID(),
           orderId,
-          persistedDraft.screenshotId,
-          asString(recognitionRow.recognition_json),
           JSON.stringify(confirmedRecognition),
           now,
+          draft.id,
         );
+      if (finalizedSnapshot.changes !== 1) {
+        throw new Error('该订单来源快照状态已变化，请刷新后重试');
+      }
+
+      const resolvedDraft = workspace.database
+        .prepare(`
+          UPDATE order_drafts
+          SET
+            status = 'confirmed',
+            confirmed_at = ?,
+            matched_order_id = NULL,
+            review_issues_json = '[]',
+            intake_decision_pending = 0
+          WHERE id = ?
+            AND status = 'awaiting_review'
+            AND review_cancelled_at IS NULL
+        `)
+        .run(now, draft.id);
+      if (resolvedDraft.changes !== 1) {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
+      workspace.database
+        .prepare(`
+          UPDATE recognition_batch_items
+          SET
+            status = 'imported',
+            error_message = NULL,
+            resolution_kind = 'new_order',
+            updated_at = ?
+          WHERE draft_id = ?
+        `)
+        .run(now, draft.id);
+      this.completeBatchWhenReviewed(persistedDraft.batchId);
+    });
+
+    return this.getOrder(orderId).order;
+  }
+
+  public confirmOrderUpdate(
+    draft: OrderDraft,
+    expectedRevision: number,
+  ): OrderUpdateConfirmation {
+    const workspace = this.requireWorkspace();
+    validateDraft(draft);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new Error('订单版本无效，请刷新后重试');
+    }
+    const draftRow = workspace.database
+      .prepare(`
+        SELECT matched_order_id, batch_id, status, review_cancelled_at
+        FROM order_drafts
+        WHERE id = ?
+      `)
+      .get(draft.id) as SqlRow | undefined;
+    if (!draftRow) throw new Error('未找到订单草稿');
+    if (draftRow.review_cancelled_at !== null) {
+      throw new Error('该订单草稿已取消，不能确认更新');
+    }
+    if (asString(draftRow.status) !== 'awaiting_review') {
+      throw new Error('该订单草稿已经处理');
+    }
+    if (draftRow.matched_order_id === null) {
+      throw new Error('该订单草稿不是已有订单更新');
+    }
+
+    const orderId = asString(draftRow.matched_order_id);
+    const existing = this.getOrder(orderId).order;
+    if (!hasSameOrderIdentity(existing, draft)) {
+      const correctedExisting = this.findOriginalOrderByIdentity(draft);
+      if (!correctedExisting) {
+        return {
+          order: this.confirmDraft(draft),
+          resolution: 'new_order',
+        };
+      }
+      if (hasEquivalentOrderContent(correctedExisting, draft)) {
+        return {
+          order: this.resolveEquivalentDraft(draft.id, correctedExisting.id, draft),
+          resolution: 'equivalent_order',
+        };
+      }
+      this.saveDraftOrderMatch(
+        draft.id,
+        correctedExisting.id,
+        normalizeOrderReviewIssues([
+          ...(draft.reviewIssues ?? []),
+          'order_content_changed',
+        ]),
+        draft,
+      );
+      throw new Error('修正后的订单身份命中另一笔已有订单，已切换对比，请核对后再次确认');
+    }
+    if (existing.revision !== expectedRevision) {
+      throw new Error('订单已在其他操作中更新，请刷新对比后重试');
+    }
+    const changes = diffOrderCurrentValues(existing, draft);
+    if (changes.length === 0) {
+      return {
+        order: this.resolveEquivalentDraft(draft.id, orderId, draft),
+        resolution: 'equivalent_order',
+      };
+    }
+
+    const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
+    const shippingFeeCents = requireMoney('运费', draft.shippingFeeCents);
+    const amountCents = requireMoney('成交金额', draft.amountCents);
+    const now = new Date().toISOString();
+    const confirmedRecognition = toRecognitionResult({
+      ...draft,
+      platform: existing.platform,
+      sellerAccount: existing.sellerAccount,
+      orderNumber: existing.orderNumber,
+    });
+
+    workspace.transaction(() => {
+      const currentDraft = workspace.database
+        .prepare(`
+          SELECT matched_order_id, status, review_cancelled_at
+          FROM order_drafts
+          WHERE id = ?
+        `)
+        .get(draft.id) as SqlRow | undefined;
+      if (
+        !currentDraft ||
+        currentDraft.matched_order_id !== orderId ||
+        asString(currentDraft.status) !== 'awaiting_review' ||
+        currentDraft.review_cancelled_at !== null
+      ) {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
+
+      const updatedOrder = workspace.database
+        .prepare(`
+          UPDATE original_orders
+          SET
+            alipay_transaction_number = ?,
+            buyer_nickname = ?,
+            recipient = ?,
+            phone = ?,
+            phone_normalized = ?,
+            address_original = ?,
+            address_normalized = ?,
+            province = ?,
+            city = ?,
+            district = ?,
+            ordered_at_original = ?,
+            ordered_at_normalized = ?,
+            paid_at_original = ?,
+            paid_at_normalized = ?,
+            product_total_cents = ?,
+            shipping_fee_cents = ?,
+            amount_cents = ?,
+            platform_transaction_status = ?,
+            fulfillment_status = ?,
+            revision = revision + 1,
+            updated_at = ?
+          WHERE id = ? AND revision = ?
+        `)
+        .run(
+          draft.alipayTransactionNumber,
+          draft.buyerNickname,
+          draft.recipient,
+          draft.phone,
+          draft.phoneNormalized,
+          draft.addressOriginal,
+          draft.addressNormalized,
+          draft.province,
+          draft.city,
+          draft.district,
+          draft.orderedAtOriginal,
+          draft.orderedAtNormalized,
+          draft.paidAtOriginal,
+          draft.paidAtNormalized,
+          productTotalCents,
+          shippingFeeCents,
+          amountCents,
+          draft.platformTransactionStatus,
+          draft.fulfillmentStatus,
+          now,
+          orderId,
+          expectedRevision,
+        );
+      if (updatedOrder.changes !== 1) {
+        throw new Error('订单已在其他操作中更新，请刷新对比后重试');
+      }
 
       workspace.database
+        .prepare('DELETE FROM order_items WHERE order_id = ?')
+        .run(orderId);
+      const insertItem = workspace.database.prepare(`
+        INSERT INTO order_items (
+          id, order_id, position, source_title, source_spec,
+          unit_price_cents, quantity, quantity_inferred, subtotal_cents
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      draft.items.forEach((item, position) => {
+        const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
+        insertItem.run(
+          randomUUID(),
+          orderId,
+          position,
+          item.sourceTitle,
+          item.sourceSpec,
+          unitPriceCents,
+          item.quantity,
+          item.quantityInferred ? 1 : 0,
+          safeSubtotal(unitPriceCents, item.quantity),
+        );
+      });
+
+      const snapshotRow = workspace.database
+        .prepare(`
+          SELECT id
+          FROM source_snapshots
+          WHERE draft_id = ?
+            AND order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
+        `)
+        .get(draft.id) as SqlRow | undefined;
+      if (!snapshotRow) {
+        throw new Error('订单更新来源快照状态已变化，请刷新后重试');
+      }
+      const sourceSnapshotId = asString(snapshotRow.id);
+      const finalizedSnapshot = workspace.database
+        .prepare(`
+          UPDATE source_snapshots
+          SET order_id = ?, confirmed_json = ?, resolved_at = ?
+          WHERE id = ?
+            AND order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
+        `)
+        .run(
+          orderId,
+          JSON.stringify(confirmedRecognition),
+          now,
+          sourceSnapshotId,
+        );
+      if (finalizedSnapshot.changes !== 1) {
+        throw new Error('订单更新来源快照状态已变化，请刷新后重试');
+      }
+
+      const eventId = randomUUID();
+      workspace.database
+        .prepare(`
+          INSERT INTO order_change_events (
+            id, order_id, source_snapshot_id, source,
+            base_revision, result_revision, created_at
+          ) VALUES (?, ?, ?, 'source_update', ?, ?, ?)
+        `)
+        .run(
+          eventId,
+          orderId,
+          sourceSnapshotId,
+          expectedRevision,
+          expectedRevision + 1,
+          now,
+        );
+      const insertChange = workspace.database.prepare(`
+        INSERT INTO order_field_changes (
+          id, event_id, field_path, before_json, after_json
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const change of changes) {
+        insertChange.run(
+          randomUUID(),
+          eventId,
+          change.path,
+          JSON.stringify(change.before),
+          JSON.stringify(change.after),
+        );
+      }
+
+      const resolvedDraft = workspace.database
         .prepare(`
           UPDATE order_drafts
           SET
@@ -1000,19 +1591,31 @@ export class LocalApplication {
             review_issues_json = '[]',
             intake_decision_pending = 0
           WHERE id = ?
+            AND status = 'awaiting_review'
+            AND review_cancelled_at IS NULL
         `)
         .run(now, draft.id);
+      if (resolvedDraft.changes !== 1) {
+        throw new Error('该订单草稿状态已变化，请刷新后重试');
+      }
       workspace.database
         .prepare(`
           UPDATE recognition_batch_items
-          SET status = 'imported', error_message = NULL, updated_at = ?
+          SET
+            status = 'imported',
+            error_message = NULL,
+            resolution_kind = 'order_updated',
+            updated_at = ?
           WHERE draft_id = ?
         `)
         .run(now, draft.id);
-      this.completeBatchWhenReviewed(persistedDraft.batchId);
+      this.completeBatchWhenReviewed(asString(draftRow.batch_id));
     });
 
-    return this.getOrder(orderId).order;
+    return {
+      order: this.getOrder(orderId).order,
+      resolution: 'order_updated',
+    };
   }
 
   public listOrders(): OrderSummary[] {
@@ -1093,24 +1696,7 @@ export class LocalApplication {
   public getOrder(orderId: string): OrderDetails {
     const workspace = this.requireWorkspace();
     const row = workspace.database
-      .prepare(`
-        SELECT
-          orders.*,
-          screenshots.id AS source_id,
-          screenshots.original_name,
-          screenshots.relative_path,
-          screenshots.mime_type,
-          screenshots.content_sha256,
-          screenshots.created_at AS screenshot_created_at,
-          snapshots.id AS snapshot_id,
-          snapshots.recognition_json,
-          snapshots.confirmed_json,
-          snapshots.created_at AS snapshot_created_at
-        FROM original_orders AS orders
-        JOIN source_screenshots AS screenshots ON screenshots.id = orders.screenshot_id
-        JOIN source_snapshots AS snapshots ON snapshots.order_id = orders.id
-        WHERE orders.id = ?
-      `)
+      .prepare('SELECT * FROM original_orders WHERE id = ?')
       .get(orderId) as SqlRow | undefined;
     if (!row) throw new Error('未找到原始订单');
 
@@ -1130,6 +1716,7 @@ export class LocalApplication {
 
     const order: OriginalOrder = {
       id: asString(row.id),
+      revision: asNumber(row.revision),
       platform: 'xianyu',
       sellerAccount: asString(row.seller_account),
       orderNumber: asString(row.platform_order_number),
@@ -1160,23 +1747,112 @@ export class LocalApplication {
       items,
     };
 
-    const sourceScreenshot: SourceScreenshot = {
-      id: asString(row.source_id),
-      originalName: asString(row.original_name),
-      relativePath: asString(row.relative_path),
-      mimeType: asString(row.mime_type),
-      sha256: asString(row.content_sha256),
-      createdAt: asString(row.screenshot_created_at),
-    };
+    const sourceRows = workspace.database
+      .prepare(`
+        SELECT
+          screenshots.id AS source_id,
+          screenshots.original_name,
+          screenshots.relative_path,
+          screenshots.mime_type,
+          screenshots.content_sha256,
+          screenshots.created_at AS screenshot_created_at,
+          snapshots.id AS snapshot_id,
+          snapshots.recognition_json,
+          snapshots.confirmed_json,
+          snapshots.created_at AS snapshot_created_at
+        FROM source_snapshots AS snapshots
+        JOIN source_screenshots AS screenshots ON screenshots.id = snapshots.screenshot_id
+        LEFT JOIN (
+          SELECT source_snapshot_id, MAX(result_revision) AS result_revision
+          FROM order_change_events
+          WHERE source_snapshot_id IS NOT NULL
+          GROUP BY source_snapshot_id
+        ) AS applied_updates ON applied_updates.source_snapshot_id = snapshots.id
+        WHERE snapshots.order_id = ?
+        ORDER BY
+          snapshots.resolved_at DESC,
+          applied_updates.result_revision DESC,
+          snapshots.rowid DESC
+      `)
+      .all(orderId) as unknown as SqlRow[];
+    const sources = sourceRows.map((sourceRow) => ({
+      sourceScreenshot: {
+        id: asString(sourceRow.source_id),
+        originalName: asString(sourceRow.original_name),
+        relativePath: asString(sourceRow.relative_path),
+        mimeType: asString(sourceRow.mime_type),
+        sha256: asString(sourceRow.content_sha256),
+        createdAt: asString(sourceRow.screenshot_created_at),
+      } satisfies SourceScreenshot,
+      sourceSnapshot: {
+        id: asString(sourceRow.snapshot_id),
+        createdAt: asString(sourceRow.snapshot_created_at),
+        recognition: parseStoredRecognition(asString(sourceRow.recognition_json)),
+        confirmed: sourceRow.confirmed_json === null
+          ? null
+          : parseStoredRecognition(asString(sourceRow.confirmed_json)),
+      } satisfies SourceSnapshot,
+    }));
+    const latestSource = sources[0];
+    if (!latestSource) throw new Error('原始订单缺少来源快照');
 
-    const sourceSnapshot: SourceSnapshot = {
-      id: asString(row.snapshot_id),
-      createdAt: asString(row.snapshot_created_at),
-      recognition: parseStoredRecognition(asString(row.recognition_json)),
-      confirmed: parseStoredRecognition(asString(row.confirmed_json)),
-    };
+    const changeRows = workspace.database
+      .prepare(`
+        SELECT
+          events.id AS event_id,
+          events.source_snapshot_id,
+          events.source,
+          events.base_revision,
+          events.result_revision,
+          events.created_at,
+          changes.id AS change_id,
+          changes.field_path,
+          changes.before_json,
+          changes.after_json
+        FROM order_change_events AS events
+        LEFT JOIN order_field_changes AS changes ON changes.event_id = events.id
+        WHERE events.order_id = ?
+        ORDER BY events.result_revision DESC, events.id DESC, changes.field_path
+      `)
+      .all(orderId) as unknown as SqlRow[];
+    const eventsById = new Map<string, OrderChangeEvent>();
+    for (const changeRow of changeRows) {
+      const eventId = asString(changeRow.event_id);
+      let event = eventsById.get(eventId);
+      if (!event) {
+        const source = asString(changeRow.source);
+        if (source !== 'source_update' && source !== 'manual_edit') {
+          throw new Error('数据库订单修改来源格式错误');
+        }
+        event = {
+          id: eventId,
+          sourceSnapshotId: changeRow.source_snapshot_id === null
+            ? null
+            : asString(changeRow.source_snapshot_id),
+          source,
+          baseRevision: asNumber(changeRow.base_revision),
+          resultRevision: asNumber(changeRow.result_revision),
+          createdAt: asString(changeRow.created_at),
+          changes: [],
+        };
+        eventsById.set(eventId, event);
+      }
+      if (changeRow.change_id !== null) {
+        event.changes.push({
+          path: asString(changeRow.field_path),
+          before: parseOrderChangeValue(asString(changeRow.before_json)),
+          after: parseOrderChangeValue(asString(changeRow.after_json)),
+        });
+      }
+    }
 
-    return { order, sourceScreenshot, sourceSnapshot };
+    return {
+      order,
+      sourceScreenshot: latestSource.sourceScreenshot,
+      sourceSnapshot: latestSource.sourceSnapshot,
+      sources,
+      changeEvents: [...eventsById.values()],
+    };
   }
 
   public getRecognitionEvidence(screenshotId: string): RecognitionEvidence {
@@ -1323,6 +1999,21 @@ export class LocalApplication {
         input.createdAt,
       );
 
+    workspace.database
+      .prepare(`
+        INSERT INTO source_snapshots (
+          id, draft_id, order_id, screenshot_id,
+          recognition_json, confirmed_json, created_at, resolved_at
+        ) VALUES (?, ?, NULL, ?, ?, NULL, ?, NULL)
+      `)
+      .run(
+        randomUUID(),
+        input.draftId,
+        input.screenshotId,
+        JSON.stringify(recognition),
+        input.createdAt,
+      );
+
     const insertItem = workspace.database.prepare(`
       INSERT INTO draft_items (
         id, draft_id, position, source_title, source_spec,
@@ -1370,7 +2061,9 @@ export class LocalApplication {
   }
 }
 
-function toRecognitionResult(draft: OrderDraft): RecognitionResult {
+function toRecognitionResult(
+  draft: Omit<RecognitionResult, 'items'> & { items: readonly RecognitionItem[] },
+): RecognitionResult {
   return {
     platform: draft.platform,
     sellerAccount: draft.sellerAccount,
@@ -1549,6 +2242,26 @@ function storedOptionalAmount(
   return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : fallback;
 }
 
+function parseOrderChangeValue(serialized: string): OrderChangeValue {
+  const parsed: unknown = JSON.parse(serialized);
+  if (!isOrderChangeValue(parsed)) throw new Error('数据库订单字段修改值格式错误');
+  return parsed;
+}
+
+function isOrderChangeValue(value: unknown): value is OrderChangeValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return true;
+  }
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isOrderChangeValue);
+  if (typeof value !== 'object') return false;
+  return Object.values(value).every(isOrderChangeValue);
+}
+
 function parseStoredOrderReviewIssues(
   value: string | number | null | undefined,
 ): OrderReviewIssueCode[] {
@@ -1571,10 +2284,6 @@ function serializeOrderReviewIssues(
     throw new Error('订单草稿待确认原因格式无效');
   }
   return JSON.stringify(normalizeOrderReviewIssues(reviewIssues));
-}
-
-function normalizedIdentityPart(value: string): string {
-  return value.normalize('NFKC').trim();
 }
 
 function isPlatformTransactionStatus(
@@ -1615,6 +2324,20 @@ function asRecognitionBatchItemStatus(
 ): RecognitionBatchItemStatus {
   if (!isRecognitionBatchItemStatus(value)) {
     throw new Error('数据库来源截图识别状态格式错误');
+  }
+  return value;
+}
+
+function asRecognitionBatchItemResolution(
+  value: string | number | null | undefined,
+): RecognitionBatchItemResolution {
+  if (
+    value !== 'new_order' &&
+    value !== 'identical_image' &&
+    value !== 'equivalent_order' &&
+    value !== 'order_updated'
+  ) {
+    throw new Error('数据库来源截图处理结果格式错误');
   }
   return value;
 }
