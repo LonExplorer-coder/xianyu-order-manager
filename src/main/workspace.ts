@@ -150,6 +150,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 6) migrateToVersion6(database);
   if (row.version < 7) migrateToVersion7(database);
   if (row.version < 8) migrateToVersion8(database);
+  if (row.version < 9) migrateToVersion9(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -844,6 +845,121 @@ function migrateToVersion8(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion9(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE table_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        granularity TEXT NOT NULL
+          CHECK (granularity IN ('order', 'order_item')),
+        configuration_version INTEGER NOT NULL DEFAULT 1
+          CHECK (configuration_version = 1),
+        configuration_json TEXT NOT NULL CHECK (
+          json_valid(configuration_json)
+          AND json_type(configuration_json) = 'object'
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (granularity, name_key)
+      ) STRICT;
+
+      CREATE TABLE table_template_custom_field_dependencies (
+        template_id TEXT NOT NULL
+          REFERENCES table_templates(id) ON DELETE CASCADE,
+        definition_id TEXT NOT NULL
+          REFERENCES custom_field_definitions(id) ON DELETE RESTRICT,
+        usage TEXT NOT NULL CHECK (usage IN ('column', 'filter', 'sort')),
+        PRIMARY KEY (template_id, definition_id, usage)
+      ) STRICT;
+
+      CREATE INDEX table_template_dependencies_by_definition
+      ON table_template_custom_field_dependencies (definition_id, template_id);
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_insert
+      BEFORE INSERT ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_update
+      BEFORE UPDATE ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_templates_prevent_granularity_change_with_dependencies
+      BEFORE UPDATE OF granularity ON table_templates
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies AS dependencies
+          WHERE dependencies.template_id = OLD.id
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'cannot change table template granularity with custom field dependencies'
+        );
+      END;
+
+      CREATE TRIGGER custom_field_definitions_keep_template_granularity_on_update
+      BEFORE UPDATE OF granularity ON custom_field_definitions
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies AS dependencies
+          JOIN table_templates AS templates
+            ON templates.id = dependencies.template_id
+          WHERE dependencies.definition_id = OLD.id
+            AND templates.granularity <> NEW.granularity
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (9, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

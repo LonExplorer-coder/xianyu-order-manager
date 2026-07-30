@@ -10,6 +10,7 @@ import type {
 import type {
   CustomFieldFilter,
   CustomFieldSort,
+  CustomFieldValueRecord,
 } from './custom-fields';
 
 export type OrderWorkbenchDateField = 'ordered_at' | 'paid_at' | 'created_at';
@@ -47,6 +48,7 @@ export type OrderWorkbenchQuery = {
 
 export type OrderWorkbenchResult = {
   orders: OrderSummary[];
+  customFieldValues: CustomFieldValueRecord[];
   allLifecycleOrderCount: number;
   activeOrderCount: number;
   pendingShipmentCount: number;
@@ -61,8 +63,10 @@ export type OrderItemWorkbenchQuery = {
 
 export type OrderItemWorkbenchItem = OrderItem & {
   orderId: string;
+  orderNumber: string;
 };
 
 export type OrderItemWorkbenchResult = {
   items: OrderItemWorkbenchItem[];
+  customFieldValues: CustomFieldValueRecord[];
 };

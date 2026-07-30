@@ -63,6 +63,7 @@ describe('桌面启动状态', () => {
 
     expect(session.queryOrders({})).toEqual({
       orders: [],
+      customFieldValues: [],
       allLifecycleOrderCount: 0,
       activeOrderCount: 0,
       pendingShipmentCount: 0,

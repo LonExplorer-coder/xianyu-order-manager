@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v8 并保留来源与更新约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v9 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -27,6 +27,7 @@ describe('数据库升级', () => {
       { version: 6 },
       { version: 7 },
       { version: 8 },
+      { version: 9 },
     ]);
     expect(
       first.database
@@ -34,13 +35,20 @@ describe('数据库升级', () => {
           SELECT name
           FROM sqlite_master
           WHERE type = 'table'
-            AND name IN ('custom_field_definitions', 'custom_field_values')
+            AND name IN (
+              'custom_field_definitions',
+              'custom_field_values',
+              'table_templates',
+              'table_template_custom_field_dependencies'
+            )
           ORDER BY name
         `)
         .all(),
     ).toEqual([
       { name: 'custom_field_definitions' },
       { name: 'custom_field_values' },
+      { name: 'table_template_custom_field_dependencies' },
+      { name: 'table_templates' },
     ]);
     first.database.exec(`
       INSERT INTO custom_field_definitions (
@@ -63,6 +71,62 @@ describe('数据库升级', () => {
         '"有效订单值"', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
       );
     `);
+    first.database.prepare(`
+      INSERT INTO table_templates (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'template-order-v9',
+      '订单跟单表',
+      '订单跟单表',
+      'order',
+      1,
+      '{"columns":[]}',
+      '2026-07-30T00:00:00.000Z',
+      '2026-07-30T00:00:00.000Z',
+    );
+    first.database.prepare(`
+      INSERT INTO table_template_custom_field_dependencies (
+        template_id, definition_id, usage
+      ) VALUES (?, ?, ?)
+    `).run('template-order-v9', 'field-order-v8', 'column');
+    expect(() => first.database.prepare(`
+      INSERT INTO table_template_custom_field_dependencies (
+        template_id, definition_id, usage
+      ) VALUES ('template-order-v9', 'field-item-v8', 'filter')
+    `).run()).toThrow('table template and custom field granularities do not match');
+    expect(() => first.database.prepare(`
+      UPDATE table_templates
+      SET granularity = 'order_item'
+      WHERE id = 'template-order-v9'
+    `).run()).toThrow('cannot change table template granularity with custom field dependencies');
+    expect(() => first.database.prepare(`
+      UPDATE custom_field_definitions
+      SET granularity = 'order_item'
+      WHERE id = 'field-order-v8'
+    `).run()).toThrow('table template and custom field granularities do not match');
+    expect(() => first.database.prepare(`
+      INSERT INTO table_templates (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      ) VALUES (
+        'template-invalid-json-v9', '错误模板', '错误模板', 'order', 1,
+        '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      )
+    `).run()).toThrow();
+    expect(() => first.database.prepare(`
+      INSERT INTO table_templates (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      ) VALUES (
+        'template-duplicate-v9', '订单跟单表（重名）', '订单跟单表', 'order', 1,
+        '{"columns":[]}', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      )
+    `).run()).toThrow();
+    expect(() => first.database.prepare(`
+      DELETE FROM custom_field_definitions WHERE id = 'field-order-v8'
+    `).run()).toThrow();
     expect(() => first.database.prepare(`
       INSERT INTO custom_field_values (
         id, definition_id, order_id, order_item_id,
@@ -288,6 +352,7 @@ describe('数据库升级', () => {
       { version: 6 },
       { version: 7 },
       { version: 8 },
+      { version: 9 },
     ]);
     expect(
       (
@@ -313,6 +378,19 @@ describe('数据库升级', () => {
     ).toEqual({ intake_decision_pending: 0 });
     expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(reopened.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+    expect(
+      reopened.database.prepare(`
+        SELECT name, name_key, granularity, configuration_version, configuration_json
+        FROM table_templates
+        WHERE id = 'template-order-v9'
+      `).get(),
+    ).toEqual({
+      name: '订单跟单表',
+      name_key: '订单跟单表',
+      granularity: 'order',
+      configuration_version: 1,
+      configuration_json: '{"columns":[]}',
+    });
     reopened.close();
 
     const unusedRecognizer: Recognizer = {

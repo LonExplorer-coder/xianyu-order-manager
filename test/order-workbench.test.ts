@@ -113,6 +113,7 @@ describe('订单工作台查询', () => {
         paidAtNormalized: '2026-07-28T09:31:00+08:00',
         items: [{ sourceTitle: '夏日海棠杯', sourceSpec: '红色 450ml', quantity: 2 }],
       })],
+      customFieldValues: [],
       allLifecycleOrderCount: 1,
       activeOrderCount: 1,
       pendingShipmentCount: 1,

@@ -31,6 +31,12 @@ import type {
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
 } from './order-workbench';
+import type {
+  CreateTableTemplateInput,
+  TableTemplate,
+  TableTemplateGranularity,
+  UpdateTableTemplateInput,
+} from './table-templates';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -62,14 +68,29 @@ export interface DesktopApi {
     customValues?: DraftCustomFieldValues,
   ): Promise<OrderUpdateConfirmation>;
   listOrders(): Promise<OrderSummary[]>;
-  queryOrders(query: OrderWorkbenchQuery): Promise<OrderWorkbenchResult>;
-  queryOrderItems(query: OrderItemWorkbenchQuery): Promise<OrderItemWorkbenchResult>;
+  queryOrders(
+    query: OrderWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): Promise<OrderWorkbenchResult>;
+  queryOrderItems(
+    query: OrderItemWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): Promise<OrderItemWorkbenchResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   listCustomFieldDefinitions(): Promise<CustomFieldDefinition[]>;
   createCustomFieldDefinition(
     input: CreateCustomFieldDefinitionInput,
   ): Promise<CustomFieldDefinition>;
+  listTableTemplates(
+    granularity?: TableTemplateGranularity,
+  ): Promise<TableTemplate[]>;
+  createTableTemplate(input: CreateTableTemplateInput): Promise<TableTemplate>;
+  updateTableTemplate(
+    templateId: string,
+    input: UpdateTableTemplateInput,
+  ): Promise<TableTemplate>;
+  deleteTableTemplate(templateId: string): Promise<void>;
   saveCustomFieldValues(
     input: SaveCustomFieldValuesInput,
   ): Promise<CustomFieldValueRecord[]>;

@@ -21,6 +21,11 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from '../core/order-workbench';
+import {
+  normalizeCreateTableTemplateInput,
+  normalizeUpdateTableTemplateInput,
+  type TableTemplateGranularity,
+} from '../core/table-templates';
 import { DesktopSession } from './desktop-session';
 import { createConfiguredDesktopSession } from './production-session';
 import {
@@ -66,7 +71,7 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
-function registerIpcHandlers(desktopSession: DesktopSession): void {
+export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
   ipcMain.handle('app:retry-data-directory', () => desktopSession.retryDataDirectory());
 
@@ -162,11 +167,17 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
-  ipcMain.handle('orders:query', (_event, input: unknown) => (
-    desktopSession.queryOrders(parseOrderWorkbenchQuery(input))
+  ipcMain.handle('orders:query', (_event, input: unknown, definitionIds: unknown) => (
+    desktopSession.queryOrders(
+      parseOrderWorkbenchQuery(input),
+      parseProjectedCustomFieldDefinitionIds(definitionIds),
+    )
   ));
-  ipcMain.handle('order-items:query', (_event, input: unknown) => (
-    desktopSession.queryOrderItems(parseOrderItemWorkbenchQuery(input))
+  ipcMain.handle('order-items:query', (_event, input: unknown, definitionIds: unknown) => (
+    desktopSession.queryOrderItems(
+      parseOrderItemWorkbenchQuery(input),
+      parseProjectedCustomFieldDefinitionIds(definitionIds),
+    )
   ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('custom-fields:list', () => (
@@ -179,6 +190,38 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ));
   ipcMain.handle('custom-fields:save-values', (_event, input: unknown) => (
     desktopSession.saveCustomFieldValues(parseSaveCustomFieldValuesInput(input))
+  ));
+  ipcMain.handle('table-templates:list', (_event, granularity: unknown) => (
+    desktopSession.listTableTemplates(parseOptionalTableTemplateGranularity(granularity))
+  ));
+  ipcMain.handle('table-templates:create', (_event, input: unknown) => (
+    desktopSession.createTableTemplate(
+      normalizeCreateTableTemplateInput(
+        input,
+        desktopSession.listCustomFieldDefinitions(),
+      ),
+    )
+  ));
+  ipcMain.handle(
+    'table-templates:update',
+    (_event, templateIdValue: unknown, input: unknown) => {
+      const templateId = parseTableTemplateId(templateIdValue);
+      const existing = desktopSession.listTableTemplates()
+        .find((template) => template.id === templateId);
+      if (!existing) throw new Error('未找到表格模板');
+      return desktopSession.updateTableTemplate(
+        templateId,
+        normalizeUpdateTableTemplateInput(
+          templateId,
+          existing.granularity,
+          input,
+          desktopSession.listCustomFieldDefinitions(),
+        ),
+      );
+    },
+  );
+  ipcMain.handle('table-templates:delete', (_event, templateId: unknown) => (
+    desktopSession.deleteTableTemplate(parseTableTemplateId(templateId))
   ));
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
@@ -203,6 +246,21 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
 
 function parseDraftId(draftId: unknown): string {
   return parseWorkflowId(draftId, '订单草稿');
+}
+
+function parseOptionalTableTemplateGranularity(
+  value: unknown,
+): TableTemplateGranularity | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'order' || value === 'order_item') return value;
+  throw new Error('表格模板数据粒度格式无效');
+}
+
+function parseTableTemplateId(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 200) {
+    throw new Error('表格模板 ID 格式无效');
+  }
+  return value.trim();
 }
 
 const ORDER_WORKBENCH_QUERY_KEYS = new Set([
@@ -302,6 +360,18 @@ function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
     customFieldFilter: parseCustomFieldFilter(input.customFieldFilter),
     customFieldSort: parseCustomFieldSort(input.customFieldSort),
   };
+}
+
+function parseProjectedCustomFieldDefinitionIds(input: unknown): string[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input) || input.length > 200) {
+    throw new Error('投影自定义字段列表格式无效');
+  }
+  const definitionIds = input.map((value) => parseWorkflowId(value, '自定义字段'));
+  if (new Set(definitionIds).size !== definitionIds.length) {
+    throw new Error('投影自定义字段不能重复');
+  }
+  return definitionIds;
 }
 
 const CUSTOM_FIELD_FILTER_KEYS = new Set(['definitionId', 'value']);

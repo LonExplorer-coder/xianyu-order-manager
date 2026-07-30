@@ -39,8 +39,12 @@ const api: DesktopApi = {
     )
   ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
-  queryOrders: (query) => ipcRenderer.invoke('orders:query', query),
-  queryOrderItems: (query) => ipcRenderer.invoke('order-items:query', query),
+  queryOrders: (query, customFieldDefinitionIds) => (
+    ipcRenderer.invoke('orders:query', query, customFieldDefinitionIds)
+  ),
+  queryOrderItems: (query, customFieldDefinitionIds) => (
+    ipcRenderer.invoke('order-items:query', query, customFieldDefinitionIds)
+  ),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,
@@ -55,6 +59,18 @@ const api: DesktopApi = {
   listCustomFieldDefinitions: () => ipcRenderer.invoke('custom-fields:list'),
   createCustomFieldDefinition: (input) => (
     ipcRenderer.invoke('custom-fields:create', input)
+  ),
+  listTableTemplates: (granularity) => (
+    ipcRenderer.invoke('table-templates:list', granularity)
+  ),
+  createTableTemplate: (input) => (
+    ipcRenderer.invoke('table-templates:create', input)
+  ),
+  updateTableTemplate: (templateId, input) => (
+    ipcRenderer.invoke('table-templates:update', templateId, input)
+  ),
+  deleteTableTemplate: (templateId) => (
+    ipcRenderer.invoke('table-templates:delete', templateId)
   ),
   saveCustomFieldValues: (input) => ipcRenderer.invoke('custom-fields:save-values', input),
   getScreenshotDataUrl: (screenshotId) =>

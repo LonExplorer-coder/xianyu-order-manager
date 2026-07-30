@@ -46,6 +46,12 @@ import type {
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
 } from '../core/order-workbench';
+import type {
+  CreateTableTemplateInput,
+  TableTemplate,
+  TableTemplateGranularity,
+  UpdateTableTemplateInput,
+} from '../core/table-templates';
 import {
   LocalApplication,
   type RecognitionBatchItemUpdate,
@@ -326,12 +332,18 @@ export class DesktopSession {
     return this.requireApplication().listOrders();
   }
 
-  public queryOrders(query: OrderWorkbenchQuery): OrderWorkbenchResult {
-    return this.requireApplication().queryOrders(query);
+  public queryOrders(
+    query: OrderWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): OrderWorkbenchResult {
+    return this.requireApplication().queryOrders(query, customFieldDefinitionIds);
   }
 
-  public queryOrderItems(query: OrderItemWorkbenchQuery): OrderItemWorkbenchResult {
-    return this.requireApplication().queryOrderItems(query);
+  public queryOrderItems(
+    query: OrderItemWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): OrderItemWorkbenchResult {
+    return this.requireApplication().queryOrderItems(query, customFieldDefinitionIds);
   }
 
   public getOrder(orderId: string): OrderDetails {
@@ -348,6 +360,27 @@ export class DesktopSession {
     const definition = this.requireApplication().createCustomFieldDefinition(input);
     this.refreshOrders();
     return definition;
+  }
+
+  public listTableTemplates(
+    granularity?: TableTemplateGranularity,
+  ): TableTemplate[] {
+    return this.requireApplication().listTableTemplates(granularity);
+  }
+
+  public createTableTemplate(input: CreateTableTemplateInput): TableTemplate {
+    return this.requireApplication().createTableTemplate(input);
+  }
+
+  public updateTableTemplate(
+    templateId: string,
+    input: UpdateTableTemplateInput,
+  ): TableTemplate {
+    return this.requireApplication().updateTableTemplate(templateId, input);
+  }
+
+  public deleteTableTemplate(templateId: string): void {
+    this.requireApplication().deleteTableTemplate(templateId);
   }
 
   public saveCustomFieldValues(

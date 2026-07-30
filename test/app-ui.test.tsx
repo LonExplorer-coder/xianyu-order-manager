@@ -22,6 +22,7 @@ import type {
 } from '../src/core/order-workbench';
 import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
+import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { App } from '../src/renderer/App';
 
 afterEach(cleanup);
@@ -168,6 +169,7 @@ function workbenchResult(
   ).length;
   return {
     orders,
+    customFieldValues: [],
     activeOrderCount,
     allLifecycleOrderCount: Math.max(orders.length, activeOrderCount),
     pendingShipmentCount: orders.filter((order) => (
@@ -232,12 +234,16 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     }),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
-    queryOrderItems: vi.fn().mockResolvedValue({ items: [] }),
+    queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
+    listTableTemplates: vi.fn().mockResolvedValue([]),
+    createTableTemplate: vi.fn(),
+    updateTableTemplate: vi.fn(),
+    deleteTableTemplate: vi.fn().mockResolvedValue(undefined),
     getScreenshotDataUrl: vi.fn(),
     getOrderIntakeSettings: vi.fn().mockResolvedValue({
       automaticImportEnabled: false,
@@ -1139,7 +1145,7 @@ describe('订单管理工作台', () => {
     fireEvent.change(search, { target: { value: '旧查询' } });
     await waitFor(() => expect(queryOrders).toHaveBeenCalledWith(expect.objectContaining({
       text: '旧查询',
-    })));
+    }), []));
     fireEvent.change(search, { target: { value: '新查询' } });
 
     expect(await screen.findByRole('button', { name: '查看订单 XY-QUERY-LATEST' })).toBeVisible();
@@ -3178,5 +3184,347 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('API Key 已移除');
     expect(screen.getByText('尚未保存 API Key')).toBeVisible();
     expect(screen.queryByText('••••••••')).not.toBeInTheDocument();
+  });
+
+  it('打开已保存订单模板后原子恢复查询、列别名、顺序和自定义字段值', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary(confirmedOrder, {
+      addressOriginal: '广东省深圳市南山区模板路1号',
+    });
+    const noteField: CustomFieldDefinition = {
+      id: 'field-template-note',
+      name: '内部备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const template: TableTemplate = {
+      id: 'template-picking',
+      name: '待发货拣货',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'custom', definitionId: noteField.id }, displayName: '跟单说明' },
+        { field: { kind: 'computed', key: 'order_total' }, displayName: '实付' },
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+      ],
+      query: {
+        dateField: 'ordered_at',
+        lifecycleStatus: 'active',
+        fulfillmentStatus: 'pending_shipment',
+        sortField: 'amount',
+        sortDirection: 'desc',
+        customFieldFilter: { definitionId: noteField.id, value: '加急' },
+      },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const result = workbenchResult([summary], {
+      customFieldValues: [{
+        definitionId: noteField.id,
+        orderId: summary.id,
+        orderItemId: null,
+        value: '加急',
+        createdAt: template.createdAt,
+        updatedAt: template.updatedAt,
+      }],
+    });
+    const queryOrders = vi.fn().mockResolvedValue(result);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([noteField]),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '表格模板' }));
+    await user.click(await screen.findByRole('button', { name: '应用 待发货拣货' }));
+
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledWith(template.query, [noteField.id]));
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+      .toEqual(['跟单说明', '实付', '平台单号']);
+    const row = within(table).getByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }).closest('tr');
+    expect(row).toHaveTextContent(`加急¥8.00${summary.orderNumber}`);
+    expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue(template.id);
+    expect(screen.getByRole('combobox', { name: '自定义字段筛选' })).toHaveValue(noteField.id);
+
+    expect(queryOrders.mock.calls.filter(([query]) => (
+      JSON.stringify(query) === JSON.stringify(template.query)
+    ))).toHaveLength(1);
+    queryOrders.mockClear();
+    await user.selectOptions(screen.getByRole('combobox', { name: '表格模板' }), '');
+
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledWith({
+      dateField: 'ordered_at',
+      lifecycleStatus: 'active',
+      sortField: 'created_at',
+      sortDirection: 'desc',
+    }, []));
+    expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
+    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+      .toEqual(['订单号', '平台', '卖家账号']);
+  });
+
+  it('模板不包含订单号时仍保留独立的订单详情入口', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-total-only',
+      name: '金额概览',
+      granularity: 'order',
+      columns: [{
+        field: { kind: 'computed', key: 'order_total' },
+        displayName: '成交金额',
+      }],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const getOrder = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      sources: [],
+      changeEvents: [],
+      customFieldValues: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      getOrder,
+    });
+
+    render(<App api={api} />);
+    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(within(table).queryByText(summary.orderNumber)).not.toBeInTheDocument();
+    await user.click(within(table).getByRole('button', { name: `打开订单详情 ${summary.orderNumber}` }));
+    await waitFor(() => expect(getOrder).toHaveBeenCalledWith(summary.id));
+  });
+
+  it('删除正在应用的模板时同步恢复默认查询与列', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-active-delete',
+      name: '待发货临时视图',
+      granularity: 'order',
+      columns: [{ field: { kind: 'computed', key: 'order_total' }, displayName: '实付' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const queryOrders = vi.fn().mockResolvedValue(workbenchResult([summary]));
+    const deleteTableTemplate = vi.fn().mockResolvedValue(undefined);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      deleteTableTemplate,
+    });
+
+    render(<App api={api} />);
+    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    await user.click(screen.getByRole('button', { name: '表格模板' }));
+    queryOrders.mockClear();
+    await user.click(await screen.findByRole('button', { name: '删除 待发货临时视图' }));
+    await user.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledWith({
+      dateField: 'ordered_at',
+      lifecycleStatus: 'active',
+      sortField: 'created_at',
+      sortDirection: 'desc',
+    }, []));
+    expect(deleteTableTemplate).toHaveBeenCalledWith(template.id);
+    await user.click(screen.getByRole('button', { name: '订单' }));
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+      .toEqual(['订单号', '平台', '卖家账号']);
+    expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
+  });
+
+  it('后端返回查询键顺序不同时仍正确判定模板已保存', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-query-order',
+      name: '筛选保存',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: {
+        dateField: 'ordered_at',
+        lifecycleStatus: 'active',
+        fulfillmentStatus: 'pending_shipment',
+        sortField: 'created_at',
+        sortDirection: 'desc',
+      },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const updateTableTemplate = vi.fn().mockImplementation(async (
+      _templateId: string,
+      input: UpdateTableTemplateInput,
+    ) => ({
+      ...template,
+      ...input,
+      query: {
+        sortDirection: (input.query as OrderWorkbenchQuery).sortDirection,
+        sortField: (input.query as OrderWorkbenchQuery).sortField,
+        fulfillmentStatus: (input.query as OrderWorkbenchQuery).fulfillmentStatus,
+        lifecycleStatus: (input.query as OrderWorkbenchQuery).lifecycleStatus,
+        dateField: (input.query as OrderWorkbenchQuery).dateField,
+      },
+      updatedAt: '2026-07-30T01:00:00.000Z',
+    }));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      updateTableTemplate,
+    });
+
+    render(<App api={api} />);
+    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    await user.selectOptions(screen.getByRole('combobox', { name: '排序方式' }), 'amount:asc');
+    expect(screen.getByText('筛选或排序已修改')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '保存当前筛选排序' }));
+
+    await waitFor(() => expect(updateTableTemplate).toHaveBeenCalledOnce());
+    expect(screen.getByText('已应用保存配置')).toBeVisible();
+    expect(screen.queryByText('筛选或排序已修改')).not.toBeInTheDocument();
+  });
+
+  it('在订单页应用模板失败时保留当前视图并显示原因', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-failing',
+      name: '暂时不可用',
+      granularity: 'order',
+      columns: [{ field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const queryOrders = vi.fn().mockImplementation(async (query) => {
+      if (query.fulfillmentStatus === 'pending_shipment') {
+        throw new Error('模板查询失败');
+      }
+      return workbenchResult([summary]);
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('模板查询失败');
+    expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
+    expect(screen.getByRole('table', { name: '原始订单' })).toBeVisible();
+  });
+
+  it('应用商品模板时切换数据粒度并按模板列展示商品自定义值', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const binField: CustomFieldDefinition = {
+      id: 'field-item-bin-template',
+      name: '拣货位',
+      granularity: 'order_item',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const template: TableTemplate = {
+      id: 'template-items',
+      name: '商品拣货',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '关联单号' },
+        { field: { kind: 'custom', definitionId: binField.id }, displayName: '货位' },
+        { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '行金额' },
+      ],
+      query: { customFieldSort: { definitionId: binField.id, direction: 'asc' } },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const item = {
+      ...confirmedOrder.items[0],
+      orderId: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const queryOrderItems = vi.fn().mockResolvedValue({
+      items: [item],
+      customFieldValues: [{
+        definitionId: binField.id,
+        orderId: null,
+        orderItemId: item.id,
+        value: 'A-01',
+        createdAt: template.createdAt,
+        updatedAt: template.updatedAt,
+      }],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([binField]),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '表格模板' }));
+    await user.click(await screen.findByRole('button', { name: '应用 商品拣货' }));
+
+    await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith(template.query, [binField.id]));
+    expect(screen.getByRole('tab', { name: '商品' })).toHaveAttribute('aria-selected', 'true');
+    const table = await screen.findByRole('table', { name: '商品明细' });
+    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+      .toEqual(['关联单号', '货位', '行金额']);
+    expect(within(table).getByText('A-01')).toBeVisible();
+    expect(within(table).getByText('¥16.00')).toBeVisible();
   });
 });

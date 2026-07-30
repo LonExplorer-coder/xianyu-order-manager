@@ -1,6 +1,7 @@
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -50,15 +51,30 @@ import {
   normalizePhone,
   normalizeShanghaiDateTime,
 } from '../core/order-normalization';
+import {
+  availableTableFields,
+  createCustomFieldValueIndex,
+  fieldReferenceKey,
+  projectOrderItemTableCell,
+  projectOrderTableCell,
+  type AvailableTableField,
+  type CreateTableTemplateInput,
+  type TableCellValue,
+  type TableFieldReference,
+  type TableTemplate,
+  type TableTemplateColumn,
+  type UpdateTableTemplateInput,
+} from '../core/table-templates';
 import { CustomFieldInput } from './CustomFieldInput';
 import { CustomFieldsWorkspace } from './CustomFieldsWorkspace';
+import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 
 export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | null;
-type AppPage = 'orders' | 'batches' | 'fields' | 'settings';
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | null;
+type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 
 const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
@@ -68,6 +84,30 @@ const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
   sortField: 'created_at',
   sortDirection: 'desc',
 };
+const DEFAULT_ORDER_COLUMNS: TableTemplateColumn[] = [
+  { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+  { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
+  { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
+  { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
+  { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+  { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+  { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
+  { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品' },
+  { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '商品总数量' },
+  { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
+  { field: { kind: 'builtin', key: 'initial_source_recognition_status' }, displayName: '初始来源识别状态' },
+  { field: { kind: 'builtin', key: 'platform_transaction_status' }, displayName: '平台交易状态' },
+  { field: { kind: 'builtin', key: 'fulfillment_status' }, displayName: '履约状态' },
+  { field: { kind: 'builtin', key: 'lifecycle_status' }, displayName: '生命周期状态' },
+  { field: { kind: 'builtin', key: 'ordered_at' }, displayName: '下单时间' },
+];
+const DEFAULT_ORDER_ITEM_COLUMNS: TableTemplateColumn[] = [
+  { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
+  { field: { kind: 'builtin', key: 'product_spec' }, displayName: '规格' },
+  { field: { kind: 'builtin', key: 'unit_price' }, displayName: '单价' },
+  { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
+  { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '小计' },
+];
 
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -96,6 +136,11 @@ export function App({ api }: AppProps) {
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
   const [customFieldDefinitionsLoading, setCustomFieldDefinitionsLoading] = useState(false);
   const [customFieldDefinitionsError, setCustomFieldDefinitionsError] = useState('');
+  const [tableTemplates, setTableTemplates] = useState<TableTemplate[]>([]);
+  const [tableTemplatesLoading, setTableTemplatesLoading] = useState(false);
+  const [tableTemplatesError, setTableTemplatesError] = useState('');
+  const [activeTableTemplateId, setActiveTableTemplateId] = useState('');
+  const [activeTableTemplateDirty, setActiveTableTemplateDirty] = useState(false);
   const [draftCustomFieldValues, setDraftCustomFieldValues] = useState<DraftCustomFieldValues>({
     orderValues: [],
     itemValues: [],
@@ -105,10 +150,26 @@ export function App({ api }: AppProps) {
   const orderSnapshotVersion = useRef(0);
   const orderQueryRequestVersion = useRef(0);
   const orderItemQueryRequestVersion = useRef(0);
+  const tableTemplateApplyVersion = useRef(0);
+  const preloadedOrderTemplateQuery = useRef<OrderWorkbenchQuery | null>(null);
+  const preloadedOrderItemTemplateQuery = useRef<OrderItemWorkbenchQuery | null>(null);
   const detailSourceRequestVersion = useRef(0);
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
     : '';
+  const activeTableTemplate = tableTemplates.find(
+    (template) => template.id === activeTableTemplateId,
+  ) ?? null;
+  const orderProjectionDefinitionIds = useMemo(() => (
+    activeTableTemplate?.granularity === 'order'
+      ? customFieldDefinitionIds(activeTableTemplate.columns)
+      : []
+  ), [activeTableTemplate]);
+  const orderItemProjectionDefinitionIds = useMemo(() => (
+    activeTableTemplate?.granularity === 'order_item'
+      ? customFieldDefinitionIds(activeTableTemplate.columns)
+      : []
+  ), [activeTableTemplate]);
 
   useEffect(() => {
     let active = true;
@@ -139,15 +200,22 @@ export function App({ api }: AppProps) {
     setDetailCustomFieldsDirty(false);
     detailSourceRequestVersion.current += 1;
     orderQueryRequestVersion.current += 1;
+    preloadedOrderTemplateQuery.current = null;
     setOrderQuery(DEFAULT_ORDER_QUERY);
     setOrderWorkbench(null);
     orderItemQueryRequestVersion.current += 1;
+    tableTemplateApplyVersion.current += 1;
+    preloadedOrderItemTemplateQuery.current = null;
     setOrdersWorkspaceView('orders');
     setOrderItemQuery({});
     setOrderItemWorkbench(null);
     setOrderQueryRefreshToken(0);
     setCustomFieldDefinitions([]);
     setCustomFieldDefinitionsError('');
+    setTableTemplates([]);
+    setTableTemplatesError('');
+    setActiveTableTemplateId('');
+    setActiveTableTemplateDirty(false);
     setDraftCustomFieldValues({ orderValues: [], itemValues: [] });
     draftCustomFieldValuesContextKey.current = '';
     draftCustomFieldTouchedKeys.current.clear();
@@ -201,6 +269,26 @@ export function App({ api }: AppProps) {
       })
       .finally(() => {
         if (active) setCustomFieldDefinitionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory) return undefined;
+    let active = true;
+    setTableTemplatesLoading(true);
+    setTableTemplatesError('');
+    void api.listTableTemplates()
+      .then((templates) => {
+        if (active) setTableTemplates(templates);
+      })
+      .catch((error: unknown) => {
+        if (active) setTableTemplatesError(errorMessage(error));
+      })
+      .finally(() => {
+        if (active) setTableTemplatesLoading(false);
       });
     return () => {
       active = false;
@@ -267,10 +355,15 @@ export function App({ api }: AppProps) {
 
   useEffect(() => {
     if (!readyDataDirectory) return undefined;
+    if (preloadedOrderTemplateQuery.current === orderQuery) {
+      preloadedOrderTemplateQuery.current = null;
+      setOrderQueryLoading(false);
+      return undefined;
+    }
     let active = true;
     const requestVersion = ++orderQueryRequestVersion.current;
     setOrderQueryLoading(true);
-    void api.queryOrders(orderQuery)
+    void api.queryOrders(orderQuery, orderProjectionDefinitionIds)
       .then((result) => {
         if (!active || requestVersion !== orderQueryRequestVersion.current) return;
         setOrderWorkbench(result);
@@ -288,14 +381,25 @@ export function App({ api }: AppProps) {
     return () => {
       active = false;
     };
-  }, [api, orderQuery, orderQueryRefreshToken, readyDataDirectory]);
+  }, [
+    api,
+    orderProjectionDefinitionIds,
+    orderQuery,
+    orderQueryRefreshToken,
+    readyDataDirectory,
+  ]);
 
   useEffect(() => {
     if (!readyDataDirectory || ordersWorkspaceView !== 'order_items') return undefined;
+    if (preloadedOrderItemTemplateQuery.current === orderItemQuery) {
+      preloadedOrderItemTemplateQuery.current = null;
+      setOrderItemQueryLoading(false);
+      return undefined;
+    }
     let active = true;
     const requestVersion = ++orderItemQueryRequestVersion.current;
     setOrderItemQueryLoading(true);
-    void api.queryOrderItems(orderItemQuery)
+    void api.queryOrderItems(orderItemQuery, orderItemProjectionDefinitionIds)
       .then((result) => {
         if (!active || requestVersion !== orderItemQueryRequestVersion.current) return;
         setOrderItemWorkbench(result);
@@ -315,6 +419,7 @@ export function App({ api }: AppProps) {
     };
   }, [
     api,
+    orderItemProjectionDefinitionIds,
     orderItemQuery,
     orderQueryRefreshToken,
     ordersWorkspaceView,
@@ -333,6 +438,205 @@ export function App({ api }: AppProps) {
       throw error;
     } finally {
       setCustomFieldDefinitionsLoading(false);
+    }
+  }
+
+  async function createTableTemplate(input: CreateTableTemplateInput) {
+    setBusyAction('templates');
+    setTableTemplatesError('');
+    try {
+      const created = await api.createTableTemplate(input);
+      setTableTemplates((current) => [...current, created]);
+    } catch (error) {
+      setTableTemplatesError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function updateTableTemplate(
+    templateId: string,
+    input: UpdateTableTemplateInput,
+  ) {
+    setBusyAction('templates');
+    setTableTemplatesError('');
+    try {
+      const updated = await api.updateTableTemplate(templateId, input);
+      setTableTemplates((current) => current.map((template) => (
+        template.id === updated.id ? updated : template
+      )));
+      if (activeTableTemplateId === updated.id) {
+        const currentQuery = updated.granularity === 'order' ? orderQuery : orderItemQuery;
+        setActiveTableTemplateDirty(!sameJsonValue(currentQuery, updated.query));
+      }
+    } catch (error) {
+      setTableTemplatesError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function deleteTableTemplate(templateId: string) {
+    setBusyAction('templates');
+    setTableTemplatesError('');
+    try {
+      const template = tableTemplates.find(({ id }) => id === templateId);
+      const deletingActiveTemplate = activeTableTemplateId === templateId && template !== undefined;
+      let orderReset: {
+        query: OrderWorkbenchQuery;
+        result: OrderWorkbenchResult;
+      } | null = null;
+      let itemReset: {
+        query: OrderItemWorkbenchQuery;
+        result: OrderItemWorkbenchResult;
+      } | null = null;
+      if (deletingActiveTemplate) {
+        tableTemplateApplyVersion.current += 1;
+        if (template.granularity === 'order') {
+          const query = structuredClone(DEFAULT_ORDER_QUERY);
+          orderReset = { query, result: await api.queryOrders(query, []) };
+        } else {
+          const query: OrderItemWorkbenchQuery = {};
+          itemReset = { query, result: await api.queryOrderItems(query, []) };
+        }
+      }
+      await api.deleteTableTemplate(templateId);
+      setTableTemplates((current) => current.filter(({ id }) => id !== templateId));
+      if (deletingActiveTemplate) {
+        if (orderReset) {
+          preloadedOrderTemplateQuery.current = orderReset.query;
+          setOrderQuery(orderReset.query);
+          setOrderWorkbench(orderReset.result);
+          setOrdersWorkspaceView('orders');
+        } else if (itemReset) {
+          preloadedOrderItemTemplateQuery.current = itemReset.query;
+          setOrderItemQuery(itemReset.query);
+          setOrderItemWorkbench(itemReset.result);
+          setOrdersWorkspaceView('order_items');
+        }
+        setActiveTableTemplateId('');
+        setActiveTableTemplateDirty(false);
+      }
+    } catch (error) {
+      setTableTemplatesError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function applyTableTemplate(template: TableTemplate) {
+    const requestVersion = ++tableTemplateApplyVersion.current;
+    setBusyAction('templates');
+    setTableTemplatesError('');
+    setOperationError('');
+    try {
+      if (template.granularity === 'order') {
+        const query = structuredClone(template.query);
+        const result = await api.queryOrders(
+          query,
+          customFieldDefinitionIds(template.columns),
+        );
+        if (requestVersion !== tableTemplateApplyVersion.current) return;
+        preloadedOrderTemplateQuery.current = query;
+        setOrderQuery(query);
+        setOrderWorkbench(result);
+        setOrdersWorkspaceView('orders');
+      } else {
+        const query = structuredClone(template.query);
+        const result = await api.queryOrderItems(
+          query,
+          customFieldDefinitionIds(template.columns),
+        );
+        if (requestVersion !== tableTemplateApplyVersion.current) return;
+        preloadedOrderItemTemplateQuery.current = query;
+        setOrderItemQuery(query);
+        setOrderItemWorkbench(result);
+        setOrdersWorkspaceView('order_items');
+      }
+      setActiveTableTemplateId(template.id);
+      setActiveTableTemplateDirty(false);
+      setActivePage('orders');
+      setOperationError('');
+    } catch (error) {
+      if (requestVersion === tableTemplateApplyVersion.current) {
+        const message = errorMessage(error);
+        setTableTemplatesError(message);
+        setOperationError(message);
+      }
+    } finally {
+      if (requestVersion === tableTemplateApplyVersion.current) {
+        setBusyAction(null);
+      }
+    }
+  }
+
+  async function clearTableTemplate(granularity: TableTemplate['granularity']) {
+    const requestVersion = ++tableTemplateApplyVersion.current;
+    setBusyAction('templates');
+    setTableTemplatesError('');
+    setOperationError('');
+    try {
+      if (granularity === 'order') {
+        const query = structuredClone(DEFAULT_ORDER_QUERY);
+        const result = await api.queryOrders(query, []);
+        if (requestVersion !== tableTemplateApplyVersion.current) return;
+        preloadedOrderTemplateQuery.current = query;
+        setOrderQuery(query);
+        setOrderWorkbench(result);
+        setOrdersWorkspaceView('orders');
+      } else {
+        const query: OrderItemWorkbenchQuery = {};
+        const result = await api.queryOrderItems(query, []);
+        if (requestVersion !== tableTemplateApplyVersion.current) return;
+        preloadedOrderItemTemplateQuery.current = query;
+        setOrderItemQuery(query);
+        setOrderItemWorkbench(result);
+        setOrdersWorkspaceView('order_items');
+      }
+      setActiveTableTemplateId('');
+      setActiveTableTemplateDirty(false);
+      setActivePage('orders');
+    } catch (error) {
+      if (requestVersion === tableTemplateApplyVersion.current) {
+        const message = errorMessage(error);
+        setTableTemplatesError(message);
+        setOperationError(message);
+      }
+    } finally {
+      if (requestVersion === tableTemplateApplyVersion.current) {
+        setBusyAction(null);
+      }
+    }
+  }
+
+  function changeOrderQuery(query: OrderWorkbenchQuery) {
+    setOrderQuery(query);
+    if (activeTableTemplate?.granularity === 'order') {
+      setActiveTableTemplateDirty(true);
+    }
+  }
+
+  function changeOrderItemQuery(query: OrderItemWorkbenchQuery) {
+    setOrderItemQuery(query);
+    if (activeTableTemplate?.granularity === 'order_item') {
+      setActiveTableTemplateDirty(true);
+    }
+  }
+
+  async function saveActiveTableTemplateView() {
+    if (!activeTableTemplate) return;
+    setOperationError('');
+    try {
+      await updateTableTemplate(activeTableTemplate.id, {
+        name: activeTableTemplate.name,
+        columns: activeTableTemplate.columns,
+        query: activeTableTemplate.granularity === 'order' ? orderQuery : orderItemQuery,
+      });
+    } catch (error) {
+      setOperationError(errorMessage(error));
     }
   }
 
@@ -670,6 +974,22 @@ export function App({ api }: AppProps) {
   let workspace: ReactNode;
   if (activePage === 'settings') {
     workspace = <SettingsWorkspace api={api} />;
+  } else if (activePage === 'templates') {
+    workspace = (
+      <TableTemplatesWorkspace
+        templates={tableTemplates}
+        customFieldDefinitions={customFieldDefinitions}
+        orderQuery={orderQuery}
+        orderItemQuery={orderItemQuery}
+        loading={tableTemplatesLoading}
+        error={tableTemplatesError}
+        saving={busyAction === 'templates'}
+        onCreate={createTableTemplate}
+        onUpdate={updateTableTemplate}
+        onDelete={deleteTableTemplate}
+        onApply={applyTableTemplate}
+      />
+    );
   } else if (activePage === 'fields') {
     workspace = (
       <CustomFieldsWorkspace
@@ -744,10 +1064,15 @@ export function App({ api }: AppProps) {
         platforms={orderWorkbench?.platforms ?? []}
         sellerAccounts={orderWorkbench?.sellerAccounts ?? []}
         customFieldDefinitions={customFieldDefinitions}
+        customFieldValues={orderWorkbench?.customFieldValues ?? []}
+        tableTemplates={tableTemplates}
+        activeTableTemplate={activeTableTemplate}
+        activeTableTemplateDirty={activeTableTemplateDirty}
         view={ordersWorkspaceView}
         query={orderQuery}
         queryLoading={orderQueryLoading}
         orderItems={orderItemWorkbench?.items ?? []}
+        orderItemCustomFieldValues={orderItemWorkbench?.customFieldValues ?? []}
         orderItemQuery={orderItemQuery}
         orderItemQueryLoading={orderItemQueryLoading}
         dataDirectory={bootstrap.dataDirectory}
@@ -761,8 +1086,12 @@ export function App({ api }: AppProps) {
         }}
         onOpenOrder={(orderId) => void openOrder(orderId)}
         onViewChange={setOrdersWorkspaceView}
-        onQueryChange={setOrderQuery}
-        onOrderItemQueryChange={setOrderItemQuery}
+        onQueryChange={changeOrderQuery}
+        onOrderItemQueryChange={changeOrderItemQuery}
+        onApplyTableTemplate={applyTableTemplate}
+        onClearTableTemplate={clearTableTemplate}
+        onManageTableTemplates={() => setActivePage('templates')}
+        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
       />
     );
   }
@@ -823,10 +1152,14 @@ function AppFrame({
             <span className="nav-label">发货组</span>
             <span className="nav-badge">稍后</span>
           </button>
-          <button className="nav-item" type="button" disabled>
+          <button
+            className={`nav-item${activePage === 'templates' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'templates' ? 'page' : undefined}
+            onClick={() => onNavigate('templates')}
+          >
             <Icon name="template" />
             <span className="nav-label">表格模板</span>
-            <span className="nav-badge">稍后</span>
           </button>
           <button
             className={`nav-item${activePage === 'fields' ? ' is-active' : ''}`}
@@ -952,10 +1285,15 @@ type OrdersWorkspaceProps = {
   platforms: OrderWorkbenchResult['platforms'];
   sellerAccounts: string[];
   customFieldDefinitions: CustomFieldDefinition[];
+  customFieldValues: CustomFieldValueRecord[];
+  tableTemplates: TableTemplate[];
+  activeTableTemplate: TableTemplate | null;
+  activeTableTemplateDirty: boolean;
   view: OrdersWorkspaceView;
   query: OrderWorkbenchQuery;
   queryLoading: boolean;
   orderItems: OrderItemWorkbenchResult['items'];
+  orderItemCustomFieldValues: CustomFieldValueRecord[];
   orderItemQuery: OrderItemWorkbenchQuery;
   orderItemQueryLoading: boolean;
   dataDirectory: string;
@@ -968,6 +1306,10 @@ type OrdersWorkspaceProps = {
   onViewChange: (view: OrdersWorkspaceView) => void;
   onQueryChange: (query: OrderWorkbenchQuery) => void;
   onOrderItemQueryChange: (query: OrderItemWorkbenchQuery) => void;
+  onApplyTableTemplate: (template: TableTemplate) => void;
+  onClearTableTemplate: (granularity: TableTemplate['granularity']) => void;
+  onManageTableTemplates: () => void;
+  onSaveActiveTableTemplate: () => void;
 };
 
 function OrdersWorkspace({
@@ -980,10 +1322,15 @@ function OrdersWorkspace({
   platforms,
   sellerAccounts,
   customFieldDefinitions,
+  customFieldValues,
+  tableTemplates,
+  activeTableTemplate,
+  activeTableTemplateDirty,
   view,
   query,
   queryLoading,
   orderItems,
+  orderItemCustomFieldValues,
   orderItemQuery,
   orderItemQueryLoading,
   dataDirectory,
@@ -996,10 +1343,17 @@ function OrdersWorkspace({
   onViewChange,
   onQueryChange,
   onOrderItemQueryChange,
+  onApplyTableTemplate,
+  onClearTableTemplate,
+  onManageTableTemplates,
+  onSaveActiveTableTemplate,
 }: OrdersWorkspaceProps) {
   const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
     query.customFieldFilter?.definitionId ?? '',
   );
+  useEffect(() => {
+    setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
+  }, [query.customFieldFilter?.definitionId]);
   const latestBatch = batches[0];
   const patchQuery = (patch: Partial<OrderWorkbenchQuery>) => onQueryChange({ ...query, ...patch });
   const orderCustomFields = customFieldDefinitions.filter(
@@ -1008,6 +1362,16 @@ function OrdersWorkspace({
   const selectedCustomFilter = orderCustomFields.find(
     (definition) => definition.id === selectedCustomFilterId,
   );
+  const orderTemplate = activeTableTemplate?.granularity === 'order'
+    ? activeTableTemplate
+    : null;
+  const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_COLUMNS;
+  const customFieldValueIndex = useMemo(
+    () => createCustomFieldValueIndex(customFieldValues),
+    [customFieldValues],
+  );
+  const orderFieldCatalog = availableTableFields('order', customFieldDefinitions);
+  const viewGranularity = view === 'orders' ? 'order' : 'order_item';
   const hasActiveQuery = Boolean(
     query.text || query.buyerText || query.productText || query.dateFrom || query.dateTo ||
     query.platform || query.sellerAccount || query.initialSourceRecognitionStatus ||
@@ -1093,6 +1457,48 @@ function OrdersWorkspace({
           onClick={() => onViewChange('order_items')}
         >
           商品
+        </button>
+      </div>
+
+      <div className="workbench-template-bar" aria-label="当前表格模板">
+        <label>
+          <span>表格模板</span>
+          <select
+            aria-label="表格模板"
+            value={activeTableTemplate?.granularity === viewGranularity ? activeTableTemplate.id : ''}
+            onChange={(event) => {
+              if (!event.target.value) {
+                onClearTableTemplate(viewGranularity);
+                return;
+              }
+              const template = tableTemplates.find(({ id }) => id === event.target.value);
+              if (template) onApplyTableTemplate(template);
+            }}
+          >
+            <option value="">默认视图</option>
+            {tableTemplates
+              .filter(({ granularity }) => granularity === viewGranularity)
+              .map((template) => (
+                <option value={template.id} key={template.id}>{template.name}</option>
+              ))}
+          </select>
+        </label>
+        {activeTableTemplate?.granularity === viewGranularity && (
+          <span className={`template-state${activeTableTemplateDirty ? ' is-dirty' : ''}`}>
+            {activeTableTemplateDirty ? '筛选或排序已修改' : '已应用保存配置'}
+          </span>
+        )}
+        {activeTableTemplate?.granularity === viewGranularity && activeTableTemplateDirty && (
+          <button
+            className="button button--quiet"
+            type="button"
+            onClick={onSaveActiveTableTemplate}
+          >
+            保存当前筛选排序
+          </button>
+        )}
+        <button className="button button--quiet" type="button" onClick={onManageTableTemplates}>
+          管理模板
         </button>
       </div>
 
@@ -1404,66 +1810,48 @@ function OrdersWorkspace({
         <table aria-label="原始订单">
           <thead>
             <tr>
-              <th>订单号</th>
-              <th>平台 / 卖家</th>
-              <th>买家</th>
-              <th>收件信息</th>
-              <th>商品</th>
-              <th>成交金额</th>
-              <th>初始来源识别状态</th>
-              <th>平台交易状态</th>
-              <th>履约状态</th>
-              <th>生命周期状态</th>
-              <th>下单时间</th>
+              {orderColumns.map((column) => (
+                <th key={fieldReferenceKey(column.field)}>{column.displayName}</th>
+              ))}
               <th><span className="visually-hidden">操作</span></th>
             </tr>
           </thead>
           <tbody>
             {orders.map((order) => (
               <tr key={order.id}>
+                {orderColumns.map((column) => {
+                  const descriptor = findTableFieldDescriptor(orderFieldCatalog, column.field);
+                  const value = projectOrderTableCell(order, column.field, customFieldValueIndex);
+                  return (
+                    <td
+                      className={descriptor?.valueType === 'money' ? 'money-cell' : undefined}
+                      key={fieldReferenceKey(column.field)}
+                    >
+                      {column.field.kind === 'builtin' && column.field.key === 'order_number' ? (
+                        <button
+                          className="order-link"
+                          type="button"
+                          aria-label={`查看订单 ${order.orderNumber}`}
+                          onClick={() => onOpenOrder(order.id)}
+                          disabled={openingOrder}
+                        >
+                          {order.orderNumber}
+                        </button>
+                      ) : renderTableCellValue(column.field, descriptor, value)}
+                    </td>
+                  );
+                })}
                 <td>
                   <button
                     className="order-link"
                     type="button"
-                    aria-label={`查看订单 ${order.orderNumber}`}
+                    aria-label={`打开订单详情 ${order.orderNumber}`}
                     onClick={() => onOpenOrder(order.id)}
                     disabled={openingOrder}
                   >
-                    {order.orderNumber}
+                    详情
                   </button>
                 </td>
-                <td>
-                  <div className="order-cell-stack">
-                    <strong>{platformLabel(order.platform)}</strong>
-                    <small>{order.sellerAccount || '—'}</small>
-                  </div>
-                </td>
-                <td>{order.buyerNickname || '—'}</td>
-                <td>
-                  <div className="order-cell-stack order-cell-stack--recipient">
-                    <strong>{order.recipient}</strong>
-                    <small>{order.phone || '—'}</small>
-                    <small title={order.addressOriginal || undefined}>{order.addressOriginal || '—'}</small>
-                  </div>
-                </td>
-                <td>
-                  <div className="order-product-summary">
-                    {order.items.map((item, index) => (
-                      <span key={`${item.sourceTitle}-${index}`}>
-                        {item.sourceTitle || '未命名商品'}
-                        {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}
-                        {' ×'}{item.quantity}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td className="money-cell">{formatMoney(order.amountCents)}</td>
-                <td><span className="status-chip">{recognitionStatusLabel(order.initialSourceRecognitionStatus)}</span></td>
-                <td><span className="status-chip">{platformTransactionStatusLabel(order.platformTransactionStatus)}</span></td>
-                <td><span className="status-chip">{fulfillmentStatusLabel(order.fulfillmentStatus)}</span></td>
-                <td><span className="status-chip">{lifecycleStatusLabel(order.lifecycleStatus)}</span></td>
-                <td>{formatDateTime(order.orderedAtNormalized || order.createdAt)}</td>
-                <td><Icon name="chevron" /></td>
               </tr>
             ))}
           </tbody>
@@ -1476,6 +1864,10 @@ function OrdersWorkspace({
         <OrderItemsWorkbench
           items={orderItems}
           definitions={customFieldDefinitions}
+          customFieldValues={orderItemCustomFieldValues}
+          columns={activeTableTemplate?.granularity === 'order_item'
+            ? activeTableTemplate.columns
+            : DEFAULT_ORDER_ITEM_COLUMNS}
           query={orderItemQuery}
           loading={orderItemQueryLoading}
           openingOrder={openingOrder}
@@ -1490,6 +1882,8 @@ function OrdersWorkspace({
 type OrderItemsWorkbenchProps = {
   items: OrderItemWorkbenchResult['items'];
   definitions: CustomFieldDefinition[];
+  customFieldValues: CustomFieldValueRecord[];
+  columns: TableTemplateColumn[];
   query: OrderItemWorkbenchQuery;
   loading: boolean;
   openingOrder: boolean;
@@ -1500,21 +1894,31 @@ type OrderItemsWorkbenchProps = {
 function OrderItemsWorkbench({
   items,
   definitions,
+  customFieldValues,
+  columns,
   query,
   loading,
   openingOrder,
   onQueryChange,
   onOpenOrder,
 }: OrderItemsWorkbenchProps) {
+  const customFieldValueIndex = useMemo(
+    () => createCustomFieldValueIndex(customFieldValues),
+    [customFieldValues],
+  );
   const [selectedFilterId, setSelectedFilterId] = useState(
     query.customFieldFilter?.definitionId ?? '',
   );
+  useEffect(() => {
+    setSelectedFilterId(query.customFieldFilter?.definitionId ?? '');
+  }, [query.customFieldFilter?.definitionId]);
   const itemFields = definitions.filter(
     (definition) => definition.granularity === 'order_item',
   );
   const selectedFilter = itemFields.find(
     (definition) => definition.id === selectedFilterId,
   );
+  const fieldCatalog = availableTableFields('order_item', definitions);
   const patchQuery = (patch: Partial<OrderItemWorkbenchQuery>) => {
     onQueryChange({ ...query, ...patch });
   };
@@ -1632,22 +2036,41 @@ function OrderItemsWorkbench({
             <table aria-label="商品明细">
               <thead>
                 <tr>
-                  <th>商品</th>
-                  <th>规格</th>
-                  <th>单价</th>
-                  <th>数量</th>
-                  <th>小计</th>
+                  {columns.map((column) => (
+                    <th key={fieldReferenceKey(column.field)}>{column.displayName}</th>
+                  ))}
                   <th><span className="visually-hidden">操作</span></th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((item) => (
                   <tr key={item.id}>
-                    <td><strong>{item.sourceTitle || '未命名商品'}</strong></td>
-                    <td>{item.sourceSpec || '—'}</td>
-                    <td className="money-cell">{formatMoney(item.unitPriceCents)}</td>
-                    <td>{item.quantity}</td>
-                    <td className="money-cell">{formatMoney(item.subtotalCents)}</td>
+                    {columns.map((column) => {
+                      const descriptor = findTableFieldDescriptor(fieldCatalog, column.field);
+                      const value = projectOrderItemTableCell(
+                        item,
+                        column.field,
+                        customFieldValueIndex,
+                      );
+                      return (
+                        <td
+                          className={descriptor?.valueType === 'money' ? 'money-cell' : undefined}
+                          key={fieldReferenceKey(column.field)}
+                        >
+                          {column.field.kind === 'builtin' && column.field.key === 'order_number' ? (
+                            <button
+                              className="order-link"
+                              type="button"
+                              aria-label={`打开订单 ${item.orderNumber}`}
+                              onClick={() => onOpenOrder(item.orderId)}
+                              disabled={openingOrder}
+                            >
+                              {item.orderNumber}
+                            </button>
+                          ) : renderTableCellValue(column.field, descriptor, value)}
+                        </td>
+                      );
+                    })}
                     <td>
                       <button
                         className="order-link"
@@ -3654,6 +4077,48 @@ function Icon({ name }: { name: IconName }) {
   );
 }
 
+function findTableFieldDescriptor(
+  catalog: readonly AvailableTableField[],
+  reference: TableFieldReference,
+): AvailableTableField | undefined {
+  const key = fieldReferenceKey(reference);
+  return catalog.find((field) => fieldReferenceKey(field.reference) === key);
+}
+
+function renderTableCellValue(
+  reference: TableFieldReference,
+  descriptor: AvailableTableField | undefined,
+  value: TableCellValue,
+): ReactNode {
+  if (value === null || value === '') return '—';
+  if (reference.kind === 'builtin' && typeof value === 'string') {
+    if (reference.key === 'platform') return platformLabel(value as OrderDraft['platform']);
+    if (reference.key === 'initial_source_recognition_status') {
+      return <span className="status-chip">{recognitionStatusLabel(value as RecognitionBatchItemStatus)}</span>;
+    }
+    if (reference.key === 'platform_transaction_status') {
+      return <span className="status-chip">{platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus'])}</span>;
+    }
+    if (reference.key === 'fulfillment_status') {
+      return <span className="status-chip">{fulfillmentStatusLabel(value as OrderDraft['fulfillmentStatus'])}</span>;
+    }
+    if (reference.key === 'lifecycle_status') {
+      return <span className="status-chip">{lifecycleStatusLabel(value as OrderSummary['lifecycleStatus'])}</span>;
+    }
+  }
+  if (descriptor?.valueType === 'money' && typeof value === 'number') {
+    return formatMoney(value);
+  }
+  if (descriptor?.valueType === 'datetime' && typeof value === 'string') {
+    return formatDateTime(value);
+  }
+  if (descriptor?.valueType === 'checkbox' && typeof value === 'boolean') {
+    return value ? '是' : '否';
+  }
+  if (Array.isArray(value)) return value.length > 0 ? value.join('、') : '—';
+  return String(value);
+}
+
 function formatMoney(cents: number | null): string {
   if (cents === null) return '—';
   return `¥${(cents / 100).toFixed(2)}`;
@@ -3860,4 +4325,25 @@ function updateBatchItemStatus(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '发生未知错误';
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(stableJsonValue(left)) === JSON.stringify(stableJsonValue(right));
+}
+
+function customFieldDefinitionIds(columns: readonly TableTemplateColumn[]): string[] {
+  return columns.flatMap(({ field }) => (
+    field.kind === 'custom' ? [field.definitionId] : []
+  ));
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+      .map(([key, entry]) => [key, stableJsonValue(entry)]),
+  );
 }

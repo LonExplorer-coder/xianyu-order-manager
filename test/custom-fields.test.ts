@@ -1359,9 +1359,18 @@ describe('自定义字段库', () => {
       itemValues: [],
     }));
 
-    expect(application.queryOrders({
+    const filtered = application.queryOrders({
       customFieldFilter: { definitionId: priority.id, value: 20 },
-    }).orders.map((order) => order.orderNumber)).toEqual(['XY-ORDER-QUERY-003']);
+    });
+    expect(filtered.orders.map((order) => order.orderNumber)).toEqual(['XY-ORDER-QUERY-003']);
+    expect(filtered.customFieldValues).toEqual([
+      expect.objectContaining({
+        definitionId: priority.id,
+        orderId: orders[2].id,
+        orderItemId: null,
+        value: 20,
+      }),
+    ]);
     expect(application.queryOrders({
       customFieldSort: { definitionId: priority.id, direction: 'asc' },
     }).orders.map((order) => order.orderNumber)).toEqual([
@@ -1369,6 +1378,76 @@ describe('自定义字段库', () => {
       'XY-ORDER-QUERY-003',
       'XY-ORDER-QUERY-001',
     ]);
+  });
+
+  it('工作台可只返回投影所需的自定义字段，空列表不返回无关值', async () => {
+    const { application, uploadDirectory } = await createApplication([
+      recognition('XY-PROJECTION-001', {
+        items: [{
+          sourceTitle: '投影商品',
+          sourceSpec: '标准款',
+          unitPriceCents: 1_200,
+          quantity: 1,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+    const order = await importOrder(application, uploadDirectory, 'XY-PROJECTION-001');
+    const orderPriority = application.createCustomFieldDefinition({
+      name: '处理优先级',
+      granularity: 'order',
+      type: 'number',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    const orderNote = application.createCustomFieldDefinition({
+      name: '客服备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    const itemBin = application.createCustomFieldDefinition({
+      name: '拣货位',
+      granularity: 'order_item',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    const itemNote = application.createCustomFieldDefinition({
+      name: '商品备注',
+      granularity: 'order_item',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    application.saveCustomFieldValues({
+      orderId: order.id,
+      orderValues: [
+        { definitionId: orderPriority.id, value: 10 },
+        { definitionId: orderNote.id, value: '需电话确认' },
+      ],
+      itemValues: [
+        { definitionId: itemBin.id, orderItemId: order.items[0].id, value: 'A-01' },
+        { definitionId: itemNote.id, orderItemId: order.items[0].id, value: '轻拿轻放' },
+      ],
+    });
+
+    expect(application.queryOrders({}, [orderPriority.id]).customFieldValues)
+      .toEqual([expect.objectContaining({ definitionId: orderPriority.id, value: 10 })]);
+    expect(application.queryOrders({}, []).customFieldValues).toEqual([]);
+    expect(application.queryOrders({}).customFieldValues.map(({ definitionId }) => definitionId))
+      .toEqual(expect.arrayContaining([orderPriority.id, orderNote.id]));
+
+    expect(application.queryOrderItems({}, [itemBin.id]).customFieldValues)
+      .toEqual([expect.objectContaining({ definitionId: itemBin.id, value: 'A-01' })]);
+    expect(application.queryOrderItems({}, []).customFieldValues).toEqual([]);
+    expect(application.queryOrderItems({}).customFieldValues.map(({ definitionId }) => definitionId))
+      .toEqual(expect.arrayContaining([itemBin.id, itemNote.id]));
   });
 
   it('多选值始终按定义选项顺序保存，筛选不受输入集合顺序影响', async () => {
@@ -1485,12 +1564,26 @@ describe('自定义字段库', () => {
       ],
     }));
 
-    expect(application.queryOrderItems({
+    const filteredItems = application.queryOrderItems({
       customFieldFilter: { definitionId: picked.id, value: true },
-    }).items.map((item) => item.id)).toEqual([
+    });
+    expect(filteredItems.items.map((item) => item.id)).toEqual([
       order.items[0].id,
       order.items[2].id,
     ]);
+    expect(filteredItems.items.every((item) => item.orderNumber === order.orderNumber)).toBe(true);
+    expect(filteredItems.customFieldValues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        definitionId: picked.id,
+        orderItemId: order.items[0].id,
+        value: true,
+      }),
+      expect.objectContaining({
+        definitionId: picked.id,
+        orderItemId: order.items[2].id,
+        value: true,
+      }),
+    ]));
     expect(application.queryOrderItems({
       customFieldSort: { definitionId: pickingSequence.id, direction: 'asc' },
     }).items.map((item) => item.id)).toEqual([

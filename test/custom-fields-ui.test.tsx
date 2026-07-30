@@ -232,6 +232,7 @@ function workbenchResult(
 ): OrderWorkbenchResult {
   return {
     orders: [summary()],
+    customFieldValues: [],
     activeOrderCount: 1,
     allLifecycleOrderCount: 1,
     pendingShipmentCount: 1,
@@ -246,7 +247,9 @@ function itemWorkbenchResult(): OrderItemWorkbenchResult {
     items: confirmedOrder.items.map((item) => ({
       ...item,
       orderId: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
     })),
+    customFieldValues: [],
   };
 }
 
@@ -313,6 +316,10 @@ function createApi(
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
+    listTableTemplates: vi.fn().mockResolvedValue([]),
+    createTableTemplate: vi.fn(),
+    updateTableTemplate: vi.fn(),
+    deleteTableTemplate: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as CustomFieldsDesktopApi;
 }
@@ -618,7 +625,7 @@ describe('自定义字段界面', () => {
         definitionId: orderTextField.id,
         direction: 'asc',
       },
-    })));
+    }), []));
 
     await user.selectOptions(
       builtInSort,
@@ -652,7 +659,7 @@ describe('自定义字段界面', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('tab', { name: '商品' }));
 
-    await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith({}));
+    await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith({}, []));
     const fieldFilter = await screen.findByRole('combobox', {
       name: '商品自定义字段筛选',
     });
@@ -677,7 +684,7 @@ describe('自定义字段界面', () => {
         definitionId: itemTextField.id,
         direction: 'desc',
       },
-    }));
+    }, []));
 
     await user.click(screen.getByRole('button', {
       name: `打开商品 ${confirmedOrder.items[0].sourceTitle} 所属订单`,

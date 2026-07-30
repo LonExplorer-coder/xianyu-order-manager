@@ -71,6 +71,17 @@ import {
   isRecognitionBatchItemStatus,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
+import type {
+  CreateTableTemplateInput,
+  TableTemplate,
+  TableTemplateGranularity,
+  UpdateTableTemplateInput,
+} from '../core/table-templates';
+import {
+  normalizeCreateTableTemplateInput,
+  normalizeUpdateTableTemplateInput,
+  tableTemplateNameKey,
+} from '../core/table-templates';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -1334,6 +1345,191 @@ export class LocalApplication {
     return rows.map(parseCustomFieldDefinitionRow);
   }
 
+  public listTableTemplates(
+    granularity?: TableTemplateGranularity,
+  ): TableTemplate[] {
+    const workspace = this.requireWorkspace();
+    if (
+      granularity !== undefined &&
+      granularity !== 'order' &&
+      granularity !== 'order_item'
+    ) {
+      throw new Error('表格模板数据粒度无效');
+    }
+    const rows = workspace.database.prepare(`
+      SELECT *
+      FROM table_templates
+      ${granularity === undefined ? '' : 'WHERE granularity = ?'}
+      ORDER BY created_at, id
+    `).all(...(granularity === undefined ? [] : [granularity])) as unknown as SqlRow[];
+    const definitions = this.listCustomFieldDefinitions();
+    return rows.map((row) => {
+      const template = parseTableTemplateRow(row, definitions);
+      this.assertTableTemplateDependenciesMatch(template);
+      return template;
+    });
+  }
+
+  public createTableTemplate(input: CreateTableTemplateInput): TableTemplate {
+    const workspace = this.requireWorkspace();
+    const definitions = this.listCustomFieldDefinitions();
+    const normalized = normalizeTableTemplateCustomFilter(
+      normalizeCreateTableTemplateInput(input, definitions),
+      definitions,
+    );
+    const now = new Date().toISOString();
+    const template: TableTemplate = {
+      id: randomUUID(),
+      ...normalized,
+      createdAt: now,
+      updatedAt: now,
+    } as TableTemplate;
+
+    workspace.transaction(() => {
+      this.assertTableTemplateNameAvailable(
+        template.granularity,
+        tableTemplateNameKey(template.name),
+      );
+      workspace.database.prepare(`
+        INSERT INTO table_templates (
+          id, name, name_key, granularity, configuration_version,
+          configuration_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(
+        template.id,
+        template.name,
+        tableTemplateNameKey(template.name),
+        template.granularity,
+        serializeTableTemplateConfiguration(template),
+        template.createdAt,
+        template.updatedAt,
+      );
+      this.replaceTableTemplateCustomFieldDependencies(template);
+    });
+
+    return structuredClone(template);
+  }
+
+  public updateTableTemplate(
+    templateId: string,
+    input: UpdateTableTemplateInput,
+  ): TableTemplate {
+    const workspace = this.requireWorkspace();
+    const existing = this.getTableTemplate(templateId);
+    const definitions = this.listCustomFieldDefinitions();
+    const normalizedInput = normalizeUpdateTableTemplateInput(
+      templateId,
+      existing.granularity,
+      input,
+      definitions,
+    );
+    const normalized = normalizeTableTemplateCustomFilter({
+      ...normalizedInput,
+      granularity: existing.granularity,
+    } as CreateTableTemplateInput, definitions);
+    const template: TableTemplate = {
+      id: existing.id,
+      ...normalized,
+      createdAt: existing.createdAt,
+      updatedAt: new Date().toISOString(),
+    } as TableTemplate;
+
+    workspace.transaction(() => {
+      this.assertTableTemplateNameAvailable(
+        template.granularity,
+        tableTemplateNameKey(template.name),
+        template.id,
+      );
+      const result = workspace.database.prepare(`
+        UPDATE table_templates
+        SET name = ?, name_key = ?, configuration_json = ?, updated_at = ?
+        WHERE id = ? AND granularity = ?
+      `).run(
+        template.name,
+        tableTemplateNameKey(template.name),
+        serializeTableTemplateConfiguration(template),
+        template.updatedAt,
+        template.id,
+        template.granularity,
+      );
+      if (result.changes !== 1) throw new Error('表格模板已变化，请刷新后重试');
+      this.replaceTableTemplateCustomFieldDependencies(template);
+    });
+
+    return structuredClone(template);
+  }
+
+  public deleteTableTemplate(templateId: string): void {
+    const workspace = this.requireWorkspace();
+    const id = normalizeTableTemplateId(templateId);
+    const result = workspace.database
+      .prepare('DELETE FROM table_templates WHERE id = ?')
+      .run(id);
+    if (result.changes !== 1) throw new Error('未找到表格模板');
+  }
+
+  private getTableTemplate(templateId: string): TableTemplate {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database
+      .prepare('SELECT * FROM table_templates WHERE id = ?')
+      .get(normalizeTableTemplateId(templateId)) as SqlRow | undefined;
+    if (!row) throw new Error('未找到表格模板');
+    const template = parseTableTemplateRow(row, this.listCustomFieldDefinitions());
+    this.assertTableTemplateDependenciesMatch(template);
+    return template;
+  }
+
+  private assertTableTemplateNameAvailable(
+    granularity: TableTemplateGranularity,
+    nameKey: string,
+    excludedTemplateId = '',
+  ): void {
+    const workspace = this.requireWorkspace();
+    const duplicate = workspace.database.prepare(`
+      SELECT 1 AS found
+      FROM table_templates
+      WHERE granularity = ? AND name_key = ? AND id <> ?
+      LIMIT 1
+    `).get(granularity, nameKey, excludedTemplateId);
+    if (duplicate) throw new Error('同一数据粒度下不能使用重复的模板名称');
+  }
+
+  private replaceTableTemplateCustomFieldDependencies(template: TableTemplate): void {
+    const workspace = this.requireWorkspace();
+    workspace.database.prepare(`
+      DELETE FROM table_template_custom_field_dependencies
+      WHERE template_id = ?
+    `).run(template.id);
+    const dependencies = tableTemplateCustomFieldDependencies(template);
+    const insert = workspace.database.prepare(`
+      INSERT INTO table_template_custom_field_dependencies (
+        template_id, definition_id, usage
+      ) VALUES (?, ?, ?)
+    `);
+    for (const dependency of dependencies) {
+      insert.run(template.id, dependency.definitionId, dependency.usage);
+    }
+  }
+
+  private assertTableTemplateDependenciesMatch(template: TableTemplate): void {
+    const workspace = this.requireWorkspace();
+    const stored = workspace.database.prepare(`
+      SELECT definition_id, usage
+      FROM table_template_custom_field_dependencies
+      WHERE template_id = ?
+      ORDER BY usage, definition_id
+    `).all(template.id) as unknown as SqlRow[];
+    const storedKeys = stored.map((row) => (
+      `${asString(row.usage)}:${asString(row.definition_id)}`
+    ));
+    const expectedKeys = tableTemplateCustomFieldDependencies(template)
+      .map((dependency) => `${dependency.usage}:${dependency.definitionId}`)
+      .sort();
+    if (storedKeys.sort().join('\n') !== expectedKeys.join('\n')) {
+      throw new Error(`表格模板“${template.name}”的自定义字段依赖已损坏`);
+    }
+  }
+
   public hasMissingRequiredOrderCustomFields(): boolean {
     const workspace = this.requireWorkspace();
     return workspace.database.prepare(`
@@ -2065,10 +2261,13 @@ export class LocalApplication {
   }
 
   public listOrders(): OrderSummary[] {
-    return this.queryOrders({}).orders;
+    return this.queryOrders({}, []).orders;
   }
 
-  public queryOrders(query: OrderWorkbenchQuery): OrderWorkbenchResult {
+  public queryOrders(
+    query: OrderWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): OrderWorkbenchResult {
     const workspace = this.requireWorkspace();
     const where = [
       query.lifecycleStatus === 'all'
@@ -2316,6 +2515,11 @@ export class LocalApplication {
 
     return {
       orders,
+      customFieldValues: this.listWorkbenchCustomFieldValues(
+        'order',
+        orders.map((order) => order.id),
+        customFieldDefinitionIds,
+      ),
       allLifecycleOrderCount: asNumber(counts.all_lifecycle_order_count),
       activeOrderCount: asNumber(counts.active_order_count),
       pendingShipmentCount: asNumber(counts.pending_shipment_count),
@@ -2324,7 +2528,10 @@ export class LocalApplication {
     };
   }
 
-  public queryOrderItems(query: OrderItemWorkbenchQuery): OrderItemWorkbenchResult {
+  public queryOrderItems(
+    query: OrderItemWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): OrderItemWorkbenchResult {
     const workspace = this.requireWorkspace();
     const where = ["orders.lifecycle_status = 'active'"];
     const parameters: Array<string | number> = [];
@@ -2399,16 +2606,16 @@ export class LocalApplication {
     }
 
     const rows = workspace.database.prepare(`
-      SELECT items.*
+      SELECT items.*, orders.platform_order_number AS order_number
       FROM order_items AS items
       JOIN original_orders AS orders ON orders.id = items.order_id
       WHERE ${where.join('\n        AND ')}
       ORDER BY ${sortExpression} ${sortDirection}, items.id
     `).all(...parameters, ...sortParameters) as unknown as SqlRow[];
-    return {
-      items: rows.map((row) => ({
+    const items = rows.map((row) => ({
         id: asString(row.id),
         orderId: asString(row.order_id),
+        orderNumber: asString(row.order_number),
         position: asNumber(row.position),
         sourceTitle: asString(row.source_title),
         sourceSpec: asString(row.source_spec),
@@ -2416,7 +2623,14 @@ export class LocalApplication {
         quantity: asNumber(row.quantity),
         quantityInferred: asNumber(row.quantity_inferred) === 1,
         subtotalCents: asNumber(row.subtotal_cents),
-      })),
+      }));
+    return {
+      items,
+      customFieldValues: this.listWorkbenchCustomFieldValues(
+        'order_item',
+        items.map((item) => item.id),
+        customFieldDefinitionIds,
+      ),
     };
   }
 
@@ -2892,17 +3106,52 @@ export class LocalApplication {
         CASE WHEN values_table.order_id IS NOT NULL THEN -1 ELSE items.position END,
         values_table.order_item_id
     `).all(orderId, orderId) as unknown as SqlRow[];
-    return rows.map((row) => {
-      const definition = parseCustomFieldDefinitionValueMetadata(row);
-      return {
-        definitionId: asString(row.definition_id),
-        orderId: row.order_id === null ? null : asString(row.order_id),
-        orderItemId: row.order_item_id === null ? null : asString(row.order_item_id),
-        value: parseStoredCustomFieldValue(asString(row.value_json), definition),
-        createdAt: asString(row.created_at),
-        updatedAt: asString(row.updated_at),
-      };
-    });
+    return rows.map(parseCustomFieldValueRecordRow);
+  }
+
+  private listWorkbenchCustomFieldValues(
+    granularity: CustomFieldGranularity,
+    ownerIds: readonly string[],
+    customFieldDefinitionIds?: readonly string[],
+  ): CustomFieldValueRecord[] {
+    if (ownerIds.length === 0 || customFieldDefinitionIds?.length === 0) return [];
+    const workspace = this.requireWorkspace();
+    const ownerColumn = granularity === 'order' ? 'order_id' : 'order_item_id';
+    const selectedDefinitionIds = customFieldDefinitionIds === undefined
+      ? undefined
+      : [...new Set(customFieldDefinitionIds)];
+    const definitionFilter = selectedDefinitionIds === undefined
+      ? ''
+      : `AND values_table.definition_id IN (${selectedDefinitionIds.map(() => '?').join(', ')})`;
+    const values: CustomFieldValueRecord[] = [];
+    const chunkSize = 500;
+    for (let offset = 0; offset < ownerIds.length; offset += chunkSize) {
+      const chunk = ownerIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = workspace.database.prepare(`
+        SELECT
+          values_table.definition_id,
+          values_table.order_id,
+          values_table.order_item_id,
+          values_table.value_json,
+          values_table.created_at,
+          values_table.updated_at,
+          definitions.value_type,
+          definitions.options_json
+        FROM custom_field_values AS values_table
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = values_table.definition_id
+        WHERE definitions.granularity = ?
+          AND values_table.${ownerColumn} IN (${placeholders})
+          ${definitionFilter}
+        ORDER BY
+          definitions.created_at,
+          definitions.id,
+          values_table.${ownerColumn}
+      `).all(granularity, ...chunk, ...(selectedDefinitionIds ?? [])) as unknown as SqlRow[];
+      values.push(...rows.map(parseCustomFieldValueRecordRow));
+    }
+    return values;
   }
 
   private assertRequiredCustomFieldValuesPresent(orderId: string): void {
@@ -3466,6 +3715,133 @@ function parseCustomFieldDefinitionRow(row: SqlRow): CustomFieldDefinition {
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
   };
+}
+
+function parseCustomFieldValueRecordRow(row: SqlRow): CustomFieldValueRecord {
+  const definition = parseCustomFieldDefinitionValueMetadata(row);
+  return {
+    definitionId: asString(row.definition_id),
+    orderId: row.order_id === null ? null : asString(row.order_id),
+    orderItemId: row.order_item_id === null ? null : asString(row.order_item_id),
+    value: parseStoredCustomFieldValue(asString(row.value_json), definition),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function parseTableTemplateRow(
+  row: SqlRow,
+  definitions: readonly CustomFieldDefinition[],
+): TableTemplate {
+  if (asNumber(row.configuration_version) !== 1) {
+    throw new Error('数据库表格模板配置版本不受支持');
+  }
+  let configuration: unknown;
+  try {
+    configuration = JSON.parse(asString(row.configuration_json));
+  } catch (error) {
+    throw new Error('数据库表格模板配置格式错误', { cause: error });
+  }
+  if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) {
+    throw new Error('数据库表格模板配置格式错误');
+  }
+  const config = configuration as Record<string, unknown>;
+  if (Object.keys(config).some((key) => key !== 'columns' && key !== 'query')) {
+    throw new Error('数据库表格模板配置包含未知属性');
+  }
+  const normalized = normalizeTableTemplateCustomFilter(
+    normalizeCreateTableTemplateInput({
+      name: asString(row.name),
+      granularity: parseTableTemplateGranularity(row.granularity),
+      columns: config.columns,
+      query: config.query,
+    }, definitions),
+    definitions,
+  );
+  if (tableTemplateNameKey(normalized.name) !== asString(row.name_key)) {
+    throw new Error('数据库表格模板名称索引不一致');
+  }
+  return {
+    id: normalizeTableTemplateId(asString(row.id)),
+    ...normalized,
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  } as TableTemplate;
+}
+
+function normalizeTableTemplateCustomFilter<T extends CreateTableTemplateInput>(
+  template: T,
+  definitions: readonly CustomFieldDefinition[],
+): T {
+  const filter = template.query.customFieldFilter;
+  if (!filter) return structuredClone(template);
+  const definition = definitions.find(({ id }) => id === filter.definitionId);
+  if (!definition || definition.granularity !== template.granularity) {
+    throw new Error('表格模板自定义筛选字段无效');
+  }
+  const value = normalizeCustomFieldValue(
+    definition.type,
+    filter.value,
+    definition.options,
+  );
+  return {
+    ...template,
+    query: {
+      ...template.query,
+      customFieldFilter: { definitionId: definition.id, value },
+    },
+  } as T;
+}
+
+function serializeTableTemplateConfiguration(template: TableTemplate): string {
+  return JSON.stringify({
+    columns: template.columns,
+    query: template.query,
+  });
+}
+
+function tableTemplateCustomFieldDependencies(template: TableTemplate): Array<{
+  definitionId: string;
+  usage: 'column' | 'filter' | 'sort';
+}> {
+  const dependencies: Array<{
+    definitionId: string;
+    usage: 'column' | 'filter' | 'sort';
+  }> = [];
+  for (const column of template.columns) {
+    if (column.field.kind === 'custom') {
+      dependencies.push({ definitionId: column.field.definitionId, usage: 'column' });
+    }
+  }
+  if (template.query.customFieldFilter) {
+    dependencies.push({
+      definitionId: template.query.customFieldFilter.definitionId,
+      usage: 'filter',
+    });
+  }
+  if (template.query.customFieldSort) {
+    dependencies.push({
+      definitionId: template.query.customFieldSort.definitionId,
+      usage: 'sort',
+    });
+  }
+  return dependencies;
+}
+
+function parseTableTemplateGranularity(
+  value: string | number | null | undefined,
+): TableTemplateGranularity {
+  if (value === 'order' || value === 'order_item') return value;
+  throw new Error('数据库表格模板数据粒度错误');
+}
+
+function normalizeTableTemplateId(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('表格模板 ID 格式无效');
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 200) {
+    throw new Error('表格模板 ID 格式无效');
+  }
+  return normalized;
 }
 
 function parseCustomFieldDefinitionValueMetadata(row: SqlRow): {
