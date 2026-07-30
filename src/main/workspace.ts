@@ -149,6 +149,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 5) migrateToVersion5(database);
   if (row.version < 6) migrateToVersion6(database);
   if (row.version < 7) migrateToVersion7(database);
+  if (row.version < 8) migrateToVersion8(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -733,6 +734,116 @@ function migrateToVersion7(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion8(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE custom_field_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        granularity TEXT NOT NULL
+          CHECK (granularity IN ('order', 'order_item')),
+        value_type TEXT NOT NULL
+          CHECK (value_type IN (
+            'text', 'number', 'money', 'datetime',
+            'single_select', 'multi_select', 'checkbox'
+          )),
+        required INTEGER NOT NULL CHECK (required IN (0, 1)),
+        default_value_json TEXT CHECK (
+          default_value_json IS NULL OR json_valid(default_value_json)
+        ),
+        options_json TEXT NOT NULL CHECK (
+          json_valid(options_json) AND json_type(options_json) = 'array'
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (granularity, name)
+      ) STRICT;
+
+      CREATE TABLE custom_field_values (
+        id TEXT PRIMARY KEY,
+        definition_id TEXT NOT NULL
+          REFERENCES custom_field_definitions(id) ON DELETE CASCADE,
+        order_id TEXT REFERENCES original_orders(id) ON DELETE CASCADE,
+        order_item_id TEXT REFERENCES order_items(id) ON DELETE CASCADE,
+        value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (order_id IS NOT NULL AND order_item_id IS NULL)
+          OR (order_id IS NULL AND order_item_id IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE UNIQUE INDEX custom_field_values_by_order
+      ON custom_field_values (definition_id, order_id)
+      WHERE order_id IS NOT NULL;
+
+      CREATE UNIQUE INDEX custom_field_values_by_order_item
+      ON custom_field_values (definition_id, order_item_id)
+      WHERE order_item_id IS NOT NULL;
+
+      CREATE INDEX custom_field_values_order_lookup
+      ON custom_field_values (order_id, definition_id);
+
+      CREATE INDEX custom_field_values_order_item_lookup
+      ON custom_field_values (order_item_id, definition_id);
+
+      CREATE TRIGGER custom_field_values_owner_matches_definition_on_insert
+      BEFORE INSERT ON custom_field_values
+      WHEN EXISTS (
+        SELECT 1
+        FROM custom_field_definitions AS definitions
+        WHERE definitions.id = NEW.definition_id
+          AND NOT (
+            (definitions.granularity = 'order'
+              AND NEW.order_id IS NOT NULL
+              AND NEW.order_item_id IS NULL)
+            OR
+            (definitions.granularity = 'order_item'
+              AND NEW.order_id IS NULL
+              AND NEW.order_item_id IS NOT NULL)
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'custom field granularity does not match value owner');
+      END;
+
+      CREATE TRIGGER custom_field_values_owner_matches_definition_on_update
+      BEFORE UPDATE ON custom_field_values
+      WHEN EXISTS (
+        SELECT 1
+        FROM custom_field_definitions AS definitions
+        WHERE definitions.id = NEW.definition_id
+          AND NOT (
+            (definitions.granularity = 'order'
+              AND NEW.order_id IS NOT NULL
+              AND NEW.order_item_id IS NULL)
+            OR
+            (definitions.granularity = 'order_item'
+              AND NEW.order_id IS NULL
+              AND NEW.order_item_id IS NOT NULL)
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'custom field granularity does not match value owner');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

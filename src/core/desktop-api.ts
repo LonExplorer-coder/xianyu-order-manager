@@ -9,6 +9,13 @@ import type {
   RecognitionBatchView,
 } from './contracts';
 import type {
+  CreateCustomFieldDefinitionInput,
+  CustomFieldDefinition,
+  CustomFieldValueRecord,
+  DraftCustomFieldValues,
+  SaveCustomFieldValuesInput,
+} from './custom-fields';
+import type {
   OcrConnectionTestInput,
   OcrConnectionTestResult,
   OcrSettingsView,
@@ -18,7 +25,12 @@ import type {
   OrderIntakeSettingsView,
   SaveOrderIntakeSettingsInput,
 } from './order-intake';
-import type { OrderWorkbenchQuery, OrderWorkbenchResult } from './order-workbench';
+import type {
+  OrderItemWorkbenchQuery,
+  OrderItemWorkbenchResult,
+  OrderWorkbenchQuery,
+  OrderWorkbenchResult,
+} from './order-workbench';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -40,15 +52,27 @@ export interface DesktopApi {
     listener: (batches: RecognitionBatchView[]) => void,
   ): () => void;
   cancelDraft(draftId: string): Promise<void>;
-  confirmDraft(draft: OrderDraft): Promise<OrderDraftConfirmation>;
+  confirmDraft(
+    draft: OrderDraft,
+    customValues?: DraftCustomFieldValues,
+  ): Promise<OrderDraftConfirmation>;
   confirmOrderUpdate(
     draft: OrderDraft,
     expectedRevision: number,
+    customValues?: DraftCustomFieldValues,
   ): Promise<OrderUpdateConfirmation>;
   listOrders(): Promise<OrderSummary[]>;
   queryOrders(query: OrderWorkbenchQuery): Promise<OrderWorkbenchResult>;
+  queryOrderItems(query: OrderItemWorkbenchQuery): Promise<OrderItemWorkbenchResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
+  listCustomFieldDefinitions(): Promise<CustomFieldDefinition[]>;
+  createCustomFieldDefinition(
+    input: CreateCustomFieldDefinitionInput,
+  ): Promise<CustomFieldDefinition>;
+  saveCustomFieldValues(
+    input: SaveCustomFieldValuesInput,
+  ): Promise<CustomFieldValueRecord[]>;
   getScreenshotDataUrl(screenshotId: string): Promise<string>;
   getOrderIntakeSettings(): Promise<OrderIntakeSettingsView>;
   saveOrderIntakeSettings(

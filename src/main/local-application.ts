@@ -25,6 +25,26 @@ import type {
   SourceSnapshot,
 } from '../core/contracts';
 import type {
+  ConfirmDraftCustomFieldOptions,
+  CreateCustomFieldDefinitionInput,
+  CustomFieldDefinition,
+  CustomFieldGranularity,
+  CustomFieldValue,
+  CustomFieldValueRecord,
+  DraftCustomFieldValues,
+  SaveCustomFieldValuesInput,
+} from '../core/custom-fields';
+import {
+  isCustomFieldGranularity,
+  isCustomFieldType,
+  isMissingCustomFieldValue,
+  normalizeCustomFieldDefinitionInput,
+  normalizeCustomFieldValue,
+  parseStoredCustomFieldValue,
+} from '../core/custom-fields';
+import type {
+  OrderItemWorkbenchQuery,
+  OrderItemWorkbenchResult,
   OrderWorkbenchDateField,
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
@@ -36,6 +56,7 @@ import {
   hasSameOrderIdentity,
   normalizedOrderIdentityPart,
 } from '../core/order-comparison';
+import { matchOrderItemIds } from '../core/order-item-matching';
 import {
   assessAutomaticImport,
   isOrderReviewIssueCode,
@@ -786,6 +807,7 @@ export class LocalApplication {
       currentOrder,
       expectedRevision: currentOrder.revision,
       changes: diffOrderCurrentValues(currentOrder, draft),
+      customFieldValues: this.listCustomFieldValuesForOrder(currentOrder.id),
       sourceSnapshot: {
         id: asString(snapshotRow.id),
         createdAt: asString(snapshotRow.created_at),
@@ -803,7 +825,6 @@ export class LocalApplication {
     reviewIssues: readonly OrderReviewIssueCode[],
     reviewedDraft?: OrderDraft,
   ): OrderDraft {
-    const workspace = this.requireWorkspace();
     const persistedDraft = this.getDraft(draftId);
     const draft = reviewedDraft ?? persistedDraft;
     if (draft.id !== draftId) {
@@ -814,6 +835,40 @@ export class LocalApplication {
     if (!hasSameOrderIdentity(existing, draft)) {
       throw new Error('订单草稿与候选原始订单身份不一致');
     }
+    return this.persistDraftReviewTarget(
+      draftId,
+      orderId,
+      reviewIssues,
+      reviewedDraft,
+    );
+  }
+
+  public saveDraftAsNewOrderReview(
+    draftId: string,
+    reviewIssues: readonly OrderReviewIssueCode[],
+    reviewedDraft: OrderDraft,
+  ): OrderDraft {
+    this.getDraft(draftId);
+    if (reviewedDraft.id !== draftId) {
+      throw new Error('校对订单与来源草稿不一致');
+    }
+    validateDraft(reviewedDraft);
+    return this.persistDraftReviewTarget(
+      draftId,
+      null,
+      reviewIssues,
+      reviewedDraft,
+    );
+  }
+
+  private persistDraftReviewTarget(
+    draftId: string,
+    matchedOrderId: string | null,
+    reviewIssues: readonly OrderReviewIssueCode[],
+    reviewedDraft?: OrderDraft,
+  ): OrderDraft {
+    const workspace = this.requireWorkspace();
+    const draft = reviewedDraft ?? this.getDraft(draftId);
     workspace.transaction(() => {
       const result = reviewedDraft
         ? workspace.database
@@ -878,7 +933,7 @@ export class LocalApplication {
             draft.amountCents === null ? 0 : 1,
             draft.platformTransactionStatus,
             draft.fulfillmentStatus,
-            orderId,
+            matchedOrderId,
             serializeOrderReviewIssues(reviewIssues),
             draftId,
           )
@@ -893,7 +948,7 @@ export class LocalApplication {
               AND status = 'awaiting_review'
               AND review_cancelled_at IS NULL
           `)
-          .run(orderId, serializeOrderReviewIssues(reviewIssues), draftId);
+          .run(matchedOrderId, serializeOrderReviewIssues(reviewIssues), draftId);
       if (result.changes !== 1) {
         throw new Error('该订单草稿状态已变化，请刷新后重试');
       }
@@ -1051,69 +1106,79 @@ export class LocalApplication {
 
     const now = new Date().toISOString();
     workspace.transaction(() => {
-      const current = workspace.database
-        .prepare(`
-          SELECT batch_id, screenshot_id, status, review_cancelled_at
-          FROM order_drafts
-          WHERE id = ?
-        `)
-        .get(draftId) as SqlRow | undefined;
-      if (!current || asString(current.status) !== 'awaiting_review') {
-        throw new Error('该订单草稿状态已变化，请刷新后重试');
-      }
-      if (current.review_cancelled_at !== null) {
-        throw new Error('该订单草稿已取消，不能记录为重复来源');
-      }
-
-      const finalizedSnapshot = workspace.database
-        .prepare(`
-          UPDATE source_snapshots
-          SET order_id = ?, confirmed_json = ?, resolved_at = ?
-          WHERE draft_id = ?
-            AND order_id IS NULL
-            AND confirmed_json IS NULL
-            AND resolved_at IS NULL
-        `)
-        .run(
-          orderId,
-          JSON.stringify(toRecognitionResult(existing)),
-          now,
-          draftId,
-        );
-      if (finalizedSnapshot.changes !== 1) {
-        throw new Error('该订单来源快照状态已变化，请刷新后重试');
-      }
-      const resolved = workspace.database
-        .prepare(`
-          UPDATE order_drafts
-          SET
-            status = 'confirmed',
-            confirmed_at = ?,
-            matched_order_id = ?,
-            review_issues_json = '[]',
-            intake_decision_pending = 0
-          WHERE id = ?
-            AND status = 'awaiting_review'
-            AND review_cancelled_at IS NULL
-        `)
-        .run(now, orderId, draftId);
-      if (resolved.changes !== 1) {
-        throw new Error('该订单草稿状态已变化，请刷新后重试');
-      }
-      workspace.database
-        .prepare(`
-          UPDATE recognition_batch_items
-          SET
-            status = 'duplicate_skipped',
-            error_message = NULL,
-            resolution_kind = 'equivalent_order',
-            updated_at = ?
-          WHERE draft_id = ?
-        `)
-        .run(now, draftId);
-      this.completeBatchWhenReviewed(asString(current.batch_id));
+      this.resolveEquivalentDraftInTransaction(draftId, orderId, existing, now);
     });
     return existing;
+  }
+
+  private resolveEquivalentDraftInTransaction(
+    draftId: string,
+    orderId: string,
+    existing: OriginalOrder,
+    now: string,
+  ): void {
+    const workspace = this.requireWorkspace();
+    const current = workspace.database
+      .prepare(`
+        SELECT batch_id, screenshot_id, status, review_cancelled_at
+        FROM order_drafts
+        WHERE id = ?
+      `)
+      .get(draftId) as SqlRow | undefined;
+    if (!current || asString(current.status) !== 'awaiting_review') {
+      throw new Error('该订单草稿状态已变化，请刷新后重试');
+    }
+    if (current.review_cancelled_at !== null) {
+      throw new Error('该订单草稿已取消，不能记录为重复来源');
+    }
+
+    const finalizedSnapshot = workspace.database
+      .prepare(`
+        UPDATE source_snapshots
+        SET order_id = ?, confirmed_json = ?, resolved_at = ?
+        WHERE draft_id = ?
+          AND order_id IS NULL
+          AND confirmed_json IS NULL
+          AND resolved_at IS NULL
+      `)
+      .run(
+        orderId,
+        JSON.stringify(toRecognitionResult(existing)),
+        now,
+        draftId,
+      );
+    if (finalizedSnapshot.changes !== 1) {
+      throw new Error('该订单来源快照状态已变化，请刷新后重试');
+    }
+    const resolved = workspace.database
+      .prepare(`
+        UPDATE order_drafts
+        SET
+          status = 'confirmed',
+          confirmed_at = ?,
+          matched_order_id = ?,
+          review_issues_json = '[]',
+          intake_decision_pending = 0
+        WHERE id = ?
+          AND status = 'awaiting_review'
+          AND review_cancelled_at IS NULL
+      `)
+      .run(now, orderId, draftId);
+    if (resolved.changes !== 1) {
+      throw new Error('该订单草稿状态已变化，请刷新后重试');
+    }
+    workspace.database
+      .prepare(`
+        UPDATE recognition_batch_items
+        SET
+          status = 'duplicate_skipped',
+          error_message = NULL,
+          resolution_kind = 'equivalent_order',
+          updated_at = ?
+        WHERE draft_id = ?
+      `)
+      .run(now, draftId);
+    this.completeBatchWhenReviewed(asString(current.batch_id));
   }
 
   public hasActiveSourceScreenshotSha256(
@@ -1202,7 +1267,204 @@ export class LocalApplication {
     });
   }
 
-  public confirmDraft(draft: OrderDraft): OriginalOrder {
+  public createCustomFieldDefinition(
+    input: CreateCustomFieldDefinitionInput,
+  ): CustomFieldDefinition {
+    const workspace = this.requireWorkspace();
+    const normalized = normalizeCustomFieldDefinitionInput(input);
+    const now = new Date().toISOString();
+    const definition: CustomFieldDefinition = {
+      id: randomUUID(),
+      ...normalized,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    workspace.transaction(() => {
+      workspace.database.prepare(`
+        INSERT INTO custom_field_definitions (
+          id, name, granularity, value_type, required,
+          default_value_json, options_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        definition.id,
+        definition.name,
+        definition.granularity,
+        definition.type,
+        definition.required ? 1 : 0,
+        definition.defaultValue === null ? null : JSON.stringify(definition.defaultValue),
+        JSON.stringify(definition.options),
+        definition.createdAt,
+        definition.updatedAt,
+      );
+
+      if (definition.defaultValue === null) return;
+      const targets = definition.granularity === 'order'
+        ? workspace.database.prepare('SELECT id FROM original_orders ORDER BY created_at, id').all()
+        : workspace.database.prepare('SELECT id FROM order_items ORDER BY order_id, position, id').all();
+      const insertValue = workspace.database.prepare(`
+        INSERT INTO custom_field_values (
+          id, definition_id, order_id, order_item_id,
+          value_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const target of targets as unknown as SqlRow[]) {
+        insertValue.run(
+          randomUUID(),
+          definition.id,
+          definition.granularity === 'order' ? asString(target.id) : null,
+          definition.granularity === 'order_item' ? asString(target.id) : null,
+          JSON.stringify(definition.defaultValue),
+          definition.createdAt,
+          definition.updatedAt,
+        );
+      }
+    });
+
+    return structuredClone(definition);
+  }
+
+  public listCustomFieldDefinitions(): CustomFieldDefinition[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT *
+      FROM custom_field_definitions
+      ORDER BY created_at, id
+    `).all() as unknown as SqlRow[];
+    return rows.map(parseCustomFieldDefinitionRow);
+  }
+
+  public hasMissingRequiredOrderCustomFields(): boolean {
+    const workspace = this.requireWorkspace();
+    return workspace.database.prepare(`
+      SELECT 1 AS found
+      FROM custom_field_definitions
+      WHERE granularity = 'order'
+        AND required = 1
+        AND default_value_json IS NULL
+      LIMIT 1
+    `).get() !== undefined;
+  }
+
+  public saveCustomFieldValues(
+    input: SaveCustomFieldValuesInput,
+  ): CustomFieldValueRecord[] {
+    const workspace = this.requireWorkspace();
+    if (!input || typeof input !== 'object' || !input.orderId) {
+      throw new Error('自定义字段保存目标无效');
+    }
+    if (!Array.isArray(input.orderValues) || !Array.isArray(input.itemValues)) {
+      throw new Error('自定义字段保存内容无效');
+    }
+
+    workspace.transaction(() => {
+      const orderExists = workspace.database
+        .prepare('SELECT 1 AS found FROM original_orders WHERE id = ?')
+        .get(input.orderId);
+      if (!orderExists) throw new Error('未找到自定义字段对应的原始订单');
+
+      const pending: Array<{
+        definition: CustomFieldDefinition;
+        orderId: string | null;
+        orderItemId: string | null;
+        value: CustomFieldValue | null;
+      }> = [];
+      const seenTargets = new Set<string>();
+
+      for (const entry of input.orderValues) {
+        const definition = this.getCustomFieldDefinition(entry.definitionId);
+        if (definition.granularity !== 'order') {
+          throw new Error('商品粒度字段不能保存到订单');
+        }
+        const key = `${definition.id}:order`;
+        if (seenTargets.has(key)) throw new Error('同一订单自定义字段不能重复赋值');
+        seenTargets.add(key);
+        pending.push({
+          definition,
+          orderId: input.orderId,
+          orderItemId: null,
+          value: entry.value === null
+            ? null
+            : normalizeCustomFieldValue(definition.type, entry.value, definition.options),
+        });
+      }
+
+      for (const entry of input.itemValues) {
+        const definition = this.getCustomFieldDefinition(entry.definitionId);
+        if (definition.granularity !== 'order_item') {
+          throw new Error('订单粒度字段不能保存到商品');
+        }
+        const item = workspace.database
+          .prepare('SELECT order_id FROM order_items WHERE id = ?')
+          .get(entry.orderItemId) as SqlRow | undefined;
+        if (!item || asString(item.order_id) !== input.orderId) {
+          throw new Error('自定义字段的商品不属于当前订单');
+        }
+        const key = `${definition.id}:item:${entry.orderItemId}`;
+        if (seenTargets.has(key)) throw new Error('同一商品自定义字段不能重复赋值');
+        seenTargets.add(key);
+        pending.push({
+          definition,
+          orderId: null,
+          orderItemId: entry.orderItemId,
+          value: entry.value === null
+            ? null
+            : normalizeCustomFieldValue(definition.type, entry.value, definition.options),
+        });
+      }
+
+      const now = new Date().toISOString();
+      for (const entry of pending) {
+        if (entry.value === null) {
+          workspace.database.prepare(`
+            DELETE FROM custom_field_values
+            WHERE definition_id = ?
+              AND order_id IS ?
+              AND order_item_id IS ?
+          `).run(entry.definition.id, entry.orderId, entry.orderItemId);
+          continue;
+        }
+        const existing = workspace.database.prepare(`
+          SELECT id
+          FROM custom_field_values
+          WHERE definition_id = ?
+            AND order_id IS ?
+            AND order_item_id IS ?
+        `).get(entry.definition.id, entry.orderId, entry.orderItemId) as SqlRow | undefined;
+        if (existing) {
+          workspace.database.prepare(`
+            UPDATE custom_field_values
+            SET value_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(JSON.stringify(entry.value), now, asString(existing.id));
+        } else {
+          workspace.database.prepare(`
+            INSERT INTO custom_field_values (
+              id, definition_id, order_id, order_item_id,
+              value_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            randomUUID(),
+            entry.definition.id,
+            entry.orderId,
+            entry.orderItemId,
+            JSON.stringify(entry.value),
+            now,
+            now,
+          );
+        }
+      }
+      this.assertRequiredCustomFieldValuesPresent(input.orderId);
+    });
+
+    return this.listCustomFieldValuesForOrder(input.orderId);
+  }
+
+  public confirmDraft(
+    draft: OrderDraft,
+    customValues?: DraftCustomFieldValues,
+    options: ConfirmDraftCustomFieldOptions = {},
+  ): OriginalOrder {
     const workspace = this.requireWorkspace();
     validateDraft(draft);
     const persistedDraft = this.getDraft(draft.id);
@@ -1215,18 +1477,31 @@ export class LocalApplication {
 
     const existingOrder = this.findOriginalOrderByIdentity(draft);
     if (existingOrder) {
-      if (hasEquivalentOrderContent(existingOrder, draft)) {
-        return this.resolveEquivalentDraft(draft.id, existingOrder.id, draft);
-      }
-      throw new Error('该订单已存在且内容有变化，请重新打开校对查看新旧对比');
+      const equivalent = hasEquivalentOrderContent(existingOrder, draft);
+      this.saveDraftOrderMatch(
+        draft.id,
+        existingOrder.id,
+        reviewIssuesForRetargetedOrder(draft, equivalent),
+        draft,
+      );
+      throw new Error('该订单身份已存在，已转为订单更新，请核对目标订单及自定义字段后再次确认');
     }
 
+    const preparedCustomValues = this.prepareDraftCustomFieldValues(draft, customValues, {
+      enforceRequiredItemFields: options.enforceRequiredItemFields ?? true,
+    });
     const orderId = randomUUID();
     const now = new Date().toISOString();
     const confirmedRecognition = toRecognitionResult(draft);
     const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
     const shippingFeeCents = requireMoney('运费', draft.shippingFeeCents);
     const amountCents = requireMoney('成交金额', draft.amountCents);
+    const persistedItemIds = new Map(
+      draft.items.map((item) => [item.id, randomUUID()] as const),
+    );
+    if (persistedItemIds.size !== draft.items.length) {
+      throw new Error('订单草稿商品标识不能重复');
+    }
 
     workspace.transaction(() => {
       workspace.database
@@ -1286,8 +1561,10 @@ export class LocalApplication {
       `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
+        const itemId = persistedItemIds.get(item.id);
+        if (!itemId) throw new Error('订单草稿商品标识无效');
         insertItem.run(
-          randomUUID(),
+          itemId,
           orderId,
           position,
           item.sourceTitle,
@@ -1298,6 +1575,37 @@ export class LocalApplication {
           safeSubtotal(unitPriceCents, item.quantity),
         );
       });
+
+      const insertCustomValue = workspace.database.prepare(`
+        INSERT INTO custom_field_values (
+          id, definition_id, order_id, order_item_id,
+          value_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const value of preparedCustomValues.orderValues) {
+        insertCustomValue.run(
+          randomUUID(),
+          value.definitionId,
+          orderId,
+          null,
+          JSON.stringify(value.value),
+          now,
+          now,
+        );
+      }
+      for (const value of preparedCustomValues.itemValues) {
+        const orderItemId = persistedItemIds.get(value.draftItemId);
+        if (!orderItemId) throw new Error('自定义字段对应的草稿商品不存在');
+        insertCustomValue.run(
+          randomUUID(),
+          value.definitionId,
+          null,
+          orderItemId,
+          JSON.stringify(value.value),
+          now,
+          now,
+        );
+      }
 
       const finalizedSnapshot = workspace.database
         .prepare(`
@@ -1355,6 +1663,7 @@ export class LocalApplication {
   public confirmOrderUpdate(
     draft: OrderDraft,
     expectedRevision: number,
+    customValues?: DraftCustomFieldValues,
   ): OrderUpdateConfirmation {
     const workspace = this.requireWorkspace();
     validateDraft(draft);
@@ -1384,24 +1693,18 @@ export class LocalApplication {
     if (!hasSameOrderIdentity(existing, draft)) {
       const correctedExisting = this.findOriginalOrderByIdentity(draft);
       if (!correctedExisting) {
-        return {
-          order: this.confirmDraft(draft),
-          resolution: 'new_order',
-        };
+        this.saveDraftAsNewOrderReview(
+          draft.id,
+          reviewIssuesForNewOrder(draft),
+          draft,
+        );
+        throw new Error('订单身份已改为全新订单，已切换为新订单校对，请核对自定义字段后再次确认');
       }
-      if (hasEquivalentOrderContent(correctedExisting, draft)) {
-        return {
-          order: this.resolveEquivalentDraft(draft.id, correctedExisting.id, draft),
-          resolution: 'equivalent_order',
-        };
-      }
+      const equivalent = hasEquivalentOrderContent(correctedExisting, draft);
       this.saveDraftOrderMatch(
         draft.id,
         correctedExisting.id,
-        normalizeOrderReviewIssues([
-          ...(draft.reviewIssues ?? []),
-          'order_content_changed',
-        ]),
+        reviewIssuesForRetargetedOrder(draft, equivalent),
         draft,
       );
       throw new Error('修正后的订单身份命中另一笔已有订单，已切换对比，请核对后再次确认');
@@ -1410,12 +1713,6 @@ export class LocalApplication {
       throw new Error('订单已在其他操作中更新，请刷新对比后重试');
     }
     const changes = diffOrderCurrentValues(existing, draft);
-    if (changes.length === 0) {
-      return {
-        order: this.resolveEquivalentDraft(draft.id, orderId, draft),
-        resolution: 'equivalent_order',
-      };
-    }
 
     const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
     const shippingFeeCents = requireMoney('运费', draft.shippingFeeCents);
@@ -1427,6 +1724,70 @@ export class LocalApplication {
       sellerAccount: existing.sellerAccount,
       orderNumber: existing.orderNumber,
     });
+    const preparedCustomValues = this.prepareDraftCustomFieldValues(
+      draft,
+      customValues,
+      {
+        includeDefaults: false,
+        enforceRequiredOrderFields: false,
+        enforceRequiredItemFields: false,
+      },
+    );
+    const draftItemIds = new Set(draft.items.map((item) => item.id));
+    if (draftItemIds.size !== draft.items.length) {
+      throw new Error('订单草稿商品标识不能重复');
+    }
+    const persistedItemIds = matchOrderItemIds(existing.items, draft.items);
+    const unusedExistingItemIds = new Set(existing.items.map((item) => item.id));
+    for (const existingItemId of persistedItemIds.values()) {
+      unusedExistingItemIds.delete(existingItemId);
+    }
+    if (changes.length === 0) {
+      workspace.transaction(() => {
+        this.deleteDraftCustomFieldValuesForOrderUpdate(
+          orderId,
+          persistedItemIds,
+          customValues,
+        );
+        const upsertCustomValue = workspace.database.prepare(`
+          INSERT INTO custom_field_values (
+            id, definition_id, order_id, order_item_id,
+            value_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        `);
+        for (const value of preparedCustomValues.orderValues) {
+          upsertCustomValue.run(
+            randomUUID(), value.definitionId, orderId, null,
+            JSON.stringify(value.value), now, now,
+          );
+        }
+        for (const value of preparedCustomValues.itemValues) {
+          const itemId = persistedItemIds.get(value.draftItemId);
+          if (!itemId) {
+            throw new Error('无法唯一确定自定义字段对应的已有商品，请重新核对商品明细');
+          }
+          upsertCustomValue.run(
+            randomUUID(), value.definitionId, null, itemId,
+            JSON.stringify(value.value), now, now,
+          );
+        }
+        this.assertRequiredCustomFieldValuesPresent(orderId);
+        this.resolveEquivalentDraftInTransaction(draft.id, orderId, existing, now);
+      });
+      return {
+        order: this.getOrder(orderId).order,
+        resolution: 'equivalent_order',
+      };
+    }
+    for (const draftItem of draft.items) {
+      if (persistedItemIds.has(draftItem.id)) continue;
+      const persistedId = randomUUID();
+      persistedItemIds.set(draftItem.id, persistedId);
+    }
+    const existingItemIds = new Set(existing.items.map((item) => item.id));
 
     workspace.transaction(() => {
       const currentDraft = workspace.database
@@ -1501,7 +1862,7 @@ export class LocalApplication {
       }
 
       workspace.database
-        .prepare('DELETE FROM order_items WHERE order_id = ?')
+        .prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
         .run(orderId);
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
@@ -1509,20 +1870,99 @@ export class LocalApplication {
           unit_price_cents, quantity, quantity_inferred, subtotal_cents
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const updateItem = workspace.database.prepare(`
+        UPDATE order_items
+        SET
+          position = ?,
+          source_title = ?,
+          source_spec = ?,
+          unit_price_cents = ?,
+          quantity = ?,
+          quantity_inferred = ?,
+          subtotal_cents = ?
+        WHERE id = ? AND order_id = ?
+      `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
-        insertItem.run(
-          randomUUID(),
-          orderId,
-          position,
-          item.sourceTitle,
-          item.sourceSpec,
-          unitPriceCents,
-          item.quantity,
-          item.quantityInferred ? 1 : 0,
-          safeSubtotal(unitPriceCents, item.quantity),
-        );
+        const itemId = persistedItemIds.get(item.id);
+        if (!itemId) throw new Error('订单草稿商品标识无效');
+        if (existingItemIds.has(itemId)) {
+          updateItem.run(
+            position,
+            item.sourceTitle,
+            item.sourceSpec,
+            unitPriceCents,
+            item.quantity,
+            item.quantityInferred ? 1 : 0,
+            safeSubtotal(unitPriceCents, item.quantity),
+            itemId,
+            orderId,
+          );
+        } else {
+          insertItem.run(
+            itemId,
+            orderId,
+            position,
+            item.sourceTitle,
+            item.sourceSpec,
+            unitPriceCents,
+            item.quantity,
+            item.quantityInferred ? 1 : 0,
+            safeSubtotal(unitPriceCents, item.quantity),
+          );
+          workspace.database.prepare(`
+            INSERT INTO custom_field_values (
+              id, definition_id, order_id, order_item_id,
+              value_json, created_at, updated_at
+            )
+            SELECT
+              lower(hex(randomblob(16))), definitions.id, NULL, ?,
+              definitions.default_value_json, ?, ?
+            FROM custom_field_definitions AS definitions
+            WHERE definitions.granularity = 'order_item'
+              AND definitions.default_value_json IS NOT NULL
+          `).run(itemId, now, now);
+        }
       });
+      if (unusedExistingItemIds.size > 0) {
+        const placeholders = [...unusedExistingItemIds].map(() => '?').join(', ');
+        workspace.database.prepare(`
+          DELETE FROM order_items
+          WHERE order_id = ? AND id IN (${placeholders})
+        `).run(orderId, ...unusedExistingItemIds);
+      }
+
+      this.deleteDraftCustomFieldValuesForOrderUpdate(
+        orderId,
+        persistedItemIds,
+        customValues,
+      );
+
+      const upsertCustomValue = workspace.database.prepare(`
+        INSERT INTO custom_field_values (
+          id, definition_id, order_id, order_item_id,
+          value_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `);
+      for (const value of preparedCustomValues.orderValues) {
+        upsertCustomValue.run(
+          randomUUID(), value.definitionId, orderId, null,
+          JSON.stringify(value.value), now, now,
+        );
+      }
+      for (const value of preparedCustomValues.itemValues) {
+        const itemId = persistedItemIds.get(value.draftItemId);
+        if (!itemId) throw new Error('自定义字段对应的草稿商品不存在');
+        upsertCustomValue.run(
+          randomUUID(), value.definitionId, null, itemId,
+          JSON.stringify(value.value), now, now,
+        );
+      }
+
+      this.assertRequiredCustomFieldValuesPresent(orderId);
 
       const snapshotRow = workspace.database
         .prepare(`
@@ -1635,7 +2075,7 @@ export class LocalApplication {
         ? '1 = 1'
         : 'orders.lifecycle_status = ?',
     ];
-    const parameters: string[] = query.lifecycleStatus === 'all'
+    const parameters: Array<string | number> = query.lifecycleStatus === 'all'
       ? []
       : [query.lifecycleStatus ?? 'active'];
     const text = query.text?.normalize('NFKC').trim();
@@ -1716,8 +2156,74 @@ export class LocalApplication {
       where.push(`${dateColumn} <= ?`);
       parameters.push(orderWorkbenchDateBoundary(query.dateTo, dateColumn, 'end'));
     }
-    const sortExpression = orderWorkbenchSortExpression(query.sortField ?? 'created_at');
-    const sortDirection = orderWorkbenchSortDirection(query.sortDirection ?? 'desc');
+    if (query.customFieldFilter) {
+      const definition = this.getCustomFieldDefinition(
+        query.customFieldFilter.definitionId,
+      );
+      if (definition.granularity !== 'order') {
+        throw new Error('商品粒度自定义字段不能用于订单筛选');
+      }
+      const value = normalizeCustomFieldValue(
+        definition.type,
+        query.customFieldFilter.value,
+        definition.options,
+      );
+      if (definition.type === 'text') {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_id = orders.id
+            AND CAST(json_extract(filtered_custom_values.value_json, '$') AS TEXT)
+              LIKE ? ESCAPE '\\'
+        )`);
+        parameters.push(definition.id, containsLikePattern(value as string));
+      } else if (definition.type === 'multi_select') {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_id = orders.id
+            AND NOT EXISTS (
+              SELECT 1
+              FROM json_each(?) AS requested_values
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM json_each(filtered_custom_values.value_json) AS stored_values
+                WHERE stored_values.value = requested_values.value
+              )
+            )
+        )`);
+        parameters.push(definition.id, JSON.stringify(value));
+      } else {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_id = orders.id
+            AND filtered_custom_values.value_json = ?
+        )`);
+        parameters.push(definition.id, JSON.stringify(value));
+      }
+    }
+    const sortParameters: Array<string | number> = [];
+    let sortExpression = orderWorkbenchSortExpression(query.sortField ?? 'created_at');
+    let sortDirection = orderWorkbenchSortDirection(query.sortDirection ?? 'desc');
+    if (query.customFieldSort) {
+      const definition = this.getCustomFieldDefinition(query.customFieldSort.definitionId);
+      if (definition.granularity !== 'order') {
+        throw new Error('商品粒度自定义字段不能用于订单排序');
+      }
+      sortExpression = `(
+        SELECT json_extract(sorted_custom_values.value_json, '$')
+        FROM custom_field_values AS sorted_custom_values
+        WHERE sorted_custom_values.definition_id = ?
+          AND sorted_custom_values.order_id = orders.id
+        LIMIT 1
+      )${customFieldTextCollation(definition.type)}`;
+      sortParameters.push(definition.id);
+      sortDirection = orderWorkbenchSortDirection(query.customFieldSort.direction);
+    }
     const rows = workspace.database
       .prepare(`
         SELECT
@@ -1759,7 +2265,7 @@ export class LocalApplication {
         GROUP BY orders.id
         ORDER BY ${sortExpression} ${sortDirection}, orders.id DESC
       `)
-      .all(...parameters) as unknown as SqlRow[];
+      .all(...parameters, ...sortParameters) as unknown as SqlRow[];
 
     const orders = rows.map((row) => ({
       id: asString(row.id),
@@ -1815,6 +2321,102 @@ export class LocalApplication {
       pendingShipmentCount: asNumber(counts.pending_shipment_count),
       platforms: platforms.map((row) => asOrderPlatform(row.platform)),
       sellerAccounts: sellerAccounts.map((row) => asString(row.seller_account)),
+    };
+  }
+
+  public queryOrderItems(query: OrderItemWorkbenchQuery): OrderItemWorkbenchResult {
+    const workspace = this.requireWorkspace();
+    const where = ["orders.lifecycle_status = 'active'"];
+    const parameters: Array<string | number> = [];
+    if (query.customFieldFilter) {
+      const definition = this.getCustomFieldDefinition(
+        query.customFieldFilter.definitionId,
+      );
+      if (definition.granularity !== 'order_item') {
+        throw new Error('订单粒度自定义字段不能用于商品筛选');
+      }
+      const value = normalizeCustomFieldValue(
+        definition.type,
+        query.customFieldFilter.value,
+        definition.options,
+      );
+      if (definition.type === 'text') {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_item_id = items.id
+            AND CAST(json_extract(filtered_custom_values.value_json, '$') AS TEXT)
+              LIKE ? ESCAPE '\\'
+        )`);
+        parameters.push(definition.id, containsLikePattern(value as string));
+      } else if (definition.type === 'multi_select') {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_item_id = items.id
+            AND NOT EXISTS (
+              SELECT 1
+              FROM json_each(?) AS requested_values
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM json_each(filtered_custom_values.value_json) AS stored_values
+                WHERE stored_values.value = requested_values.value
+              )
+            )
+        )`);
+        parameters.push(definition.id, JSON.stringify(value));
+      } else {
+        where.push(`EXISTS (
+          SELECT 1
+          FROM custom_field_values AS filtered_custom_values
+          WHERE filtered_custom_values.definition_id = ?
+            AND filtered_custom_values.order_item_id = items.id
+            AND filtered_custom_values.value_json = ?
+        )`);
+        parameters.push(definition.id, JSON.stringify(value));
+      }
+    }
+
+    const sortParameters: Array<string | number> = [];
+    let sortExpression = 'orders.created_at DESC, orders.id DESC, items.position';
+    let sortDirection = '';
+    if (query.customFieldSort) {
+      const definition = this.getCustomFieldDefinition(query.customFieldSort.definitionId);
+      if (definition.granularity !== 'order_item') {
+        throw new Error('订单粒度自定义字段不能用于商品排序');
+      }
+      sortExpression = `(
+        SELECT json_extract(sorted_custom_values.value_json, '$')
+        FROM custom_field_values AS sorted_custom_values
+        WHERE sorted_custom_values.definition_id = ?
+          AND sorted_custom_values.order_item_id = items.id
+        LIMIT 1
+      )${customFieldTextCollation(definition.type)}`;
+      sortParameters.push(definition.id);
+      sortDirection = orderWorkbenchSortDirection(query.customFieldSort.direction);
+    }
+
+    const rows = workspace.database.prepare(`
+      SELECT items.*
+      FROM order_items AS items
+      JOIN original_orders AS orders ON orders.id = items.order_id
+      WHERE ${where.join('\n        AND ')}
+      ORDER BY ${sortExpression} ${sortDirection}, items.id
+    `).all(...parameters, ...sortParameters) as unknown as SqlRow[];
+    return {
+      items: rows.map((row) => ({
+        id: asString(row.id),
+        orderId: asString(row.order_id),
+        position: asNumber(row.position),
+        sourceTitle: asString(row.source_title),
+        sourceSpec: asString(row.source_spec),
+        unitPriceCents: asNumber(row.unit_price_cents),
+        quantity: asNumber(row.quantity),
+        quantityInferred: asNumber(row.quantity_inferred) === 1,
+        subtotalCents: asNumber(row.subtotal_cents),
+      })),
     };
   }
 
@@ -2020,6 +2622,8 @@ export class LocalApplication {
       sourceSnapshot: latestSource.sourceSnapshot,
       sources,
       changeEvents: [...eventsById.values()],
+      customFieldDefinitions: this.listCustomFieldDefinitions(),
+      customFieldValues: this.listCustomFieldValuesForOrder(orderId),
     };
   }
 
@@ -2221,6 +2825,262 @@ export class LocalApplication {
         new Date(Date.parse(input.createdAt) + index).toISOString(),
       );
     });
+  }
+
+  private getCustomFieldDefinition(definitionId: string): CustomFieldDefinition {
+    const workspace = this.requireWorkspace();
+    if (typeof definitionId !== 'string' || !definitionId) {
+      throw new Error('自定义字段标识无效');
+    }
+    const row = workspace.database
+      .prepare('SELECT * FROM custom_field_definitions WHERE id = ?')
+      .get(definitionId) as SqlRow | undefined;
+    if (!row) throw new Error('未找到自定义字段定义');
+    return parseCustomFieldDefinitionRow(row);
+  }
+
+  private deleteDraftCustomFieldValuesForOrderUpdate(
+    orderId: string,
+    persistedItemIds: ReadonlyMap<string, string>,
+    customValues: DraftCustomFieldValues | undefined,
+  ): void {
+    if (!customValues) return;
+    const workspace = this.requireWorkspace();
+    const deleteOrderValue = workspace.database.prepare(`
+      DELETE FROM custom_field_values
+      WHERE definition_id = ? AND order_id = ?
+    `);
+    for (const value of customValues.orderValues) {
+      if (value.value !== null) continue;
+      deleteOrderValue.run(value.definitionId, orderId);
+    }
+
+    const deleteItemValue = workspace.database.prepare(`
+      DELETE FROM custom_field_values
+      WHERE definition_id = ? AND order_item_id = ?
+    `);
+    for (const value of customValues.itemValues) {
+      if (value.value !== null) continue;
+      const orderItemId = persistedItemIds.get(value.draftItemId);
+      if (!orderItemId) {
+        throw new Error('无法唯一确定待清空自定义字段对应的已有商品，请重新核对商品明细');
+      }
+      deleteItemValue.run(value.definitionId, orderItemId);
+    }
+  }
+
+  private listCustomFieldValuesForOrder(orderId: string): CustomFieldValueRecord[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT
+        values_table.definition_id,
+        values_table.order_id,
+        values_table.order_item_id,
+        values_table.value_json,
+        values_table.created_at,
+        values_table.updated_at,
+        definitions.value_type,
+        definitions.options_json
+      FROM custom_field_values AS values_table
+      JOIN custom_field_definitions AS definitions
+        ON definitions.id = values_table.definition_id
+      LEFT JOIN order_items AS items ON items.id = values_table.order_item_id
+      WHERE values_table.order_id = ? OR items.order_id = ?
+      ORDER BY
+        definitions.created_at,
+        definitions.id,
+        CASE WHEN values_table.order_id IS NOT NULL THEN -1 ELSE items.position END,
+        values_table.order_item_id
+    `).all(orderId, orderId) as unknown as SqlRow[];
+    return rows.map((row) => {
+      const definition = parseCustomFieldDefinitionValueMetadata(row);
+      return {
+        definitionId: asString(row.definition_id),
+        orderId: row.order_id === null ? null : asString(row.order_id),
+        orderItemId: row.order_item_id === null ? null : asString(row.order_item_id),
+        value: parseStoredCustomFieldValue(asString(row.value_json), definition),
+        createdAt: asString(row.created_at),
+        updatedAt: asString(row.updated_at),
+      };
+    });
+  }
+
+  private assertRequiredCustomFieldValuesPresent(orderId: string): void {
+    const workspace = this.requireWorkspace();
+    const requiredDefinitions = this.listCustomFieldDefinitions()
+      .filter((definition) => definition.required);
+    if (requiredDefinitions.length === 0) return;
+
+    const itemIds = (workspace.database.prepare(`
+      SELECT id
+      FROM order_items
+      WHERE order_id = ?
+      ORDER BY position, id
+    `).all(orderId) as unknown as SqlRow[]).map((row) => asString(row.id));
+    const valueRows = workspace.database.prepare(`
+      SELECT definition_id, order_id, order_item_id, value_json
+      FROM custom_field_values
+      WHERE order_id = ?
+        OR order_item_id IN (
+          SELECT id FROM order_items WHERE order_id = ?
+        )
+    `).all(orderId, orderId) as unknown as SqlRow[];
+    const valuesByTarget = new Map(valueRows.map((row) => [
+      JSON.stringify([
+        asString(row.definition_id),
+        row.order_id === null ? asString(row.order_item_id) : 'order',
+      ]),
+      asString(row.value_json),
+    ]));
+
+    for (const definition of requiredDefinitions) {
+      const targets = definition.granularity === 'order' ? ['order'] : itemIds;
+      for (const target of targets) {
+        const serialized = valuesByTarget.get(JSON.stringify([definition.id, target]));
+        const value = serialized === undefined
+          ? null
+          : parseStoredCustomFieldValue(serialized, definition);
+        if (isMissingCustomFieldValue(value)) {
+          throw new Error(`必填自定义字段“${definition.name}”不能为空`);
+        }
+      }
+    }
+  }
+
+  private prepareDraftCustomFieldValues(
+    draft: OrderDraft,
+    input?: DraftCustomFieldValues,
+    options: {
+      includeDefaults?: boolean;
+      enforceRequiredOrderFields?: boolean;
+      enforceRequiredItemFields?: boolean;
+    } = {},
+  ): {
+      orderValues: Array<{ definitionId: string; value: CustomFieldValue }>;
+      itemValues: Array<{
+        definitionId: string;
+        draftItemId: string;
+        value: CustomFieldValue;
+      }>;
+    } {
+    const includeDefaults = options.includeDefaults ?? true;
+    const enforceRequiredOrderFields = options.enforceRequiredOrderFields ?? true;
+    const enforceRequiredItemFields = options.enforceRequiredItemFields ?? true;
+    const definitions = this.listCustomFieldDefinitions();
+    const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+    const draftItemIds = new Set(draft.items.map((item) => item.id));
+    if (draftItemIds.size !== draft.items.length) {
+      throw new Error('订单草稿商品标识不能重复');
+    }
+    if (
+      input !== undefined &&
+      (!input || typeof input !== 'object' ||
+        !Array.isArray(input.orderValues) || !Array.isArray(input.itemValues))
+    ) {
+      throw new Error('订单草稿自定义字段值无效');
+    }
+
+    const orderValues = new Map<string, CustomFieldValue>();
+    const itemValues = new Map<string, {
+      definitionId: string;
+      draftItemId: string;
+      value: CustomFieldValue;
+    }>();
+    if (includeDefaults) {
+      for (const definition of definitions) {
+        if (definition.defaultValue === null) continue;
+        if (definition.granularity === 'order') {
+          orderValues.set(definition.id, structuredClone(definition.defaultValue));
+          continue;
+        }
+        for (const item of draft.items) {
+          const key = JSON.stringify([definition.id, item.id]);
+          itemValues.set(key, {
+            definitionId: definition.id,
+            draftItemId: item.id,
+            value: structuredClone(definition.defaultValue),
+          });
+        }
+      }
+    }
+
+    const seenOrderDefinitions = new Set<string>();
+    for (const entry of input?.orderValues ?? []) {
+      const definition = definitionsById.get(entry.definitionId);
+      if (!definition) throw new Error('未找到订单草稿的自定义字段定义');
+      if (definition.granularity !== 'order') {
+        throw new Error('商品粒度字段不能保存到订单草稿');
+      }
+      if (seenOrderDefinitions.has(definition.id)) {
+        throw new Error('同一订单草稿字段不能重复赋值');
+      }
+      seenOrderDefinitions.add(definition.id);
+      if (entry.value === null) {
+        orderValues.delete(definition.id);
+      } else {
+        orderValues.set(
+          definition.id,
+          normalizeCustomFieldValue(definition.type, entry.value, definition.options),
+        );
+      }
+    }
+
+    const seenItemTargets = new Set<string>();
+    for (const entry of input?.itemValues ?? []) {
+      const definition = definitionsById.get(entry.definitionId);
+      if (!definition) throw new Error('未找到订单草稿商品的自定义字段定义');
+      if (definition.granularity !== 'order_item') {
+        throw new Error('订单粒度字段不能保存到草稿商品');
+      }
+      if (!draftItemIds.has(entry.draftItemId)) {
+        throw new Error('自定义字段对应的草稿商品不存在');
+      }
+      const key = JSON.stringify([definition.id, entry.draftItemId]);
+      if (seenItemTargets.has(key)) {
+        throw new Error('同一草稿商品字段不能重复赋值');
+      }
+      seenItemTargets.add(key);
+      if (entry.value === null) {
+        itemValues.delete(key);
+      } else {
+        itemValues.set(key, {
+          definitionId: definition.id,
+          draftItemId: entry.draftItemId,
+          value: normalizeCustomFieldValue(
+            definition.type,
+            entry.value,
+            definition.options,
+          ),
+        });
+      }
+    }
+
+    if (enforceRequiredOrderFields) {
+      const missingRequired = definitions.some((definition) => (
+        definition.granularity === 'order' &&
+        definition.required &&
+        isMissingCustomFieldValue(orderValues.get(definition.id))
+      ));
+      if (missingRequired) throw new Error('订单缺少必填自定义字段');
+    }
+    if (enforceRequiredItemFields) {
+      const missingRequired = definitions.some((definition) => (
+        definition.granularity === 'order_item' &&
+        definition.required &&
+        draft.items.some((item) => isMissingCustomFieldValue(
+          itemValues.get(JSON.stringify([definition.id, item.id]))?.value,
+        ))
+      ));
+      if (missingRequired) throw new Error('商品缺少必填自定义字段');
+    }
+
+    return {
+      orderValues: [...orderValues].map(([definitionId, value]) => ({
+        definitionId,
+        value,
+      })),
+      itemValues: [...itemValues.values()],
+    };
   }
 
   private requireWorkspace(): Workspace {
@@ -2454,6 +3314,26 @@ function serializeOrderReviewIssues(
   return JSON.stringify(normalizeOrderReviewIssues(reviewIssues));
 }
 
+function reviewIssuesForRetargetedOrder(
+  draft: Pick<OrderDraft, 'reviewIssues'>,
+  equivalent: boolean,
+): OrderReviewIssueCode[] {
+  return normalizeOrderReviewIssues([
+    ...(draft.reviewIssues ?? []).filter((issue) => (
+      issue !== 'duplicate_order' && issue !== 'order_content_changed'
+    )),
+    equivalent ? 'duplicate_order' : 'order_content_changed',
+  ]);
+}
+
+function reviewIssuesForNewOrder(
+  draft: Pick<OrderDraft, 'reviewIssues'>,
+): OrderReviewIssueCode[] {
+  return normalizeOrderReviewIssues((draft.reviewIssues ?? []).filter((issue) => (
+    issue !== 'duplicate_order' && issue !== 'order_content_changed'
+  )));
+}
+
 function isPlatformTransactionStatus(
   value: unknown,
 ): value is OriginalOrder['platformTransactionStatus'] {
@@ -2566,8 +3446,61 @@ function asNullableNumber(value: string | number | null | undefined): number | n
   return asNumber(value);
 }
 
+function parseCustomFieldDefinitionRow(row: SqlRow): CustomFieldDefinition {
+  const metadata = parseCustomFieldDefinitionValueMetadata(row);
+  let defaultValue: CustomFieldValue | null = null;
+  if (row.default_value_json !== null) {
+    defaultValue = parseStoredCustomFieldValue(
+      asString(row.default_value_json),
+      metadata,
+    );
+  }
+  return {
+    id: asString(row.id),
+    name: asString(row.name),
+    granularity: parseCustomFieldGranularity(row.granularity),
+    type: metadata.type,
+    required: asNumber(row.required) === 1,
+    defaultValue,
+    options: metadata.options,
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function parseCustomFieldDefinitionValueMetadata(row: SqlRow): {
+  type: CustomFieldDefinition['type'];
+  options: string[];
+} {
+  const type = row.value_type;
+  if (!isCustomFieldType(type)) throw new Error('数据库自定义字段类型错误');
+  let options: unknown;
+  try {
+    options = JSON.parse(asString(row.options_json));
+  } catch (error) {
+    throw new Error('数据库自定义字段可选项格式错误', { cause: error });
+  }
+  if (!Array.isArray(options) || !options.every((option) => typeof option === 'string')) {
+    throw new Error('数据库自定义字段可选项格式错误');
+  }
+  return { type, options };
+}
+
+function parseCustomFieldGranularity(
+  value: string | number | null | undefined,
+): CustomFieldGranularity {
+  if (!isCustomFieldGranularity(value)) throw new Error('数据库自定义字段粒度错误');
+  return value;
+}
+
 function containsLikePattern(value: string): string {
   return `%${value.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`;
+}
+
+function customFieldTextCollation(type: CustomFieldDefinition['type']): string {
+  return type === 'text' || type === 'single_select' || type === 'datetime'
+    ? ' COLLATE NOCASE'
+    : '';
 }
 
 function orderWorkbenchDateColumn(

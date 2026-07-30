@@ -64,6 +64,7 @@ const ORDER_REVIEW_ISSUE_LABELS: Record<OrderReviewIssueCode, string> = {
   invalid_order_time: '下单时间格式或规范化结果异常',
   invalid_payment_time: '付款时间格式或规范化结果异常',
   payment_before_order: '付款时间早于下单时间',
+  missing_required_custom_field: '缺少无默认值的订单必填自定义字段',
 };
 
 const ORDER_NUMBER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;

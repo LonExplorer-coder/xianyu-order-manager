@@ -2,6 +2,13 @@ import type {
   BootstrapState,
 } from '../core/desktop-api';
 import type {
+  CreateCustomFieldDefinitionInput,
+  CustomFieldDefinition,
+  CustomFieldValueRecord,
+  DraftCustomFieldValues,
+  SaveCustomFieldValuesInput,
+} from '../core/custom-fields';
+import type {
   OrderDetails,
   OrderDraft,
   OrderDraftConfirmation,
@@ -33,7 +40,12 @@ import type {
   OcrSettingsView,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
-import type { OrderWorkbenchQuery, OrderWorkbenchResult } from '../core/order-workbench';
+import type {
+  OrderItemWorkbenchQuery,
+  OrderItemWorkbenchResult,
+  OrderWorkbenchQuery,
+  OrderWorkbenchResult,
+} from '../core/order-workbench';
 import {
   LocalApplication,
   type RecognitionBatchItemUpdate,
@@ -280,36 +292,12 @@ export class DesktopSession {
     this.setItemStatusByDraftId(draftId, 'cancelled');
   }
 
-  public confirmDraft(draft: OrderDraft): OrderDraftConfirmation {
+  public confirmDraft(
+    draft: OrderDraft,
+    customValues?: DraftCustomFieldValues,
+  ): OrderDraftConfirmation {
     const application = this.requireApplication();
-    const existingOrder = application.findOriginalOrderByIdentity(draft);
-    if (existingOrder) {
-      if (!hasEquivalentOrderContent(existingOrder, draft)) {
-        application.saveDraftOrderMatch(
-          draft.id,
-          existingOrder.id,
-          uniqueReviewIssues([
-            ...(draft.reviewIssues ?? []),
-            'order_content_changed',
-          ]),
-          draft,
-        );
-        throw new Error('该订单已存在且内容有变化，已转为订单更新，请核对新旧对比后再次确认');
-      }
-      const resolvedOrder = application.resolveEquivalentDraft(
-        draft.id,
-        existingOrder.id,
-        draft,
-      );
-      this.refreshOrders();
-      this.setItemStatusByDraftId(
-        draft.id,
-        'duplicate_skipped',
-        'equivalent_order',
-      );
-      return { order: resolvedOrder, resolution: 'equivalent_order' };
-    }
-    const order = application.confirmDraft(draft);
+    const order = application.confirmDraft(draft, customValues);
     this.refreshOrders();
     this.setItemStatusByDraftId(draft.id, 'imported', 'new_order');
     return { order, resolution: 'new_order' };
@@ -318,8 +306,13 @@ export class DesktopSession {
   public confirmOrderUpdate(
     draft: OrderDraft,
     expectedRevision: number,
+    customValues?: DraftCustomFieldValues,
   ): OrderUpdateConfirmation {
-    const outcome = this.requireApplication().confirmOrderUpdate(draft, expectedRevision);
+    const outcome = this.requireApplication().confirmOrderUpdate(
+      draft,
+      expectedRevision,
+      customValues,
+    );
     this.refreshOrders();
     this.setItemStatusByDraftId(
       draft.id,
@@ -337,8 +330,32 @@ export class DesktopSession {
     return this.requireApplication().queryOrders(query);
   }
 
+  public queryOrderItems(query: OrderItemWorkbenchQuery): OrderItemWorkbenchResult {
+    return this.requireApplication().queryOrderItems(query);
+  }
+
   public getOrder(orderId: string): OrderDetails {
     return this.requireApplication().getOrder(orderId);
+  }
+
+  public listCustomFieldDefinitions(): CustomFieldDefinition[] {
+    return this.requireApplication().listCustomFieldDefinitions();
+  }
+
+  public createCustomFieldDefinition(
+    input: CreateCustomFieldDefinitionInput,
+  ): CustomFieldDefinition {
+    const definition = this.requireApplication().createCustomFieldDefinition(input);
+    this.refreshOrders();
+    return definition;
+  }
+
+  public saveCustomFieldValues(
+    input: SaveCustomFieldValuesInput,
+  ): CustomFieldValueRecord[] {
+    const values = this.requireApplication().saveCustomFieldValues(input);
+    this.refreshOrders();
+    return values;
   }
 
   public async getScreenshotDataUrl(screenshotId: string): Promise<string> {
@@ -866,8 +883,12 @@ export class DesktopSession {
         draft: { ...draft, status: 'confirmed', reviewIssues: [] },
       };
     }
+    const requiredCustomFieldIssues = (
+      !existingOrder && application.hasMissingRequiredOrderCustomFields()
+    ) ? ['missing_required_custom_field'] as const : [];
     const reviewIssues = uniqueReviewIssues([
       ...deterministicReviewIssues,
+      ...requiredCustomFieldIssues,
       ...(automaticImportEnabled ? [] : ['automatic_import_disabled'] as const),
     ]);
     if (existingOrder) {
@@ -897,7 +918,9 @@ export class DesktopSession {
     }
     if (automaticImportEnabled && reviewIssues.length === 0) {
       try {
-        application.confirmDraft(draft);
+        application.confirmDraft(draft, undefined, {
+          enforceRequiredItemFields: false,
+        });
         return { status: 'imported', draft: { ...draft, status: 'confirmed' } };
       } catch {
         reviewIssues.push('automatic_import_failed');

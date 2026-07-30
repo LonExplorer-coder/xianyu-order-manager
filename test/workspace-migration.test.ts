@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v7 并保留来源与更新约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v8 并保留来源与更新约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -26,7 +26,66 @@ describe('数据库升级', () => {
       { version: 5 },
       { version: 6 },
       { version: 7 },
+      { version: 8 },
     ]);
+    expect(
+      first.database
+        .prepare(`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN ('custom_field_definitions', 'custom_field_values')
+          ORDER BY name
+        `)
+        .all(),
+    ).toEqual([
+      { name: 'custom_field_definitions' },
+      { name: 'custom_field_values' },
+    ]);
+    first.database.exec(`
+      INSERT INTO custom_field_definitions (
+        id, name, granularity, value_type, required,
+        default_value_json, options_json, created_at, updated_at
+      ) VALUES
+        (
+          'field-order-v8', '订单备注', 'order', 'text', 0,
+          NULL, '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+        ),
+        (
+          'field-item-v8', '商品备注', 'order_item', 'text', 0,
+          NULL, '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+        );
+      INSERT INTO custom_field_values (
+        id, definition_id, order_id, order_item_id,
+        value_json, created_at, updated_at
+      ) VALUES (
+        'value-order-v8', 'field-order-v8', 'order-v1', NULL,
+        '"有效订单值"', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      );
+    `);
+    expect(() => first.database.prepare(`
+      INSERT INTO custom_field_values (
+        id, definition_id, order_id, order_item_id,
+        value_json, created_at, updated_at
+      ) VALUES (
+        'invalid-order-owner-v8', 'field-order-v8', NULL, 'order-item-v1',
+        '"错误归属"', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      )
+    `).run()).toThrow('custom field granularity does not match value owner');
+    expect(() => first.database.prepare(`
+      INSERT INTO custom_field_values (
+        id, definition_id, order_id, order_item_id,
+        value_json, created_at, updated_at
+      ) VALUES (
+        'invalid-item-owner-v8', 'field-item-v8', 'order-v1', NULL,
+        '"错误归属"', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      )
+    `).run()).toThrow('custom field granularity does not match value owner');
+    expect(() => first.database.prepare(`
+      UPDATE custom_field_values
+      SET order_id = NULL, order_item_id = 'order-item-v1'
+      WHERE id = 'value-order-v8'
+    `).run()).toThrow('custom field granularity does not match value owner');
     expect(
       (
         first.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
@@ -228,6 +287,7 @@ describe('数据库升级', () => {
       { version: 5 },
       { version: 6 },
       { version: 7 },
+      { version: 8 },
     ]);
     expect(
       (

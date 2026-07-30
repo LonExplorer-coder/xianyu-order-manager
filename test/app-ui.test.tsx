@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
+import type { CustomFieldDefinition } from '../src/core/custom-fields';
 import type {
   OrderDetails,
   OrderDraft,
@@ -123,6 +124,8 @@ const orderDetails: OrderDetails = {
   sourceSnapshot,
   sources: [{ recognitionStatus: 'imported', sourceScreenshot, sourceSnapshot }],
   changeEvents: [],
+  customFieldDefinitions: [],
+  customFieldValues: [],
 };
 
 function orderSummary(
@@ -229,8 +232,12 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     }),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
+    queryOrderItems: vi.fn().mockResolvedValue({ items: [] }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
+    listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
+    createCustomFieldDefinition: vi.fn(),
+    saveCustomFieldValues: vi.fn().mockResolvedValue([]),
     getScreenshotDataUrl: vi.fn(),
     getOrderIntakeSettings: vi.fn().mockResolvedValue({
       automaticImportEnabled: false,
@@ -344,6 +351,100 @@ describe('订单管理工作台', () => {
         items: [expect.objectContaining({ quantity: 2, quantityInferred: false })],
       }),
     );
+  });
+
+  it('人工确认新订单时要求每件商品补齐必填自定义字段', async () => {
+    const user = userEvent.setup();
+    const requiredItemField: CustomFieldDefinition = {
+      id: 'field-required-item-bin',
+      name: '商品库位',
+      granularity: 'order_item',
+      type: 'text',
+      required: true,
+      defaultValue: null,
+      options: [],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([requiredItemField]),
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    const confirmButton = await screen.findByRole('button', { name: '确认并入库' });
+    const itemField = screen.getByRole('textbox', { name: '商品库位' });
+    expect(itemField).toHaveAttribute('aria-required', 'true');
+    expect(confirmButton).toBeDisabled();
+    expect(screen.getByText('请填写每件商品的全部必填自定义字段后再确认入库。'))
+      .toBeVisible();
+
+    await user.type(itemField, 'A-03');
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
+
+    expect(confirmDraft).toHaveBeenCalledWith(draft, {
+      orderValues: [],
+      itemValues: [{
+        definitionId: requiredItemField.id,
+        draftItemId: draft.items[0].id,
+        value: 'A-03',
+      }],
+    });
+  });
+
+  it('校对中的自定义金额显示非法精度时不能提交旧值或空值', async () => {
+    const user = userEvent.setup();
+    const moneyField: CustomFieldDefinition = {
+      id: 'field-review-extra-cost',
+      name: '附加成本',
+      granularity: 'order',
+      type: 'money',
+      required: false,
+      defaultValue: 100,
+      options: [],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
+    const confirmDraft = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([moneyField]),
+      confirmDraft,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    const confirmButton = await screen.findByRole('button', { name: '确认并入库' });
+    const moneyInput = screen.getByRole('textbox', { name: '附加成本' });
+    expect(confirmButton).toBeEnabled();
+
+    await user.clear(moneyInput);
+    await user.type(moneyInput, '1.005');
+
+    expect(screen.getByText(/金额最多支持两位小数/u)).toBeVisible();
+    expect(confirmButton).toBeDisabled();
+    expect(confirmDraft).not.toHaveBeenCalled();
   });
 
   it('可取消本次校对并回到上传页，且不会确认订单', async () => {
@@ -1952,6 +2053,17 @@ describe('订单管理工作台', () => {
       revision: 3,
       recipient: '当前收件人',
     };
+    const existingOrderField: CustomFieldDefinition = {
+      id: 'field-existing-order-priority',
+      name: '订单优先级',
+      granularity: 'order',
+      type: 'single_select',
+      required: true,
+      defaultValue: '普通',
+      options: ['普通', '加急'],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
     const review = {
       kind: 'order_update' as const,
       draft: updateDraft,
@@ -1968,6 +2080,14 @@ describe('订单管理工作台', () => {
         recognition: updateDraft,
         confirmed: null,
       },
+      customFieldValues: [{
+        definitionId: existingOrderField.id,
+        orderId: currentOrder.id,
+        orderItemId: null,
+        value: '加急',
+        createdAt: draft.createdAt,
+        updatedAt: draft.createdAt,
+      }],
     };
     const batch = recognitionBatchView('batch-order-update', [{
       id: 'batch-item-order-update',
@@ -1995,6 +2115,7 @@ describe('订单管理工作台', () => {
       getDraft: vi.fn().mockResolvedValue(updateDraft),
       getDraftReview: vi.fn().mockResolvedValue(review),
       confirmOrderUpdate,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([existingOrderField]),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,dXBkYXRl'),
       listOrders: vi.fn().mockResolvedValue([]),
     });
@@ -2011,10 +2132,198 @@ describe('订单管理工作台', () => {
     );
     expect(screen.getByRole('textbox', { name: '卖家账号' })).not.toHaveAttribute('readonly');
     expect(screen.getByRole('textbox', { name: '订单号' })).not.toHaveAttribute('readonly');
+    expect(screen.getByRole('combobox', { name: '订单优先级' })).toHaveValue('加急');
 
     await user.click(screen.getByRole('button', { name: '确认更新订单' }));
 
-    expect(confirmOrderUpdate).toHaveBeenCalledWith(updateDraft, 3);
+    expect(confirmOrderUpdate).toHaveBeenCalledWith(updateDraft, 3, {
+      orderValues: [{
+        definitionId: existingOrderField.id,
+        value: '加急',
+      }],
+      itemValues: [],
+    });
+  });
+
+  it('同一订单更新时显示旧订单缺失的必填商品字段，填写后才可确认', async () => {
+    const user = userEvent.setup();
+    const updateDraft: OrderDraft = {
+      ...draft,
+      id: 'draft-update-required-item-field',
+      batchId: 'batch-update-required-item-field',
+      recipient: '新识别收件人',
+      reviewIssues: ['order_content_changed'],
+    };
+    const currentOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-update-required-item-field',
+      recipient: '当前收件人',
+    };
+    const requiredItemField: CustomFieldDefinition = {
+      id: 'field-required-item-bin',
+      name: '拣货位',
+      granularity: 'order_item',
+      type: 'text',
+      required: true,
+      defaultValue: 'A-DEFAULT',
+      options: [],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
+    const review = {
+      kind: 'order_update' as const,
+      draft: updateDraft,
+      currentOrder,
+      expectedRevision: currentOrder.revision,
+      changes: [{
+        path: 'recipient',
+        before: currentOrder.recipient,
+        after: updateDraft.recipient,
+      }],
+      sourceSnapshot: {
+        ...sourceSnapshot,
+        recognition: updateDraft,
+        confirmed: null,
+      },
+      // 该旧商品曾在详情页清空过带默认值的字段。
+      customFieldValues: [],
+    };
+    const batch = recognitionBatchView(updateDraft.batchId, [{
+      id: 'batch-item-update-required-item-field',
+      batchId: updateDraft.batchId,
+      sourceName: '旧订单缺必填商品字段.png',
+      status: 'awaiting_confirmation',
+      draftId: updateDraft.id,
+    }]);
+    const confirmOrderUpdate = vi.fn().mockResolvedValue({
+      order: { ...currentOrder, recipient: updateDraft.recipient, revision: 2 },
+      resolution: 'order_updated' as const,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      getDraftReview: vi.fn().mockResolvedValue(review),
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([requiredItemField]),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,aXRlbQ=='),
+      confirmOrderUpdate,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    await user.click(await screen.findByRole('button', { name: '校对' }));
+
+    const field = await screen.findByRole('textbox', { name: '拣货位' });
+    const confirmButton = screen.getByRole('button', { name: '确认更新订单' });
+    expect(field).toHaveValue('');
+    expect(confirmButton).toBeDisabled();
+
+    await user.type(field, 'B-07');
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
+
+    expect(confirmOrderUpdate).toHaveBeenCalledWith(
+      updateDraft,
+      currentOrder.revision,
+      {
+        orderValues: [],
+        itemValues: [{
+          definitionId: requiredItemField.id,
+          draftItemId: updateDraft.items[0].id,
+          value: 'B-07',
+        }],
+      },
+    );
+  });
+
+  it('更新中商品从未匹配修正为已有商品时，重新载入旧自定义值', async () => {
+    const user = userEvent.setup();
+    const currentOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-update-rematched-item',
+      recipient: '当前收件人',
+    };
+    const updateDraft: OrderDraft = {
+      ...draft,
+      id: 'draft-update-rematched-item',
+      batchId: 'batch-update-rematched-item',
+      recipient: '新识别收件人',
+      reviewIssues: ['order_content_changed'],
+      items: [{
+        ...draft.items[0],
+        sourceTitle: '识别错误的新商品',
+        sourceSpec: '识别错误规格',
+      }],
+    };
+    const priorityField: CustomFieldDefinition = {
+      id: 'field-item-priority-rematch',
+      name: '商品优先级',
+      granularity: 'order_item',
+      type: 'single_select',
+      required: false,
+      defaultValue: '普通',
+      options: ['普通', '加急'],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
+    const review = {
+      kind: 'order_update' as const,
+      draft: updateDraft,
+      currentOrder,
+      expectedRevision: currentOrder.revision,
+      changes: [{
+        path: 'recipient',
+        before: currentOrder.recipient,
+        after: updateDraft.recipient,
+      }],
+      sourceSnapshot: {
+        ...sourceSnapshot,
+        recognition: updateDraft,
+        confirmed: null,
+      },
+      customFieldValues: [{
+        definitionId: priorityField.id,
+        orderId: null,
+        orderItemId: currentOrder.items[0].id,
+        value: '加急',
+        createdAt: draft.createdAt,
+        updatedAt: draft.createdAt,
+      }],
+    };
+    const batch = recognitionBatchView(updateDraft.batchId, [{
+      id: 'batch-item-update-rematched-item',
+      batchId: updateDraft.batchId,
+      sourceName: '商品修正匹配.png',
+      status: 'awaiting_confirmation',
+      draftId: updateDraft.id,
+    }]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      getDraftReview: vi.fn().mockResolvedValue(review),
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([priorityField]),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,cmVtYXRjaA=='),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    await user.click(await screen.findByRole('button', { name: '校对' }));
+
+    const priority = await screen.findByRole('combobox', { name: '商品优先级' });
+    expect(priority).toHaveValue('普通');
+    const title = screen.getByRole('textbox', { name: '商品标题' });
+    await user.clear(title);
+    await user.type(title, currentOrder.items[0].sourceTitle);
+
+    await waitFor(() => expect(priority).toHaveValue('加急'));
   });
 
   it('订单更新确认失败时保留用户尚未提交成功的表单修改', async () => {
@@ -2046,6 +2355,7 @@ describe('订单管理工作台', () => {
         recognition: updateDraft,
         confirmed: null,
       },
+      customFieldValues: [],
     };
     const batch = recognitionBatchView('batch-update-failure', [{
       id: 'batch-item-update-failure',
@@ -2159,6 +2469,7 @@ describe('订单管理工作台', () => {
         recognition: initialDraft,
         confirmed: null,
       },
+      customFieldValues: [],
     };
     const reroutedReview = {
       ...initialReview,
@@ -2212,6 +2523,115 @@ describe('订单管理工作台', () => {
     );
     expect(confirmOrderUpdate).toHaveBeenCalledWith(correctedDraft, 1);
     expect(getDraftReview).toHaveBeenCalledTimes(2);
+  });
+
+  it('订单更新修正为新订单时重新加载默认值，不沿用旧目标的自定义值', async () => {
+    const user = userEvent.setup();
+    const initialDraft: OrderDraft = {
+      ...draft,
+      id: 'draft-update-to-new-order',
+      batchId: 'batch-update-to-new-order',
+      orderNumber: 'EXISTING-TARGET-ORDER',
+      recipient: '新截图收件人',
+      reviewIssues: ['order_content_changed'],
+    };
+    const initialOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'existing-target-before-new-order',
+      orderNumber: initialDraft.orderNumber,
+      recipient: '当前收件人',
+    };
+    const correctedDraft = {
+      ...initialDraft,
+      orderNumber: 'TRULY-NEW-ORDER',
+    };
+    const priorityField: CustomFieldDefinition = {
+      id: 'field-order-priority-target-switch',
+      name: '订单优先级',
+      granularity: 'order',
+      type: 'single_select',
+      required: true,
+      defaultValue: '普通',
+      options: ['普通', '加急'],
+      createdAt: draft.createdAt,
+      updatedAt: draft.createdAt,
+    };
+    const initialReview = {
+      kind: 'order_update' as const,
+      draft: initialDraft,
+      currentOrder: initialOrder,
+      expectedRevision: initialOrder.revision,
+      changes: [{
+        path: 'recipient',
+        before: initialOrder.recipient,
+        after: initialDraft.recipient,
+      }],
+      sourceSnapshot: {
+        ...sourceSnapshot,
+        recognition: initialDraft,
+        confirmed: null,
+      },
+      customFieldValues: [{
+        definitionId: priorityField.id,
+        orderId: initialOrder.id,
+        orderItemId: null,
+        value: '加急',
+        createdAt: draft.createdAt,
+        updatedAt: draft.createdAt,
+      }],
+    };
+    const getDraftReview = vi.fn()
+      .mockResolvedValueOnce(initialReview)
+      .mockResolvedValueOnce({ kind: 'new_order' as const, draft: correctedDraft });
+    const batch = recognitionBatchView(initialDraft.batchId, [{
+      id: 'batch-item-update-to-new-order',
+      batchId: initialDraft.batchId,
+      sourceName: '修正为新订单.png',
+      status: 'awaiting_confirmation',
+      draftId: initialDraft.id,
+    }]);
+    const confirmOrderUpdate = vi.fn().mockRejectedValue(new Error(
+      '修正后的订单身份未命中已有订单，已切换为新订单校对，请再次确认',
+    ));
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: { ...confirmedOrder, orderNumber: correctedDraft.orderNumber },
+      resolution: 'new_order' as const,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      getDraftReview,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([priorityField]),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,bmV3'),
+      confirmOrderUpdate,
+      confirmDraft,
+      listOrders: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    await user.click(await screen.findByRole('button', { name: '校对' }));
+    expect(await screen.findByRole('combobox', { name: '订单优先级' }))
+      .toHaveValue('加急');
+
+    const orderNumber = screen.getByRole('textbox', { name: '订单号' });
+    await user.clear(orderNumber);
+    await user.type(orderNumber, correctedDraft.orderNumber);
+    await user.click(screen.getByRole('button', { name: '确认更新订单' }));
+
+    expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
+    expect(screen.getByRole('combobox', { name: '订单优先级' }))
+      .toHaveValue('普通');
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(correctedDraft, {
+      orderValues: [{ definitionId: priorityField.id, value: '普通' }],
+      itemValues: [],
+    });
   });
 
   it('从批次进入单张校对，确认后返回原批次并更新为已入库', async () => {
@@ -2323,8 +2743,31 @@ describe('订单管理工作台', () => {
       status: 'awaiting_confirmation',
       draftId: draft.id,
     }]);
-    const confirmDraft = vi.fn().mockResolvedValue({
-      order: confirmedOrder,
+    const equivalentOrder = {
+      ...confirmedOrder,
+      recipient: draft.recipient,
+    };
+    const transitionedReview = {
+      kind: 'order_update' as const,
+      draft,
+      currentOrder: equivalentOrder,
+      expectedRevision: equivalentOrder.revision,
+      changes: [],
+      sourceSnapshot: {
+        ...sourceSnapshot,
+        recognition: draft,
+        confirmed: null,
+      },
+      customFieldValues: [],
+    };
+    const getDraftReview = vi.fn()
+      .mockResolvedValueOnce({ kind: 'new_order' as const, draft })
+      .mockResolvedValueOnce(transitionedReview);
+    const confirmDraft = vi.fn().mockRejectedValue(new Error(
+      '该订单已存在，已转为已有订单校对，请确认自定义字段后再次提交',
+    ));
+    const confirmOrderUpdate = vi.fn().mockResolvedValue({
+      order: equivalentOrder,
       resolution: 'equivalent_order',
     });
     const api = createApi({
@@ -2335,15 +2778,18 @@ describe('订单管理工作台', () => {
       }),
       selectSourceScreenshots: vi.fn().mockResolvedValue(batch),
       listRecognitionBatches: vi.fn().mockResolvedValue([]),
-      getDraft: vi.fn().mockResolvedValue(draft),
+      getDraftReview,
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
       confirmDraft,
+      confirmOrderUpdate,
       listOrders: vi.fn().mockResolvedValue([]),
     });
 
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
     await user.click(await screen.findByRole('button', { name: '确认并入库' }));
+    expect(await screen.findByRole('heading', { name: '确认订单更新' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '确认更新订单' }));
 
     await user.click(await screen.findByRole('button', { name: '查看批次' }));
     const table = await screen.findByRole('table', { name: '批次截图状态' });
@@ -2351,6 +2797,8 @@ describe('订单管理工作台', () => {
     expect(row).toHaveTextContent('重复跳过');
     expect(row).toHaveTextContent('不同来源截图的订单内容等价');
     expect(row).not.toHaveTextContent('已入库');
+    expect(getDraftReview).toHaveBeenCalledTimes(2);
+    expect(confirmOrderUpdate).toHaveBeenCalledWith(draft, equivalentOrder.revision);
   });
 
   it('校对新订单时若最终命中已有变化订单会立即切换到新旧对比', async () => {
@@ -2387,6 +2835,7 @@ describe('订单管理工作台', () => {
         recognition: transitionedDraft,
         confirmed: null,
       },
+      customFieldValues: [],
     };
     const getDraftReview = vi.fn()
       .mockResolvedValueOnce({ kind: 'new_order', draft })

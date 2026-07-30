@@ -27,12 +27,20 @@ const api: DesktopApi = {
     };
   },
   cancelDraft: (draftId) => ipcRenderer.invoke('workflow:cancel-draft', draftId),
-  confirmDraft: (draft) => ipcRenderer.invoke('workflow:confirm-draft', draft),
-  confirmOrderUpdate: (draft, expectedRevision) => (
-    ipcRenderer.invoke('workflow:confirm-order-update', draft, expectedRevision)
+  confirmDraft: (draft, customValues) => (
+    ipcRenderer.invoke('workflow:confirm-draft', draft, customValues)
+  ),
+  confirmOrderUpdate: (draft, expectedRevision, customValues) => (
+    ipcRenderer.invoke(
+      'workflow:confirm-order-update',
+      draft,
+      expectedRevision,
+      customValues,
+    )
   ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
   queryOrders: (query) => ipcRenderer.invoke('orders:query', query),
+  queryOrderItems: (query) => ipcRenderer.invoke('order-items:query', query),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,
@@ -44,6 +52,11 @@ const api: DesktopApi = {
     };
   },
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),
+  listCustomFieldDefinitions: () => ipcRenderer.invoke('custom-fields:list'),
+  createCustomFieldDefinition: (input) => (
+    ipcRenderer.invoke('custom-fields:create', input)
+  ),
+  saveCustomFieldValues: (input) => ipcRenderer.invoke('custom-fields:save-values', input),
   getScreenshotDataUrl: (screenshotId) =>
     ipcRenderer.invoke('evidence:get-screenshot-data-url', screenshotId),
   getOrderIntakeSettings: () => ipcRenderer.invoke('settings:get-order-intake'),

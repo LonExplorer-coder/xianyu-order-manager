@@ -5,11 +5,22 @@ import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/package
 import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
 import type { OrderDraft } from '../core/contracts';
 import type {
+  CreateCustomFieldDefinitionInput,
+  CustomFieldFilter,
+  CustomFieldSort,
+  CustomFieldValue,
+  DraftCustomFieldValues,
+  SaveCustomFieldValuesInput,
+} from '../core/custom-fields';
+import type {
   OcrConnectionTestInput,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
-import type { OrderWorkbenchQuery } from '../core/order-workbench';
+import type {
+  OrderItemWorkbenchQuery,
+  OrderWorkbenchQuery,
+} from '../core/order-workbench';
 import { DesktopSession } from './desktop-session';
 import { createConfiguredDesktopSession } from './production-session';
 import {
@@ -123,15 +134,27 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     mainWindow.webContents.send('orders:changed', orders);
   });
 
-  ipcMain.handle('workflow:confirm-draft', (_event, draft: OrderDraft) => {
-    return desktopSession.confirmDraft(draft);
-  });
+  ipcMain.handle(
+    'workflow:confirm-draft',
+    (_event, draft: OrderDraft, customValues: unknown) => {
+      return desktopSession.confirmDraft(
+        draft,
+        parseDraftCustomFieldValues(customValues),
+      );
+    },
+  );
   ipcMain.handle(
     'workflow:confirm-order-update',
-    (_event, draft: OrderDraft, expectedRevision: unknown) => (
+    (
+      _event,
+      draft: OrderDraft,
+      expectedRevision: unknown,
+      customValues: unknown,
+    ) => (
       desktopSession.confirmOrderUpdate(
         draft,
         parseExpectedRevision(expectedRevision),
+        parseDraftCustomFieldValues(customValues),
       )
     ),
   );
@@ -142,7 +165,21 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('orders:query', (_event, input: unknown) => (
     desktopSession.queryOrders(parseOrderWorkbenchQuery(input))
   ));
+  ipcMain.handle('order-items:query', (_event, input: unknown) => (
+    desktopSession.queryOrderItems(parseOrderItemWorkbenchQuery(input))
+  ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
+  ipcMain.handle('custom-fields:list', () => (
+    desktopSession.listCustomFieldDefinitions()
+  ));
+  ipcMain.handle('custom-fields:create', (_event, input: unknown) => (
+    desktopSession.createCustomFieldDefinition(
+      parseCreateCustomFieldDefinitionInput(input),
+    )
+  ));
+  ipcMain.handle('custom-fields:save-values', (_event, input: unknown) => (
+    desktopSession.saveCustomFieldValues(parseSaveCustomFieldValuesInput(input))
+  ));
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
   });
@@ -183,6 +220,8 @@ const ORDER_WORKBENCH_QUERY_KEYS = new Set([
   'lifecycleStatus',
   'sortField',
   'sortDirection',
+  'customFieldFilter',
+  'customFieldSort',
 ]);
 
 function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
@@ -246,7 +285,276 @@ function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
       ['asc', 'desc'] as const,
       '排序方向',
     ),
+    customFieldFilter: parseCustomFieldFilter(input.customFieldFilter),
+    customFieldSort: parseCustomFieldSort(input.customFieldSort),
   };
+}
+
+const ORDER_ITEM_WORKBENCH_QUERY_KEYS = new Set([
+  'customFieldFilter',
+  'customFieldSort',
+]);
+
+function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
+  if (!isRecord(input)) throw new Error('商品工作台查询格式无效');
+  rejectUnknownKeys(input, ORDER_ITEM_WORKBENCH_QUERY_KEYS, '商品工作台查询');
+  return {
+    customFieldFilter: parseCustomFieldFilter(input.customFieldFilter),
+    customFieldSort: parseCustomFieldSort(input.customFieldSort),
+  };
+}
+
+const CUSTOM_FIELD_FILTER_KEYS = new Set(['definitionId', 'value']);
+
+function parseCustomFieldFilter(input: unknown): CustomFieldFilter | undefined {
+  if (input === undefined) return undefined;
+  if (!isRecord(input)) throw new Error('自定义字段筛选格式无效');
+  rejectUnknownKeys(input, CUSTOM_FIELD_FILTER_KEYS, '自定义字段筛选');
+  requireOwnKeys(input, CUSTOM_FIELD_FILTER_KEYS, '自定义字段筛选');
+  const value = parseCustomFieldValue(input.value, false);
+  if (value === null) throw new Error('自定义字段筛选值格式无效');
+  return {
+    definitionId: parseWorkflowId(input.definitionId, '自定义字段'),
+    value,
+  };
+}
+
+const CUSTOM_FIELD_SORT_KEYS = new Set(['definitionId', 'direction']);
+
+function parseCustomFieldSort(input: unknown): CustomFieldSort | undefined {
+  if (input === undefined) return undefined;
+  if (!isRecord(input)) throw new Error('自定义字段排序格式无效');
+  rejectUnknownKeys(input, CUSTOM_FIELD_SORT_KEYS, '自定义字段排序');
+  requireOwnKeys(input, CUSTOM_FIELD_SORT_KEYS, '自定义字段排序');
+  return {
+    definitionId: parseWorkflowId(input.definitionId, '自定义字段'),
+    direction: requiredEnum(
+      input.direction,
+      ['asc', 'desc'] as const,
+      '自定义字段排序方向',
+    ),
+  };
+}
+
+const CREATE_CUSTOM_FIELD_KEYS = new Set([
+  'name',
+  'granularity',
+  'type',
+  'required',
+  'defaultValue',
+  'options',
+]);
+
+function parseCreateCustomFieldDefinitionInput(
+  input: unknown,
+): CreateCustomFieldDefinitionInput {
+  if (!isRecord(input)) throw new Error('自定义字段设置格式无效');
+  rejectUnknownKeys(input, CREATE_CUSTOM_FIELD_KEYS, '自定义字段设置');
+  requireOwnKeys(input, CREATE_CUSTOM_FIELD_KEYS, '自定义字段设置');
+  if (typeof input.required !== 'boolean') {
+    throw new Error('自定义字段必填设置格式无效');
+  }
+  return {
+    name: requiredBoundedText(input.name, 80, '自定义字段名称'),
+    granularity: requiredEnum(
+      input.granularity,
+      ['order', 'order_item'] as const,
+      '自定义字段数据粒度',
+    ),
+    type: requiredEnum(
+      input.type,
+      [
+        'text',
+        'number',
+        'money',
+        'datetime',
+        'single_select',
+        'multi_select',
+        'checkbox',
+      ] as const,
+      '自定义字段类型',
+    ),
+    required: input.required,
+    defaultValue: parseCustomFieldValue(input.defaultValue, true),
+    options: parseCustomFieldOptions(input.options),
+  };
+}
+
+const SAVE_CUSTOM_FIELD_VALUES_KEYS = new Set([
+  'orderId',
+  'orderValues',
+  'itemValues',
+]);
+const CUSTOM_FIELD_ORDER_VALUE_KEYS = new Set(['definitionId', 'value']);
+const CUSTOM_FIELD_ITEM_VALUE_KEYS = new Set([
+  'definitionId',
+  'orderItemId',
+  'value',
+]);
+const DRAFT_CUSTOM_FIELD_VALUES_KEYS = new Set(['orderValues', 'itemValues']);
+const DRAFT_CUSTOM_FIELD_ITEM_VALUE_KEYS = new Set([
+  'definitionId',
+  'draftItemId',
+  'value',
+]);
+const MAX_CUSTOM_FIELD_ASSIGNMENTS = 1_000;
+
+function parseSaveCustomFieldValuesInput(input: unknown): SaveCustomFieldValuesInput {
+  if (!isRecord(input)) throw new Error('自定义字段值格式无效');
+  rejectUnknownKeys(input, SAVE_CUSTOM_FIELD_VALUES_KEYS, '自定义字段值');
+  requireOwnKeys(input, SAVE_CUSTOM_FIELD_VALUES_KEYS, '自定义字段值');
+  return {
+    orderId: parseWorkflowId(input.orderId, '订单'),
+    orderValues: parseOrderCustomFieldValues(input.orderValues),
+    itemValues: parsePersistedItemCustomFieldValues(input.itemValues),
+  };
+}
+
+function parseDraftCustomFieldValues(
+  input: unknown,
+): DraftCustomFieldValues | undefined {
+  if (input === undefined) return undefined;
+  if (!isRecord(input)) throw new Error('草稿自定义字段值格式无效');
+  rejectUnknownKeys(input, DRAFT_CUSTOM_FIELD_VALUES_KEYS, '草稿自定义字段值');
+  requireOwnKeys(input, DRAFT_CUSTOM_FIELD_VALUES_KEYS, '草稿自定义字段值');
+  return {
+    orderValues: parseOrderCustomFieldValues(input.orderValues),
+    itemValues: parseDraftItemCustomFieldValues(input.itemValues),
+  };
+}
+
+function parseOrderCustomFieldValues(
+  input: unknown,
+): DraftCustomFieldValues['orderValues'] {
+  const values = boundedArray(input, MAX_CUSTOM_FIELD_ASSIGNMENTS, '订单自定义字段值');
+  return values.map((value) => {
+    if (!isRecord(value)) throw new Error('订单自定义字段值格式无效');
+    rejectUnknownKeys(value, CUSTOM_FIELD_ORDER_VALUE_KEYS, '订单自定义字段值');
+    requireOwnKeys(value, CUSTOM_FIELD_ORDER_VALUE_KEYS, '订单自定义字段值');
+    return {
+      definitionId: parseWorkflowId(value.definitionId, '自定义字段'),
+      value: parseCustomFieldValue(value.value, true),
+    };
+  });
+}
+
+function parsePersistedItemCustomFieldValues(
+  input: unknown,
+): SaveCustomFieldValuesInput['itemValues'] {
+  const values = boundedArray(input, MAX_CUSTOM_FIELD_ASSIGNMENTS, '商品自定义字段值');
+  return values.map((value) => {
+    if (!isRecord(value)) throw new Error('商品自定义字段值格式无效');
+    rejectUnknownKeys(value, CUSTOM_FIELD_ITEM_VALUE_KEYS, '商品自定义字段值');
+    requireOwnKeys(value, CUSTOM_FIELD_ITEM_VALUE_KEYS, '商品自定义字段值');
+    return {
+      definitionId: parseWorkflowId(value.definitionId, '自定义字段'),
+      orderItemId: parseWorkflowId(value.orderItemId, '订单商品'),
+      value: parseCustomFieldValue(value.value, true),
+    };
+  });
+}
+
+function parseDraftItemCustomFieldValues(
+  input: unknown,
+): DraftCustomFieldValues['itemValues'] {
+  const values = boundedArray(input, MAX_CUSTOM_FIELD_ASSIGNMENTS, '草稿商品自定义字段值');
+  return values.map((value) => {
+    if (!isRecord(value)) throw new Error('草稿商品自定义字段值格式无效');
+    rejectUnknownKeys(value, DRAFT_CUSTOM_FIELD_ITEM_VALUE_KEYS, '草稿商品自定义字段值');
+    requireOwnKeys(value, DRAFT_CUSTOM_FIELD_ITEM_VALUE_KEYS, '草稿商品自定义字段值');
+    return {
+      definitionId: parseWorkflowId(value.definitionId, '自定义字段'),
+      draftItemId: parseWorkflowId(value.draftItemId, '草稿商品'),
+      value: parseCustomFieldValue(value.value, true),
+    };
+  });
+}
+
+function parseCustomFieldOptions(input: unknown): string[] {
+  return boundedArray(input, 100, '自定义字段可选项')
+    .map((option) => requiredBoundedText(option, 120, '自定义字段可选项'));
+}
+
+function parseCustomFieldValue(
+  value: unknown,
+  allowNull: boolean,
+): CustomFieldValue | null {
+  if (value === null && allowNull) return null;
+  if (typeof value === 'string') {
+    if (value.length > 20_000) throw new Error('自定义字段文本过长');
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error('自定义字段数值格式无效');
+    }
+    return value;
+  }
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    if (value.length > 100 || value.some((entry) => (
+      typeof entry !== 'string' || entry.length > 128
+    ))) {
+      throw new Error('自定义字段多选值格式无效');
+    }
+    return [...value] as string[];
+  }
+  throw new Error('自定义字段值格式无效');
+}
+
+function boundedArray(
+  input: unknown,
+  maximumLength: number,
+  label: string,
+): unknown[] {
+  if (!Array.isArray(input) || input.length > maximumLength) {
+    throw new Error(`${label}格式无效`);
+  }
+  return input;
+}
+
+function requiredBoundedText(
+  input: unknown,
+  maximumLength: number,
+  label: string,
+): string {
+  if (typeof input !== 'string' || input.length > maximumLength) {
+    throw new Error(`${label}格式无效`);
+  }
+  const normalized = input.normalize('NFKC').trim();
+  if (!normalized) throw new Error(`${label}不能为空`);
+  return normalized;
+}
+
+function requiredEnum<const T extends readonly string[]>(
+  input: unknown,
+  values: T,
+  label: string,
+): T[number] {
+  if (typeof input !== 'string' || !(values as readonly string[]).includes(input)) {
+    throw new Error(`${label}格式无效`);
+  }
+  return input as T[number];
+}
+
+function rejectUnknownKeys(
+  input: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>,
+  label: string,
+): void {
+  if (Object.keys(input).some((key) => !allowedKeys.has(key))) {
+    throw new Error(`${label}包含未知字段`);
+  }
+}
+
+function requireOwnKeys(
+  input: Record<string, unknown>,
+  requiredKeys: ReadonlySet<string>,
+  label: string,
+): void {
+  if ([...requiredKeys].some((key) => !Object.hasOwn(input, key))) {
+    throw new Error(`${label}缺少必要字段`);
+  }
 }
 
 function optionalWorkbenchText(value: unknown, maximumLength: number): string | undefined {

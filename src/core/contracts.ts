@@ -1,3 +1,8 @@
+import type {
+  CustomFieldDefinition,
+  CustomFieldValueRecord,
+} from './custom-fields';
+
 export type RecognitionItem = {
   sourceTitle: string;
   sourceSpec: string;
@@ -50,6 +55,7 @@ export const ORDER_REVIEW_ISSUE_CODES = [
   'invalid_order_time',
   'invalid_payment_time',
   'payment_before_order',
+  'missing_required_custom_field',
 ] as const;
 
 export type OrderReviewIssueCode = (typeof ORDER_REVIEW_ISSUE_CODES)[number];
@@ -265,6 +271,7 @@ export type OrderDraftReview =
     expectedRevision: number;
     changes: OrderFieldChange[];
     sourceSnapshot: SourceSnapshot;
+    customFieldValues: CustomFieldValueRecord[];
   };
 
 export type OrderSource = {
@@ -279,4 +286,6 @@ export type OrderDetails = {
   sourceSnapshot: SourceSnapshot;
   sources: OrderSource[];
   changeEvents: OrderChangeEvent[];
+  customFieldDefinitions: CustomFieldDefinition[];
+  customFieldValues: CustomFieldValueRecord[];
 };

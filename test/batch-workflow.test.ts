@@ -1026,7 +1026,26 @@ describe('批量来源截图识别队列', () => {
       orderNumber: 'ＩＤＥＮＴＩＴＹ－ＮＦＫＣ－００１',
     };
 
-    const resolution = session.confirmDraft(correctedDraft);
+    expect(() => session.confirmDraft(correctedDraft)).toThrowError(/已转为订单更新/);
+    const transitionedReview = session.getDraftReview(correctedDraftId);
+    expect(transitionedReview).toMatchObject({
+      kind: 'order_update',
+      draft: { orderNumber: correctedDraft.orderNumber },
+      currentOrder: { id: originalOrder.id },
+      changes: [],
+    });
+    if (transitionedReview.kind !== 'order_update') {
+      throw new Error('预期等价身份修正后转为订单更新校对');
+    }
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      id: correctedBatch.id,
+      counts: { awaiting_confirmation: 1, duplicate_skipped: 0 },
+    });
+
+    const resolution = session.confirmOrderUpdate(
+      transitionedReview.draft,
+      transitionedReview.expectedRevision,
+    );
     const resolvedOrder = resolution.order;
 
     expect(resolvedOrder.id).toBe(originalOrder.id);
@@ -1105,7 +1124,7 @@ describe('批量来源截图识别队列', () => {
     });
   });
 
-  it('订单更新校对中修正为全新身份会创建新订单且不改动误命中的旧订单', async () => {
+  it('订单更新校对中修正为全新身份时先切换为新订单校对且不沿用旧目标字段', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-update-reroute-new-order-'));
     const dataDirectory = join(root, '订单数据');
     const originalPath = join(root, '已有订单.png');
@@ -1139,6 +1158,14 @@ describe('批量来源截图识别队列', () => {
     });
     const originalDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
     const originalOrder = session.confirmDraft(session.getDraft(originalDraftId)).order;
+    const staleTargetField = session.createCustomFieldDefinition({
+      name: '旧目标备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
 
     const mistakenBatch = await session.submitSourceScreenshots([mistakenPath]);
     await eventually(() => {
@@ -1151,10 +1178,33 @@ describe('批量来源截图识别队列', () => {
     const review = session.getDraftReview(mistakenDraftId);
     if (review.kind !== 'order_update') throw new Error('预期先误命中已有订单');
 
-    const outcome = session.confirmOrderUpdate({
+    const correctedDraft = {
       ...review.draft,
       orderNumber: 'ACTUAL-NEW-ORDER-002',
-    }, review.expectedRevision);
+    };
+    expect(() => session.confirmOrderUpdate(
+      correctedDraft,
+      review.expectedRevision,
+      {
+        orderValues: [{ definitionId: staleTargetField.id, value: '不应写入新订单' }],
+        itemValues: [],
+      },
+    )).toThrowError(/已切换为新订单校对/);
+
+    const transitionedReview = session.getDraftReview(mistakenDraftId);
+    expect(transitionedReview).toMatchObject({
+      kind: 'new_order',
+      draft: {
+        orderNumber: 'ACTUAL-NEW-ORDER-002',
+        recipient: '实际新订单收件人',
+      },
+    });
+    if (transitionedReview.kind !== 'new_order') {
+      throw new Error('预期已切换为新订单校对');
+    }
+    expect(session.listOrders()).toHaveLength(1);
+
+    const outcome = session.confirmDraft(transitionedReview.draft);
 
     expect(outcome).toMatchObject({
       resolution: 'new_order',
@@ -1166,6 +1216,7 @@ describe('批量来源截图识别队列', () => {
     });
     expect(outcome.order.id).not.toBe(originalOrder.id);
     expect(session.listOrders()).toHaveLength(2);
+    expect(session.getOrder(outcome.order.id).customFieldValues).toEqual([]);
     expect(session.getOrder(originalOrder.id)).toMatchObject({
       order: { recipient: '旧订单收件人', revision: 1 },
       sources: [{}],
@@ -1182,7 +1233,7 @@ describe('批量来源截图识别队列', () => {
     });
   });
 
-  it('订单更新校对中修正为另一已有身份时先切换候选再只更新正确订单', async () => {
+  it('订单更新校对中修正为另一等价已有身份时先切换候选且不沿用旧目标字段', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-update-reroute-existing-order-'));
     const dataDirectory = join(root, '订单数据');
     const paths = [
@@ -1199,7 +1250,7 @@ describe('批量来源截图识别队列', () => {
     const correctCandidate = {
       ...recognition,
       orderNumber: 'CORRECT-CANDIDATE-ORDER',
-      recipient: '正确候选当前收件人',
+      recipient: '新来源确认收件人',
     };
     const recognize = vi.fn<Recognizer['recognize']>()
       .mockResolvedValueOnce(recognitionAttempt(wrongCandidate))
@@ -1226,6 +1277,19 @@ describe('批量来源截图识别队列', () => {
       importedOrders.push(session.confirmDraft(session.getDraft(draftId)).order);
     }
     const [wrongOrder, correctOrder] = importedOrders;
+    const routingNote = session.createCustomFieldDefinition({
+      name: '路由备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    session.saveCustomFieldValues({
+      orderId: correctOrder.id,
+      orderValues: [{ definitionId: routingNote.id, value: '正确目标原值' }],
+      itemValues: [],
+    });
 
     const updateBatch = await session.submitSourceScreenshots([paths[2]]);
     await eventually(() => {
@@ -1246,6 +1310,10 @@ describe('批量来源截图识别队列', () => {
     expect(() => session.confirmOrderUpdate(
       correctedDraft,
       initialReview.expectedRevision,
+      {
+        orderValues: [{ definitionId: routingNote.id, value: '误目标未提交值' }],
+        itemValues: [],
+      },
     )).toThrowError(/已切换对比/);
 
     const reroutedReview = session.getDraftReview(updateDraftId);
@@ -1257,21 +1325,30 @@ describe('批量来源截图识别队列', () => {
       },
       currentOrder: {
         id: correctOrder.id,
-        recipient: '正确候选当前收件人',
+        recipient: '新来源确认收件人',
       },
+      changes: [],
+      customFieldValues: [expect.objectContaining({
+        definitionId: routingNote.id,
+        value: '正确目标原值',
+      })],
     });
     if (reroutedReview.kind !== 'order_update') throw new Error('预期切换到正确候选');
     const outcome = session.confirmOrderUpdate(
       reroutedReview.draft,
       reroutedReview.expectedRevision,
+      {
+        orderValues: [{ definitionId: routingNote.id, value: '正确目标原值' }],
+        itemValues: [],
+      },
     );
 
     expect(outcome).toMatchObject({
-      resolution: 'order_updated',
+      resolution: 'equivalent_order',
       order: {
         id: correctOrder.id,
         recipient: '新来源确认收件人',
-        revision: 2,
+        revision: 1,
       },
     });
     expect(session.getOrder(wrongOrder.id)).toMatchObject({
@@ -1280,12 +1357,12 @@ describe('批量来源截图识别队列', () => {
     });
     expect(session.listRecognitionBatches()[0]).toMatchObject({
       id: updateBatch.id,
-      items: [{ status: 'imported', resolution: 'order_updated' }],
+      items: [{ status: 'duplicate_skipped', resolution: 'equivalent_order' }],
     });
     expect(readStoredDraftResolution(dataDirectory, updateDraftId)).toEqual({
       status: 'confirmed',
       matchedOrderId: correctOrder.id,
-      resolution: 'order_updated',
+      resolution: 'equivalent_order',
     });
   });
 

@@ -9,6 +9,13 @@ import {
 
 import type { BootstrapState, DesktopApi } from '../core/desktop-api';
 import type {
+  CustomFieldDefinition,
+  CustomFieldValue,
+  CustomFieldValueRecord,
+  DraftCustomFieldValues,
+  SaveCustomFieldValuesInput,
+} from '../core/custom-fields';
+import type {
   DraftItem,
   OrderChangeValue,
   OrderDetails,
@@ -18,9 +25,12 @@ import type {
   RecognitionBatchView,
   RecognitionBatchItemStatus,
 } from '../core/contracts';
-import { diffOrderCurrentValues } from '../core/order-comparison';
+import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
+import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
 import type {
+  OrderItemWorkbenchQuery,
+  OrderItemWorkbenchResult,
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
 } from '../core/order-workbench';
@@ -40,13 +50,16 @@ import {
   normalizePhone,
   normalizeShanghaiDateTime,
 } from '../core/order-normalization';
+import { CustomFieldInput } from './CustomFieldInput';
+import { CustomFieldsWorkspace } from './CustomFieldsWorkspace';
 
 export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | null;
-type AppPage = 'orders' | 'batches' | 'settings';
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | null;
+type AppPage = 'orders' | 'batches' | 'fields' | 'settings';
+type OrdersWorkspaceView = 'orders' | 'order_items';
 
 const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
 const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
@@ -64,6 +77,7 @@ export function App({ api }: AppProps) {
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
   const [detailScreenshotId, setDetailScreenshotId] = useState('');
+  const [detailCustomFieldsDirty, setDetailCustomFieldsDirty] = useState(false);
   const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
   const [reviewBatchId, setReviewBatchId] = useState('');
@@ -75,8 +89,22 @@ export function App({ api }: AppProps) {
   const [orderWorkbench, setOrderWorkbench] = useState<OrderWorkbenchResult | null>(null);
   const [orderQueryRefreshToken, setOrderQueryRefreshToken] = useState(0);
   const [orderQueryLoading, setOrderQueryLoading] = useState(false);
+  const [ordersWorkspaceView, setOrdersWorkspaceView] = useState<OrdersWorkspaceView>('orders');
+  const [orderItemQuery, setOrderItemQuery] = useState<OrderItemWorkbenchQuery>({});
+  const [orderItemWorkbench, setOrderItemWorkbench] = useState<OrderItemWorkbenchResult | null>(null);
+  const [orderItemQueryLoading, setOrderItemQueryLoading] = useState(false);
+  const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
+  const [customFieldDefinitionsLoading, setCustomFieldDefinitionsLoading] = useState(false);
+  const [customFieldDefinitionsError, setCustomFieldDefinitionsError] = useState('');
+  const [draftCustomFieldValues, setDraftCustomFieldValues] = useState<DraftCustomFieldValues>({
+    orderValues: [],
+    itemValues: [],
+  });
+  const draftCustomFieldValuesContextKey = useRef('');
+  const draftCustomFieldTouchedKeys = useRef<Set<string>>(new Set());
   const orderSnapshotVersion = useRef(0);
   const orderQueryRequestVersion = useRef(0);
+  const orderItemQueryRequestVersion = useRef(0);
   const detailSourceRequestVersion = useRef(0);
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
@@ -108,11 +136,21 @@ export function App({ api }: AppProps) {
     setOrderDetails(null);
     setDetailScreenshotUrl('');
     setDetailScreenshotId('');
+    setDetailCustomFieldsDirty(false);
     detailSourceRequestVersion.current += 1;
     orderQueryRequestVersion.current += 1;
     setOrderQuery(DEFAULT_ORDER_QUERY);
     setOrderWorkbench(null);
+    orderItemQueryRequestVersion.current += 1;
+    setOrdersWorkspaceView('orders');
+    setOrderItemQuery({});
+    setOrderItemWorkbench(null);
     setOrderQueryRefreshToken(0);
+    setCustomFieldDefinitions([]);
+    setCustomFieldDefinitionsError('');
+    setDraftCustomFieldValues({ orderValues: [], itemValues: [] });
+    draftCustomFieldValuesContextKey.current = '';
+    draftCustomFieldTouchedKeys.current.clear();
     setActivePage('orders');
     setOperationError('');
   }, [readyDataDirectory]);
@@ -148,6 +186,52 @@ export function App({ api }: AppProps) {
       unsubscribe();
     };
   }, [api, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory) return undefined;
+    let active = true;
+    setCustomFieldDefinitionsLoading(true);
+    setCustomFieldDefinitionsError('');
+    void api.listCustomFieldDefinitions()
+      .then((definitions) => {
+        if (active) setCustomFieldDefinitions(definitions);
+      })
+      .catch((error: unknown) => {
+        if (active) setCustomFieldDefinitionsError(errorMessage(error));
+      })
+      .finally(() => {
+        if (active) setCustomFieldDefinitionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!draft) {
+      draftCustomFieldValuesContextKey.current = '';
+      draftCustomFieldTouchedKeys.current.clear();
+      setDraftCustomFieldValues({ orderValues: [], itemValues: [] });
+      return;
+    }
+    const currentOrderId = draftReview?.kind === 'order_update' && hasSameOrderIdentity(
+      draftReview.currentOrder,
+      draft,
+    )
+      ? draftReview.currentOrder.id
+      : 'new-order';
+    const contextKey = `${draft.id}:${currentOrderId}`;
+    const changedContext = draftCustomFieldValuesContextKey.current !== contextKey;
+    draftCustomFieldValuesContextKey.current = contextKey;
+    if (changedContext) draftCustomFieldTouchedKeys.current.clear();
+    setDraftCustomFieldValues((current) => reconcileDraftCustomFieldValues(
+      changedContext ? { orderValues: [], itemValues: [] } : current,
+      customFieldDefinitions,
+      draft,
+      draftReview,
+      draftCustomFieldTouchedKeys.current,
+    ));
+  }, [customFieldDefinitions, draft, draftReview]);
 
   useEffect(() => {
     if (!readyDataDirectory) return undefined;
@@ -205,6 +289,52 @@ export function App({ api }: AppProps) {
       active = false;
     };
   }, [api, orderQuery, orderQueryRefreshToken, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory || ordersWorkspaceView !== 'order_items') return undefined;
+    let active = true;
+    const requestVersion = ++orderItemQueryRequestVersion.current;
+    setOrderItemQueryLoading(true);
+    void api.queryOrderItems(orderItemQuery)
+      .then((result) => {
+        if (!active || requestVersion !== orderItemQueryRequestVersion.current) return;
+        setOrderItemWorkbench(result);
+      })
+      .catch((error: unknown) => {
+        if (active && requestVersion === orderItemQueryRequestVersion.current) {
+          setOperationError(errorMessage(error));
+        }
+      })
+      .finally(() => {
+        if (active && requestVersion === orderItemQueryRequestVersion.current) {
+          setOrderItemQueryLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    api,
+    orderItemQuery,
+    orderQueryRefreshToken,
+    ordersWorkspaceView,
+    readyDataDirectory,
+  ]);
+
+  async function refreshCustomFieldDefinitions() {
+    setCustomFieldDefinitionsLoading(true);
+    setCustomFieldDefinitionsError('');
+    try {
+      const definitions = await api.listCustomFieldDefinitions();
+      setCustomFieldDefinitions(definitions);
+      setOrderQueryRefreshToken((current) => current + 1);
+    } catch (error) {
+      setCustomFieldDefinitionsError(errorMessage(error));
+      throw error;
+    } finally {
+      setCustomFieldDefinitionsLoading(false);
+    }
+  }
 
   async function uploadScreenshots() {
     setBusyAction('upload');
@@ -293,10 +423,18 @@ export function App({ api }: AppProps) {
     try {
       let resolution: RecognitionBatchView['items'][number]['resolution'] = 'new_order';
       if (isOrderUpdate) {
-        const outcome = await api.confirmOrderUpdate(draft, draftReview.expectedRevision);
+        const outcome = customFieldDefinitions.length > 0
+          ? await api.confirmOrderUpdate(
+            draft,
+            draftReview.expectedRevision,
+            draftCustomFieldValues,
+          )
+          : await api.confirmOrderUpdate(draft, draftReview.expectedRevision);
         resolution = outcome.resolution;
       } else {
-        const outcome = await api.confirmDraft(draft);
+        const outcome = customFieldDefinitions.length > 0
+          ? await api.confirmDraft(draft, draftCustomFieldValues)
+          : await api.confirmDraft(draft);
         resolution = outcome.resolution;
       }
       const requestedAtVersion = orderSnapshotVersion.current;
@@ -343,6 +481,9 @@ export function App({ api }: AppProps) {
             const nextDraft = changedTarget ? transitionedReview.draft : draft;
             setDraft(nextDraft);
             setDraftReview({ ...transitionedReview, draft: nextDraft });
+          } else {
+            setDraft(transitionedReview.draft);
+            setDraftReview(transitionedReview);
           }
         } catch {
           // Keep the current comparison and unsaved edits if refreshing also fails.
@@ -386,6 +527,7 @@ export function App({ api }: AppProps) {
       if (requestVersion !== detailSourceRequestVersion.current) return;
       setDetailScreenshotUrl(screenshotUrl);
       setDetailScreenshotId(details.sourceScreenshot.id);
+      setDetailCustomFieldsDirty(false);
       setOrderDetails(details);
     } catch (error) {
       if (requestVersion === detailSourceRequestVersion.current) {
@@ -419,6 +561,23 @@ export function App({ api }: AppProps) {
     }
   }
 
+  async function saveOrderCustomFieldValues(input: SaveCustomFieldValuesInput) {
+    setBusyAction('custom-fields');
+    setOperationError('');
+    try {
+      const values = await api.saveCustomFieldValues(input);
+      setOrderDetails((current) => current?.order.id === input.orderId
+        ? { ...current, customFieldValues: values }
+        : current);
+      setOrderQueryRefreshToken((current) => current + 1);
+    } catch (error) {
+      setOperationError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function chooseDataDirectory() {
     setBusyAction('directory');
     setOperationError('');
@@ -447,8 +606,28 @@ export function App({ api }: AppProps) {
     setOrderDetails(null);
     setDetailScreenshotUrl('');
     setDetailScreenshotId('');
+    setDetailCustomFieldsDirty(false);
     setOperationError('');
     setBusyAction(null);
+  }
+
+  function leaveOrderDetails(action: () => void) {
+    if (
+      detailCustomFieldsDirty &&
+      !window.confirm('自定义字段还有未保存修改，确定放弃吗？')
+    ) {
+      return;
+    }
+    closeDetails();
+    action();
+  }
+
+  function navigateTo(page: AppPage) {
+    if (orderDetails) {
+      leaveOrderDetails(() => setActivePage(page));
+      return;
+    }
+    setActivePage(page);
   }
 
   if (!bootstrap) {
@@ -491,6 +670,16 @@ export function App({ api }: AppProps) {
   let workspace: ReactNode;
   if (activePage === 'settings') {
     workspace = <SettingsWorkspace api={api} />;
+  } else if (activePage === 'fields') {
+    workspace = (
+      <CustomFieldsWorkspace
+        api={api}
+        definitions={customFieldDefinitions}
+        loading={customFieldDefinitionsLoading}
+        loadError={customFieldDefinitionsError}
+        onRefresh={refreshCustomFieldDefinitions}
+      />
+    );
   } else if (draft) {
     workspace = (
       <ReviewWorkspace
@@ -500,7 +689,11 @@ export function App({ api }: AppProps) {
         error={operationError}
         cancelling={busyAction === 'cancel'}
         confirming={busyAction === 'confirm'}
+        customFieldDefinitions={customFieldDefinitions}
+        customFieldValues={draftCustomFieldValues}
         onDraftChange={setDraft}
+        onCustomFieldValuesChange={setDraftCustomFieldValues}
+        onCustomFieldTouched={(key) => draftCustomFieldTouchedKeys.current.add(key)}
         onCancel={() => void cancelReview()}
         onConfirm={(event) => void confirmOrder(event)}
       />
@@ -512,9 +705,12 @@ export function App({ api }: AppProps) {
         screenshotUrl={detailScreenshotUrl}
         selectedScreenshotId={detailScreenshotId}
         sourceLoading={busyAction === 'detail'}
+        customFieldsSaving={busyAction === 'custom-fields'}
         error={operationError}
-        onBack={closeDetails}
+        onBack={() => leaveOrderDetails(() => undefined)}
+        onDirtyChange={setDetailCustomFieldsDirty}
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
+        onSaveCustomFieldValues={saveOrderCustomFieldValues}
       />
     );
   } else if (activePage === 'batches') {
@@ -547,8 +743,13 @@ export function App({ api }: AppProps) {
         pendingShipmentCount={orderWorkbench?.pendingShipmentCount ?? 0}
         platforms={orderWorkbench?.platforms ?? []}
         sellerAccounts={orderWorkbench?.sellerAccounts ?? []}
+        customFieldDefinitions={customFieldDefinitions}
+        view={ordersWorkspaceView}
         query={orderQuery}
         queryLoading={orderQueryLoading}
+        orderItems={orderItemWorkbench?.items ?? []}
+        orderItemQuery={orderItemQuery}
+        orderItemQueryLoading={orderItemQueryLoading}
         dataDirectory={bootstrap.dataDirectory}
         error={operationError}
         uploading={busyAction === 'upload'}
@@ -559,7 +760,9 @@ export function App({ api }: AppProps) {
           setActivePage('batches');
         }}
         onOpenOrder={(orderId) => void openOrder(orderId)}
+        onViewChange={setOrdersWorkspaceView}
         onQueryChange={setOrderQuery}
+        onOrderItemQueryChange={setOrderItemQuery}
       />
     );
   }
@@ -573,7 +776,7 @@ export function App({ api }: AppProps) {
           .filter((item) => isActiveRecognitionBatchItemStatus(item.status)).length,
         0,
       )}
-      onNavigate={setActivePage}
+      onNavigate={navigateTo}
     >
       {workspace}
     </AppFrame>
@@ -608,11 +811,12 @@ function AppFrame({
           <button
             className={`nav-item${activePage === 'orders' ? ' is-active' : ''}`}
             type="button"
+            aria-label="订单"
             aria-current={activePage === 'orders' ? 'page' : undefined}
             onClick={() => onNavigate('orders')}
           >
             <Icon name="orders" />
-            <span className="nav-label">订单</span>
+            <span className="nav-label">原始订单</span>
           </button>
           <button className="nav-item" type="button" disabled>
             <Icon name="shipment" />
@@ -623,6 +827,15 @@ function AppFrame({
             <Icon name="template" />
             <span className="nav-label">表格模板</span>
             <span className="nav-badge">稍后</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'fields' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'fields' ? 'page' : undefined}
+            onClick={() => onNavigate('fields')}
+          >
+            <Icon name="fields" />
+            <span className="nav-label">字段库</span>
           </button>
           <button
             className={`nav-item${activePage === 'batches' ? ' is-active' : ''}`}
@@ -738,8 +951,13 @@ type OrdersWorkspaceProps = {
   pendingShipmentCount: number;
   platforms: OrderWorkbenchResult['platforms'];
   sellerAccounts: string[];
+  customFieldDefinitions: CustomFieldDefinition[];
+  view: OrdersWorkspaceView;
   query: OrderWorkbenchQuery;
   queryLoading: boolean;
+  orderItems: OrderItemWorkbenchResult['items'];
+  orderItemQuery: OrderItemWorkbenchQuery;
+  orderItemQueryLoading: boolean;
   dataDirectory: string;
   error: string;
   uploading: boolean;
@@ -747,7 +965,9 @@ type OrdersWorkspaceProps = {
   onUpload: () => void;
   onOpenBatch: (batchId: string) => void;
   onOpenOrder: (orderId: string) => void;
+  onViewChange: (view: OrdersWorkspaceView) => void;
   onQueryChange: (query: OrderWorkbenchQuery) => void;
+  onOrderItemQueryChange: (query: OrderItemWorkbenchQuery) => void;
 };
 
 function OrdersWorkspace({
@@ -759,8 +979,13 @@ function OrdersWorkspace({
   pendingShipmentCount,
   platforms,
   sellerAccounts,
+  customFieldDefinitions,
+  view,
   query,
   queryLoading,
+  orderItems,
+  orderItemQuery,
+  orderItemQueryLoading,
   dataDirectory,
   error,
   uploading,
@@ -768,14 +993,26 @@ function OrdersWorkspace({
   onUpload,
   onOpenBatch,
   onOpenOrder,
+  onViewChange,
   onQueryChange,
+  onOrderItemQueryChange,
 }: OrdersWorkspaceProps) {
+  const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
+    query.customFieldFilter?.definitionId ?? '',
+  );
   const latestBatch = batches[0];
   const patchQuery = (patch: Partial<OrderWorkbenchQuery>) => onQueryChange({ ...query, ...patch });
+  const orderCustomFields = customFieldDefinitions.filter(
+    (definition) => definition.granularity === 'order',
+  );
+  const selectedCustomFilter = orderCustomFields.find(
+    (definition) => definition.id === selectedCustomFilterId,
+  );
   const hasActiveQuery = Boolean(
     query.text || query.buyerText || query.productText || query.dateFrom || query.dateTo ||
     query.platform || query.sellerAccount || query.initialSourceRecognitionStatus ||
     query.platformTransactionStatus || query.fulfillmentStatus ||
+    query.customFieldFilter || query.customFieldSort ||
     (query.lifecycleStatus && query.lifecycleStatus !== 'active') ||
     query.sortField !== DEFAULT_ORDER_QUERY.sortField ||
     query.sortDirection !== DEFAULT_ORDER_QUERY.sortDirection,
@@ -815,7 +1052,9 @@ function OrdersWorkspace({
         <div>
           <span className="section-kicker">原始订单</span>
           <h1>订单</h1>
-          <p>显示 {orders.length} / {allLifecycleOrderCount} 笔，保留来源截图与来源快照。</p>
+          <p>{view === 'orders'
+            ? `显示 ${orders.length} / ${allLifecycleOrderCount} 笔，保留来源截图与来源快照。`
+            : '逐条查看商品明细，并按商品级自定义字段筛选或排序。'}</p>
         </div>
         <div className="upload-action">
           <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
@@ -832,6 +1071,31 @@ function OrdersWorkspace({
         <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
       )}
 
+      <div className="workspace-view-switch" role="tablist" aria-label="工作台视图">
+        <button
+          id="orders-view-tab"
+          type="button"
+          role="tab"
+          aria-selected={view === 'orders'}
+          aria-controls="orders-view-panel"
+          className={view === 'orders' ? 'is-active' : ''}
+          onClick={() => onViewChange('orders')}
+        >
+          订单
+        </button>
+        <button
+          id="order-items-view-tab"
+          type="button"
+          role="tab"
+          aria-selected={view === 'order_items'}
+          aria-controls="order-items-view-panel"
+          className={view === 'order_items' ? 'is-active' : ''}
+          onClick={() => onViewChange('order_items')}
+        >
+          商品
+        </button>
+      </div>
+
       <section className="orders-overview" aria-label="订单概况">
         <span><small>在库订单</small><strong>{activeOrderCount}</strong></span>
         <span><small>待确认</small><strong>{pendingConfirmationCount}</strong></span>
@@ -841,6 +1105,12 @@ function OrdersWorkspace({
         </span>
       </section>
 
+      {view === 'orders' ? (
+        <div
+          id="orders-view-panel"
+          role="tabpanel"
+          aria-labelledby="orders-view-tab"
+        >
       <section className="order-query" aria-label="订单查询">
         <label className="order-query__search">
           <span>搜索订单</span>
@@ -860,7 +1130,10 @@ function OrdersWorkspace({
           <button
             className="button button--quiet order-query__clear"
             type="button"
-            onClick={() => onQueryChange(DEFAULT_ORDER_QUERY)}
+            onClick={() => {
+              setSelectedCustomFilterId('');
+              onQueryChange(DEFAULT_ORDER_QUERY);
+            }}
           >
             清除筛选
           </button>
@@ -941,6 +1214,39 @@ function OrdersWorkspace({
             />
           </label>
           <label>
+            <span>自定义字段筛选</span>
+            <select
+              aria-label="自定义字段筛选"
+              value={selectedCustomFilterId}
+              onChange={(event) => {
+                setSelectedCustomFilterId(event.target.value);
+                patchQuery({ customFieldFilter: undefined });
+              }}
+            >
+              <option value="">不筛选</option>
+              {orderCustomFields.map((definition) => (
+                <option value={definition.id} key={definition.id}>{definition.name}</option>
+              ))}
+            </select>
+          </label>
+          {selectedCustomFilter && (
+            <CustomFieldInput
+              definition={selectedCustomFilter}
+              value={query.customFieldFilter?.definitionId === selectedCustomFilter.id
+                ? query.customFieldFilter.value
+                : null}
+              label={selectedCustomFilter.type === 'multi_select'
+                ? '自定义字段值（包含全部所选项）'
+                : '自定义字段值'}
+              showRequired={false}
+              onChange={(value) => patchQuery({
+                customFieldFilter: value === null
+                  ? undefined
+                  : { definitionId: selectedCustomFilter.id, value },
+              })}
+            />
+          )}
+          <label>
             <span>初始来源识别状态</span>
             <select
               value={query.initialSourceRecognitionStatus ?? ''}
@@ -1006,15 +1312,20 @@ function OrdersWorkspace({
           <label>
             <span>排序方式</span>
             <select
-              value={`${query.sortField ?? 'created_at'}:${query.sortDirection ?? 'desc'}`}
+              value={query.customFieldSort
+                ? ''
+                : `${query.sortField ?? 'created_at'}:${query.sortDirection ?? 'desc'}`}
               onChange={(event) => {
                 const [sortField, sortDirection] = event.target.value.split(':') as [
                   NonNullable<OrderWorkbenchQuery['sortField']>,
                   NonNullable<OrderWorkbenchQuery['sortDirection']>,
                 ];
-                patchQuery({ sortField, sortDirection });
+                patchQuery({ sortField, sortDirection, customFieldSort: undefined });
               }}
             >
+              {query.customFieldSort && (
+                <option value="" disabled>当前由自定义字段排序</option>
+              )}
               <option value="created_at:desc">入库时间：新到旧</option>
               <option value="created_at:asc">入库时间：旧到新</option>
               <option value="ordered_at:desc">下单时间：新到旧</option>
@@ -1039,6 +1350,38 @@ function OrdersWorkspace({
               <option value="fulfillment_status:desc">履约状态：降序</option>
               <option value="lifecycle_status:asc">生命周期状态：升序</option>
               <option value="lifecycle_status:desc">生命周期状态：降序</option>
+            </select>
+          </label>
+          <label>
+            <span>自定义字段排序</span>
+            <select
+              aria-label="自定义字段排序"
+              value={query.customFieldSort
+                ? `${query.customFieldSort.definitionId}:${query.customFieldSort.direction}`
+                : ''}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  patchQuery({ customFieldSort: undefined });
+                  return;
+                }
+                const separator = event.target.value.lastIndexOf(':');
+                patchQuery({
+                  customFieldSort: {
+                    definitionId: event.target.value.slice(0, separator),
+                    direction: event.target.value.slice(separator + 1) as 'asc' | 'desc',
+                  },
+                });
+              }}
+            >
+              <option value="">默认排序</option>
+              {orderCustomFields.flatMap((definition) => ([
+                <option value={`${definition.id}:asc`} key={`${definition.id}:asc`}>
+                  {definition.name}：升序
+                </option>,
+                <option value={`${definition.id}:desc`} key={`${definition.id}:desc`}>
+                  {definition.name}：降序
+                </option>,
+              ]))}
             </select>
           </label>
         </div>
@@ -1128,7 +1471,202 @@ function OrdersWorkspace({
           </div>
         </>
       )}
+        </div>
+      ) : (
+        <OrderItemsWorkbench
+          items={orderItems}
+          definitions={customFieldDefinitions}
+          query={orderItemQuery}
+          loading={orderItemQueryLoading}
+          openingOrder={openingOrder}
+          onQueryChange={onOrderItemQueryChange}
+          onOpenOrder={onOpenOrder}
+        />
+      )}
     </section>
+  );
+}
+
+type OrderItemsWorkbenchProps = {
+  items: OrderItemWorkbenchResult['items'];
+  definitions: CustomFieldDefinition[];
+  query: OrderItemWorkbenchQuery;
+  loading: boolean;
+  openingOrder: boolean;
+  onQueryChange: (query: OrderItemWorkbenchQuery) => void;
+  onOpenOrder: (orderId: string) => void;
+};
+
+function OrderItemsWorkbench({
+  items,
+  definitions,
+  query,
+  loading,
+  openingOrder,
+  onQueryChange,
+  onOpenOrder,
+}: OrderItemsWorkbenchProps) {
+  const [selectedFilterId, setSelectedFilterId] = useState(
+    query.customFieldFilter?.definitionId ?? '',
+  );
+  const itemFields = definitions.filter(
+    (definition) => definition.granularity === 'order_item',
+  );
+  const selectedFilter = itemFields.find(
+    (definition) => definition.id === selectedFilterId,
+  );
+  const patchQuery = (patch: Partial<OrderItemWorkbenchQuery>) => {
+    onQueryChange({ ...query, ...patch });
+  };
+  const hasActiveQuery = Boolean(query.customFieldFilter || query.customFieldSort);
+
+  return (
+    <div
+      id="order-items-view-panel"
+      role="tabpanel"
+      aria-labelledby="order-items-view-tab"
+    >
+      <section className="order-query order-item-query" aria-label="商品查询">
+        <div className="order-item-query__heading">
+          <strong>商品级字段</strong>
+          <span>筛选和排序只使用商品明细粒度的自定义字段。</span>
+        </div>
+        <span className="order-query__result" role="status" aria-live="polite">
+          {loading ? '正在查询…' : `显示 ${items.length} 条商品明细`}
+        </span>
+        {hasActiveQuery && (
+          <button
+            className="button button--quiet order-query__clear"
+            type="button"
+            onClick={() => {
+              setSelectedFilterId('');
+              onQueryChange({});
+            }}
+          >
+            清除筛选
+          </button>
+        )}
+        <div className="order-query__filters order-item-query__filters">
+          <label>
+            <span>自定义字段筛选</span>
+            <select
+              aria-label="商品自定义字段筛选"
+              value={selectedFilterId}
+              onChange={(event) => {
+                setSelectedFilterId(event.target.value);
+                patchQuery({ customFieldFilter: undefined });
+              }}
+            >
+              <option value="">不筛选</option>
+              {itemFields.map((definition) => (
+                <option value={definition.id} key={definition.id}>{definition.name}</option>
+              ))}
+            </select>
+          </label>
+          {selectedFilter && (
+            <CustomFieldInput
+              definition={selectedFilter}
+              value={query.customFieldFilter?.definitionId === selectedFilter.id
+                ? query.customFieldFilter.value
+                : null}
+              label={selectedFilter.type === 'multi_select'
+                ? '商品自定义字段值（包含全部所选项）'
+                : '商品自定义字段值'}
+              showRequired={false}
+              onChange={(value) => patchQuery({
+                customFieldFilter: value === null
+                  ? undefined
+                  : { definitionId: selectedFilter.id, value },
+              })}
+            />
+          )}
+          <label>
+            <span>自定义字段排序</span>
+            <select
+              aria-label="商品自定义字段排序"
+              value={query.customFieldSort
+                ? `${query.customFieldSort.definitionId}:${query.customFieldSort.direction}`
+                : ''}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  patchQuery({ customFieldSort: undefined });
+                  return;
+                }
+                const separator = event.target.value.lastIndexOf(':');
+                patchQuery({
+                  customFieldSort: {
+                    definitionId: event.target.value.slice(0, separator),
+                    direction: event.target.value.slice(separator + 1) as 'asc' | 'desc',
+                  },
+                });
+              }}
+            >
+              <option value="">默认排序</option>
+              {itemFields.flatMap((definition) => ([
+                <option value={`${definition.id}:asc`} key={`${definition.id}:asc`}>
+                  {definition.name}：升序
+                </option>,
+                <option value={`${definition.id}:desc`} key={`${definition.id}:desc`}>
+                  {definition.name}：降序
+                </option>,
+              ]))}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      {items.length === 0 ? (
+        <div className="order-no-results">
+          <h2>没有符合条件的商品明细</h2>
+          <p>试试更换字段值，或清除当前筛选。</p>
+        </div>
+      ) : (
+        <>
+          <div className="table-toolbar" aria-label="商品表概况">
+            <span><strong>{items.length}</strong> 条商品明细</span>
+            <span><strong>{items.reduce((total, item) => total + item.quantity, 0)}</strong> 件商品</span>
+            <span><strong>{formatMoney(items.reduce((total, item) => total + item.subtotalCents, 0))}</strong> 商品小计</span>
+          </div>
+
+          <div className="table-frame order-items-table-frame">
+            <table aria-label="商品明细">
+              <thead>
+                <tr>
+                  <th>商品</th>
+                  <th>规格</th>
+                  <th>单价</th>
+                  <th>数量</th>
+                  <th>小计</th>
+                  <th><span className="visually-hidden">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id}>
+                    <td><strong>{item.sourceTitle || '未命名商品'}</strong></td>
+                    <td>{item.sourceSpec || '—'}</td>
+                    <td className="money-cell">{formatMoney(item.unitPriceCents)}</td>
+                    <td>{item.quantity}</td>
+                    <td className="money-cell">{formatMoney(item.subtotalCents)}</td>
+                    <td>
+                      <button
+                        className="order-link"
+                        type="button"
+                        aria-label={`打开商品 ${item.sourceTitle || '未命名商品'} 所属订单`}
+                        onClick={() => onOpenOrder(item.orderId)}
+                        disabled={openingOrder}
+                      >
+                        打开所属订单
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1699,7 +2237,11 @@ type ReviewWorkspaceProps = {
   error: string;
   cancelling: boolean;
   confirming: boolean;
+  customFieldDefinitions: CustomFieldDefinition[];
+  customFieldValues: DraftCustomFieldValues;
   onDraftChange: (draft: OrderDraft) => void;
+  onCustomFieldValuesChange: (values: DraftCustomFieldValues) => void;
+  onCustomFieldTouched: (key: string) => void;
   onCancel: () => void;
   onConfirm: (event: FormEvent<HTMLFormElement>) => void;
 };
@@ -1711,16 +2253,46 @@ function ReviewWorkspace({
   error,
   cancelling,
   confirming,
+  customFieldDefinitions,
+  customFieldValues,
   onDraftChange,
+  onCustomFieldValuesChange,
+  onCustomFieldTouched,
   onCancel,
   onConfirm,
 }: ReviewWorkspaceProps) {
   const [moneyErrors, setMoneyErrors] = useState<Record<string, string>>({});
+  const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
   const isOrderUpdate = review.kind === 'order_update';
   const updateChanges = isOrderUpdate
     ? diffOrderCurrentValues(review.currentOrder, draft)
     : [];
   const hasMoneyErrors = Object.keys(moneyErrors).length > 0;
+  const orderCustomFields = customFieldDefinitions.filter(
+    (definition) => definition.granularity === 'order',
+  );
+  const itemCustomFields = customFieldDefinitions.filter(
+    (definition) => definition.granularity === 'order_item',
+  );
+  const requiredOrderCustomFieldsComplete = orderCustomFields
+    .filter((definition) => definition.required)
+    .every((definition) => hasCustomFieldValue(customFieldValues.orderValues.find(
+      (entry) => entry.definitionId === definition.id,
+    )?.value ?? null));
+  const requiredItemCustomFieldsComplete = draft.items.every((item) => itemCustomFields
+    .filter((definition) => definition.required)
+    .every((definition) => hasCustomFieldValue(customFieldValues.itemValues.find(
+      (entry) => entry.definitionId === definition.id && entry.draftItemId === item.id,
+    )?.value ?? null)));
+  const activeCustomFieldKeys = [
+    ...orderCustomFields.map((definition) => `order:${definition.id}`),
+    ...draft.items.flatMap((item) => itemCustomFields.map(
+      (definition) => `item:${item.id}:${definition.id}`,
+    )),
+  ];
+  const customFieldInputsValid = activeCustomFieldKeys.every(
+    (key) => customFieldValidity[key] !== false,
+  );
   const isComplete =
     draft.orderNumber.trim() !== '' &&
     draft.sellerAccount.trim() !== '' &&
@@ -1737,7 +2309,10 @@ function ReviewWorkspace({
     draft.productTotalCents !== null &&
     draft.shippingFeeCents !== null &&
     draft.amountCents !== null &&
-    !hasMoneyErrors;
+    !hasMoneyErrors &&
+    customFieldInputsValid &&
+    requiredOrderCustomFieldsComplete &&
+    requiredItemCustomFieldsComplete;
 
   function patchDraft(patch: Partial<OrderDraft>) {
     onDraftChange({ ...draft, ...patch });
@@ -1747,6 +2322,35 @@ function ReviewWorkspace({
     const items = [...draft.items];
     items[index] = { ...items[index], ...patch };
     patchDraft({ items });
+  }
+
+  function patchOrderCustomField(definitionId: string, value: CustomFieldValue | null) {
+    onCustomFieldTouched(`order:${definitionId}`);
+    onCustomFieldValuesChange({
+      ...customFieldValues,
+      orderValues: upsertDraftOrderCustomFieldValue(
+        customFieldValues.orderValues,
+        definitionId,
+        value,
+      ),
+    });
+  }
+
+  function patchItemCustomField(
+    definitionId: string,
+    draftItemId: string,
+    value: CustomFieldValue | null,
+  ) {
+    onCustomFieldTouched(`item:${draftItemId}:${definitionId}`);
+    onCustomFieldValuesChange({
+      ...customFieldValues,
+      itemValues: upsertDraftItemCustomFieldValue(
+        customFieldValues.itemValues,
+        definitionId,
+        draftItemId,
+        value,
+      ),
+    });
   }
 
   function patchMoney(
@@ -1969,6 +2573,35 @@ function ReviewWorkspace({
             </div>
           </FormSection>
 
+          {orderCustomFields.length > 0 && (
+            <FormSection
+              title="自定义字段"
+              description="这些业务信息与平台订单事实分开保存，可用于后续筛选和排序。"
+            >
+              <div className="custom-field-grid">
+                {orderCustomFields.map((definition) => (
+                  <CustomFieldInput
+                    key={definition.id}
+                    definition={definition}
+                    value={customFieldValues.orderValues.find(
+                      (entry) => entry.definitionId === definition.id,
+                    )?.value ?? null}
+                    onChange={(value) => patchOrderCustomField(definition.id, value)}
+                    onValidityChange={(valid) => setCustomFieldValidity((current) => ({
+                      ...current,
+                      [`order:${definition.id}`]: valid,
+                    }))}
+                  />
+                ))}
+              </div>
+              {!requiredOrderCustomFieldsComplete && (
+                <p className="custom-field-required-note" role="status">
+                  请填写全部订单必填自定义字段后再确认入库。
+                </p>
+              )}
+            </FormSection>
+          )}
+
           <FormSection title="金额" description="金额以人民币元校对，入库时以分精确保存。">
             <div className="field-grid field-grid--three">
               <Field label="商品总价" required suffix="元">
@@ -2159,10 +2792,47 @@ function ReviewWorkspace({
                     {item.quantityInferred && (
                       <div className="inferred-note">截图未显示数量，已按 1 件处理</div>
                     )}
+                    {itemCustomFields.length > 0 && (
+                      <div className="item-custom-fields">
+                        <span className="item-custom-fields__title">商品自定义字段</span>
+                        <div className="custom-field-grid">
+                          {itemCustomFields.map((definition) => {
+                            const label = draft.items.length === 1
+                              ? definition.name
+                              : `${definition.name} · 商品 ${index + 1}`;
+                            return (
+                              <CustomFieldInput
+                                key={definition.id}
+                                definition={definition}
+                                label={label}
+                                value={customFieldValues.itemValues.find((entry) => (
+                                  entry.definitionId === definition.id &&
+                                  entry.draftItemId === item.id
+                                ))?.value ?? null}
+                                onChange={(value) => patchItemCustomField(
+                                  definition.id,
+                                  item.id,
+                                  value,
+                                )}
+                                onValidityChange={(valid) => setCustomFieldValidity((current) => ({
+                                  ...current,
+                                  [`item:${item.id}:${definition.id}`]: valid,
+                                }))}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
+            {!requiredItemCustomFieldsComplete && (
+              <p className="custom-field-required-note" role="status">
+                请填写每件商品的全部必填自定义字段后再确认入库。
+              </p>
+            )}
             <button className="add-item-button" type="button" onClick={addItem}>
               <span aria-hidden="true">+</span>添加商品
             </button>
@@ -2320,19 +2990,87 @@ function DetailWorkspace({
   screenshotUrl,
   selectedScreenshotId,
   sourceLoading,
+  customFieldsSaving,
   error,
   onBack,
+  onDirtyChange,
   onSelectSource,
+  onSaveCustomFieldValues,
 }: {
   details: OrderDetails;
   screenshotUrl: string;
   selectedScreenshotId: string;
   sourceLoading: boolean;
+  customFieldsSaving: boolean;
   error: string;
   onBack: () => void;
+  onDirtyChange: (dirty: boolean) => void;
   onSelectSource: (screenshotId: string) => void;
+  onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
 }) {
   const { order } = details;
+  const definitions = details.customFieldDefinitions ?? [];
+  const persistedCustomFieldValues = details.customFieldValues ?? [];
+  const [customValues, setCustomValues] = useState<CustomFieldValueRecord[]>(
+    persistedCustomFieldValues,
+  );
+  const [customFieldFeedback, setCustomFieldFeedback] = useState<{
+    kind: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setCustomValues(details.customFieldValues ?? []);
+    setCustomFieldValidity({});
+  }, [details.order.id, details.customFieldValues]);
+  useEffect(() => {
+    setCustomFieldFeedback(null);
+  }, [details.order.id]);
+  const customFieldsDirty = !customFieldValueRecordsEqual(
+    customValues,
+    persistedCustomFieldValues,
+  );
+  useEffect(() => {
+    onDirtyChange(customFieldsDirty);
+  }, [customFieldsDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+  useEffect(() => {
+    if (!customFieldsDirty) return undefined;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [customFieldsDirty]);
+  const orderCustomFields = definitions.filter(
+    (definition) => definition.granularity === 'order',
+  );
+  const itemCustomFields = definitions.filter(
+    (definition) => definition.granularity === 'order_item',
+  );
+  const requiredCustomFieldsComplete = orderCustomFields
+    .filter((definition) => definition.required)
+    .every((definition) => hasCustomFieldValue(customValueFromRecords(
+      customValues,
+      definition.id,
+      null,
+    ))) && order.items.every((item) => itemCustomFields
+      .filter((definition) => definition.required)
+      .every((definition) => hasCustomFieldValue(customValueFromRecords(
+        customValues,
+        definition.id,
+        item.id,
+      ))));
+  const activeCustomFieldKeys = [
+    ...orderCustomFields.map((definition) => `order:${definition.id}`),
+    ...order.items.flatMap((item) => itemCustomFields.map(
+      (definition) => `item:${item.id}:${definition.id}`,
+    )),
+  ];
+  const customFieldInputsValid = activeCustomFieldKeys.every(
+    (key) => customFieldValidity[key] !== false,
+  );
   const selectedSource = details.sources.find(
     (source) => source.sourceScreenshot.id === selectedScreenshotId,
   ) ?? details.sources[0];
@@ -2340,6 +3078,49 @@ function DetailWorkspace({
   const sourceSnapshot = selectedSource?.sourceSnapshot ?? details.sourceSnapshot;
   const recipientChanged = sourceSnapshot.confirmed !== null &&
     sourceSnapshot.recognition.recipient !== sourceSnapshot.confirmed.recipient;
+
+  function customValue(definitionId: string, orderItemId: string | null) {
+    return customValues.find((entry) => (
+      entry.definitionId === definitionId &&
+      entry.orderItemId === orderItemId
+    ))?.value ?? null;
+  }
+
+  function patchCustomValue(
+    definitionId: string,
+    orderItemId: string | null,
+    value: CustomFieldValue | null,
+  ) {
+    setCustomFieldFeedback(null);
+    setCustomValues((current) => updateDetailCustomFieldValue(
+      current,
+      order.id,
+      definitionId,
+      orderItemId,
+      value,
+    ));
+  }
+
+  async function saveCustomFields() {
+    setCustomFieldFeedback(null);
+    try {
+      await onSaveCustomFieldValues({
+        orderId: order.id,
+        orderValues: orderCustomFields.map((definition) => ({
+          definitionId: definition.id,
+          value: customValue(definition.id, null),
+        })),
+        itemValues: order.items.flatMap((item) => itemCustomFields.map((definition) => ({
+          definitionId: definition.id,
+          orderItemId: item.id,
+          value: customValue(definition.id, item.id),
+        }))),
+      });
+      setCustomFieldFeedback({ kind: 'success', message: '自定义字段已保存。' });
+    } catch (error) {
+      setCustomFieldFeedback({ kind: 'error', message: errorMessage(error) });
+    }
+  }
 
   return (
     <section className="detail-workspace detail-enter">
@@ -2484,6 +3265,92 @@ function DetailWorkspace({
             </div>
           </section>
 
+          {definitions.length > 0 && (
+            <section className="detail-section detail-custom-fields">
+              <div className="detail-section-title">
+                <h2>自定义字段</h2>
+                <span>独立于订单事实保存</span>
+              </div>
+              {orderCustomFields.length > 0 && (
+                <div className="detail-custom-fields__group">
+                  <h3>订单字段</h3>
+                  <div className="custom-field-grid">
+                    {orderCustomFields.map((definition) => (
+                      <CustomFieldInput
+                        definition={definition}
+                        key={definition.id}
+                        value={customValue(definition.id, null)}
+                        disabled={customFieldsSaving}
+                        onChange={(value) => patchCustomValue(definition.id, null, value)}
+                        onValidityChange={(valid) => setCustomFieldValidity((current) => ({
+                          ...current,
+                          [`order:${definition.id}`]: valid,
+                        }))}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {itemCustomFields.length > 0 && order.items.map((item, index) => (
+                <div className="detail-custom-fields__group" key={item.id}>
+                  <h3>商品 {String(index + 1).padStart(2, '0')} · {item.sourceTitle}</h3>
+                  <div className="custom-field-grid">
+                    {itemCustomFields.map((definition) => {
+                      const label = order.items.length === 1
+                        ? definition.name
+                        : `${definition.name} · 商品 ${index + 1}`;
+                      return (
+                        <CustomFieldInput
+                          definition={definition}
+                          key={definition.id}
+                          label={label}
+                          value={customValue(definition.id, item.id)}
+                          disabled={customFieldsSaving}
+                          onChange={(value) => patchCustomValue(
+                            definition.id,
+                            item.id,
+                            value,
+                          )}
+                          onValidityChange={(valid) => setCustomFieldValidity((current) => ({
+                            ...current,
+                            [`item:${item.id}:${definition.id}`]: valid,
+                          }))}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              <div className="detail-custom-fields__actions">
+                {!requiredCustomFieldsComplete && (
+                  <p className="custom-field-required-note" role="status">
+                    请填写订单及每件商品的全部必填自定义字段。
+                  </p>
+                )}
+                {customFieldFeedback && (
+                  <p
+                    className={`fields-feedback fields-feedback--${customFieldFeedback.kind}`}
+                    role={customFieldFeedback.kind === 'error' ? 'alert' : 'status'}
+                  >
+                    {customFieldFeedback.message}
+                  </p>
+                )}
+                <button
+                  className="button button--primary"
+                  type="button"
+                  disabled={
+                    customFieldsSaving ||
+                    !requiredCustomFieldsComplete ||
+                    !customFieldInputsValid
+                  }
+                  onClick={() => void saveCustomFields()}
+                >
+                  {customFieldsSaving ? '正在保存…' : '保存自定义字段'}
+                </button>
+              </div>
+            </section>
+          )}
+
           <section className="detail-section" aria-label="来源与修改记录">
             <div className="detail-section-title">
               <h2>来源与修改记录</h2>
@@ -2598,6 +3465,153 @@ function InlineError({ message }: { message: string }) {
   );
 }
 
+function reconcileDraftCustomFieldValues(
+  current: DraftCustomFieldValues,
+  definitions: CustomFieldDefinition[],
+  draft: OrderDraft,
+  review: OrderDraftReview | null,
+  touchedKeys: ReadonlySet<string>,
+): DraftCustomFieldValues {
+  const sameOrderReview = review?.kind === 'order_update' && hasSameOrderIdentity(
+    review.currentOrder,
+    draft,
+  )
+    ? review
+    : null;
+  const persistedValues = sameOrderReview ? sameOrderReview.customFieldValues : [];
+  const existingItemIdByDraftId = sameOrderReview
+    ? matchOrderItemIds(sameOrderReview.currentOrder.items, draft.items)
+    : new Map<string, string>();
+  const orderValues = definitions
+    .filter((definition) => definition.granularity === 'order')
+    .map((definition) => {
+      const existing = current.orderValues.find(
+        (entry) => entry.definitionId === definition.id,
+      );
+      if (existing && touchedKeys.has(`order:${definition.id}`)) return existing;
+      const persisted = persistedValues.find((entry) => (
+        entry.definitionId === definition.id && entry.orderItemId === null
+      ));
+      return {
+        definitionId: definition.id,
+        value: cloneCustomFieldValue(
+          sameOrderReview ? (persisted?.value ?? null) : definition.defaultValue,
+        ),
+      };
+    });
+  const itemDefinitions = definitions.filter(
+    (definition) => definition.granularity === 'order_item',
+  );
+  const itemValues = draft.items.flatMap((item) => itemDefinitions.map((definition) => {
+    const existing = current.itemValues.find((entry) => (
+      entry.definitionId === definition.id && entry.draftItemId === item.id
+    ));
+    if (existing && touchedKeys.has(`item:${item.id}:${definition.id}`)) return existing;
+    const existingItemId = existingItemIdByDraftId.get(item.id);
+    const persisted = existingItemId === undefined
+      ? undefined
+      : persistedValues.find((entry) => (
+        entry.definitionId === definition.id && entry.orderItemId === existingItemId
+      ));
+    return {
+      definitionId: definition.id,
+      draftItemId: item.id,
+      value: cloneCustomFieldValue(
+        existingItemId === undefined
+          ? definition.defaultValue
+          : (persisted?.value ?? null),
+      ),
+    };
+  }));
+  return { orderValues, itemValues };
+}
+
+function cloneCustomFieldValue(value: CustomFieldValue | null): CustomFieldValue | null {
+  return Array.isArray(value) ? [...value] : value;
+}
+
+function customFieldValueRecordsEqual(
+  left: readonly CustomFieldValueRecord[],
+  right: readonly CustomFieldValueRecord[],
+): boolean {
+  const comparable = (records: readonly CustomFieldValueRecord[]) => records
+    .map((record) => ({
+      definitionId: record.definitionId,
+      orderItemId: record.orderItemId,
+      value: record.value,
+    }))
+    .sort((first, second) => (
+      `${first.definitionId}\u0000${first.orderItemId ?? ''}`.localeCompare(
+        `${second.definitionId}\u0000${second.orderItemId ?? ''}`,
+      )
+    ));
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));
+}
+
+function hasCustomFieldValue(value: CustomFieldValue | null): boolean {
+  if (value === null) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'number') return Number.isFinite(value);
+  return true;
+}
+
+function upsertDraftOrderCustomFieldValue(
+  values: DraftCustomFieldValues['orderValues'],
+  definitionId: string,
+  value: CustomFieldValue | null,
+): DraftCustomFieldValues['orderValues'] {
+  const next = values.filter((entry) => entry.definitionId !== definitionId);
+  return [...next, { definitionId, value }];
+}
+
+function upsertDraftItemCustomFieldValue(
+  values: DraftCustomFieldValues['itemValues'],
+  definitionId: string,
+  draftItemId: string,
+  value: CustomFieldValue | null,
+): DraftCustomFieldValues['itemValues'] {
+  const next = values.filter((entry) => !(
+    entry.definitionId === definitionId && entry.draftItemId === draftItemId
+  ));
+  return [...next, { definitionId, draftItemId, value }];
+}
+
+function updateDetailCustomFieldValue(
+  values: CustomFieldValueRecord[],
+  orderId: string,
+  definitionId: string,
+  orderItemId: string | null,
+  value: CustomFieldValue | null,
+): CustomFieldValueRecord[] {
+  const existing = values.find((entry) => (
+    entry.definitionId === definitionId && entry.orderItemId === orderItemId
+  ));
+  const next = values.filter((entry) => !(
+    entry.definitionId === definitionId && entry.orderItemId === orderItemId
+  ));
+  if (value === null) return next;
+  const now = new Date().toISOString();
+  return [...next, {
+    definitionId,
+    orderId: orderItemId === null ? orderId : null,
+    orderItemId,
+    value,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  }];
+}
+
+function customValueFromRecords(
+  values: CustomFieldValueRecord[],
+  definitionId: string,
+  orderItemId: string | null,
+): CustomFieldValue | null {
+  return values.find((entry) => (
+    entry.definitionId === definitionId && entry.orderItemId === orderItemId
+  ))?.value ?? null;
+}
+
 type IconName =
   | 'orders'
   | 'shipment'
@@ -2612,6 +3626,7 @@ type IconName =
   | 'back'
   | 'check'
   | 'history'
+  | 'fields'
   | 'settings';
 
 function Icon({ name }: { name: IconName }) {
@@ -2629,6 +3644,7 @@ function Icon({ name }: { name: IconName }) {
     back: <><path d="m15 5-7 7 7 7" /><path d="M8 12h11" /></>,
     check: <path d="m5 12.5 4 4L19 7" />,
     history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 7.5V12l3 2" /></>,
+    fields: <><path d="M5 5h14v4H5zM5 13h14v6H5z" /><path d="M9 5v4M15 13v6" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06-2.76 2.76-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.08 1.65V21H10v-.09A1.8 1.8 0 0 0 8.92 19.3a1.8 1.8 0 0 0-2 .36l-.06.06-2.76-2.76.06-.06a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.91 14H2.8v-4h.11a1.8 1.8 0 0 0 1.61-1.08 1.8 1.8 0 0 0-.36-2l-.06-.06L6.86 4.1l.06.06a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10 2.91V2.8h4v.11a1.8 1.8 0 0 0 1.08 1.61 1.8 1.8 0 0 0 2-.36l.06-.06 2.76 2.76-.06.06a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.09 10h.11v4h-.11A1.8 1.8 0 0 0 19.4 15Z" /></>,
   };
   return (

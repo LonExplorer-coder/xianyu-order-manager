@@ -5,7 +5,12 @@ import type {
   OrderSummary,
   PlatformTransactionStatus,
   RecognitionBatchItemStatus,
+  OrderItem,
 } from './contracts';
+import type {
+  CustomFieldFilter,
+  CustomFieldSort,
+} from './custom-fields';
 
 export type OrderWorkbenchDateField = 'ordered_at' | 'paid_at' | 'created_at';
 
@@ -36,6 +41,8 @@ export type OrderWorkbenchQuery = {
   lifecycleStatus?: LifecycleStatus | 'all';
   sortField?: OrderWorkbenchSortField;
   sortDirection?: 'asc' | 'desc';
+  customFieldFilter?: CustomFieldFilter;
+  customFieldSort?: CustomFieldSort;
 };
 
 export type OrderWorkbenchResult = {
@@ -45,4 +52,17 @@ export type OrderWorkbenchResult = {
   pendingShipmentCount: number;
   platforms: OrderPlatform[];
   sellerAccounts: string[];
+};
+
+export type OrderItemWorkbenchQuery = {
+  customFieldFilter?: CustomFieldFilter;
+  customFieldSort?: CustomFieldSort;
+};
+
+export type OrderItemWorkbenchItem = OrderItem & {
+  orderId: string;
+};
+
+export type OrderItemWorkbenchResult = {
+  items: OrderItemWorkbenchItem[];
 };
