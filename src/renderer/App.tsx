@@ -1,4 +1,11 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 
 import type { BootstrapState, DesktopApi } from '../core/desktop-api';
 import type {
@@ -10,6 +17,10 @@ import type {
   RecognitionBatchItemStatus,
 } from '../core/contracts';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import {
+  orderReviewIssueLabel,
+  type OrderIntakeSettingsView,
+} from '../core/order-intake';
 import {
   isActiveRecognitionBatchItemStatus,
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
@@ -45,6 +56,7 @@ export function App({ api }: AppProps) {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [operationError, setOperationError] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('orders');
+  const orderSnapshotVersion = useRef(0);
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
     : '';
@@ -64,19 +76,8 @@ export function App({ api }: AppProps) {
     };
   }, [api]);
 
-  useEffect(() => {
-    if (!readyDataDirectory) {
-      setRecognitionBatches([]);
-      setActiveBatchId('');
-      setDraft(null);
-      setReviewScreenshotUrl('');
-      setReviewBatchId('');
-      setOrderDetails(null);
-      setDetailScreenshotUrl('');
-      return;
-    }
-    let active = true;
-    let pushedSnapshotVersion = 0;
+  useLayoutEffect(() => {
+    orderSnapshotVersion.current += 1;
     setRecognitionBatches([]);
     setActiveBatchId('');
     setDraft(null);
@@ -86,6 +87,14 @@ export function App({ api }: AppProps) {
     setDetailScreenshotUrl('');
     setActivePage('orders');
     setOperationError('');
+  }, [readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory) {
+      return undefined;
+    }
+    let active = true;
+    let pushedSnapshotVersion = 0;
 
     const refresh = async () => {
       const requestedAtVersion = pushedSnapshotVersion;
@@ -106,6 +115,37 @@ export function App({ api }: AppProps) {
       setRecognitionBatches(batches);
       setActiveBatchId((current) => current || batches[0]?.id || '');
     });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [api, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory) return undefined;
+    let active = true;
+    const unsubscribe = api.onOrdersChanged((orders) => {
+      if (!active) return;
+      orderSnapshotVersion.current += 1;
+      setBootstrap((current) => (
+        current?.kind === 'ready' && current.dataDirectory === readyDataDirectory
+          ? { ...current, orders }
+          : current
+      ));
+    });
+    const requestedAtVersion = orderSnapshotVersion.current;
+    void api.listOrders()
+      .then((orders) => {
+        if (!active || requestedAtVersion !== orderSnapshotVersion.current) return;
+        setBootstrap((current) => (
+          current?.kind === 'ready' && current.dataDirectory === readyDataDirectory
+            ? { ...current, orders }
+            : current
+        ));
+      })
+      .catch((error: unknown) => {
+        if (active) setOperationError(errorMessage(error));
+      });
     return () => {
       active = false;
       unsubscribe();
@@ -194,8 +234,15 @@ export function App({ api }: AppProps) {
     setOperationError('');
     try {
       await api.confirmDraft(draft);
+      const requestedAtVersion = orderSnapshotVersion.current;
       const orders = await api.listOrders();
-      setBootstrap({ ...bootstrap, orders });
+      if (requestedAtVersion === orderSnapshotVersion.current) {
+        setBootstrap((current) => (
+          current?.kind === 'ready' && current.dataDirectory === bootstrap.dataDirectory
+            ? { ...current, orders }
+            : current
+        ));
+      }
       setRecognitionBatches((current) => updateBatchDraftStatus(current, draft.id, 'imported'));
       setDraft(null);
       setReviewScreenshotUrl('');
@@ -780,9 +827,16 @@ function BatchesWorkspace({
                       </td>
                       <td
                         className="batch-result"
-                        title={recognitionBatchItemResult(item)}
+                        title={recognitionBatchItemResultTitle(item)}
                       >
-                        {recognitionBatchItemResult(item)}
+                        <span>{recognitionBatchItemResult(item)}</span>
+                        {item.reviewIssues && item.reviewIssues.length > 0 && (
+                          <ul className="batch-review-issues" aria-label="待确认原因">
+                            {item.reviewIssues.map((issue) => (
+                              <li key={issue}>{orderReviewIssueLabel(issue)}</li>
+                            ))}
+                          </ul>
+                        )}
                       </td>
                       <td>
                         {item.status === 'awaiting_confirmation' && item.draftId && (
@@ -867,23 +921,46 @@ type SettingsFeedback = { kind: 'success' | 'error'; message: string } | null;
 
 function SettingsWorkspace({ api }: { api: DesktopApi }) {
   const [settings, setSettings] = useState<OcrSettingsView | null>(null);
+  const [orderIntakeSettings, setOrderIntakeSettings] =
+    useState<OrderIntakeSettingsView | null>(null);
   const [workspaceId, setWorkspaceId] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState<SettingsAction>('loading');
+  const [orderIntakeLoading, setOrderIntakeLoading] = useState(true);
+  const [savingOrderIntake, setSavingOrderIntake] = useState(false);
   const [feedback, setFeedback] = useState<SettingsFeedback>(null);
+  const [orderIntakeFeedback, setOrderIntakeFeedback] = useState<SettingsFeedback>(null);
   const [showPaidCallConfirmation, setShowPaidCallConfirmation] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setSettings(null);
+    setOrderIntakeSettings(null);
     setBusy('loading');
+    setOrderIntakeLoading(true);
     setFeedback(null);
+    setOrderIntakeFeedback(null);
+    void api
+      .getOrderIntakeSettings()
+      .then((intakeValue) => {
+        if (!active) return;
+        setOrderIntakeSettings(intakeValue);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setOrderIntakeFeedback({ kind: 'error', message: errorMessage(error) });
+        }
+      })
+      .finally(() => {
+        if (active) setOrderIntakeLoading(false);
+      });
     void api
       .getOcrSettings()
-      .then((value) => {
+      .then((ocrValue) => {
         if (!active) return;
-        setSettings(value);
-        setWorkspaceId(value.workspaceId);
+        setSettings(ocrValue);
+        setWorkspaceId(ocrValue.workspaceId);
         setApiKey('');
       })
       .catch((error: unknown) => {
@@ -896,6 +973,28 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
       active = false;
     };
   }, [api, reloadToken]);
+
+  async function toggleAutomaticImport() {
+    if (!orderIntakeSettings || savingOrderIntake) return;
+    const previous = orderIntakeSettings;
+    const automaticImportEnabled = !previous.automaticImportEnabled;
+    setOrderIntakeSettings({ automaticImportEnabled });
+    setSavingOrderIntake(true);
+    setOrderIntakeFeedback(null);
+    try {
+      const saved = await api.saveOrderIntakeSettings({ automaticImportEnabled });
+      setOrderIntakeSettings(saved);
+      setOrderIntakeFeedback({
+        kind: 'success',
+        message: saved.automaticImportEnabled ? '自动入库已开启' : '自动入库已关闭',
+      });
+    } catch (error) {
+      setOrderIntakeSettings(previous);
+      setOrderIntakeFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setSavingOrderIntake(false);
+    }
+  }
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -956,26 +1055,75 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
         <div>
           <span className="section-kicker">本机配置</span>
           <h1>设置</h1>
-          <p>管理识别服务与本机凭据。</p>
+          <p>管理订单接收方式、识别服务与本机凭据。</p>
         </div>
       </header>
 
       <div className="settings-body">
-        {busy === 'loading' && !settings ? (
-          <div className="settings-loading" role="status">正在读取 OCR 设置…</div>
-        ) : !settings ? (
-          <div className="settings-load-error">
-            <SettingsNotice feedback={feedback} />
-            <button
-              className="button button--quiet"
-              type="button"
-              onClick={() => setReloadToken((value) => value + 1)}
-            >
-              重新读取
-            </button>
-          </div>
-        ) : (
-          <form className="settings-form" aria-label="百炼 OCR 设置" onSubmit={(event) => void saveSettings(event)}>
+        <form className="settings-form" aria-label="应用设置" onSubmit={(event) => void saveSettings(event)}>
+          {orderIntakeLoading && !orderIntakeSettings && (
+            <div className="settings-loading" role="status">正在读取自动入库设置…</div>
+          )}
+          {!orderIntakeLoading && !orderIntakeSettings && (
+            <div className="settings-load-error">
+              <SettingsNotice feedback={orderIntakeFeedback} />
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={() => setReloadToken((value) => value + 1)}
+              >
+                重新读取自动入库设置
+              </button>
+            </div>
+          )}
+          {orderIntakeSettings && (
+            <section className="settings-section settings-section--order-intake" aria-labelledby="order-intake-heading">
+              <div className="settings-section-heading">
+                <div>
+                  <span className="section-kicker">订单接收</span>
+                  <h2 id="order-intake-heading">自动入库</h2>
+                  <p>仅将字段完整、格式正确且无交叉检查冲突的识别结果直接写入原始订单。</p>
+                </div>
+                <button
+                  className={`settings-switch${orderIntakeSettings.automaticImportEnabled ? ' is-on' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={orderIntakeSettings.automaticImportEnabled}
+                  aria-label="自动入库"
+                  aria-busy={savingOrderIntake}
+                  disabled={savingOrderIntake}
+                  onClick={() => void toggleAutomaticImport()}
+                >
+                  <span className="settings-switch-track" aria-hidden="true"><i /></span>
+                  <span>
+                    {savingOrderIntake
+                      ? '正在保存…'
+                      : orderIntakeSettings.automaticImportEnabled ? '已开启' : '已关闭'}
+                  </span>
+                </button>
+              </div>
+              <p className="order-intake-policy">
+                缺少关键字段或存在明确冲突时仍会进入待确认，并显示需要校对的具体原因。切换后立即保存。
+              </p>
+              <SettingsNotice feedback={orderIntakeFeedback} />
+            </section>
+          )}
+
+          {busy === 'loading' && !settings ? (
+            <div className="settings-loading" role="status">正在读取 OCR 设置…</div>
+          ) : !settings ? (
+            <div className="settings-load-error">
+              <SettingsNotice feedback={feedback} />
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={() => setReloadToken((value) => value + 1)}
+              >
+                重新读取 OCR 设置
+              </button>
+            </div>
+          ) : (
+            <>
             <section className="settings-section">
               <div className="settings-section-heading">
                 <div>
@@ -1104,8 +1252,9 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
             </section>
 
             <SettingsNotice feedback={feedback} />
-          </form>
-        )}
+            </>
+          )}
+        </form>
       </div>
     </section>
   );
@@ -1289,6 +1438,19 @@ function ReviewWorkspace({
         </figure>
 
         <form id="review-form" className="review-form" onSubmit={onConfirm}>
+          {draft.reviewIssues && draft.reviewIssues.length > 0 && (
+            <section className="review-issues" aria-labelledby="review-issues-heading">
+              <div>
+                <span className="section-kicker">待确认原因</span>
+                <h2 id="review-issues-heading">请重点核对</h2>
+              </div>
+              <ul>
+                {draft.reviewIssues.map((issue) => (
+                  <li key={issue}>{orderReviewIssueLabel(issue)}</li>
+                ))}
+              </ul>
+            </section>
+          )}
           <div className="review-summary">
             <div>
               <span>订单号</span>
@@ -1909,6 +2071,13 @@ function recognitionBatchItemResult(
   return `${reason}已保留原图，将按受控退避自动重试${retryNumber}${retryTime}`;
 }
 
+function recognitionBatchItemResultTitle(
+  item: RecognitionBatchView['items'][number],
+): string {
+  const reasons = item.reviewIssues?.map(orderReviewIssueLabel) ?? [];
+  return [recognitionBatchItemResult(item), ...reasons].join('；');
+}
+
 function processingCount(batch: RecognitionBatchView): number {
   return batch.items.filter((item) => (
     isActiveRecognitionBatchItemStatus(item.status)
@@ -1931,7 +2100,9 @@ function updateBatchDraftStatus(
   return batches.map((batch) => {
     if (!batch.items.some((item) => item.draftId === draftId)) return batch;
     const items = batch.items.map((item) => (
-      item.draftId === draftId ? { ...item, status, errorMessage: undefined } : item
+      item.draftId === draftId
+        ? { ...item, status, errorMessage: undefined, reviewIssues: [] }
+        : item
     ));
     return {
       ...batch,

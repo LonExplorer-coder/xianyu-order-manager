@@ -145,6 +145,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 3) migrateToVersion3(database);
   if (row.version < 4) migrateToVersion4(database);
   if (row.version < 5) migrateToVersion5(database);
+  if (row.version < 6) migrateToVersion6(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -517,6 +518,32 @@ function migrateToVersion5(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion6(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE order_drafts ADD COLUMN review_issues_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (
+          json_valid(review_issues_json)
+          AND json_type(review_issues_json) = 'array'
+        );
+      ALTER TABLE order_drafts ADD COLUMN intake_decision_pending INTEGER NOT NULL DEFAULT 0
+        CHECK (intake_decision_pending IN (0, 1));
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

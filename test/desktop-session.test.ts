@@ -98,4 +98,64 @@ describe('桌面启动状态', () => {
       orders: [],
     });
   });
+
+  it('自动入库只有显式开启才生效，并在重启后保留', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-settings-'));
+    const preferences = new Preferences(join(testRoot, '启动配置'));
+    const recognizer = new ControlledRecognizer(unusedRecognition);
+    const first = new DesktopSession(preferences, recognizer, unusedOcrSettings);
+    sessions.push(first);
+
+    expect(first.getOrderIntakeSettings()).toEqual({ automaticImportEnabled: false });
+    expect(first.saveOrderIntakeSettings({ automaticImportEnabled: true })).toEqual({
+      automaticImportEnabled: true,
+    });
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = new DesktopSession(preferences, recognizer, unusedOcrSettings);
+    sessions.push(reopened);
+    expect(reopened.getOrderIntakeSettings()).toEqual({ automaticImportEnabled: true });
+    expect(reopened.saveOrderIntakeSettings({ automaticImportEnabled: false })).toEqual({
+      automaticImportEnabled: false,
+    });
+  });
+
+  it('自动入库设置写入成功后不因额外读取失败而向界面误报保存失败', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-write-result-'));
+    const configDirectory = join(testRoot, '启动配置');
+    const preferences = new WriteThenReadFailsPreferences(configDirectory);
+    const session = new DesktopSession(
+      preferences,
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+
+    expect(session.saveOrderIntakeSettings({ automaticImportEnabled: true })).toEqual({
+      automaticImportEnabled: true,
+    });
+    expect(new Preferences(configDirectory).getAutomaticImportEnabled()).toBe(true);
+  });
 });
+
+class WriteThenReadFailsPreferences extends Preferences {
+  private failReads = false;
+
+  public override saveOrderIntakeSettings(
+    input: Parameters<Preferences['saveOrderIntakeSettings']>[0],
+  ): ReturnType<Preferences['saveOrderIntakeSettings']> {
+    const saved = super.saveOrderIntakeSettings(input);
+    this.failReads = true;
+    return saved;
+  }
+
+  public override setAutomaticImportEnabled(automaticImportEnabled: boolean): void {
+    this.saveOrderIntakeSettings({ automaticImportEnabled });
+  }
+
+  public override getAutomaticImportEnabled(): boolean {
+    if (this.failReads) throw new Error('模拟写入后的瞬时读取失败');
+    return super.getAutomaticImportEnabled();
+  }
+}

@@ -6,6 +6,7 @@ import type {
   OrderDetails,
   OrderDraft,
   OrderItem,
+  OrderReviewIssueCode,
   RecognitionBatch,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
@@ -18,6 +19,11 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import {
+  assessAutomaticImport,
+  isOrderReviewIssueCode,
+  normalizeOrderReviewIssues,
+} from '../core/order-intake';
 import {
   isValidPhonePair,
   normalizeAddress,
@@ -40,6 +46,7 @@ export type RecognitionBatchItemUpdate = {
   errorMessage?: string;
   retryCount?: number;
   nextRetryAt?: string | null;
+  reviewIssues?: OrderReviewIssueCode[];
 };
 
 export type PersistedRecognitionQueueItem = {
@@ -60,6 +67,8 @@ type PersistRecognitionDraftInput = {
   sha256: string;
   recognition: RecognitionResult;
   evidences: readonly RecognitionEvidence[];
+  reviewIssues: readonly OrderReviewIssueCode[];
+  intakeDecisionPending: boolean;
   createdAt: string;
 };
 
@@ -365,6 +374,8 @@ export class LocalApplication {
           sha256,
           recognition,
           evidences: [],
+          reviewIssues: assessAutomaticImport(recognition),
+          intakeDecisionPending: false,
           createdAt: now,
         });
         const linkedItem = workspace.database
@@ -414,9 +425,11 @@ export class LocalApplication {
     const itemRows = workspace.database
       .prepare(`
         SELECT items.id, items.batch_id, items.source_name, items.status,
-          items.draft_id, items.error_message, items.retry_count, items.next_retry_at
+          items.draft_id, items.error_message, items.retry_count, items.next_retry_at,
+          drafts.review_issues_json
         FROM recognition_batch_items AS items
         JOIN recognition_batches AS batches ON batches.id = items.batch_id
+        LEFT JOIN order_drafts AS drafts ON drafts.id = items.draft_id
         ORDER BY batches.created_at DESC, batches.id DESC, items.position, items.id
       `)
       .all() as unknown as SqlRow[];
@@ -444,6 +457,9 @@ export class LocalApplication {
           ...(row.next_retry_at === null
             ? {}
             : { nextRetryAt: asString(row.next_retry_at) }),
+          ...(row.review_issues_json === null
+            ? {}
+            : { reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json) }),
         }));
       return {
         id: batchId,
@@ -488,6 +504,27 @@ export class LocalApplication {
           input.batchId,
         );
       if (result.changes !== 1) throw new Error('未找到识别批次中的来源截图');
+      if (input.reviewIssues !== undefined) {
+        const linked = workspace.database
+          .prepare(`
+            SELECT draft_id
+            FROM recognition_batch_items
+            WHERE id = ? AND batch_id = ?
+          `)
+          .get(input.itemId, input.batchId) as SqlRow;
+        if (linked.draft_id !== null) {
+          workspace.database
+            .prepare(`
+              UPDATE order_drafts
+              SET review_issues_json = ?, intake_decision_pending = 0
+              WHERE id = ?
+            `)
+            .run(
+              serializeOrderReviewIssues(input.reviewIssues),
+              asString(linked.draft_id),
+            );
+        }
+      }
       this.refreshRecognitionBatchStatus(input.batchId);
     });
   }
@@ -533,6 +570,10 @@ export class LocalApplication {
       onPhase?.('validating');
       const recognition = attempt.result;
       validateRecognition(recognition);
+      const reviewIssues = assessAutomaticImport({
+        ...recognition,
+        reviewIssues: attempt.reviewIssues,
+      });
       const now = new Date().toISOString();
 
       workspace.transaction(() => {
@@ -546,6 +587,8 @@ export class LocalApplication {
           sha256,
           recognition,
           evidences: attempt.evidences,
+          reviewIssues,
+          intakeDecisionPending: true,
           createdAt: now,
         });
 
@@ -676,6 +719,7 @@ export class LocalApplication {
       status: row.review_cancelled_at === null
         ? asString(row.status) as OrderDraft['status']
         : 'cancelled',
+      reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json),
       createdAt: asString(row.created_at),
       items: itemRows.map((item) => ({
         id: asString(item.id),
@@ -690,6 +734,94 @@ export class LocalApplication {
         quantityInferred: asNumber(item.quantity_inferred) === 1,
       })),
     };
+  }
+
+  public saveDraftReviewIssues(
+    draftId: string,
+    reviewIssues: readonly OrderReviewIssueCode[],
+  ): OrderDraft {
+    const workspace = this.requireWorkspace();
+    const result = workspace.database
+      .prepare(`
+        UPDATE order_drafts
+        SET review_issues_json = ?, intake_decision_pending = 0
+        WHERE id = ?
+      `)
+      .run(serializeOrderReviewIssues(reviewIssues), draftId);
+    if (result.changes !== 1) throw new Error('未找到订单草稿');
+    return this.getDraft(draftId);
+  }
+
+  public listPendingOrderIntakeDraftIds(): string[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database
+      .prepare(`
+        SELECT id
+        FROM order_drafts
+        WHERE status = 'awaiting_review'
+          AND review_cancelled_at IS NULL
+          AND intake_decision_pending = 1
+        ORDER BY created_at, id
+      `)
+      .all() as unknown as SqlRow[];
+    return rows.map((row) => asString(row.id));
+  }
+
+  public hasActiveOrderIdentity(
+    identity: Pick<RecognitionResult, 'platform' | 'sellerAccount' | 'orderNumber'> & {
+      id?: string;
+    },
+    excludeDraftId?: string,
+  ): boolean;
+
+  public hasActiveOrderIdentity(
+    platform: RecognitionResult['platform'],
+    sellerAccount: string,
+    orderNumber: string,
+    excludeDraftId?: string,
+  ): boolean;
+
+  public hasActiveOrderIdentity(
+    identityOrPlatform: (
+      Pick<RecognitionResult, 'platform' | 'sellerAccount' | 'orderNumber'> & { id?: string }
+    ) | RecognitionResult['platform'],
+    sellerAccountOrExcludedDraftId?: string,
+    orderNumber?: string,
+    excludedDraftId?: string,
+  ): boolean {
+    const identity = typeof identityOrPlatform === 'string'
+      ? {
+          platform: identityOrPlatform,
+          sellerAccount: sellerAccountOrExcludedDraftId ?? '',
+          orderNumber: orderNumber ?? '',
+          excludedDraftId,
+        }
+      : {
+          ...identityOrPlatform,
+          excludedDraftId: sellerAccountOrExcludedDraftId ?? identityOrPlatform.id,
+        };
+    const sellerAccount = normalizedIdentityPart(identity.sellerAccount);
+    const platformOrderNumber = normalizedIdentityPart(identity.orderNumber);
+    if (!sellerAccount || !platformOrderNumber) return false;
+
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database
+      .prepare(`
+        SELECT platform, seller_account, platform_order_number, draft_id
+        FROM original_orders
+        WHERE platform = ?
+        UNION ALL
+        SELECT platform, seller_account, order_number AS platform_order_number, id AS draft_id
+        FROM order_drafts
+        WHERE platform = ?
+          AND review_cancelled_at IS NULL
+      `)
+      .all(identity.platform, identity.platform) as unknown as SqlRow[];
+    return rows.some((row) => (
+      asString(row.draft_id) !== identity.excludedDraftId &&
+      normalizedIdentityPart(asString(row.seller_account)) === sellerAccount &&
+      normalizedIdentityPart(asString(row.platform_order_number)) === platformOrderNumber
+    ));
   }
 
   public hasActiveSourceScreenshotSha256(sha256: string): boolean {
@@ -733,7 +865,10 @@ export class LocalApplication {
       const result = workspace.database
         .prepare(`
           UPDATE order_drafts
-          SET review_cancelled_at = ?
+          SET
+            review_cancelled_at = ?,
+            review_issues_json = '[]',
+            intake_decision_pending = 0
           WHERE id = ?
             AND status = 'awaiting_review'
             AND review_cancelled_at IS NULL
@@ -857,7 +992,15 @@ export class LocalApplication {
         );
 
       workspace.database
-        .prepare("UPDATE order_drafts SET status = 'confirmed', confirmed_at = ? WHERE id = ?")
+        .prepare(`
+          UPDATE order_drafts
+          SET
+            status = 'confirmed',
+            confirmed_at = ?,
+            review_issues_json = '[]',
+            intake_decision_pending = 0
+          WHERE id = ?
+        `)
         .run(now, draft.id);
       workspace.database
         .prepare(`
@@ -1139,10 +1282,10 @@ export class LocalApplication {
           product_total_cents, product_total_present,
           shipping_fee_cents, shipping_fee_present, amount_cents, amount_present,
           platform_transaction_status, fulfillment_status,
-          status, recognition_json, created_at
+          status, recognition_json, review_issues_json, intake_decision_pending, created_at
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, 'awaiting_review', ?, ?
+          ?, ?, ?, 'awaiting_review', ?, ?, ?, ?
         )
       `)
       .run(
@@ -1175,6 +1318,8 @@ export class LocalApplication {
         recognition.platformTransactionStatus,
         recognition.fulfillmentStatus,
         JSON.stringify(recognition),
+        serializeOrderReviewIssues(input.reviewIssues),
+        input.intakeDecisionPending ? 1 : 0,
         input.createdAt,
       );
 
@@ -1402,6 +1547,34 @@ function storedOptionalAmount(
 ): number | null {
   if (value === null) return null;
   return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : fallback;
+}
+
+function parseStoredOrderReviewIssues(
+  value: string | number | null | undefined,
+): OrderReviewIssueCode[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(asString(value));
+  } catch (error) {
+    throw new Error('订单草稿待确认原因格式错误', { cause: error });
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isOrderReviewIssueCode)) {
+    throw new Error('订单草稿待确认原因格式错误');
+  }
+  return normalizeOrderReviewIssues(parsed);
+}
+
+function serializeOrderReviewIssues(
+  reviewIssues: readonly OrderReviewIssueCode[],
+): string {
+  if (!Array.isArray(reviewIssues) || !reviewIssues.every(isOrderReviewIssueCode)) {
+    throw new Error('订单草稿待确认原因格式无效');
+  }
+  return JSON.stringify(normalizeOrderReviewIssues(reviewIssues));
+}
+
+function normalizedIdentityPart(value: string): string {
+  return value.normalize('NFKC').trim();
 }
 
 function isPlatformTransactionStatus(

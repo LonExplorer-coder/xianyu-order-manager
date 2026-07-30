@@ -1,9 +1,15 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type {
+  OrderIntakeSettingsView,
+  SaveOrderIntakeSettingsInput,
+} from '../core/order-intake';
+
 type StoredPreferences = {
   lastDataDirectory?: string;
   lastSourceScreenshotDirectory?: string;
+  automaticImportEnabled?: boolean;
 };
 
 export class Preferences {
@@ -27,6 +33,30 @@ export class Preferences {
 
   public setLastSourceScreenshotDirectory(sourceDirectory: string): void {
     this.update({ lastSourceScreenshotDirectory: sourceDirectory });
+  }
+
+  public getOrderIntakeSettings(): OrderIntakeSettingsView {
+    return {
+      automaticImportEnabled: this.read().automaticImportEnabled === true,
+    };
+  }
+
+  public saveOrderIntakeSettings(
+    input: SaveOrderIntakeSettingsInput,
+  ): OrderIntakeSettingsView {
+    if (typeof input.automaticImportEnabled !== 'boolean') {
+      throw new Error('自动入库设置格式无效');
+    }
+    this.update({ automaticImportEnabled: input.automaticImportEnabled });
+    return { automaticImportEnabled: input.automaticImportEnabled };
+  }
+
+  public getAutomaticImportEnabled(): boolean {
+    return this.getOrderIntakeSettings().automaticImportEnabled;
+  }
+
+  public setAutomaticImportEnabled(automaticImportEnabled: boolean): void {
+    this.saveOrderIntakeSettings({ automaticImportEnabled });
   }
 
   private read(): StoredPreferences {

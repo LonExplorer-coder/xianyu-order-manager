@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { BailianOcrClient } from '../src/adapters/recognition/bailian-ocr-client';
+import { assessAutomaticImport } from '../src/core/order-intake';
 
 function successfulKieResponse(
   kvResult: Record<string, unknown>,
@@ -5891,6 +5892,45 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(attempt.result.amountCents).toBe(800);
   });
 
+  it('商品字段都存在但明细小计不一致时仍只追加一次定向复核', async () => {
+    const primary = syntheticModularStatusExtraction({
+      pageHeaderStatusText: '买家已付款，请尽快发货',
+      shippingControls: ['去发货'],
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+    const purchasedItems = primary.purchased_items as {
+      items: Array<Record<string, unknown>>;
+    };
+    purchasedItems.items[0].quantity = '2';
+    purchasedItems.items[0].quantity_text = '×2';
+    const responses = [
+      successfulKieResponse(primary, 'request-item-cross-check-primary'),
+      successfulKieResponse({
+        purchased_items: {
+          items: [{
+            title: '合成状态证据商品',
+            spec: '规格S',
+            unit_price: '31.00',
+            quantity: '1',
+            quantity_text: '×1',
+          }],
+          controls: [],
+        },
+      }, 'request-item-cross-check-review'),
+    ];
+    const request = vi.fn(async (): Promise<Response> => responses.shift()!);
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('item-cross-check'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.evidences).toHaveLength(2);
+    expect(attempt.reviewIssues).toEqual(['targeted_review_conflict']);
+  });
+
   it('定向复核失败时保留首次结果且不会继续第三次调用', async () => {
     const primaryResult = {
       order_number: 'XY-SYNTH-REVIEW-FALLBACK-0001',
@@ -5943,6 +5983,116 @@ describe('阿里云百炼 OCR 请求契约', () => {
       amountCents: 800,
       items: [expect.objectContaining({ unitPriceCents: null })],
     });
+    expect(attempt.reviewIssues).toEqual(['targeted_review_failed']);
+  });
+
+  it('定向复核中的国家码和姓名空格差异不视为关键字段冲突', async () => {
+    const responses = [
+      successfulKieResponse({
+        order_number: 'XY-SYNTH-EQUIVALENT-CONTACT-0001',
+        buyer_nickname: 'x***4',
+        recipient: '合 成 收 件 人',
+        phone: '+86 139 0000 0001',
+        address: null,
+        province: null,
+        city: null,
+        district: null,
+        product_total: '8.00',
+        shipping_fee: '0.00',
+        amount: '8.00',
+        platform_transaction_status: 'paid',
+        fulfillment_status: 'pending_shipment',
+        items: [{
+          title: '合成测试商品',
+          spec: null,
+          unit_price: '8.00',
+          quantity: '1',
+        }],
+      }, 'request-equivalent-contact-primary'),
+      successfulKieResponse({
+        shipping_contact: {
+          recipient: '合成收件人',
+          phone: '13900000001',
+          address: '测试省测试市示例区安全路1号',
+          province: '测试省',
+          city: '测试市',
+          district: '示例区',
+        },
+      }, 'request-equivalent-contact-review'),
+    ];
+    const request = vi.fn(async (): Promise<Response> => responses.shift()!);
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder({
+      workspaceId: 'ws-test123',
+      region: 'cn-beijing',
+      apiKey: 'sk-synthetic-equivalent-contact',
+      sellerAccount: '默认闲鱼账号',
+      source: {
+        absolutePath: '/private/synthetic-equivalent-contact.png',
+        originalName: '合成等价联系人订单.png',
+        mimeType: 'image/png',
+        sha256: 'synthetic-equivalent-contact',
+        bytes: Uint8Array.from([1]),
+      },
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({
+      recipient: '合 成 收 件 人',
+      phoneNormalized: '8613900000001',
+      addressNormalized: '测试省测试市示例区安全路1号',
+    });
+    expect(attempt.reviewIssues).toEqual([]);
+  });
+
+  it('完整模块在一次复核后仍缺失时标记截图内容不完整', async () => {
+    const primary = syntheticModularStatusExtraction({
+      pageHeaderStatusText: '买家已付款，请尽快发货',
+      shippingControls: ['去发货'],
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+    });
+    primary.transaction_information = {
+      detail_state: 'unknown',
+      order_number: null,
+      alipay_transaction_number: null,
+      buyer_nickname_label: null,
+      buyer_nickname: null,
+      order_time: null,
+      payment_time: null,
+      product_total: null,
+      shipping_fee: null,
+      amount: null,
+      platform_transaction_status: null,
+      fulfillment_status: null,
+      controls: [],
+    };
+    const responses = [
+      successfulKieResponse(primary, 'request-incomplete-module-primary'),
+      successfulKieResponse(
+        {
+          transaction_information: {
+            detail_state: 'unknown',
+            order_number: null,
+            product_total: null,
+            shipping_fee: null,
+            amount: null,
+          },
+        },
+        'request-incomplete-module-review',
+      ),
+    ];
+    const request = vi.fn(async (): Promise<Response> => responses.shift()!);
+    const client = new BailianOcrClient(request);
+
+    const attempt = await client.recognizeOrder(
+      syntheticStatusRecognitionInput('incomplete-module'),
+    );
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.result).toMatchObject({ orderNumber: '', amountCents: null });
+    expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
   });
 
   it('定向复核不覆盖首次有效金额，也不把价格合并到规格冲突的单商品', async () => {
@@ -6014,6 +6164,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantityInferred: true,
       })],
     });
+    expect(attempt.reviewIssues).toEqual(['targeted_review_conflict']);
   });
 
   it('地址补拆跳过直辖市和省直管县的占位层级', async () => {
@@ -6067,6 +6218,64 @@ describe('阿里云百炼 OCR 请求契约', () => {
       });
 
       expect(attempt.result).toMatchObject(sample.expected);
+    }
+  });
+
+  it('地址补拆不会把小区或园区名称登记为区县', async () => {
+    const samples = [
+      {
+        address: '南山小区3栋401室',
+        expected: { province: '', city: '', district: '' },
+      },
+      {
+        address: '东江高新科技园区6栋3楼',
+        expected: { province: '', city: '', district: '' },
+      },
+      {
+        address: '上海市某某小区3栋401室',
+        expected: { province: '上海市', city: '上海市', district: '' },
+      },
+    ];
+    for (const [index, sample] of samples.entries()) {
+      const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
+        order_number: `XY-SYNTH-FACILITY-ADDRESS-${index}`,
+        buyer_nickname: 'x***4',
+        recipient: '合成收件人',
+        phone: '13900000001',
+        address: sample.address,
+        province: null,
+        city: null,
+        district: null,
+        product_total: '8.00',
+        shipping_fee: '0.00',
+        amount: '8.00',
+        platform_transaction_status: 'paid',
+        fulfillment_status: 'pending_shipment',
+        items: [{
+          title: '合成测试商品',
+          spec: null,
+          unit_price: '8.00',
+          quantity: '1',
+        }],
+      }, `request-facility-address-${index}`));
+      const client = new BailianOcrClient(request);
+
+      const attempt = await client.recognizeOrder({
+        workspaceId: 'ws-test123',
+        region: 'cn-beijing',
+        apiKey: 'sk-synthetic-facility-address',
+        sellerAccount: '默认闲鱼账号',
+        source: {
+          absolutePath: `/private/synthetic-facility-address-${index}.png`,
+          originalName: `合成设施地址${index}.png`,
+          mimeType: 'image/png',
+          sha256: `synthetic-facility-address-${index}`,
+          bytes: Uint8Array.from([1]),
+        },
+      });
+
+      expect(attempt.result).toMatchObject(sample.expected);
+      expect(assessAutomaticImport(attempt.result)).toContain('incomplete_address');
     }
   });
 

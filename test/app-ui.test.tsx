@@ -10,10 +10,12 @@ import type { DesktopApi } from '../src/core/desktop-api';
 import type {
   OrderDetails,
   OrderDraft,
+  OrderSummary,
   OriginalOrder,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
 } from '../src/core/contracts';
+import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
 import { App } from '../src/renderer/App';
 
@@ -149,8 +151,13 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     cancelDraft: vi.fn().mockResolvedValue(undefined),
     confirmDraft: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
+    onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     getScreenshotDataUrl: vi.fn(),
+    getOrderIntakeSettings: vi.fn().mockResolvedValue({
+      automaticImportEnabled: false,
+    }),
+    saveOrderIntakeSettings: vi.fn(async (input) => input),
     getOcrSettings: vi.fn().mockResolvedValue({
       workspaceId: '',
       region: 'cn-beijing',
@@ -224,8 +231,9 @@ describe('订单管理工作台', () => {
       selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
       confirmDraft,
-      listOrders: vi.fn().mockResolvedValue([
-        {
+      listOrders: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValue([{
           id: confirmedOrder.id,
           orderNumber: confirmedOrder.orderNumber,
           buyerNickname: confirmedOrder.buyerNickname,
@@ -235,8 +243,7 @@ describe('订单管理工作台', () => {
           platformTransactionStatus: confirmedOrder.platformTransactionStatus,
           fulfillmentStatus: confirmedOrder.fulfillmentStatus,
           createdAt: confirmedOrder.createdAt,
-        },
-      ]),
+        }]),
     });
 
     render(<App api={api} />);
@@ -631,6 +638,17 @@ describe('订单管理工作台', () => {
       }),
       getOrder: vi.fn().mockResolvedValue(orderDetails),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+      listOrders: vi.fn().mockResolvedValue([{
+        id: confirmedOrder.id,
+        orderNumber: confirmedOrder.orderNumber,
+        buyerNickname: confirmedOrder.buyerNickname,
+        recipient: confirmedOrder.recipient,
+        amountCents: confirmedOrder.amountCents,
+        itemCount: 1,
+        platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+        fulfillmentStatus: confirmedOrder.fulfillmentStatus,
+        createdAt: confirmedOrder.createdAt,
+      }]),
     });
 
     render(<App api={api} />);
@@ -693,6 +711,17 @@ describe('订单管理工作台', () => {
       }),
       getOrder: vi.fn().mockResolvedValue(detailsWithEvidence),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+      listOrders: vi.fn().mockResolvedValue([{
+        id: detailedOrder.id,
+        orderNumber: detailedOrder.orderNumber,
+        buyerNickname: detailedOrder.buyerNickname,
+        recipient: detailedOrder.recipient,
+        amountCents: detailedOrder.amountCents,
+        itemCount: detailedOrder.items.length,
+        platformTransactionStatus: detailedOrder.platformTransactionStatus,
+        fulfillmentStatus: detailedOrder.fulfillmentStatus,
+        createdAt: detailedOrder.createdAt,
+      }]),
     });
 
     render(<App api={api} />);
@@ -908,6 +937,160 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('table', { name: '批次截图状态' })).toHaveTextContent('待确认');
   });
 
+  it('自动入库后接收订单变更通知，无需刷新即更新订单表', async () => {
+    let publishOrders!: (orders: OrderSummary[]) => void;
+    const onOrdersChanged = vi.fn((listener: Parameters<DesktopApi['onOrdersChanged']>[0]) => {
+      publishOrders = listener;
+      return () => undefined;
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      onOrdersChanged,
+    });
+
+    render(<App api={api} />);
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    await waitFor(() => expect(onOrdersChanged).toHaveBeenCalledOnce());
+
+    await act(async () => publishOrders([{
+      id: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+      buyerNickname: confirmedOrder.buyerNickname,
+      recipient: confirmedOrder.recipient,
+      amountCents: confirmedOrder.amountCents,
+      itemCount: confirmedOrder.items.length,
+      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
+      createdAt: confirmedOrder.createdAt,
+    }]));
+
+    expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
+    expect(screen.getByRole('button', {
+      name: `查看订单 ${confirmedOrder.orderNumber}`,
+    })).toBeVisible();
+  });
+
+  it('启动快照与事件订阅之间发生的自动入库会通过订阅后查询补齐', async () => {
+    const importedOrder: OrderSummary = {
+      id: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+      buyerNickname: confirmedOrder.buyerNickname,
+      recipient: confirmedOrder.recipient,
+      amountCents: confirmedOrder.amountCents,
+      itemCount: confirmedOrder.items.length,
+      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
+      createdAt: confirmedOrder.createdAt,
+    };
+    const onOrdersChanged = vi.fn(() => () => undefined);
+    const listOrders = vi.fn().mockResolvedValue([importedOrder]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      onOrdersChanged,
+      listOrders,
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
+    expect(onOrdersChanged).toHaveBeenCalledOnce();
+    expect(listOrders).toHaveBeenCalledOnce();
+  });
+
+  it('启动订单查询较晚返回时不会关闭用户已经打开的校对页', async () => {
+    const user = userEvent.setup();
+    let finishInitialQuery!: (orders: OrderSummary[]) => void;
+    const initialQuery = new Promise<OrderSummary[]>((resolve) => {
+      finishInitialQuery = resolve;
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listOrders: vi.fn().mockReturnValue(initialQuery),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    expect(await screen.findByRole('heading', { name: '校对识别结果' })).toBeVisible();
+
+    await act(async () => finishInitialQuery([]));
+
+    expect(screen.getByRole('heading', { name: '校对识别结果' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '收件人' })).toHaveValue(draft.recipient);
+  });
+
+  it('确认后的较晚订单查询不会覆盖期间收到的自动入库通知', async () => {
+    const user = userEvent.setup();
+    let publishOrders!: (orders: OrderSummary[]) => void;
+    let finishConfirmationQuery!: (orders: OrderSummary[]) => void;
+    const confirmationQuery = new Promise<OrderSummary[]>((resolve) => {
+      finishConfirmationQuery = resolve;
+    });
+    const confirmedSummary: OrderSummary = {
+      id: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+      buyerNickname: confirmedOrder.buyerNickname,
+      recipient: confirmedOrder.recipient,
+      amountCents: confirmedOrder.amountCents,
+      itemCount: confirmedOrder.items.length,
+      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
+      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
+      createdAt: confirmedOrder.createdAt,
+    };
+    const automaticSummary: OrderSummary = {
+      ...confirmedSummary,
+      id: 'order-auto-newer',
+      orderNumber: 'XY-AUTO-NEWER-0001',
+      recipient: '自动入库收件人',
+    };
+    const listOrders = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockReturnValue(confirmationQuery);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      confirmDraft: vi.fn().mockResolvedValue(confirmedOrder),
+      listOrders,
+      onOrdersChanged: vi.fn((listener) => {
+        publishOrders = listener;
+        return () => undefined;
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', { name: '确认并入库' }));
+    await waitFor(() => expect(listOrders).toHaveBeenCalledTimes(2));
+
+    await act(async () => publishOrders([automaticSummary, confirmedSummary]));
+    await act(async () => finishConfirmationQuery([confirmedSummary]));
+
+    expect(await screen.findByRole('button', {
+      name: `查看订单 ${automaticSummary.orderNumber}`,
+    })).toBeVisible();
+    expect(screen.getByRole('button', {
+      name: `查看订单 ${confirmedSummary.orderNumber}`,
+    })).toBeVisible();
+  });
+
   it('较晚返回的旧批次查询不会覆盖主进程刚推送的新进度', async () => {
     let publish!: (batches: RecognitionBatchView[]) => void;
     let finishInitialQuery!: (batches: RecognitionBatchView[]) => void;
@@ -1107,6 +1290,52 @@ describe('订单管理工作台', () => {
     expect(screen.getByLabelText('成交金额')).toHaveValue(null);
   });
 
+  it('批次结果和校对页展示确定性待确认原因，不展示模型置信度', async () => {
+    const user = userEvent.setup();
+    const reviewIssues = ['missing_phone', 'item_total_mismatch'] as const;
+    const reviewDraft: OrderDraft = {
+      ...draft,
+      reviewIssues: [...reviewIssues],
+    };
+    const batch = recognitionBatchView('batch-review-issues', [{
+      id: 'batch-item-review-issues',
+      batchId: 'batch-review-issues',
+      sourceName: '需重点校对.png',
+      status: 'awaiting_confirmation',
+      draftId: reviewDraft.id,
+      reviewIssues: [...reviewIssues],
+    }]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      getDraft: vi.fn().mockResolvedValue(reviewDraft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+    const table = await screen.findByRole('table', { name: '批次截图状态' });
+    const row = within(table).getByText('需重点校对.png').closest('tr');
+    if (!row) throw new Error('未找到待确认批次项');
+    const batchReasons = within(row).getByRole('list', { name: '待确认原因' });
+    for (const issue of reviewIssues) {
+      expect(batchReasons).toHaveTextContent(orderReviewIssueLabel(issue));
+    }
+    expect(row).not.toHaveTextContent('置信度');
+
+    await user.click(within(row).getByRole('button', { name: '校对' }));
+    const reviewReasons = await screen.findByRole('region', { name: '请重点核对' });
+    for (const issue of reviewIssues) {
+      expect(reviewReasons).toHaveTextContent(orderReviewIssueLabel(issue));
+    }
+    expect(screen.getByRole('heading', { name: '校对识别结果' }).closest('section'))
+      .not.toHaveTextContent('置信度');
+  });
+
   it('从批次进入单张校对，确认后返回原批次并更新为已入库', async () => {
     const user = userEvent.setup();
     const batch = recognitionBatchView('batch-review-return', [
@@ -1171,6 +1400,134 @@ describe('订单管理工作台', () => {
       '一次最多选择 50 张，当前选择了 51 张，请重新选择',
     );
     expect(screen.getByRole('heading', { name: '还没有订单' })).toBeVisible();
+  });
+
+  it('设置页在 OCR 之前显示自动入库开关，切换后立即保存', async () => {
+    const user = userEvent.setup();
+    let finishSave!: (value: { automaticImportEnabled: boolean }) => void;
+    const saveOrderIntakeSettings = vi.fn((
+      _input: { automaticImportEnabled: boolean },
+    ) => new Promise<{ automaticImportEnabled: boolean }>((resolve) => {
+      finishSave = resolve;
+    }));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOrderIntakeSettings: vi.fn().mockResolvedValue({
+        automaticImportEnabled: false,
+      }),
+      saveOrderIntakeSettings,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
+    const settingsForm = screen.getByRole('form', { name: '应用设置' });
+    expect(within(settingsForm).getAllByRole('heading', { level: 2 }).slice(0, 2)
+      .map((heading) => heading.textContent)).toEqual(['自动入库', '百炼 OCR']);
+    expect(automaticImport).toHaveAttribute('aria-checked', 'false');
+
+    await user.click(automaticImport);
+
+    expect(saveOrderIntakeSettings).toHaveBeenCalledOnce();
+    expect(saveOrderIntakeSettings).toHaveBeenCalledWith({ automaticImportEnabled: true });
+    expect(automaticImport).toHaveAttribute('aria-checked', 'true');
+    expect(automaticImport).toBeDisabled();
+
+    await act(async () => finishSave({ automaticImportEnabled: true }));
+    expect(await screen.findByText('自动入库已开启')).toBeVisible();
+    expect(automaticImport).toBeEnabled();
+  });
+
+  it('自动入库设置保存失败时回滚开关并显示错误', async () => {
+    const user = userEvent.setup();
+    const saveOrderIntakeSettings = vi.fn().mockRejectedValue(
+      new Error('无法保存自动入库设置'),
+    );
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOrderIntakeSettings: vi.fn().mockResolvedValue({
+        automaticImportEnabled: false,
+      }),
+      saveOrderIntakeSettings,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
+    await user.click(automaticImport);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法保存自动入库设置');
+    expect(automaticImport).toHaveAttribute('aria-checked', 'false');
+    expect(automaticImport).toBeEnabled();
+  });
+
+  it('OCR 设置读取失败时仍可查看并关闭已开启的自动入库', async () => {
+    const user = userEvent.setup();
+    const saveOrderIntakeSettings = vi.fn().mockResolvedValue({
+      automaticImportEnabled: false,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOrderIntakeSettings: vi.fn().mockResolvedValue({
+        automaticImportEnabled: true,
+      }),
+      saveOrderIntakeSettings,
+      getOcrSettings: vi.fn().mockRejectedValue(
+        new Error('无法读取系统凭据库中的 OCR 设置'),
+      ),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
+    expect(automaticImport).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '无法读取系统凭据库中的 OCR 设置',
+    );
+
+    await user.click(automaticImport);
+
+    expect(saveOrderIntakeSettings).toHaveBeenCalledWith({
+      automaticImportEnabled: false,
+    });
+    expect(await screen.findByText('自动入库已关闭')).toBeVisible();
+    expect(automaticImport).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('OCR 设置一直未返回时也不会阻塞自动入库开关', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOrderIntakeSettings: vi.fn().mockResolvedValue({
+        automaticImportEnabled: true,
+      }),
+      getOcrSettings: vi.fn().mockReturnValue(new Promise(() => undefined)),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
+    expect(automaticImport).toHaveAttribute('aria-checked', 'true');
+    expect(automaticImport).toBeEnabled();
+    expect(screen.getByText('正在读取 OCR 设置…')).toBeVisible();
   });
 
   it('从侧栏打开百炼 OCR 设置时只显示密钥状态，不回填 API Key', async () => {

@@ -4,6 +4,7 @@ import type {
 import type {
   OrderDetails,
   OrderDraft,
+  OrderReviewIssueCode,
   OrderSummary,
   OriginalOrder,
   Recognizer,
@@ -14,6 +15,11 @@ import {
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
+import {
+  assessAutomaticImport,
+  type OrderIntakeSettingsView,
+  type SaveOrderIntakeSettingsInput,
+} from '../core/order-intake';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
@@ -44,6 +50,7 @@ export class DesktopSession {
   private readonly recognitionBatchListeners = new Set<
     (batches: RecognitionBatchView[]) => void
   >();
+  private readonly orderListeners = new Set<(orders: OrderSummary[]) => void>();
 
   public constructor(
     private readonly preferences: Preferences,
@@ -221,6 +228,7 @@ export class DesktopSession {
         status: 'awaiting_confirmation',
         draftId: draft.id,
         nextRetryAt: null,
+        reviewIssues: draft.reviewIssues ?? [],
       },
     );
     return structuredClone(draft);
@@ -235,6 +243,11 @@ export class DesktopSession {
   ): () => void {
     this.recognitionBatchListeners.add(listener);
     return () => this.recognitionBatchListeners.delete(listener);
+  }
+
+  public onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void {
+    this.orderListeners.add(listener);
+    return () => this.orderListeners.delete(listener);
   }
 
   public getLastSourceScreenshotDirectory(): string | undefined {
@@ -301,8 +314,21 @@ export class DesktopSession {
     return this.ocrSettings.testConnection(input);
   }
 
+  public getOrderIntakeSettings(): OrderIntakeSettingsView {
+    return {
+      automaticImportEnabled: this.preferences.getAutomaticImportEnabled(),
+    };
+  }
+
+  public saveOrderIntakeSettings(
+    input: SaveOrderIntakeSettingsInput,
+  ): OrderIntakeSettingsView {
+    return this.preferences.saveOrderIntakeSettings(input);
+  }
+
   public close(): void {
     this.recognitionBatchListeners.clear();
+    this.orderListeners.clear();
     this.cancelRecognitionRetryTimers();
     this.workspaceGeneration += 1;
     this.recognitionBatches.splice(0);
@@ -331,6 +357,7 @@ export class DesktopSession {
     const application = new LocalApplication(this.recognizer);
     try {
       application.openDataDirectory(dataDirectory);
+      this.reconcilePendingOrderIntake(application);
       const recognitionBatches = application.restoreRecognitionBatches();
       if (remember) this.preferences.setLastDataDirectory(dataDirectory);
       this.application = application;
@@ -385,10 +412,18 @@ export class DesktopSession {
 
   private refreshOrders(): void {
     if (this.state.kind !== 'ready') return;
+    const orders = this.requireApplication().listOrders();
     this.state = {
       ...this.state,
-      orders: this.requireApplication().listOrders(),
+      orders,
     };
+    for (const listener of this.orderListeners) {
+      try {
+        listener(structuredClone(orders));
+      } catch {
+        // A renderer listener cannot interrupt confirmation or automatic import.
+      }
+    }
   }
 
   private async processRecognitionItem(
@@ -460,6 +495,24 @@ export class DesktopSession {
         },
         itemId,
       );
+      const intake = this.decideOrderIntake(application, draft);
+      if (intake.status === 'imported') {
+        this.refreshOrders();
+        this.applyRecognitionItemStatusToView(
+          generation,
+          {
+            batchId,
+            itemId,
+            status: 'imported',
+            draftId: draft.id,
+            sha256,
+            retryCount,
+            nextRetryAt: null,
+            reviewIssues: [],
+          },
+        );
+        return;
+      }
       this.applyRecognitionItemStatusToView(
         generation,
         {
@@ -470,6 +523,7 @@ export class DesktopSession {
           sha256,
           retryCount,
           nextRetryAt: null,
+          reviewIssues: intake.draft.reviewIssues ?? [],
         },
       );
     } catch (error) {
@@ -604,6 +658,7 @@ export class DesktopSession {
     if (update.draftId) item.draftId = update.draftId;
     if (update.errorMessage) item.errorMessage = update.errorMessage;
     else delete item.errorMessage;
+    if (update.reviewIssues) item.reviewIssues = [...update.reviewIssues];
     if (update.retryCount !== undefined) item.retryCount = update.retryCount;
     if (update.nextRetryAt) item.nextRetryAt = update.nextRetryAt;
     else if (update.nextRetryAt === null) delete item.nextRetryAt;
@@ -620,6 +675,7 @@ export class DesktopSession {
       if (!item) continue;
       item.status = status;
       delete item.errorMessage;
+      item.reviewIssues = [];
       updateBatchProgress(batch);
       this.notifyRecognitionBatchesChanged();
       return;
@@ -668,6 +724,64 @@ export class DesktopSession {
     }
     return this.application;
   }
+
+  private automaticImportEnabledForBackgroundWork(): boolean {
+    try {
+      return this.preferences.getAutomaticImportEnabled();
+    } catch {
+      // A damaged or temporarily unreadable preference must fail closed: the
+      // recognized draft remains available for manual confirmation.
+      return false;
+    }
+  }
+
+  private reconcilePendingOrderIntake(application: LocalApplication): void {
+    for (const draftId of application.listPendingOrderIntakeDraftIds()) {
+      this.decideOrderIntake(application, application.getDraft(draftId));
+    }
+  }
+
+  private decideOrderIntake(
+    application: LocalApplication,
+    draft: OrderDraft,
+  ): { status: 'imported' | 'awaiting_confirmation'; draft: OrderDraft } {
+    const automaticImportEnabled = this.automaticImportEnabledForBackgroundWork();
+    const reviewIssues = uniqueReviewIssues([
+      ...(draft.reviewIssues ?? []),
+      ...assessAutomaticImport(draft),
+      ...(automaticImportEnabled ? [] : ['automatic_import_disabled'] as const),
+    ]);
+    if (
+      automaticImportEnabled &&
+      reviewIssues.length === 0 &&
+      application.hasActiveOrderIdentity(
+        draft.platform,
+        draft.sellerAccount,
+        draft.orderNumber,
+        draft.id,
+      )
+    ) {
+      reviewIssues.push('duplicate_order');
+    }
+    if (automaticImportEnabled && reviewIssues.length === 0) {
+      try {
+        application.confirmDraft(draft);
+        return { status: 'imported', draft: { ...draft, status: 'confirmed' } };
+      } catch {
+        reviewIssues.push('automatic_import_failed');
+      }
+    }
+    return {
+      status: 'awaiting_confirmation',
+      draft: application.saveDraftReviewIssues(draft.id, reviewIssues),
+    };
+  }
+}
+
+function uniqueReviewIssues(
+  issues: readonly OrderReviewIssueCode[],
+): OrderReviewIssueCode[] {
+  return [...new Set(issues)];
 }
 
 function updateBatchProgress(batch: RecognitionBatchView): void {

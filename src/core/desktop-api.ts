@@ -11,6 +11,10 @@ import type {
   OcrSettingsView,
   SaveOcrSettingsInput,
 } from './ocr-settings';
+import type {
+  OrderIntakeSettingsView,
+  SaveOrderIntakeSettingsInput,
+} from './order-intake';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -33,8 +37,13 @@ export interface DesktopApi {
   cancelDraft(draftId: string): Promise<void>;
   confirmDraft(draft: OrderDraft): Promise<OriginalOrder>;
   listOrders(): Promise<OrderSummary[]>;
+  onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   getScreenshotDataUrl(screenshotId: string): Promise<string>;
+  getOrderIntakeSettings(): Promise<OrderIntakeSettingsView>;
+  saveOrderIntakeSettings(
+    input: SaveOrderIntakeSettingsInput,
+  ): Promise<OrderIntakeSettingsView>;
   getOcrSettings(): Promise<OcrSettingsView>;
   saveOcrSettings(input: SaveOcrSettingsInput): Promise<OcrSettingsView>;
   removeOcrApiKey(): Promise<OcrSettingsView>;

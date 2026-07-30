@@ -8,6 +8,7 @@ import type {
   OcrConnectionTestInput,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
+import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
 import { DesktopSession } from './desktop-session';
 import { createConfiguredDesktopSession } from './production-session';
 import {
@@ -113,6 +114,10 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('workflow:recognition-batches-changed', batches);
   });
+  desktopSession.onOrdersChanged((orders) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('orders:changed', orders);
+  });
 
   ipcMain.handle('workflow:confirm-draft', (_event, draft: OrderDraft) => {
     return desktopSession.confirmDraft(draft);
@@ -124,6 +129,12 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
+  });
+  ipcMain.handle('settings:get-order-intake', () => {
+    return desktopSession.getOrderIntakeSettings();
+  });
+  ipcMain.handle('settings:save-order-intake', (_event, input: unknown) => {
+    return desktopSession.saveOrderIntakeSettings(parseSaveOrderIntakeSettingsInput(input));
   });
   ipcMain.handle('settings:get-ocr', () => desktopSession.getOcrSettings());
   ipcMain.handle('settings:save-ocr', (_event, input: unknown) => {
@@ -197,6 +208,13 @@ function parseSaveOcrSettingsInput(input: unknown): SaveOcrSettingsInput {
   const apiKey = asBoundedString(input.apiKey, 4_096, 'API Key', true);
   if (input.region !== 'cn-beijing') throw new Error('当前暂不支持该百炼地域');
   return { workspaceId, apiKey, region: input.region };
+}
+
+function parseSaveOrderIntakeSettingsInput(input: unknown): SaveOrderIntakeSettingsInput {
+  if (!isRecord(input) || typeof input.automaticImportEnabled !== 'boolean') {
+    throw new Error('订单接收设置格式无效');
+  }
+  return { automaticImportEnabled: input.automaticImportEnabled };
 }
 
 function parseConnectionTestInput(input: unknown): OcrConnectionTestInput {

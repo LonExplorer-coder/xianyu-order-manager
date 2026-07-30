@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v5 并回填持久队列字段', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v6 并回填待确认原因', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -24,6 +24,7 @@ describe('数据库升级', () => {
       { version: 3 },
       { version: 4 },
       { version: 5 },
+      { version: 6 },
     ]);
     expect(
       (
@@ -47,6 +48,34 @@ describe('数据库升级', () => {
         .prepare("SELECT review_cancelled_at FROM order_drafts WHERE id = 'draft-v1'")
         .get(),
     ).toEqual({ review_cancelled_at: null });
+    expect(
+      (
+        first.database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
+          name: string;
+          type: string;
+          notnull: number;
+          dflt_value: string | null;
+        }>
+      ).filter((column) => column.name === 'review_issues_json'),
+    ).toMatchObject([{
+      name: 'review_issues_json',
+      type: 'TEXT',
+      notnull: 1,
+      dflt_value: "'[]'",
+    }]);
+    expect(
+      first.database
+        .prepare("SELECT review_issues_json FROM order_drafts WHERE id = 'draft-v1'")
+        .get(),
+    ).toEqual({ review_issues_json: '[]' });
+    expect(
+      first.database
+        .prepare("SELECT intake_decision_pending FROM order_drafts WHERE id = 'draft-v1'")
+        .get(),
+    ).toEqual({ intake_decision_pending: 0 });
+    expect(() => first.database
+      .prepare("UPDATE order_drafts SET review_issues_json = '{}' WHERE id = 'draft-v1'")
+      .run()).toThrow();
     expect(first.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(
       first.database
@@ -171,6 +200,7 @@ describe('数据库升级', () => {
       { version: 3 },
       { version: 4 },
       { version: 5 },
+      { version: 6 },
     ]);
     expect(
       (
@@ -184,6 +214,16 @@ describe('数据库升级', () => {
         .prepare("SELECT review_cancelled_at FROM order_drafts WHERE id = 'draft-v1'")
         .get(),
     ).toEqual({ review_cancelled_at: null });
+    expect(
+      reopened.database
+        .prepare("SELECT review_issues_json FROM order_drafts WHERE id = 'draft-v1'")
+        .get(),
+    ).toEqual({ review_issues_json: '[]' });
+    expect(
+      reopened.database
+        .prepare("SELECT intake_decision_pending FROM order_drafts WHERE id = 'draft-v1'")
+        .get(),
+    ).toEqual({ intake_decision_pending: 0 });
     expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(reopened.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
     reopened.close();

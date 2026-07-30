@@ -28,9 +28,23 @@ const api: DesktopApi = {
   cancelDraft: (draftId) => ipcRenderer.invoke('workflow:cancel-draft', draftId),
   confirmDraft: (draft) => ipcRenderer.invoke('workflow:confirm-draft', draft),
   listOrders: () => ipcRenderer.invoke('orders:list'),
+  onOrdersChanged: (listener) => {
+    const ipcListener = (
+      _event: Electron.IpcRendererEvent,
+      orders: Parameters<typeof listener>[0],
+    ) => listener(orders);
+    ipcRenderer.on('orders:changed', ipcListener);
+    return () => {
+      ipcRenderer.removeListener('orders:changed', ipcListener);
+    };
+  },
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),
   getScreenshotDataUrl: (screenshotId) =>
     ipcRenderer.invoke('evidence:get-screenshot-data-url', screenshotId),
+  getOrderIntakeSettings: () => ipcRenderer.invoke('settings:get-order-intake'),
+  saveOrderIntakeSettings: (input) => (
+    ipcRenderer.invoke('settings:save-order-intake', input)
+  ),
   getOcrSettings: () => ipcRenderer.invoke('settings:get-ocr'),
   saveOcrSettings: (input) => ipcRenderer.invoke('settings:save-ocr', input),
   removeOcrApiKey: () => ipcRenderer.invoke('settings:remove-ocr-api-key'),

@@ -10,6 +10,45 @@ export type PlatformTransactionStatus = 'paid' | 'cancelled' | 'refunded' | 'unk
 
 export type FulfillmentStatus = 'pending_shipment' | 'shipped' | 'unknown';
 
+export const ORDER_REVIEW_ISSUE_CODES = [
+  'automatic_import_disabled',
+  'automatic_import_failed',
+  'duplicate_order',
+  'screenshot_content_incomplete',
+  'targeted_review_failed',
+  'targeted_review_conflict',
+  'missing_seller_account',
+  'missing_order_number',
+  'invalid_order_number',
+  'missing_recipient',
+  'invalid_recipient',
+  'missing_phone',
+  'invalid_phone',
+  'missing_address',
+  'incomplete_address',
+  'address_mismatch',
+  'missing_items',
+  'missing_item_title',
+  'invalid_item_title',
+  'missing_item_price',
+  'invalid_item_price',
+  'missing_item_quantity',
+  'invalid_item_quantity',
+  'missing_product_total',
+  'invalid_product_total',
+  'missing_shipping_fee',
+  'invalid_shipping_fee',
+  'missing_amount',
+  'invalid_amount',
+  'item_total_mismatch',
+  'buyer_recipient_conflict',
+  'invalid_order_time',
+  'invalid_payment_time',
+  'payment_before_order',
+] as const;
+
+export type OrderReviewIssueCode = (typeof ORDER_REVIEW_ISSUE_CODES)[number];
+
 export type RecognitionResult = {
   platform: 'xianyu';
   sellerAccount: string;
@@ -47,6 +86,7 @@ export type RecognitionEvidence = {
 export type RecognitionAttempt = {
   result: RecognitionResult;
   evidences: [RecognitionEvidence, ...RecognitionEvidence[]];
+  reviewIssues?: OrderReviewIssueCode[];
 };
 
 export type RecognizerSource = {
@@ -71,6 +111,7 @@ export type OrderDraft = Omit<RecognitionResult, 'items'> & {
   batchId: string;
   screenshotId: string;
   status: 'awaiting_review' | 'confirmed' | 'cancelled';
+  reviewIssues?: OrderReviewIssueCode[];
   createdAt: string;
   items: DraftItem[];
 };
@@ -100,6 +141,7 @@ export type RecognitionBatchItem = {
   errorMessage?: string;
   retryCount?: number;
   nextRetryAt?: string;
+  reviewIssues?: OrderReviewIssueCode[];
 };
 
 export type RecognitionBatchView = {

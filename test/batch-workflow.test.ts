@@ -4,7 +4,11 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { RecognitionResult, Recognizer } from '../src/core/contracts';
+import type {
+  OrderReviewIssueCode,
+  RecognitionResult,
+  Recognizer,
+} from '../src/core/contracts';
 import { DesktopSession } from '../src/main/desktop-session';
 import { LocalApplication } from '../src/main/local-application';
 import { OcrSettingsService } from '../src/main/ocr-settings';
@@ -73,6 +77,354 @@ async function openSession(recognizer: Recognizer): Promise<DesktopSession> {
 }
 
 describe('批量来源截图识别队列', () => {
+  it('自动入库默认关闭，完整识别结果仍保留明确的待确认原因', async () => {
+    const session = await openSession({
+      recognize: async () => attempt('AUTO-IMPORT-DEFAULT-OFF'),
+    });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-off-'));
+    const sourcePath = join(root, '默认校对.png');
+    await writeFile(sourcePath, 'auto-import-default-off');
+
+    expect(session.getOrderIntakeSettings()).toEqual({ automaticImportEnabled: false });
+    await session.submitSourceScreenshots([sourcePath]);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { awaiting_confirmation: 1, imported: 0 },
+        items: [{
+          status: 'awaiting_confirmation',
+          reviewIssues: ['automatic_import_disabled'],
+        }],
+      });
+    });
+    expect(session.listOrders()).toEqual([]);
+  });
+
+  it('后台无法读取自动入库偏好时安全回退为人工确认', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-pref-failure-'));
+    const preferences = new Preferences(join(root, '启动配置'));
+    const session = new DesktopSession(
+      preferences,
+      { recognize: async () => attempt('AUTO-PREFERENCE-FAIL-CLOSED') },
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(root, '订单数据'));
+    vi.spyOn(preferences, 'getAutomaticImportEnabled').mockImplementation(() => {
+      throw new Error('无法读取启动配置');
+    });
+    const sourcePath = join(root, '安全回退.png');
+    await writeFile(sourcePath, 'auto-import-fail-closed');
+
+    await session.submitSourceScreenshots([sourcePath]);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { awaiting_confirmation: 1, failed: 0 },
+        items: [{
+          status: 'awaiting_confirmation',
+          reviewIssues: ['automatic_import_disabled'],
+        }],
+      });
+    });
+  });
+
+  it('开启后把完整、格式有效且无冲突的草稿直接入库', async () => {
+    const session = await openSession({
+      recognize: async () => attempt('AUTO-IMPORT-COMPLETE'),
+    });
+    session.saveOrderIntakeSettings({ automaticImportEnabled: true });
+    const observedOrders: ReturnType<DesktopSession['listOrders']>[] = [];
+    session.onOrdersChanged((orders) => observedOrders.push(orders));
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-complete-'));
+    const sourcePath = join(root, '可自动入库.png');
+    await writeFile(sourcePath, 'auto-import-complete');
+
+    await session.submitSourceScreenshots([sourcePath]);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { imported: 1, awaiting_confirmation: 0 },
+        items: [{ status: 'imported', reviewIssues: [] }],
+      });
+      expect(session.listOrders()).toHaveLength(1);
+    });
+    const order = session.listOrders()[0];
+    expect(session.getOrder(order.id)).toMatchObject({
+      order: { orderNumber: 'AUTO-IMPORT-COMPLETE' },
+      sourceSnapshot: {
+        recognition: { orderNumber: 'AUTO-IMPORT-COMPLETE' },
+        confirmed: { orderNumber: 'AUTO-IMPORT-COMPLETE' },
+      },
+    });
+    expect(observedOrders.at(-1)).toMatchObject([{ orderNumber: 'AUTO-IMPORT-COMPLETE' }]);
+  });
+
+  it('已入库订单的同平台账号与订单号不会被静默重复导入', async () => {
+    const session = await openSession({
+      recognize: async () => attempt('AUTO-DUPLICATE-IDENTITY'),
+    });
+    session.saveOrderIntakeSettings({ automaticImportEnabled: true });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-duplicate-'));
+    const firstPath = join(root, '首次识别.png');
+    const secondPath = join(root, '更新截图.png');
+    await Promise.all([
+      writeFile(firstPath, 'auto-duplicate-first'),
+      writeFile(secondPath, 'auto-duplicate-second'),
+    ]);
+
+    await session.submitSourceScreenshots([firstPath]);
+    await eventually(() => expect(session.listOrders()).toHaveLength(1));
+    await session.submitSourceScreenshots([secondPath]);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { awaiting_confirmation: 1, imported: 0 },
+        items: [{
+          status: 'awaiting_confirmation',
+          reviewIssues: ['duplicate_order'],
+        }],
+      });
+    });
+    expect(session.listOrders()).toHaveLength(1);
+  });
+
+  it('开启后对六类关键信息缺失逐项给出确定性原因', async () => {
+    const cases: Array<{
+      sourceName: string;
+      issue: OrderReviewIssueCode;
+      result: RecognitionResult;
+    }> = [
+      {
+        sourceName: '缺订单号.png',
+        issue: 'missing_order_number',
+        result: { ...recognition, orderNumber: '' },
+      },
+      {
+        sourceName: '缺收件人.png',
+        issue: 'missing_recipient',
+        result: { ...recognition, orderNumber: 'AUTO-MISSING-RECIPIENT', recipient: '' },
+      },
+      {
+        sourceName: '缺手机号.png',
+        issue: 'missing_phone',
+        result: {
+          ...recognition,
+          orderNumber: 'AUTO-MISSING-PHONE',
+          phone: '',
+          phoneNormalized: '',
+        },
+      },
+      {
+        sourceName: '地址不完整.png',
+        issue: 'incomplete_address',
+        result: {
+          ...recognition,
+          orderNumber: 'AUTO-INCOMPLETE-ADDRESS',
+          addressOriginal: '南山区',
+          addressNormalized: '南山区',
+          province: '',
+          city: '',
+          district: '南山区',
+        },
+      },
+      {
+        sourceName: '缺商品.png',
+        issue: 'missing_items',
+        result: { ...recognition, orderNumber: 'AUTO-MISSING-ITEMS', items: [] },
+      },
+      {
+        sourceName: '缺成交金额.png',
+        issue: 'missing_amount',
+        result: { ...recognition, orderNumber: 'AUTO-MISSING-AMOUNT', amountCents: null },
+      },
+    ];
+    const results = new Map<string, RecognitionResult>(
+      cases.map((entry) => [entry.sourceName, entry.result]),
+    );
+    const session = await openSession({
+      recognize: async (source) => recognitionAttempt(
+        results.get(source.originalName) ?? recognition,
+      ),
+    });
+    session.saveOrderIntakeSettings({ automaticImportEnabled: true });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-missing-'));
+    const paths = cases.map((entry) => join(root, entry.sourceName));
+    await Promise.all(paths.map((path, index) => writeFile(path, `missing-${index}`)));
+
+    await session.submitSourceScreenshots(paths);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { awaiting_confirmation: cases.length, imported: 0 },
+      });
+    });
+    const items = session.listRecognitionBatches()[0].items;
+    for (const entry of cases) {
+      expect(items.find((item) => item.sourceName === entry.sourceName)?.reviewIssues)
+        .toContain(entry.issue);
+    }
+    expect(session.listOrders()).toEqual([]);
+  });
+
+  it('字段格式异常、交叉校验冲突和定向复核未解决时不会自动入库', async () => {
+    const cases: Array<{
+      sourceName: string;
+      issue: OrderReviewIssueCode;
+      result: RecognitionResult;
+    }> = [
+      {
+        sourceName: '手机号格式异常.png',
+        issue: 'invalid_phone',
+        result: {
+          ...recognition,
+          orderNumber: 'AUTO-INVALID-PHONE',
+          phone: '12345',
+          phoneNormalized: '12345',
+        },
+      },
+      {
+        sourceName: '商品明细交叉冲突.png',
+        issue: 'item_total_mismatch',
+        result: {
+          ...recognition,
+          orderNumber: 'AUTO-ITEM-TOTAL-CONFLICT',
+          productTotalCents: 900,
+          amountCents: 900,
+        },
+      },
+      {
+        sourceName: '买家收件人冲突.png',
+        issue: 'buyer_recipient_conflict',
+        result: {
+          ...recognition,
+          orderNumber: 'AUTO-IDENTITY-CONFLICT',
+          buyerNickname: recognition.recipient,
+        },
+      },
+      {
+        sourceName: '两次识别仍冲突.png',
+        issue: 'targeted_review_conflict',
+        result: { ...recognition, orderNumber: 'AUTO-REVIEW-CONFLICT' },
+      },
+    ];
+    const byName = new Map<string, (typeof cases)[number]>(
+      cases.map((entry) => [entry.sourceName, entry]),
+    );
+    const session = await openSession({
+      recognize: async (source) => {
+        const entry = byName.get(source.originalName)!;
+        return recognitionAttempt(
+          entry.result,
+          entry.issue === 'targeted_review_conflict' ? [entry.issue] : [],
+        );
+      },
+    });
+    session.saveOrderIntakeSettings({ automaticImportEnabled: true });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-conflicts-'));
+    const paths = cases.map((entry) => join(root, entry.sourceName));
+    await Promise.all(paths.map((path, index) => writeFile(path, `conflict-${index}`)));
+
+    await session.submitSourceScreenshots(paths);
+
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0]).toMatchObject({
+        counts: { awaiting_confirmation: cases.length, imported: 0 },
+      });
+    });
+    const items = session.listRecognitionBatches()[0].items;
+    for (const entry of cases) {
+      expect(items.find((item) => item.sourceName === entry.sourceName)?.reviewIssues)
+        .toContain(entry.issue);
+    }
+    expect(session.listOrders()).toEqual([]);
+  });
+
+  it('待确认原因随草稿持久化，重启后仍可继续校对', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-review-restart-'));
+    const preferencesDirectory = join(root, '启动配置');
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '缺失手机号.png');
+    await writeFile(sourcePath, 'persist-review-issues');
+    const preferences = new Preferences(preferencesDirectory);
+    preferences.setAutomaticImportEnabled(true);
+    const first = new DesktopSession(
+      preferences,
+      {
+        recognize: async () => recognitionAttempt({
+          ...recognition,
+          orderNumber: 'AUTO-REVIEW-RESTART',
+          phone: '',
+          phoneNormalized: '',
+        }),
+      },
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+    const batch = await first.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0]).toMatchObject({
+        id: batch.id,
+        items: [{ reviewIssues: ['missing_phone'] }],
+      });
+    });
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: async () => attempt('SHOULD-NOT-RUN') },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    await eventually(() => {
+      expect(reopened.restore()).toMatchObject({ kind: 'ready', dataDirectory });
+    });
+    expect(reopened.listRecognitionBatches()[0]).toMatchObject({
+      id: batch.id,
+      counts: { awaiting_confirmation: 1 },
+      items: [{ status: 'awaiting_confirmation', reviewIssues: ['missing_phone'] }],
+    });
+  });
+
+  it('草稿落盘后在入库决策前退出，重启会恢复未完成的自动入库', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-decision-recovery-'));
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '待决策订单.png');
+    await writeFile(sourcePath, 'pending-intake-decision');
+    const seed = new LocalApplication({
+      recognize: async () => attempt('AUTO-DECISION-RECOVERY'),
+    });
+    seed.openDataDirectory(dataDirectory);
+    const pendingBatch = await seed.submitRecognitionBatch([sourcePath]);
+    expect(seed.listRecognitionBatches()[0]).toMatchObject({
+      id: pendingBatch.id,
+      counts: { awaiting_confirmation: 1 },
+      items: [{ reviewIssues: [] }],
+    });
+    seed.close();
+
+    const preferences = new Preferences(join(root, '启动配置'));
+    preferences.setAutomaticImportEnabled(true);
+    const reopened = new DesktopSession(
+      preferences,
+      { recognize: async () => attempt('SHOULD-NOT-RUN') },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+
+    expect(reopened.useDataDirectory(dataDirectory)).toMatchObject({
+      kind: 'ready',
+      orders: [{ orderNumber: 'AUTO-DECISION-RECOVERY' }],
+    });
+    expect(reopened.listRecognitionBatches()[0]).toMatchObject({
+      id: pendingBatch.id,
+      counts: { imported: 1, awaiting_confirmation: 0 },
+      items: [{ status: 'imported', reviewIssues: [] }],
+    });
+  });
+
   it('Windows 删除目录时遇到瞬时 EPERM 会继续等待直到路径消失', async () => {
     const transientError = Object.assign(new Error('目录正在删除'), { code: 'EPERM' });
     const missingError = Object.assign(new Error('目录已不存在'), { code: 'ENOENT' });
@@ -1134,18 +1486,58 @@ describe('批量来源截图识别队列', () => {
       application.close();
     }
   });
+
+  it('确认或取消草稿后重启不会重新显示已经处理过的待确认原因', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-cleared-review-reasons-'));
+    const dataDirectory = join(root, '订单数据');
+    const paths = [join(root, '确认原因.png'), join(root, '取消原因.png')];
+    await Promise.all(paths.map((path, index) => writeFile(path, `review-reason-${index}`)));
+    const application = new LocalApplication({
+      recognize: async (source) => recognitionAttempt(
+        { ...recognition, orderNumber: `REVIEW-${source.originalName}` },
+        ['targeted_review_conflict'],
+      ),
+    });
+    application.openDataDirectory(dataDirectory);
+    const batch = await application.submitRecognitionBatch(paths);
+    application.confirmDraft(batch.drafts[0]);
+    application.cancelDraft(batch.drafts[1].id);
+    application.close();
+
+    const reopened = new LocalApplication({ recognize: async () => attempt('SHOULD-NOT-RUN') });
+    reopened.openDataDirectory(dataDirectory);
+    try {
+      expect(reopened.restoreRecognitionBatches()[0]).toMatchObject({
+        counts: { imported: 1, cancelled: 1, awaiting_confirmation: 0 },
+        items: [
+          { status: 'imported', reviewIssues: [] },
+          { status: 'cancelled', reviewIssues: [] },
+        ],
+      });
+    } finally {
+      reopened.close();
+    }
+  });
 });
 
 function attempt(orderNumber: string): Awaited<ReturnType<Recognizer['recognize']>> {
+  return recognitionAttempt({ ...recognition, orderNumber });
+}
+
+function recognitionAttempt(
+  result: RecognitionResult,
+  reviewIssues: Awaited<ReturnType<Recognizer['recognize']>>['reviewIssues'] = [],
+): Awaited<ReturnType<Recognizer['recognize']>> {
   return {
-    result: { ...recognition, orderNumber },
+    result,
     evidences: [{
       provider: 'controlled',
       model: 'controlled',
-      requestId: `request-${orderNumber}`,
+      requestId: `request-${result.orderNumber || 'missing-order-number'}`,
       schemaVersion: 1,
       rawResponse: '{}',
     }],
+    reviewIssues,
   };
 }
 

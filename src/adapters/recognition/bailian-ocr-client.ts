@@ -1,11 +1,13 @@
 import { normalizeBailianWorkspaceId } from '../../core/ocr-settings';
 import {
+  isValidPhonePair,
   normalizeAddress,
   normalizePhone,
   normalizeShanghaiDateTime,
 } from '../../core/order-normalization';
 import type {
   FulfillmentStatus,
+  OrderReviewIssueCode,
   PlatformTransactionStatus,
   RecognitionAttempt,
   RecognitionEvidence,
@@ -269,7 +271,9 @@ export class BailianOcrClient implements BailianConnectionTester {
       flattenModularExtraction(primary.extracted),
     );
     let result = normalizeOrderResult(mergedExtracted, input.sellerAccount);
+    const primaryResult = result;
     const evidences: RecognitionAttempt['evidences'] = [primary.evidence];
+    const reviewIssues: OrderReviewIssueCode[] = [];
     const primaryWasModular = hasModularExtraction(primary.extracted);
     const defaultModuleReviewSchema = primaryWasModular
       ? buildModularReviewSchema(mergedExtracted, result)
@@ -300,6 +304,10 @@ export class BailianOcrClient implements BailianConnectionTester {
               : ORDER_REVIEW_USER_PROMPT,
         });
         const flattenedReview = flattenModularExtraction(review.extracted);
+        const reviewedResult = normalizeOrderResult(
+          sanitizeOrderExtraction(flattenReviewResult(flattenedReview)),
+          input.sellerAccount,
+        );
         let reviewedExtracted = mergeReviewResult(
           mergedExtracted,
           flattenedReview,
@@ -315,13 +323,28 @@ export class BailianOcrClient implements BailianConnectionTester {
         );
         result = normalizeOrderResult(mergedExtracted, input.sellerAccount);
         evidences.push(review.evidence);
+        if (hasUnresolvedTargetedReviewConflict(
+          primaryResult,
+          reviewedResult,
+          result,
+        )) {
+          reviewIssues.push('targeted_review_conflict');
+        }
       } catch {
         // The primary result remains usable for manual correction when the targeted
         // module review is unavailable, malformed, rate-limited, or unsafe to retain.
+        reviewIssues.push('targeted_review_failed');
       }
     }
 
-    return { result, evidences };
+    if (
+      primaryWasModular &&
+      modularScreenshotContentIsIncomplete(result)
+    ) {
+      reviewIssues.push('screenshot_content_incomplete');
+    }
+
+    return { result, evidences, reviewIssues: [...new Set(reviewIssues)] };
   }
 
   private async requestKeyInformation(input: {
@@ -647,12 +670,15 @@ function buildReviewSchema(result: RecognitionResult): Record<string, unknown> |
     !result.recipient ||
     !result.phone ||
     !result.addressOriginal ||
+    !isValidPhonePair(result.phone, result.phoneNormalized) ||
     identitiesMatch ||
     recipientLooksLikeMaskedNickname;
   const purchasedItemsNeedReview = result.items.length === 0 ||
-    result.items.some((item) => !item.sourceTitle || item.unitPriceCents === null);
+    result.items.some((item) => !item.sourceTitle || item.unitPriceCents === null) ||
+    itemTotalConflictsWithProductTotal(result);
   const transactionNeedsReview =
     !result.orderNumber ||
+    !ORDER_NUMBER_VALUE_PATTERN.test(result.orderNumber) ||
     result.productTotalCents === null ||
     result.shippingFeeCents === null ||
     result.amountCents === null;
@@ -694,6 +720,7 @@ function shippingResultNeedsFocusedReview(result: RecognitionResult): boolean {
   return !result.recipient ||
     !result.phone ||
     !result.addressOriginal ||
+    !isValidPhonePair(result.phone, result.phoneNormalized) ||
     identitiesMatch ||
     isMaskedNickname(result.recipient);
 }
@@ -764,7 +791,7 @@ function purchasedItemsNeedReview(
     return !normalizedItem?.sourceTitle ||
       normalizedItem.unitPriceCents === null ||
       !quantityWasClassified;
-  });
+  }) || itemTotalConflictsWithProductTotal(result);
 }
 
 function shippingInformationNeedsReview(
@@ -783,6 +810,7 @@ function shippingInformationNeedsReview(
   return !result.recipient ||
     !result.phone ||
     !result.addressOriginal ||
+    !isValidPhonePair(result.phone, result.phoneNormalized) ||
     phoneWasRecoveredFromContactText ||
     identitiesMatch ||
     isMaskedNickname(result.recipient);
@@ -828,7 +856,30 @@ function transactionInformationNeedsReview(
     }
   }
   return !result.orderNumber ||
+    !ORDER_NUMBER_VALUE_PATTERN.test(result.orderNumber) ||
+    result.productTotalCents === null ||
+    result.shippingFeeCents === null ||
     result.amountCents === null;
+}
+
+function itemTotalConflictsWithProductTotal(result: RecognitionResult): boolean {
+  if (result.productTotalCents === null || result.items.length === 0) return false;
+  let total = 0;
+  for (const item of result.items) {
+    if (
+      item.unitPriceCents === null ||
+      !Number.isSafeInteger(item.unitPriceCents) ||
+      !Number.isSafeInteger(item.quantity) ||
+      item.quantity < 1
+    ) {
+      return false;
+    }
+    const subtotal = item.unitPriceCents * item.quantity;
+    if (!Number.isSafeInteger(subtotal)) return true;
+    total += subtotal;
+    if (!Number.isSafeInteger(total)) return true;
+  }
+  return total !== result.productTotalCents;
 }
 
 function mergeReviewResult(
@@ -1019,6 +1070,106 @@ function mergeReviewResult(
   return merged;
 }
 
+function hasUnresolvedTargetedReviewConflict(
+  primary: RecognitionResult,
+  reviewed: RecognitionResult,
+  merged: RecognitionResult,
+): boolean {
+  const textFields = [
+    'orderNumber',
+    'recipient',
+    'phoneNormalized',
+    'addressNormalized',
+  ] as const;
+  for (const field of textFields) {
+    const primaryValue = comparableReviewField(field, primary[field]);
+    const reviewedValue = comparableReviewField(field, reviewed[field]);
+    const mergedValue = comparableReviewField(field, merged[field]);
+    if (
+      primaryValue &&
+      reviewedValue &&
+      primaryValue !== reviewedValue &&
+      mergedValue === primaryValue
+    ) {
+      return true;
+    }
+  }
+
+  const moneyFields = [
+    'productTotalCents',
+    'shippingFeeCents',
+    'amountCents',
+  ] as const;
+  for (const field of moneyFields) {
+    const primaryValue = primary[field];
+    const reviewedValue = reviewed[field];
+    if (
+      primaryValue !== null &&
+      reviewedValue !== null &&
+      primaryValue !== reviewedValue &&
+      merged[field] === primaryValue
+    ) {
+      return true;
+    }
+  }
+
+  return hasMaterialReviewedItemConflict(primary.items, reviewed.items) &&
+    sameReviewedItems(merged.items, primary.items);
+}
+
+function comparableReviewField(
+  field: 'orderNumber' | 'recipient' | 'phoneNormalized' | 'addressNormalized',
+  value: string,
+): string {
+  if (field === 'phoneNormalized') {
+    return chineseMobileCore(value) || comparableText(value);
+  }
+  return comparableText(value);
+}
+
+function hasMaterialReviewedItemConflict(
+  primary: readonly RecognitionItem[],
+  reviewed: readonly RecognitionItem[],
+): boolean {
+  if (primary.length === 0 || reviewed.length === 0) return false;
+  if (primary.length !== reviewed.length) return true;
+  return primary.some((item, index) => {
+    const candidate = reviewed[index];
+    if (!candidate) return true;
+    const primaryTitle = comparableText(item.sourceTitle);
+    const reviewedTitle = comparableText(candidate.sourceTitle);
+    const primarySpec = comparableText(item.sourceSpec);
+    const reviewedSpec = comparableText(candidate.sourceSpec);
+    return Boolean(
+      (primaryTitle && reviewedTitle && primaryTitle !== reviewedTitle) ||
+      (primarySpec && reviewedSpec && primarySpec !== reviewedSpec) ||
+      (
+        item.unitPriceCents !== null &&
+        candidate.unitPriceCents !== null &&
+        item.unitPriceCents !== candidate.unitPriceCents
+      ) ||
+      (
+        !candidate.quantityInferred &&
+        item.quantity !== candidate.quantity
+      ),
+    );
+  });
+}
+
+function sameReviewedItems(
+  left: readonly RecognitionItem[],
+  right: readonly RecognitionItem[],
+): boolean {
+  return left.length === right.length && left.every((item, index) => {
+    const candidate = right[index];
+    return candidate !== undefined &&
+      comparableText(item.sourceTitle) === comparableText(candidate.sourceTitle) &&
+      comparableText(item.sourceSpec) === comparableText(candidate.sourceSpec) &&
+      item.unitPriceCents === candidate.unitPriceCents &&
+      item.quantity === candidate.quantity;
+  });
+}
+
 function flattenReviewResult(review: Record<string, unknown>): Record<string, unknown> {
   const shipping = recordOrEmpty(review.shipping_contact);
   const buyer = recordOrEmpty(review.buyer_section);
@@ -1076,6 +1227,19 @@ function hasModularExtraction(extracted: Record<string, unknown>): boolean {
     'transaction_information',
     'page_context',
   ].some((key) => Object.prototype.hasOwnProperty.call(extracted, key));
+}
+
+function modularScreenshotContentIsIncomplete(
+  result: RecognitionResult,
+): boolean {
+  return result.items.length === 0 ||
+    !result.recipient ||
+    !result.phone ||
+    !result.addressOriginal ||
+    !result.orderNumber ||
+    result.productTotalCents === null ||
+    result.shippingFeeCents === null ||
+    result.amountCents === null;
 }
 
 function flattenModularExtraction(
@@ -2327,9 +2491,15 @@ function deriveAddressParts(
     '',
   );
 
-  const parsedDistrict =
+  const parsedDistrictCandidate =
     /^([\p{Script=Han}]{1,12}?(?:自治县|市辖区|区|县|旗|市))/u.exec(rest)?.[1] ||
     '';
+  const parsedDistrict = isFacilityAddressPart(parsedDistrictCandidate)
+    ? ''
+    : parsedDistrictCandidate;
+  const providedDistrict = isFacilityAddressPart(provided.district)
+    ? ''
+    : provided.district;
   const hasConfidentHierarchy = Boolean(parsedProvince);
 
   return {
@@ -2346,12 +2516,16 @@ function deriveAddressParts(
       hasConfidentHierarchy,
     ),
     district: administrativePart(
-      provided.district,
+      providedDistrict,
       parsedDistrict,
       /(?:自治县|市辖区|区|县|旗|市)$/u,
       hasConfidentHierarchy,
     ),
   };
+}
+
+function isFacilityAddressPart(value: string): boolean {
+  return /(?:小区|园区|社区|校区|景区|厂区|片区)$/u.test(comparableText(value));
 }
 
 function administrativePart(
