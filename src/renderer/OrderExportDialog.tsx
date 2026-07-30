@@ -129,9 +129,13 @@ export function OrderExportDialog({
     }
   }
 
-  const orderTemplates = templates.filter(({ granularity }) => granularity === 'order');
-  const orderItemTemplates = templates.filter(
-    ({ granularity }) => granularity === 'order_item',
+  const orderTemplates = useMemo(
+    () => templates.filter(({ granularity }) => granularity === 'order'),
+    [templates],
+  );
+  const orderItemTemplates = useMemo(
+    () => templates.filter(({ granularity }) => granularity === 'order_item'),
+    [templates],
   );
   const customFieldValueIndex = useMemo(
     () => createCustomFieldValueIndex(customFieldValues),
