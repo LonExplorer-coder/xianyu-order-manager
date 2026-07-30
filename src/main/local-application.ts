@@ -91,9 +91,7 @@ import {
 import type {
   CreateTableTemplateInput,
   TableTemplate,
-  TableTemplateColumn,
   TableTemplateGranularity,
-  TableTemplateLayoutItem,
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import {
@@ -101,6 +99,7 @@ import {
   normalizeStoredTableTemplateInput,
   normalizeUpdateTableTemplateInput,
   isDynamicProductTableGroup,
+  tableTemplateCustomFieldDefinitionIds,
   tableTemplateNameKey,
 } from '../core/table-templates';
 import {
@@ -1524,12 +1523,10 @@ export class LocalApplication {
     if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
       throw new Error('商品明细表必须使用商品明细粒度模板');
     }
-    const orderColumns = orderTemplate
-      ? legacyOrderExportColumns(orderTemplate.columns)
-      : DEFAULT_ORDER_EXPORT_COLUMNS;
+    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS;
     const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
-    const orderCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderColumns);
-    const orderItemCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderItemColumns);
+    const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
+    const orderItemCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderItemColumns);
 
     const orderResult = this.queryOrders(
       { lifecycleStatus: 'all' },
@@ -2562,6 +2559,9 @@ export class LocalApplication {
           orders.recipient,
           orders.phone,
           orders.address_original,
+          orders.province,
+          orders.city,
+          orders.district,
           orders.amount_cents,
           source_items.status AS initial_source_recognition_status,
           orders.platform_transaction_status,
@@ -2604,6 +2604,9 @@ export class LocalApplication {
       recipient: asString(row.recipient),
       phone: asString(row.phone),
       addressOriginal: asString(row.address_original),
+      province: asString(row.province),
+      city: asString(row.city),
+      district: asString(row.district),
       amountCents: asNumber(row.amount_cents),
       itemCount: asNumber(row.item_count),
       initialSourceRecognitionStatus: asRecognitionBatchItemStatus(
@@ -4192,27 +4195,6 @@ function normalizeTableTemplateId(value: unknown): string {
     throw new Error('表格模板 ID 格式无效');
   }
   return normalized;
-}
-
-function customFieldDefinitionIdsForColumns(
-  columns: readonly TableTemplateColumn[],
-): string[] {
-  return columns.flatMap(({ field }) => (
-    field.kind === 'custom' ? [field.definitionId] : []
-  ));
-}
-
-function legacyOrderExportColumns(
-  columns: readonly TableTemplateLayoutItem[],
-): TableTemplateColumn[] {
-  return columns.map((item): TableTemplateColumn => (
-    isDynamicProductTableGroup(item)
-      ? {
-          field: { kind: 'builtin', key: 'product_summary' },
-          displayName: item.labels.product,
-        }
-      : { field: { ...item.field }, displayName: item.displayName }
-  ));
 }
 
 function parseCustomFieldDefinitionValueMetadata(row: SqlRow): {

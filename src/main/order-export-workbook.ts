@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { rename, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
-import type { OrderSummary, RecognitionBatchItemStatus } from '../core/contracts';
+import type { OrderSummary } from '../core/contracts';
 import type {
   CustomFieldDefinition,
   CustomFieldType,
@@ -11,25 +11,29 @@ import type {
 } from '../core/custom-fields';
 import {
   defaultMaskedOrderCell,
+  orderExportBuiltinTextLabel,
   type OrderExportAddressRegion,
 } from '../core/order-export';
 import type { OrderItemWorkbenchItem } from '../core/order-workbench';
 import {
   availableTableFields,
+  createOrderTableProjectionPlan,
   createCustomFieldValueIndex,
   fieldReferenceKey,
   projectOrderItemTableCell,
-  projectOrderTableCell,
+  projectOrderTableProjectionRow,
   type AvailableTableField,
+  type OrderTableProjectionColumn,
   type TableCellValue,
   type TableFieldReference,
   type TableTemplateColumn,
+  type TableTemplateLayoutItem,
 } from '../core/table-templates';
 
 export type OrderExportWorkbookSource = {
   orders: OrderSummary[];
   orderItems: OrderItemWorkbenchItem[];
-  orderColumns: TableTemplateColumn[];
+  orderColumns: TableTemplateLayoutItem[];
   orderItemColumns: TableTemplateColumn[];
   customFieldDefinitions: CustomFieldDefinition[];
   orderCustomFieldValues: CustomFieldValueRecord[];
@@ -38,6 +42,8 @@ export type OrderExportWorkbookSource = {
 };
 
 type WorkbookCellValue = string | number | boolean | Date | null;
+
+const EXCEL_MAX_COLUMNS = 16_384;
 
 export type OrderExportWorksheetPlan = {
   name: '订单总表' | '商品明细';
@@ -55,26 +61,40 @@ export type OrderExportWorkbookPlan = {
 export function createOrderExportWorkbookPlan(
   source: OrderExportWorkbookSource,
 ): OrderExportWorkbookPlan {
-  const orderCatalog = availableTableFields('order', source.customFieldDefinitions);
   const orderItemCatalog = availableTableFields('order_item', source.customFieldDefinitions);
   const orderCustomValues = createCustomFieldValueIndex(source.orderCustomFieldValues);
   const orderItemCustomValues = createCustomFieldValueIndex(source.orderItemCustomFieldValues);
+  const orderProjection = createOrderTableProjectionPlan(
+    source.orderColumns,
+    source.orders,
+    source.customFieldDefinitions,
+  );
+  assertExcelColumnCount('订单总表', orderProjection.columns.length);
+  assertExcelColumnCount('商品明细', source.orderItemColumns.length);
 
-  const orderRows = source.orders.map((order) => (
-    source.orderColumns.map((column) => {
-      const descriptor = requireDescriptor(orderCatalog, column.field);
-      const rawValue = projectOrderTableCell(order, column.field, orderCustomValues);
-      const region = source.addressRegions.get(order.id) ?? {
-        province: '',
-        city: '',
-        district: '',
-      };
+  const orderRows = source.orders.map((order) => {
+    const projectedValues = projectOrderTableProjectionRow(
+      orderProjection,
+      order,
+      orderCustomValues,
+    );
+    const region = source.addressRegions.get(order.id) ?? {
+      province: '',
+      city: '',
+      district: '',
+    };
+    return orderProjection.columns.map((column, index) => {
+      const rawValue = projectedValues[index] ?? null;
+      if (column.kind === 'dynamic_product') {
+        return toWorkbookCellValue(null, column.valueType, rawValue);
+      }
+      const valueType = requireProjectionValueType(column);
       const maskedValue = column.field.kind === 'builtin'
         ? defaultMaskedOrderCell(column.field.key, rawValue, region)
         : rawValue;
-      return toWorkbookCellValue(column.field, descriptor.valueType, maskedValue);
-    })
-  ));
+      return toWorkbookCellValue(column.field, valueType, maskedValue);
+    });
+  });
   const orderItemRows = source.orderItems.map((item) => (
     source.orderItemColumns.map((column) => {
       const descriptor = requireDescriptor(orderItemCatalog, column.field);
@@ -87,9 +107,11 @@ export function createOrderExportWorkbookPlan(
     worksheets: [
       {
         name: '订单总表',
-        columns: source.orderColumns.map((column) => ({
-          header: column.displayName,
-          valueType: requireDescriptor(orderCatalog, column.field).valueType,
+        columns: orderProjection.columns.map((column) => ({
+          header: column.header,
+          valueType: column.kind === 'dynamic_product'
+            ? column.valueType
+            : requireProjectionValueType(column),
         })),
         rows: orderRows,
       },
@@ -105,10 +127,20 @@ export function createOrderExportWorkbookPlan(
   };
 }
 
+function requireProjectionValueType(
+  column: Extract<OrderTableProjectionColumn, { kind: 'field' }>,
+): CustomFieldType {
+  if (column.valueType === null) throw new Error(`导出字段不可用：${column.key}`);
+  return column.valueType;
+}
+
 export async function writeOrderExportWorkbook(
   destinationPath: string,
   plan: OrderExportWorkbookPlan,
 ): Promise<void> {
+  for (const sheetPlan of plan.worksheets) {
+    assertExcelColumnCount(sheetPlan.name, sheetPlan.columns.length);
+  }
   const workbook = new ExcelJS.Workbook();
   workbook.creator = '闲鱼订单管理';
   workbook.lastModifiedBy = '闲鱼订单管理';
@@ -155,6 +187,17 @@ export async function writeOrderExportWorkbook(
     await rename(temporaryPath, destinationPath);
   } finally {
     await rm(temporaryPath, { force: true });
+  }
+}
+
+function assertExcelColumnCount(
+  sheetName: OrderExportWorksheetPlan['name'],
+  columnCount: number,
+): void {
+  if (columnCount > EXCEL_MAX_COLUMNS) {
+    throw new Error(
+      `${sheetName}列数 ${columnCount} 超过 Excel 上限 ${EXCEL_MAX_COLUMNS}`,
+    );
   }
 }
 
@@ -249,25 +292,18 @@ function requireDescriptor(
 ): AvailableTableField {
   const key = fieldReferenceKey(reference);
   const descriptor = catalog.find((field) => fieldReferenceKey(field.reference) === key);
-  if (!descriptor && reference.kind === 'builtin' && reference.key === 'product_summary') {
-    return {
-      reference: { ...reference },
-      defaultLabel: '商品',
-      valueType: 'text',
-    };
-  }
   if (!descriptor) throw new Error(`导出字段不可用：${key}`);
   return descriptor;
 }
 
 function toWorkbookCellValue(
-  reference: TableFieldReference,
+  reference: TableFieldReference | null,
   valueType: CustomFieldType,
   value: TableCellValue,
 ): WorkbookCellValue {
   if (value === null || value === '') return null;
-  if (reference.kind === 'builtin' && typeof value === 'string') {
-    const label = builtinTextLabel(reference.key, value);
+  if (reference?.kind === 'builtin' && typeof value === 'string') {
+    const label = orderExportBuiltinTextLabel(reference.key, value);
     if (label !== undefined) return label;
   }
   switch (valueType) {
@@ -291,47 +327,6 @@ function toWorkbookCellValue(
       if (typeof value !== 'string') throw new Error('导出文本字段值无效');
       return value;
   }
-}
-
-function builtinTextLabel(key: string, value: string): string | undefined {
-  if (key === 'platform') return value === 'xianyu' ? '闲鱼' : value;
-  if (key === 'platform_transaction_status') {
-    return {
-      paid: '已付款',
-      cancelled: '已取消',
-      refunded: '已退款',
-      unknown: '未知',
-    }[value];
-  }
-  if (key === 'fulfillment_status') {
-    return {
-      pending_shipment: '待发货',
-      shipped: '已发货',
-      unknown: '未知',
-    }[value];
-  }
-  if (key === 'lifecycle_status') {
-    return {
-      active: '正常',
-      trashed: '回收站',
-      deleted: '已删除',
-    }[value];
-  }
-  if (key === 'initial_source_recognition_status') {
-    const labels: Record<RecognitionBatchItemStatus, string> = {
-      waiting_recognition: '等待识别',
-      recognizing: '识别中',
-      validating: '校验中',
-      awaiting_confirmation: '待确认',
-      imported: '已入库',
-      waiting_retry: '等待重试',
-      failed: '失败',
-      duplicate_skipped: '重复跳过',
-      cancelled: '已取消',
-    };
-    return labels[value as RecognitionBatchItemStatus];
-  }
-  return undefined;
 }
 
 function shanghaiWallClockDate(value: string): Date {

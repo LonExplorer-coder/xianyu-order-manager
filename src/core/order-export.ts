@@ -1,8 +1,11 @@
 import {
+  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   type TableCellValue,
   type TableTemplateColumn,
+  type TableTemplateLayoutItem,
 } from './table-templates';
+import type { RecognitionBatchItemStatus } from './contracts';
 
 export type OrderExportScope = {
   kind: 'current_result' | 'selected_orders';
@@ -35,7 +38,7 @@ export type OrderExportAddressRegion = {
   district: string;
 };
 
-export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateColumn[] = [
+export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateLayoutItem[] = [
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
   { field: { kind: 'builtin', key: 'alipay_transaction_number' }, displayName: '支付宝交易号' },
   { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
@@ -44,7 +47,7 @@ export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
   { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
   { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
-  { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品' },
+  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '商品总数量' },
   { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
   { field: { kind: 'builtin', key: 'platform_transaction_status' }, displayName: '平台交易状态' },
@@ -134,6 +137,50 @@ export function defaultMaskedOrderCell(
     case 'address': return maskAddress(region);
     default: return value;
   }
+}
+
+export function orderExportBuiltinTextLabel(
+  key: string,
+  value: string,
+): string | undefined {
+  if (key === 'platform') return value === 'xianyu' ? '闲鱼' : value;
+  if (key === 'platform_transaction_status') {
+    return {
+      paid: '已付款',
+      cancelled: '已取消',
+      refunded: '已退款',
+      unknown: '未知',
+    }[value];
+  }
+  if (key === 'fulfillment_status') {
+    return {
+      pending_shipment: '待发货',
+      shipped: '已发货',
+      unknown: '未知',
+    }[value];
+  }
+  if (key === 'lifecycle_status') {
+    return {
+      active: '正常',
+      trashed: '回收站',
+      deleted: '已删除',
+    }[value];
+  }
+  if (key === 'initial_source_recognition_status') {
+    const labels: Record<RecognitionBatchItemStatus, string> = {
+      waiting_recognition: '等待识别',
+      recognizing: '识别中',
+      validating: '校验中',
+      awaiting_confirmation: '待确认',
+      imported: '已入库',
+      waiting_retry: '等待重试',
+      failed: '失败',
+      duplicate_skipped: '重复跳过',
+      cancelled: '已取消',
+    };
+    return labels[value as RecognitionBatchItemStatus];
+  }
+  return undefined;
 }
 
 function normalizedCharacters(value: string): string[] {

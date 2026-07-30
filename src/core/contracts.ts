@@ -211,6 +211,9 @@ export type OrderSummary = {
   recipient: string;
   phone: string;
   addressOriginal: string;
+  province?: string;
+  city?: string;
+  district?: string;
   amountCents: number;
   itemCount: number;
   initialSourceRecognitionStatus: RecognitionBatchItemStatus;

@@ -190,6 +190,28 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(items?.rowCount).toBe(5);
     if (!orders || !items) throw new Error('缺少导出工作表');
 
+    expect(rowValues(orders, 1).slice(8, 20)).toEqual([
+      '商品1', '款式或规格1', '数量1',
+      '商品2', '款式或规格2', '数量2',
+      '商品3', '款式或规格3', '数量3',
+      '商品4', '款式或规格4', '数量4',
+    ]);
+    expect(rowValues(orders, 1)).not.toContain('商品');
+    expect(cellByHeader(orders, 2, '商品1')).toMatchObject({
+      value: '夏日海棠杯',
+      type: ExcelJS.ValueType.String,
+    });
+    expect(cellByHeader(orders, 2, '款式或规格1')).toMatchObject({
+      value: '红色 450ml',
+      type: ExcelJS.ValueType.String,
+    });
+    expect(cellByHeader(orders, 2, '数量1')).toMatchObject({
+      value: 2,
+      type: ExcelJS.ValueType.Number,
+    });
+    expect(cellByHeader(orders, 2, '商品2').value).toBe('备用杯盖');
+    expect(cellByHeader(orders, 2, '商品4').value).toBe('历史来源杯垫');
+
     expect(rowValues(items, 1)).toEqual([
       '订单号',
       '原始商品标题',
@@ -310,6 +332,97 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(archiveText).not.toContain('/comments');
   });
 
+  it('当前结果完整展开并留空短订单尾列，所选订单只按自身宽度导出', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-SCOPE-WIDE-001',
+        productTotalCents: 3_000,
+        amountCents: 3_000,
+        items: [
+          {
+            sourceTitle: '同款海棠杯',
+            sourceSpec: '红色',
+            unitPriceCents: 1_000,
+            quantity: 1,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: '同款海棠杯',
+            sourceSpec: '蓝色',
+            unitPriceCents: 1_000,
+            quantity: 1,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: '备用杯盖',
+            sourceSpec: '透明',
+            unitPriceCents: 1_000,
+            quantity: 1,
+            quantityInferred: false,
+          },
+        ],
+      }),
+      recognition({
+        orderNumber: 'XY-SCOPE-NARROW-002',
+        productTotalCents: 1_000,
+        amountCents: 1_000,
+        items: [{
+          sourceTitle: '单件海棠碟',
+          sourceSpec: '棉麻',
+          unitPriceCents: 500,
+          quantity: 2,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+    const ordersByNumber = new Map(
+      application.queryOrders({ lifecycleStatus: 'all' }).orders
+        .map((order) => [order.orderNumber, order]),
+    );
+    const wide = ordersByNumber.get('XY-SCOPE-WIDE-001');
+    const narrow = ordersByNumber.get('XY-SCOPE-NARROW-002');
+    if (!wide || !narrow) throw new Error('测试订单未入库');
+
+    const currentPath = join(testRoot, '当前结果.xlsx');
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'current_result', orderIds: [wide.id, narrow.id] },
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }, currentPath);
+    const currentWorkbook = new ExcelJS.Workbook();
+    await currentWorkbook.xlsx.readFile(currentPath);
+    const currentOrders = currentWorkbook.getWorksheet('订单总表');
+    const currentItems = currentWorkbook.getWorksheet('商品明细');
+    if (!currentOrders || !currentItems) throw new Error('缺少导出工作表');
+    expect(cellByHeader(currentOrders, 2, '商品1').value).toBe('同款海棠杯');
+    expect(cellByHeader(currentOrders, 2, '款式或规格1').value).toBe('红色');
+    expect(cellByHeader(currentOrders, 2, '商品2').value).toBe('同款海棠杯');
+    expect(cellByHeader(currentOrders, 2, '款式或规格2').value).toBe('蓝色');
+    expect(cellByHeader(currentOrders, 3, '商品1').value).toBe('单件海棠碟');
+    expect(cellByHeader(currentOrders, 3, '商品2').value).toBeNull();
+    expect(cellByHeader(currentOrders, 3, '款式或规格3').value).toBeNull();
+    expect(cellByHeader(currentOrders, 3, '数量3').value).toBeNull();
+    expect(currentItems.rowCount).toBe(5);
+
+    const selectedPath = join(testRoot, '所选结果.xlsx');
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [narrow.id] },
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }, selectedPath);
+    const selectedWorkbook = new ExcelJS.Workbook();
+    await selectedWorkbook.xlsx.readFile(selectedPath);
+    const selectedOrders = selectedWorkbook.getWorksheet('订单总表');
+    if (!selectedOrders) throw new Error('缺少订单总表');
+    expect(rowValues(selectedOrders, 1)).toEqual(expect.arrayContaining([
+      '商品1', '款式或规格1', '数量1',
+    ]));
+    expect(rowValues(selectedOrders, 1)).not.toContain('商品2');
+    expect(selectedOrders.rowCount).toBe(2);
+  });
+
   it('保存的两类模板只控制列、别名和顺序，且保留显式订单顺序与自定义字段类型', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({
@@ -326,13 +439,24 @@ describe('默认脱敏的两表工作簿导出', () => {
       recognition({
         orderNumber: 'XY-TEMPLATE-002',
         buyerNickname: '乙买家',
-        items: [{
-          sourceTitle: '乙商品',
-          sourceSpec: '蓝色',
-          unitPriceCents: 2_300,
-          quantity: 1,
-          quantityInferred: false,
-        }],
+        productTotalCents: 2_800,
+        amountCents: 2_800,
+        items: [
+          {
+            sourceTitle: '乙商品',
+            sourceSpec: '蓝色',
+            unitPriceCents: 2_300,
+            quantity: 1,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: '乙商品配件',
+            sourceSpec: '小号',
+            unitPriceCents: 500,
+            quantity: 1,
+            quantityInferred: false,
+          },
+        ],
       }),
     ]);
     const adjustment = application.createCustomFieldDefinition({
@@ -366,9 +490,10 @@ describe('默认脱敏的两表工作簿导出', () => {
     const first = ordersByNumber.get('XY-TEMPLATE-001');
     const second = ordersByNumber.get('XY-TEMPLATE-002');
     if (!first || !second) throw new Error('测试订单未入库');
-    const itemsByOrderId = new Map(
-      application.queryOrderItems({}).items.map((item) => [item.orderId, item]),
-    );
+    const itemsByOrderId = new Map<string, ReturnType<typeof application.queryOrderItems>['items'][number]>();
+    for (const item of application.queryOrderItems({}).items) {
+      if (!itemsByOrderId.has(item.orderId)) itemsByOrderId.set(item.orderId, item);
+    }
     const firstItem = itemsByOrderId.get(first.id);
     const secondItem = itemsByOrderId.get(second.id);
     if (!firstItem || !secondItem) throw new Error('测试商品未入库');
@@ -403,6 +528,10 @@ describe('默认脱敏的两表工作簿导出', () => {
       granularity: 'order',
       columns: [
         { field: { kind: 'custom', definitionId: adjustment.id }, displayName: '补差金额' },
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '货品', specification: '款型', quantity: '件数' },
+        },
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '指定单号' },
         { field: { kind: 'custom', definitionId: reviewedAt.id }, displayName: '复核时间' },
       ],
@@ -439,21 +568,30 @@ describe('默认脱敏的两表工作簿导出', () => {
     const orders = workbook.getWorksheet('订单总表');
     const items = workbook.getWorksheet('商品明细');
     if (!orders || !items) throw new Error('缺少导出工作表');
-    expect(rowValues(orders, 1)).toEqual(['补差金额', '指定单号', '复核时间']);
+    expect(rowValues(orders, 1)).toEqual([
+      '补差金额',
+      '货品1', '款型1', '件数1',
+      '货品2', '款型2', '件数2',
+      '指定单号', '复核时间',
+    ]);
     expect(rowValues(items, 1)).toEqual(['验货标记', '所属单号', '商品标题']);
-    expect(orders.getColumn(2).values.slice(2)).toEqual([
+    expect(orders.getColumn(8).values.slice(2)).toEqual([
       'XY-TEMPLATE-002',
       'XY-TEMPLATE-001',
     ]);
     expect(items.getColumn(2).values.slice(2)).toEqual([
       'XY-TEMPLATE-002',
+      'XY-TEMPLATE-002',
       'XY-TEMPLATE-001',
     ]);
+    expect(cellByHeader(orders, 2, '货品1').value).toBe('乙商品');
+    expect(cellByHeader(orders, 2, '货品2').value).toBe('乙商品配件');
+    expect(cellByHeader(orders, 3, '货品2').value).toBeNull();
     expect(orders.getCell(2, 1)).toMatchObject({
       value: 56.78,
       type: ExcelJS.ValueType.Number,
     });
-    expect(orders.getCell(2, 3)).toMatchObject({
+    expect(orders.getCell(2, 9)).toMatchObject({
       value: expect.any(Date),
       type: ExcelJS.ValueType.Date,
     });
@@ -573,6 +711,59 @@ describe('默认脱敏的两表工作簿导出', () => {
     };
 
     await expect(writeOrderExportWorkbook(destinationPath, invalidPlan)).rejects.toThrow();
+    expect(await readFile(destinationPath)).toEqual(originalContents);
+    expect((await readdir(testRoot)).filter((name) => name.includes('.tmp.xlsx'))).toEqual([]);
+  });
+
+  it('动态展开超过 Excel 列上限时在写入前明确拒绝并保留已有文件', async () => {
+    const items = Array.from({ length: 5_461 }, (_, index) => ({
+      sourceTitle: `极端商品${index + 1}`,
+      sourceSpec: `规格${index + 1}`,
+      unitPriceCents: 1,
+      quantity: 1,
+      quantityInferred: false,
+    }));
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-TOO-WIDE-001',
+        productTotalCents: items.length,
+        amountCents: items.length,
+        items,
+      }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    const orderTemplate = application.createTableTemplate({
+      name: '极端宽表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '商品', specification: '款式或规格', quantity: '数量' },
+        },
+        { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
+      ],
+      query: {},
+    });
+    const itemTemplate = application.createTableTemplate({
+      name: '极端宽表商品明细',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+      ],
+      query: {},
+    });
+    const destinationPath = join(testRoot, '已有订单.xlsx');
+    const originalContents = Buffer.from('existing-workbook-contents');
+    await writeFile(destinationPath, originalContents);
+
+    await expect(application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [order.id] },
+      orderTemplateId: orderTemplate.id,
+      orderItemTemplateId: itemTemplate.id,
+      masking: 'default',
+    }, destinationPath))
+      .rejects.toThrow('订单总表列数 16385 超过 Excel 上限 16384');
     expect(await readFile(destinationPath)).toEqual(originalContents);
     expect((await readdir(testRoot)).filter((name) => name.includes('.tmp.xlsx'))).toEqual([]);
   });

@@ -65,9 +65,9 @@ import {
   DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   fieldReferenceKey,
-  isDynamicProductTableGroup,
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
+  tableTemplateCustomFieldDefinitionIds,
   type AvailableTableField,
   type CreateTableTemplateInput,
   type TableCellValue,
@@ -165,14 +165,16 @@ export function App({ api }: AppProps) {
   const activeTableTemplate = tableTemplates.find(
     (template) => template.id === activeTableTemplateId,
   ) ?? null;
-  const orderProjectionDefinitionIds = useMemo(() => (
-    activeTableTemplate?.granularity === 'order'
-      ? customFieldDefinitionIds(activeTableTemplate.columns)
-      : []
-  ), [activeTableTemplate]);
+  const orderProjectionDefinitionIdsKey = JSON.stringify(
+    orderTemplatesCustomFieldDefinitionIds(tableTemplates),
+  );
+  const orderProjectionDefinitionIds = useMemo(
+    () => JSON.parse(orderProjectionDefinitionIdsKey) as string[],
+    [orderProjectionDefinitionIdsKey],
+  );
   const orderItemProjectionDefinitionIds = useMemo(() => (
     activeTableTemplate?.granularity === 'order_item'
-      ? customFieldDefinitionIds(activeTableTemplate.columns)
+      ? tableTemplateCustomFieldDefinitionIds(activeTableTemplate.columns)
       : []
   ), [activeTableTemplate]);
 
@@ -501,7 +503,14 @@ export function App({ api }: AppProps) {
         tableTemplateApplyVersion.current += 1;
         if (template.granularity === 'order') {
           const query = structuredClone(DEFAULT_ORDER_QUERY);
-          orderReset = { query, result: await api.queryOrders(query, []) };
+          const remainingTemplates = tableTemplates.filter(({ id }) => id !== templateId);
+          orderReset = {
+            query,
+            result: await api.queryOrders(
+              query,
+              orderTemplatesCustomFieldDefinitionIds(remainingTemplates),
+            ),
+          };
         } else {
           const query: OrderItemWorkbenchQuery = {};
           itemReset = { query, result: await api.queryOrderItems(query, []) };
@@ -542,7 +551,7 @@ export function App({ api }: AppProps) {
         const query = structuredClone(template.query);
         const result = await api.queryOrders(
           query,
-          customFieldDefinitionIds(template.columns),
+          orderProjectionDefinitionIds,
         );
         if (requestVersion !== tableTemplateApplyVersion.current) return;
         preloadedOrderTemplateQuery.current = query;
@@ -553,7 +562,7 @@ export function App({ api }: AppProps) {
         const query = structuredClone(template.query);
         const result = await api.queryOrderItems(
           query,
-          customFieldDefinitionIds(template.columns),
+          tableTemplateCustomFieldDefinitionIds(template.columns),
         );
         if (requestVersion !== tableTemplateApplyVersion.current) return;
         preloadedOrderItemTemplateQuery.current = query;
@@ -586,7 +595,7 @@ export function App({ api }: AppProps) {
     try {
       if (granularity === 'order') {
         const query = structuredClone(DEFAULT_ORDER_QUERY);
-        const result = await api.queryOrders(query, []);
+        const result = await api.queryOrders(query, orderProjectionDefinitionIds);
         if (requestVersion !== tableTemplateApplyVersion.current) return;
         preloadedOrderTemplateQuery.current = query;
         setOrderQuery(query);
@@ -1966,11 +1975,9 @@ function OrdersWorkspace({
       {exportPreview && (
         <OrderExportDialog
           scopeKind={exportPreview.kind}
-          orderIds={exportPreview.orders.map(({ id }) => id)}
-          orderItemCount={exportPreview.orders.reduce(
-            (total, order) => total + (order.items?.length ?? 0),
-            0,
-          )}
+          orders={exportPreview.orders}
+          customFieldDefinitions={customFieldDefinitions}
+          customFieldValues={customFieldValues}
           templates={tableTemplates}
           onExport={onExport}
           onClose={() => setExportPreview(null)}
@@ -4580,11 +4587,14 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(stableJsonValue(left)) === JSON.stringify(stableJsonValue(right));
 }
 
-function customFieldDefinitionIds(columns: readonly TableTemplateLayoutItem[]): string[] {
-  return columns.flatMap((item) => {
-    if (isDynamicProductTableGroup(item)) return [];
-    return item.field.kind === 'custom' ? [item.field.definitionId] : [];
-  });
+function orderTemplatesCustomFieldDefinitionIds(
+  templates: readonly TableTemplate[],
+): string[] {
+  return [...new Set(templates.flatMap((template) => (
+    template.granularity === 'order'
+      ? tableTemplateCustomFieldDefinitionIds(template.columns)
+      : []
+  )))].sort();
 }
 
 function stableJsonValue(value: unknown): unknown {

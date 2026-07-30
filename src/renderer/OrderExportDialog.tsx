@@ -1,19 +1,41 @@
 import {
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
 
-import type { OrderExportInput, OrderExportResult } from '../core/order-export';
-import type { TableTemplate } from '../core/table-templates';
+import type { OrderSummary } from '../core/contracts';
+import type {
+  CustomFieldDefinition,
+  CustomFieldValueRecord,
+} from '../core/custom-fields';
+import {
+  DEFAULT_ORDER_EXPORT_COLUMNS,
+  defaultMaskedOrderCell,
+  orderExportBuiltinTextLabel,
+  type OrderExportInput,
+  type OrderExportResult,
+} from '../core/order-export';
+import {
+  createCustomFieldValueIndex,
+  createOrderTableProjectionPlan,
+  projectOrderTableProjectionRow,
+  type OrderTableProjectionColumn,
+  type TableCellValue,
+  type TableTemplate,
+} from '../core/table-templates';
+
+const ORDER_EXPORT_PREVIEW_ROW_LIMIT = 5;
 
 export type OrderExportDialogProps = {
   scopeKind: OrderExportInput['scope']['kind'];
-  orderIds: string[];
-  orderItemCount: number;
+  orders: OrderSummary[];
+  customFieldDefinitions: CustomFieldDefinition[];
+  customFieldValues: CustomFieldValueRecord[];
   templates: TableTemplate[];
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
   onSaved: (result: Extract<OrderExportResult, { kind: 'saved' }>) => void;
@@ -22,8 +44,9 @@ export type OrderExportDialogProps = {
 
 export function OrderExportDialog({
   scopeKind,
-  orderIds,
-  orderItemCount,
+  orders,
+  customFieldDefinitions,
+  customFieldValues,
   templates,
   onExport,
   onSaved,
@@ -37,6 +60,8 @@ export function OrderExportDialog({
   const [orderItemTemplateId, setOrderItemTemplateId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const orderIds = orders.map(({ id }) => id);
+  const orderItemCount = orders.reduce((total, order) => total + order.items.length, 0);
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement
@@ -108,6 +133,36 @@ export function OrderExportDialog({
   const orderItemTemplates = templates.filter(
     ({ granularity }) => granularity === 'order_item',
   );
+  const customFieldValueIndex = useMemo(
+    () => createCustomFieldValueIndex(customFieldValues),
+    [customFieldValues],
+  );
+  const orderProjection = useMemo(() => {
+    const template = orderTemplates.find(({ id }) => id === orderTemplateId);
+    try {
+      const plan = createOrderTableProjectionPlan(
+        template?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS,
+        orders,
+        customFieldDefinitions,
+      );
+      return {
+        plan,
+        rows: orders.slice(0, ORDER_EXPORT_PREVIEW_ROW_LIMIT).map((order) => ({
+          order,
+          values: projectOrderTableProjectionRow(plan, order, customFieldValueIndex),
+        })),
+        error: '',
+      };
+    } catch (reason) {
+      return { plan: null, rows: [], error: errorMessage(reason) };
+    }
+  }, [
+    customFieldDefinitions,
+    customFieldValueIndex,
+    orderTemplateId,
+    orderTemplates,
+    orders,
+  ]);
 
   return (
     <div
@@ -170,6 +225,41 @@ export function OrderExportDialog({
           </label>
         </div>
 
+        <section className="order-export-dialog__preview" aria-label="订单总表导出预览区域">
+          <strong>订单总表预览</strong>
+          {orderProjection.error ? (
+            <p className="order-export-dialog__error" role="alert">{orderProjection.error}</p>
+          ) : (
+            <div className="order-table-wrap">
+              <table aria-label="订单总表导出预览">
+                <thead>
+                  <tr>
+                    {orderProjection.plan?.columns.map((column) => (
+                      <th key={column.key}>{column.header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderProjection.rows.map(({ order, values }) => (
+                    <tr key={order.id}>
+                      {orderProjection.plan?.columns.map((column, index) => (
+                        <td key={column.key}>
+                          {orderExportPreviewCellText(order, column, values[index] ?? null)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {orders.length > ORDER_EXPORT_PREVIEW_ROW_LIMIT && (
+            <small>
+              仅预览前 {ORDER_EXPORT_PREVIEW_ROW_LIMIT} 笔，保存时将导出本次范围全部订单。
+            </small>
+          )}
+        </section>
+
         <section className="order-export-dialog__masking" aria-labelledby={`${headingId}-masking`}>
           <div>
             <strong id={`${headingId}-masking`}>导出时默认脱敏</strong>
@@ -197,7 +287,7 @@ export function OrderExportDialog({
           <button
             className="button button--primary"
             type="submit"
-            disabled={saving || orderIds.length === 0}
+            disabled={saving || orderIds.length === 0 || Boolean(orderProjection.error)}
           >
             {saving ? '正在生成…' : '保存 Excel'}
           </button>
@@ -209,4 +299,46 @@ export function OrderExportDialog({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function orderExportPreviewCellText(
+  order: OrderSummary,
+  column: OrderTableProjectionColumn,
+  value: TableCellValue,
+): string {
+  let displayedValue = value;
+  if (column.kind === 'field' && column.field.kind === 'builtin') {
+    displayedValue = defaultMaskedOrderCell(column.field.key, value, {
+      province: order.province ?? '',
+      city: order.city ?? '',
+      district: order.district ?? '',
+    });
+    if (typeof displayedValue === 'string') {
+      displayedValue = orderExportBuiltinTextLabel(column.field.key, displayedValue)
+        ?? displayedValue;
+    }
+  }
+  if (displayedValue === null || displayedValue === '') return '';
+  if (column.valueType === 'money' && typeof displayedValue === 'number') {
+    return `¥${(displayedValue / 100).toFixed(2)}`;
+  }
+  if (column.valueType === 'datetime' && typeof displayedValue === 'string') {
+    const instant = new Date(displayedValue);
+    if (!Number.isFinite(instant.getTime())) return displayedValue;
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(instant);
+  }
+  if (column.valueType === 'checkbox' && typeof displayedValue === 'boolean') {
+    return displayedValue ? '是' : '否';
+  }
+  if (Array.isArray(displayedValue)) return displayedValue.join('、');
+  return String(displayedValue);
 }

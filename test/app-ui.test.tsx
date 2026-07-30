@@ -7,7 +7,10 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
-import type { CustomFieldDefinition } from '../src/core/custom-fields';
+import type {
+  CustomFieldDefinition,
+  CustomFieldValueRecord,
+} from '../src/core/custom-fields';
 import type {
   OrderDetails,
   OrderDraft,
@@ -143,6 +146,9 @@ function orderSummary(
     recipient: order.recipient,
     phone: order.phone,
     addressOriginal: order.addressOriginal,
+    province: order.province,
+    city: order.city,
+    district: order.district,
     amountCents: order.amountCents,
     itemCount: order.items.reduce((total, item) => total + item.quantity, 0),
     initialSourceRecognitionStatus: 'imported',
@@ -862,9 +868,11 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
 
     const overview = await screen.findByRole('region', { name: '订单概况' });
-    expect(overview).toHaveTextContent('在库订单1');
-    await waitFor(() => expect(overview).toHaveTextContent('待确认2'));
-    expect(overview).toHaveTextContent('待发货1');
+    await waitFor(() => {
+      expect(overview).toHaveTextContent('在库订单1');
+      expect(overview).toHaveTextContent('待确认2');
+      expect(overview).toHaveTextContent('待发货1');
+    });
   });
 
   it('订单行直接展示完整收件信息、商品、平台卖家和四个独立状态', async () => {
@@ -3402,10 +3410,118 @@ describe('订单管理工作台', () => {
       lifecycleStatus: 'active',
       sortField: 'created_at',
       sortDirection: 'desc',
-    }, []));
+    }, [noteField.id]));
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
     expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
       .toEqual(['订单号', '平台', '卖家账号']);
+  });
+
+  it('应用订单模板后导出切换到其他模板仍预加载其自定义字段值', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const createdAt = '2026-07-30T00:00:00.000Z';
+    const fieldA: CustomFieldDefinition = {
+      id: 'field-template-a',
+      name: 'A 模板备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const fieldB: CustomFieldDefinition = {
+      id: 'field-template-b',
+      name: 'B 模板备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const templateA: TableTemplate = {
+      id: 'template-a',
+      name: '订单模板 A',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+        { field: { kind: 'custom', definitionId: fieldA.id }, displayName: 'A 跟单' },
+      ],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const templateB: TableTemplate = {
+      id: 'template-b',
+      name: '订单模板 B',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'custom', definitionId: fieldB.id }, displayName: 'B 跟单' },
+        { field: { kind: 'custom', definitionId: fieldA.id }, displayName: 'A 备用' },
+      ],
+      query: {},
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const allValues: CustomFieldValueRecord[] = [
+      {
+        definitionId: fieldA.id,
+        orderId: summary.id,
+        orderItemId: null,
+        value: 'A 值',
+        createdAt,
+        updatedAt: createdAt,
+      },
+      {
+        definitionId: fieldB.id,
+        orderId: summary.id,
+        orderItemId: null,
+        value: 'B 值',
+        createdAt,
+        updatedAt: createdAt,
+      },
+    ];
+    const queryOrders = vi.fn(async (
+      _query: OrderWorkbenchQuery,
+      definitionIds: readonly string[] = [],
+    ) => workbenchResult([summary], {
+      customFieldValues: allValues.filter(({ definitionId }) => (
+        definitionIds.includes(definitionId)
+      )),
+    }));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([fieldA, fieldB]),
+      listTableTemplates: vi.fn().mockResolvedValue([templateA, templateB]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '表格模板' }));
+    await user.click(await screen.findByRole('button', { name: '应用 订单模板 A' }));
+
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledWith(
+      templateA.query,
+      [fieldA.id, fieldB.id],
+    ));
+    await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '订单总表模板' }),
+      templateB.id,
+    );
+    const preview = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    expect(within(preview).getAllByRole('columnheader').map(({ textContent }) => textContent))
+      .toEqual(['B 跟单', 'A 备用']);
+    expect(within(preview).getByText('B 值')).toBeVisible();
   });
 
   it('模板不包含订单号时仍保留独立的订单详情入口', async () => {
@@ -3455,12 +3571,35 @@ describe('订单管理工作台', () => {
   it('删除正在应用的模板时同步恢复默认查询与列', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
+    const remainingField: CustomFieldDefinition = {
+      id: 'field-remaining-template',
+      name: '剩余模板备注',
+      granularity: 'order',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
     const template: TableTemplate = {
       id: 'template-active-delete',
       name: '待发货临时视图',
       granularity: 'order',
       columns: [{ field: { kind: 'computed', key: 'order_total' }, displayName: '实付' }],
       query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const remainingTemplate: TableTemplate = {
+      id: 'template-remaining',
+      name: '剩余订单视图',
+      granularity: 'order',
+      columns: [{
+        field: { kind: 'custom', definitionId: remainingField.id },
+        displayName: '剩余备注',
+      }],
+      query: {},
       createdAt: '2026-07-30T00:00:00.000Z',
       updatedAt: '2026-07-30T00:00:00.000Z',
     };
@@ -3474,7 +3613,8 @@ describe('订单管理工作台', () => {
       }),
       listOrders: vi.fn().mockResolvedValue([summary]),
       queryOrders,
-      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([remainingField]),
+      listTableTemplates: vi.fn().mockResolvedValue([template, remainingTemplate]),
       deleteTableTemplate,
     });
 
@@ -3492,7 +3632,7 @@ describe('订单管理工作台', () => {
       lifecycleStatus: 'active',
       sortField: 'created_at',
       sortDirection: 'desc',
-    }, []));
+    }, [remainingField.id]));
     expect(deleteTableTemplate).toHaveBeenCalledWith(template.id);
     await user.click(screen.getByRole('button', { name: '订单' }));
     const table = await screen.findByRole('table', { name: '原始订单' });
@@ -3769,8 +3909,8 @@ describe('订单管理工作台', () => {
       id: 'order-2',
       orderNumber: 'XY-TEST-20260727-0002',
       items: [
-        { sourceTitle: '测试商品 B', sourceSpec: '大号', quantity: 1 },
-        { sourceTitle: '测试商品 C', sourceSpec: '小号', quantity: 2 },
+        { sourceTitle: '同款测试商品', sourceSpec: '大号', quantity: 1 },
+        { sourceTitle: '同款测试商品', sourceSpec: '小号', quantity: 2 },
       ],
       itemCount: 3,
     });
@@ -3780,6 +3920,14 @@ describe('订单管理工作台', () => {
       granularity: 'order',
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+        { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+        { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+        { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '品名', specification: '规格', quantity: '件数' },
+        },
         { field: { kind: 'computed', key: 'order_total' }, displayName: '实付' },
       ],
       query: {},
@@ -3831,6 +3979,37 @@ describe('订单管理工作台', () => {
       within(dialog).getByRole('combobox', { name: '订单总表模板' }),
       orderTemplate.id,
     );
+    expect(within(
+      within(dialog).getByRole('table', { name: '订单总表导出预览' }),
+    ).getAllByRole('columnheader').map(({ textContent }) => textContent)).toEqual([
+      '平台单号',
+      '买家', '收件人', '手机号', '收货地址',
+      '品名1', '规格1', '件数1',
+      '品名2', '规格2', '件数2',
+      '实付',
+    ]);
+    const previewRows = within(
+      within(dialog).getByRole('table', { name: '订单总表导出预览' }),
+    ).getAllByRole('row');
+    expect(previewRows).toHaveLength(3);
+    expect(within(previewRows[1]).getAllByRole('cell').map(({ textContent }) => textContent))
+      .toEqual([
+        first.orderNumber,
+        '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+        '脱敏测试商品', '白色', '2',
+        '', '', '',
+        '¥8.00',
+      ]);
+    expect(within(previewRows[2]).getAllByRole('cell').map(({ textContent }) => textContent))
+      .toEqual([
+        second.orderNumber,
+        '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+        '同款测试商品', '大号', '1',
+        '同款测试商品', '小号', '2',
+        '¥8.00',
+      ]);
+    expect(within(dialog).queryByText(confirmedOrder.phone)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(confirmedOrder.addressOriginal)).not.toBeInTheDocument();
     await user.selectOptions(
       within(dialog).getByRole('combobox', { name: '商品明细表模板' }),
       itemTemplate.id,
@@ -3885,6 +4064,23 @@ describe('订单管理工作台', () => {
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
     expect(within(dialog).getByText('1 笔订单')).toBeVisible();
     expect(within(dialog).getByText('2 条商品明细')).toBeVisible();
+    const previewTable = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    const previewHeaders = within(previewTable).getAllByRole('columnheader')
+      .map(({ textContent }) => textContent);
+    expect(previewHeaders).toEqual(expect.arrayContaining([
+      '商品1', '款式或规格1', '数量1',
+      '商品2', '款式或规格2', '数量2',
+    ]));
+    expect(previewHeaders).not.toContain('商品3');
+    const previewRows = within(previewTable).getAllByRole('row');
+    expect(previewRows).toHaveLength(2);
+    const selectedCells = within(previewRows[1]).getAllByRole('cell')
+      .map(({ textContent }) => textContent);
+    expect(selectedCells[previewHeaders.indexOf('订单号')]).toBe(second.orderNumber);
+    expect(selectedCells[previewHeaders.indexOf('商品1')]).toBe('所选商品 A');
+    expect(selectedCells[previewHeaders.indexOf('款式或规格1')]).toBe('大号');
+    expect(selectedCells[previewHeaders.indexOf('商品2')]).toBe('所选商品 B');
+    expect(selectedCells[previewHeaders.indexOf('款式或规格2')]).toBe('小号');
     await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
 
     await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({

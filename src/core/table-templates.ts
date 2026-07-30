@@ -408,6 +408,15 @@ export function tableTemplateLayoutItemKey(item: TableTemplateLayoutItem): strin
     : fieldReferenceKey(item.field);
 }
 
+export function tableTemplateCustomFieldDefinitionIds(
+  layout: readonly TableTemplateLayoutItem[],
+): string[] {
+  return layout.flatMap((item) => {
+    if (isDynamicProductTableGroup(item)) return [];
+    return item.field.kind === 'custom' ? [item.field.definitionId] : [];
+  });
+}
+
 export function assertOrderTableLayoutFutureHeaderSafety(
   layout: readonly TableTemplateLayoutItem[],
 ): void {
