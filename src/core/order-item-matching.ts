@@ -148,7 +148,7 @@ function completeItemSignature(item: IdentifiedOrderItem): string {
     normalizedItemText(item.sourceSpec),
     item.unitPriceCents,
     item.quantity,
-    item.quantityInferred,
+    item.quantitySource ?? null,
   ]);
 }
 

@@ -6,6 +6,7 @@ import type {
   CustomFieldValueRecord,
 } from '../src/core/custom-fields';
 import type { OrderItemWorkbenchItem } from '../src/core/order-workbench';
+import type { QuantitySource } from '../src/core/quantity-source';
 import {
   availableTableFields,
   createCustomFieldValueIndex,
@@ -116,10 +117,35 @@ describe('表格模板核心契约', () => {
       .not.toContain(`custom:${itemField.id}`);
 
     const itemFields = availableTableFields('order_item', definitions);
-    expect(itemFields).toEqual(expect.arrayContaining([
+    expect(itemFields.filter(({ reference }) => reference.kind !== 'custom')).toEqual([
       {
         reference: { kind: 'builtin', key: 'order_number' },
         defaultLabel: '订单号',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'product_title' },
+        defaultLabel: '原始商品标题',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'product_spec' },
+        defaultLabel: '原始款式／规格',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'unit_price' },
+        defaultLabel: '商品单价',
+        valueType: 'money',
+      },
+      {
+        reference: { kind: 'builtin', key: 'quantity' },
+        defaultLabel: '数量',
+        valueType: 'number',
+      },
+      {
+        reference: { kind: 'builtin', key: 'quantity_source' },
+        defaultLabel: '数量来源',
         valueType: 'text',
       },
       {
@@ -127,12 +153,12 @@ describe('表格模板核心契约', () => {
         defaultLabel: '商品小计',
         valueType: 'money',
       },
-      {
-        reference: { kind: 'custom', definitionId: itemField.id },
-        defaultLabel: itemField.name,
-        valueType: itemField.type,
-      },
-    ]));
+    ]);
+    expect(itemFields).toContainEqual({
+      reference: { kind: 'custom', definitionId: itemField.id },
+      defaultLabel: itemField.name,
+      valueType: itemField.type,
+    });
     expect(itemFields.map(({ reference }) => fieldReferenceKey(reference)))
       .not.toContain(`custom:${orderField.id}`);
   });
@@ -287,6 +313,10 @@ describe('表格模板核心契约', () => {
       ...input,
       query: { text: '订单查询字段不能混入商品模板' },
     }, definitions)).toThrow(/未知属性/);
+    expect(() => normalizeCreateTableTemplateInput({
+      ...input,
+      query: { quantitySource: 'unknown_source' },
+    }, definitions)).toThrow(/数量来源/);
   });
 
   it('把订单字段投影为可复用的原始单元格值', () => {
@@ -355,6 +385,7 @@ describe('表格模板核心契约', () => {
       sourceSpec: '红色',
       unitPriceCents: 1_800,
       quantity: 2,
+      quantitySource: 'ocr_explicit',
       quantityInferred: false,
       subtotalCents: 3_600,
     };
@@ -371,6 +402,18 @@ describe('表格模板核心契约', () => {
       .toBe('XY-001');
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'unit_price' }))
       .toBe(1_800);
+    const quantitySourceLabels: Array<[QuantitySource, string]> = [
+      ['manual', '人工修改'],
+      ['ocr_explicit', 'OCR 识别'],
+      ['system_default_1', '系统默认 1'],
+      ['legacy_explicit_or_manual', '已明确（历史来源不明）'],
+    ];
+    for (const [quantitySource, expected] of quantitySourceLabels) {
+      expect(projectOrderItemTableCell(
+        { ...item, quantitySource },
+        { kind: 'builtin', key: 'quantity_source' },
+      )).toBe(expected);
+    }
     expect(projectOrderItemTableCell(item, { kind: 'computed', key: 'item_subtotal' }))
       .toBe(3_600);
     expect(projectOrderItemTableCell(

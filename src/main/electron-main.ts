@@ -22,6 +22,7 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from '../core/order-workbench';
+import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeCreateTableTemplateInput,
   normalizeUpdateTableTemplateInput,
@@ -370,6 +371,13 @@ function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
 }
 
 const ORDER_ITEM_WORKBENCH_QUERY_KEYS = new Set([
+  'sourceTitle',
+  'sourceSpec',
+  'unitPriceCents',
+  'quantity',
+  'quantitySource',
+  'sortField',
+  'sortDirection',
   'customFieldFilter',
   'customFieldSort',
 ]);
@@ -377,9 +385,33 @@ const ORDER_ITEM_WORKBENCH_QUERY_KEYS = new Set([
 function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
   if (!isRecord(input)) throw new Error('商品工作台查询格式无效');
   rejectUnknownKeys(input, ORDER_ITEM_WORKBENCH_QUERY_KEYS, '商品工作台查询');
+  const sortField = optionalWorkbenchEnum(
+    input.sortField,
+    ['source_title', 'source_spec', 'unit_price', 'quantity', 'quantity_source'] as const,
+    '商品明细排序字段',
+  );
+  const customFieldSort = parseCustomFieldSort(input.customFieldSort);
+  if (sortField && customFieldSort) {
+    throw new Error('商品明细一次只能使用一种排序');
+  }
   return {
+    sourceTitle: optionalWorkbenchText(input.sourceTitle, 20_000),
+    sourceSpec: optionalWorkbenchText(input.sourceSpec, 20_000),
+    unitPriceCents: optionalWorkbenchInteger(input.unitPriceCents, 0, '商品单价'),
+    quantity: optionalWorkbenchInteger(input.quantity, 1, '商品数量'),
+    quantitySource: optionalWorkbenchEnum(
+      input.quantitySource,
+      QUANTITY_SOURCES,
+      '商品数量来源',
+    ),
+    sortField,
+    sortDirection: optionalWorkbenchEnum(
+      input.sortDirection,
+      ['asc', 'desc'] as const,
+      '商品明细排序方向',
+    ),
     customFieldFilter: parseCustomFieldFilter(input.customFieldFilter),
-    customFieldSort: parseCustomFieldSort(input.customFieldSort),
+    customFieldSort,
   };
 }
 
@@ -679,6 +711,18 @@ function optionalWorkbenchEnum<const T extends readonly string[]>(
     throw new Error(`订单工作台${label}格式无效`);
   }
   return value as T[number];
+}
+
+function optionalWorkbenchInteger(
+  value: unknown,
+  minimum: number,
+  label: string,
+): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
+    throw new Error(`${label}格式无效`);
+  }
+  return value as number;
 }
 
 function parseExpectedRevision(value: unknown): number {

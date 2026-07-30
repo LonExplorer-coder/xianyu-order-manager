@@ -695,7 +695,7 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
 
-    expect(await screen.findByText('截图未显示数量，已按 1 件处理')).toBeVisible();
+    expect(await screen.findByText('数量来源：系统默认 1')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '删除商品 1' }));
 
     expect(screen.getByRole('heading', { name: '商品明细 · 0' })).toBeVisible();
@@ -704,7 +704,7 @@ describe('订单管理工作台', () => {
 
     await user.click(screen.getByRole('button', { name: '添加商品' }));
     expect(screen.getByRole('heading', { name: '商品明细 · 1' })).toBeVisible();
-    expect(screen.queryByText('截图未显示数量，已按 1 件处理')).not.toBeInTheDocument();
+    expect(screen.getByText('数量来源：人工修改')).toBeVisible();
     expect(screen.getByRole('spinbutton', { name: '数量' })).toHaveValue(1);
 
     await user.type(screen.getByRole('textbox', { name: '商品标题' }), '人工补录商品');
@@ -3313,7 +3313,9 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
 
     const table = await screen.findByRole('table', { name: '原始订单' });
     expect(within(table).queryByText(summary.orderNumber)).not.toBeInTheDocument();
@@ -3348,7 +3350,9 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
     await user.click(screen.getByRole('button', { name: '表格模板' }));
     queryOrders.mockClear();
     await user.click(await screen.findByRole('button', { name: '删除 待发货临时视图' }));
@@ -3461,6 +3465,104 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('table', { name: '原始订单' })).toBeVisible();
   });
 
+  it('默认商品明细视图以一个商品条目一行展示完整原始字段', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const item = {
+      ...confirmedOrder.items[0],
+      orderId: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems: vi.fn().mockResolvedValue({ items: [item], customFieldValues: [] }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('tab', { name: '商品' }));
+
+    const table = await screen.findByRole('table', { name: '商品明细' });
+    expect(within(table).getAllByRole('columnheader').slice(0, -1).map((cell) => cell.textContent))
+      .toEqual([
+        '订单号',
+        '原始商品标题',
+        '原始款式／规格',
+        '商品单价',
+        '数量',
+        '数量来源',
+        '商品小计',
+      ]);
+    const row = within(table).getByRole('button', {
+      name: `打开订单 ${confirmedOrder.orderNumber}`,
+    }).closest('tr');
+    expect(row).toHaveTextContent(confirmedOrder.orderNumber);
+    expect(row).toHaveTextContent(confirmedOrder.items[0].sourceTitle);
+    expect(row).toHaveTextContent(confirmedOrder.items[0].sourceSpec);
+    expect(row).toHaveTextContent('¥8.00');
+    expect(row).toHaveTextContent('¥16.00');
+    expect(row).toHaveTextContent('已明确（历史来源不明）');
+  });
+
+  it('商品明细视图从内置控件发起精确事实筛选和排序', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const item = {
+      ...confirmedOrder.items[0],
+      orderId: confirmedOrder.id,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const queryOrderItems = vi.fn().mockResolvedValue({
+      items: [item],
+      customFieldValues: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('tab', { name: '商品' }));
+    await screen.findByRole('table', { name: '商品明细' });
+
+    await user.type(screen.getByRole('searchbox', { name: '原始商品标题精确筛选' }), '脱敏测试商品');
+    await user.type(screen.getByRole('searchbox', { name: '原始款式／规格精确筛选' }), '白色');
+    await user.type(screen.getByRole('spinbutton', { name: '商品单价（元）精确筛选' }), '8.00');
+    await user.type(screen.getByRole('spinbutton', { name: '商品数量精确筛选' }), '2');
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '商品数量来源精确筛选' }),
+      'manual',
+    );
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '商品明细内置排序' }),
+      'unit_price:desc',
+    );
+
+    await waitFor(() => expect(queryOrderItems).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sourceTitle: '脱敏测试商品',
+        sourceSpec: '白色',
+        unitPriceCents: 800,
+        quantity: 2,
+        quantitySource: 'manual',
+        sortField: 'unit_price',
+        sortDirection: 'desc',
+      }),
+      [],
+    ));
+  });
+
   it('应用商品模板时切换数据粒度并按模板列展示商品自定义值', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
@@ -3519,6 +3621,7 @@ describe('订单管理工作台', () => {
 
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '表格模板' }));
+    await user.click(await screen.findByRole('tab', { name: '商品明细表模板' }));
     await user.click(await screen.findByRole('button', { name: '应用 商品拣货' }));
 
     await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith(template.query, [binField.id]));

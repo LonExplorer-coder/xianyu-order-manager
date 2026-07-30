@@ -162,6 +162,16 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(items?.rowCount).toBe(3);
     if (!orders || !items) throw new Error('缺少导出工作表');
 
+    expect(rowValues(items, 1)).toEqual([
+      '订单号',
+      '原始商品标题',
+      '原始款式／规格',
+      '商品单价',
+      '数量',
+      '数量来源',
+      '商品小计',
+    ]);
+
     expect(cellByHeader(orders, 2, '买家')).toMatchObject({
       value: '海**家',
       type: ExcelJS.ValueType.String,
@@ -200,9 +210,33 @@ describe('默认脱敏的两表工作簿导出', () => {
       value: 'XY-EXPORT-001',
       type: ExcelJS.ValueType.String,
     });
-    expect(cellByHeader(items, 2, '单价')).toMatchObject({
+    expect(cellByHeader(items, 2, '原始商品标题')).toMatchObject({
+      value: '夏日海棠杯',
+      type: ExcelJS.ValueType.String,
+    });
+    expect(cellByHeader(items, 2, '原始款式／规格')).toMatchObject({
+      value: '红色 450ml',
+      type: ExcelJS.ValueType.String,
+    });
+    expect(cellByHeader(items, 2, '商品单价')).toMatchObject({
       value: 18,
       type: ExcelJS.ValueType.Number,
+    });
+    expect(cellByHeader(items, 2, '数量')).toMatchObject({
+      value: 2,
+      type: ExcelJS.ValueType.Number,
+    });
+    expect(cellByHeader(items, 2, '数量来源')).toMatchObject({
+      value: 'OCR 识别',
+      type: ExcelJS.ValueType.String,
+    });
+    expect(cellByHeader(items, 2, '商品小计')).toMatchObject({
+      value: 36,
+      type: ExcelJS.ValueType.Number,
+    });
+    expect(cellByHeader(items, 3, '原始商品标题')).toMatchObject({
+      value: '备用杯盖',
+      type: ExcelJS.ValueType.String,
     });
 
     const allCellText = workbook.worksheets.flatMap((worksheet) => (
@@ -449,7 +483,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     if (!orders || !items) throw new Error('缺少导出工作表');
     expect(cellByHeader(orders, 2, '订单号').value).toBe('XY-TRASHED-EXPORT-001');
     expect(items.rowCount).toBe(3);
-    expect(cellByHeader(items, 2, '商品')).toMatchObject({
+    expect(cellByHeader(items, 2, '原始商品标题')).toMatchObject({
       value: formulaLikeTitle,
       type: ExcelJS.ValueType.String,
       formula: undefined,

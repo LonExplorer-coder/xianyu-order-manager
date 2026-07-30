@@ -151,6 +151,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 7) migrateToVersion7(database);
   if (row.version < 8) migrateToVersion8(database);
   if (row.version < 9) migrateToVersion9(database);
+  if (row.version < 10) migrateToVersion10(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -969,6 +970,91 @@ function migrateToVersion9(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  }
+}
+
+function migrateToVersion10(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE draft_items_v10 (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL REFERENCES order_drafts(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        source_title TEXT NOT NULL,
+        source_spec TEXT NOT NULL,
+        unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price_present INTEGER NOT NULL DEFAULT 1
+          CHECK (unit_price_present IN (0, 1)),
+        quantity_source TEXT NOT NULL CHECK (quantity_source IN (
+          'manual', 'ocr_explicit', 'system_default_1', 'legacy_explicit_or_manual'
+        )),
+        UNIQUE (draft_id, position)
+      ) STRICT;
+
+      INSERT INTO draft_items_v10 (
+        id, draft_id, position, source_title, source_spec,
+        unit_price_cents, quantity, unit_price_present, quantity_source
+      )
+      SELECT
+        id, draft_id, position, source_title, source_spec,
+        unit_price_cents, quantity, unit_price_present,
+        CASE quantity_inferred
+          WHEN 1 THEN 'system_default_1'
+          ELSE 'legacy_explicit_or_manual'
+        END
+      FROM draft_items;
+
+      CREATE TABLE order_items_v10 (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        source_title TEXT NOT NULL,
+        source_spec TEXT NOT NULL,
+        unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        quantity_source TEXT NOT NULL CHECK (quantity_source IN (
+          'manual', 'ocr_explicit', 'system_default_1', 'legacy_explicit_or_manual'
+        )),
+        subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+        UNIQUE (order_id, position)
+      ) STRICT;
+
+      INSERT INTO order_items_v10 (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_source, subtotal_cents
+      )
+      SELECT
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity,
+        CASE quantity_inferred
+          WHEN 1 THEN 'system_default_1'
+          ELSE 'legacy_explicit_or_manual'
+        END,
+        subtotal_cents
+      FROM order_items;
+
+      DROP TABLE draft_items;
+      ALTER TABLE draft_items_v10 RENAME TO draft_items;
+      DROP TABLE order_items;
+      ALTER TABLE order_items_v10 RENAME TO order_items;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

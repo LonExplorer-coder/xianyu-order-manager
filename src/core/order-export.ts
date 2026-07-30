@@ -1,4 +1,8 @@
-import type { TableCellValue, TableTemplateColumn } from './table-templates';
+import {
+  DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
+  type TableCellValue,
+  type TableTemplateColumn,
+} from './table-templates';
 
 export type OrderExportScope = {
   kind: 'current_result' | 'selected_orders';
@@ -51,12 +55,7 @@ export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateColumn[] = [
 ];
 
 export const DEFAULT_ORDER_ITEM_EXPORT_COLUMNS: TableTemplateColumn[] = [
-  { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
-  { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
-  { field: { kind: 'builtin', key: 'product_spec' }, displayName: '规格' },
-  { field: { kind: 'builtin', key: 'unit_price' }, displayName: '单价' },
-  { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
-  { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '小计' },
+  ...DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
 ];
 
 export function normalizeOrderExportInput(value: unknown): OrderExportInput {

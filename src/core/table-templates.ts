@@ -10,6 +10,11 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from './order-workbench';
+import {
+  QUANTITY_SOURCES,
+  quantitySourceFromLegacy,
+  quantitySourceLabel,
+} from './quantity-source';
 
 export const TABLE_TEMPLATE_GRANULARITIES = ['order', 'order_item'] as const;
 
@@ -38,7 +43,8 @@ export type OrderItemBuiltinTableFieldId =
   | 'product_title'
   | 'product_spec'
   | 'unit_price'
-  | 'quantity';
+  | 'quantity'
+  | 'quantity_source';
 
 export type BuiltinTableFieldId =
   | OrderBuiltinTableFieldId
@@ -58,6 +64,16 @@ export type TableTemplateColumn = {
   field: TableFieldReference;
   displayName: string;
 };
+
+export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
+  { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+  { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
+  { field: { kind: 'builtin', key: 'product_spec' }, displayName: '原始款式／规格' },
+  { field: { kind: 'builtin', key: 'unit_price' }, displayName: '商品单价' },
+  { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
+  { field: { kind: 'builtin', key: 'quantity_source' }, displayName: '数量来源' },
+  { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '商品小计' },
+];
 
 type OrderTableTemplateConfiguration = {
   name: string;
@@ -147,10 +163,11 @@ const ORDER_COMPUTED_FIELDS = [
 
 const ORDER_ITEM_BUILTIN_FIELDS = [
   fixedField('order_item', 'builtin', 'order_number', '订单号', 'text'),
-  fixedField('order_item', 'builtin', 'product_title', '商品名称', 'text'),
-  fixedField('order_item', 'builtin', 'product_spec', '商品规格', 'text'),
+  fixedField('order_item', 'builtin', 'product_title', '原始商品标题', 'text'),
+  fixedField('order_item', 'builtin', 'product_spec', '原始款式／规格', 'text'),
   fixedField('order_item', 'builtin', 'unit_price', '商品单价', 'money'),
   fixedField('order_item', 'builtin', 'quantity', '数量', 'number'),
+  fixedField('order_item', 'builtin', 'quantity_source', '数量来源', 'text'),
 ] as const satisfies readonly FixedTableField[];
 
 const ORDER_ITEM_COMPUTED_FIELDS = [
@@ -183,7 +200,17 @@ const ORDER_QUERY_KEYS = [
   'customFieldSort',
 ] as const;
 
-const ORDER_ITEM_QUERY_KEYS = ['customFieldFilter', 'customFieldSort'] as const;
+const ORDER_ITEM_QUERY_KEYS = [
+  'sourceTitle',
+  'sourceSpec',
+  'unitPriceCents',
+  'quantity',
+  'quantitySource',
+  'sortField',
+  'sortDirection',
+  'customFieldFilter',
+  'customFieldSort',
+] as const;
 
 const ORDER_DATE_FIELDS = ['ordered_at', 'paid_at', 'created_at'] as const;
 const ORDER_SORT_FIELDS = [
@@ -213,6 +240,13 @@ const PLATFORM_TRANSACTION_STATUSES = ['paid', 'cancelled', 'refunded', 'unknown
 const FULFILLMENT_STATUSES = ['pending_shipment', 'shipped', 'unknown'] as const;
 const LIFECYCLE_STATUSES = ['active', 'trashed', 'deleted', 'all'] as const;
 const SORT_DIRECTIONS = ['asc', 'desc'] as const;
+const ORDER_ITEM_SORT_FIELDS = [
+  'source_title',
+  'source_spec',
+  'unit_price',
+  'quantity',
+  'quantity_source',
+] as const;
 
 const MAX_TEMPLATE_NAME_LENGTH = 100;
 const MAX_DISPLAY_NAME_LENGTH = 100;
@@ -380,6 +414,9 @@ export function projectOrderItemTableCell(
     case 'product_spec': return item.sourceSpec;
     case 'unit_price': return item.unitPriceCents;
     case 'quantity': return item.quantity;
+    case 'quantity_source': return quantitySourceLabel(
+      item.quantitySource ?? quantitySourceFromLegacy(item.quantityInferred),
+    );
     default: return null;
   }
 }
@@ -484,7 +521,40 @@ function normalizeQuery(
   const allowedKeys = granularity === 'order' ? ORDER_QUERY_KEYS : ORDER_ITEM_QUERY_KEYS;
   const record = strictRecord(value, '表格模板查询', allowedKeys);
   const common = normalizeCustomQueryParts(record, granularity, customFieldDefinitions);
-  if (granularity === 'order_item') return common;
+  if (granularity === 'order_item') {
+    const query: OrderItemWorkbenchQuery = { ...common };
+    if (record.sourceTitle !== undefined) {
+      query.sourceTitle = nonEmptyText(record.sourceTitle, '原始商品标题', MAX_QUERY_TEXT_LENGTH);
+    }
+    if (record.sourceSpec !== undefined) {
+      query.sourceSpec = nonEmptyText(record.sourceSpec, '原始款式或规格', MAX_QUERY_TEXT_LENGTH);
+    }
+    if (record.unitPriceCents !== undefined) {
+      query.unitPriceCents = integerInRange(record.unitPriceCents, '商品单价', 0);
+    }
+    if (record.quantity !== undefined) {
+      query.quantity = integerInRange(record.quantity, '商品数量', 1);
+    }
+    assignOptionalEnum(
+      query,
+      'quantitySource',
+      record.quantitySource,
+      QUANTITY_SOURCES,
+      '数量来源',
+    );
+    assignOptionalEnum(
+      query,
+      'sortField',
+      record.sortField,
+      ORDER_ITEM_SORT_FIELDS,
+      '商品明细排序字段',
+    );
+    assignOptionalEnum(query, 'sortDirection', record.sortDirection, SORT_DIRECTIONS, '排序方向');
+    if (query.sortField && query.customFieldSort) {
+      throw new Error('商品明细一次只能使用一种排序');
+    }
+    return query;
+  }
 
   const query: OrderWorkbenchQuery = { ...common };
   assignOptionalText(query, 'text', record.text, '综合搜索');
@@ -664,10 +734,11 @@ function assignOptionalText<TKey extends keyof OrderWorkbenchQuery>(
 }
 
 function assignOptionalEnum<
-  TKey extends keyof OrderWorkbenchQuery,
+  TQuery extends OrderWorkbenchQuery | OrderItemWorkbenchQuery,
+  TKey extends keyof TQuery,
   TValue extends string,
 >(
-  target: OrderWorkbenchQuery,
+  target: TQuery,
   key: TKey,
   value: unknown,
   allowed: readonly TValue[],
@@ -675,7 +746,14 @@ function assignOptionalEnum<
 ): void {
   if (value === undefined) return;
   if (!allowed.includes(value as TValue)) throw new Error(`${label}无效`);
-  target[key] = value as OrderWorkbenchQuery[TKey];
+  target[key] = value as TQuery[TKey];
+}
+
+function integerInRange(value: unknown, label: string, minimum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
+    throw new Error(`${label}无效`);
+  }
+  return value as number;
 }
 
 function assignOptionalDate<TKey extends 'dateFrom' | 'dateTo'>(

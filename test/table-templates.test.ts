@@ -225,4 +225,95 @@ describe('多套表格模板', () => {
     })).toThrow();
     expect(application.listTableTemplates()).toHaveLength(1);
   });
+
+  it('重启后完整恢复商品事实筛选和内置排序', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const template = application.createTableTemplate({
+      name: '蓝色单价表',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
+        { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
+      ],
+      query: {
+        sourceTitle: '海棠杯',
+        sourceSpec: '蓝色 300ml',
+        unitPriceCents: 1_200,
+        quantity: 1,
+        quantitySource: 'system_default_1',
+        sortField: 'unit_price',
+        sortDirection: 'desc',
+      },
+    });
+
+    closeApplication(application);
+    const reopened = new LocalApplication(unusedRecognizer);
+    applications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+
+    expect(reopened.listTableTemplates('order_item')).toEqual([template]);
+  });
+
+  it('商品模板拒绝同时保存内置排序与自定义排序', async () => {
+    const { application } = await openApplication();
+    const bin = application.createCustomFieldDefinition({
+      name: '货位',
+      granularity: 'order_item',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+
+    expect(() => application.createTableTemplate({
+      name: '冲突排序模板',
+      granularity: 'order_item',
+      columns: [{
+        field: { kind: 'builtin', key: 'product_title' },
+        displayName: '原始商品标题',
+      }],
+      query: {
+        sortField: 'source_title',
+        sortDirection: 'asc',
+        customFieldSort: { definitionId: bin.id, direction: 'desc' },
+      },
+    })).toThrow(/一种排序/u);
+    expect(application.listTableTemplates()).toEqual([]);
+  });
+
+  it('重新打开时仅更新商品字段的旧系统默认名并保留用户别名', async () => {
+    const { application, dataDirectory } = await openApplication();
+    application.createTableTemplate({
+      name: '旧默认名',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品名称' },
+        { field: { kind: 'builtin', key: 'product_spec' }, displayName: '商品规格' },
+      ],
+      query: {},
+    });
+    application.createTableTemplate({
+      name: '用户别名',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '我的商品' },
+        { field: { kind: 'builtin', key: 'product_spec' }, displayName: '款式描述' },
+      ],
+      query: {},
+    });
+
+    closeApplication(application);
+    const reopened = new LocalApplication(unusedRecognizer);
+    applications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+
+    const templates = reopened.listTableTemplates('order_item');
+    expect(Object.fromEntries(templates.map(({ name, columns }) => [
+      name,
+      columns.map(({ displayName }) => displayName),
+    ]))).toEqual({
+      '旧默认名': ['原始商品标题', '原始款式／规格'],
+      '用户别名': ['我的商品', '款式描述'],
+    });
+  });
 });

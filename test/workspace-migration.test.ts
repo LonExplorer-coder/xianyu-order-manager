@@ -9,7 +9,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v9 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v10 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -28,6 +28,7 @@ describe('数据库升级', () => {
       { version: 7 },
       { version: 8 },
       { version: 9 },
+      { version: 10 },
     ]);
     expect(
       first.database
@@ -271,6 +272,12 @@ describe('数据库升级', () => {
     expect(
       first.database.prepare("SELECT COUNT(*) AS count FROM order_items WHERE order_id = 'order-v1'").get(),
     ).toEqual({ count: 1 });
+    expect(first.database.prepare(`
+      SELECT quantity_source FROM draft_items WHERE id = 'draft-item-v1'
+    `).get()).toEqual({ quantity_source: 'system_default_1' });
+    expect(first.database.prepare(`
+      SELECT quantity_source FROM order_items WHERE id = 'order-item-v1'
+    `).get()).toEqual({ quantity_source: 'system_default_1' });
     expect(
       first.database
         .prepare(`
@@ -353,6 +360,7 @@ describe('数据库升级', () => {
       { version: 7 },
       { version: 8 },
       { version: 9 },
+      { version: 10 },
     ]);
     expect(
       (
@@ -378,6 +386,18 @@ describe('数据库升级', () => {
     ).toEqual({ intake_decision_pending: 0 });
     expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(reopened.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+    expect(reopened.database.prepare(`
+      SELECT id, quantity_source FROM draft_items WHERE id = 'draft-item-v1'
+    `).get()).toEqual({
+      id: 'draft-item-v1',
+      quantity_source: 'system_default_1',
+    });
+    expect(reopened.database.prepare(`
+      SELECT id, quantity_source FROM order_items WHERE id = 'order-item-v1'
+    `).get()).toEqual({
+      id: 'order-item-v1',
+      quantity_source: 'system_default_1',
+    });
     expect(
       reopened.database.prepare(`
         SELECT name, name_key, granularity, configuration_version, configuration_json
@@ -462,6 +482,212 @@ describe('数据库升级', () => {
     application.close();
   });
 
+  it('将 v1 历史 inferred=false 幂等迁移为来源不明的已明确数量', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-quantity-source-migration-'));
+    createVersion1Database(dataDirectory);
+    const legacy = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      legacy.exec(`
+        UPDATE draft_items SET quantity_inferred = 0 WHERE id = 'draft-item-v1';
+        UPDATE order_items SET quantity_inferred = 0 WHERE id = 'order-item-v1';
+      `);
+      const snapshot = legacy.prepare(`
+        SELECT recognition_json FROM order_drafts WHERE id = 'draft-v1'
+      `).get() as { recognition_json: string };
+      const recognition = JSON.parse(snapshot.recognition_json) as {
+        items: Array<{ quantityInferred: boolean }>;
+      };
+      recognition.items[0].quantityInferred = false;
+      const serialized = JSON.stringify(recognition);
+      legacy.prepare(`
+        UPDATE order_drafts SET recognition_json = ? WHERE id = 'draft-v1'
+      `).run(serialized);
+      legacy.prepare(`
+        UPDATE source_snapshots
+        SET recognition_json = ?, confirmed_json = ?
+        WHERE id = 'snapshot-v1'
+      `).run(serialized, serialized);
+    } finally {
+      legacy.close();
+    }
+
+    const workspace = Workspace.open(dataDirectory);
+    expect(workspace.database.prepare(`
+      SELECT quantity_source FROM draft_items WHERE id = 'draft-item-v1'
+    `).get()).toEqual({ quantity_source: 'legacy_explicit_or_manual' });
+    expect(workspace.database.prepare(`
+      SELECT quantity_source FROM order_items WHERE id = 'order-item-v1'
+    `).get()).toEqual({ quantity_source: 'legacy_explicit_or_manual' });
+    expect(workspace.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    workspace.close();
+
+    const reopened = Workspace.open(dataDirectory);
+    expect(reopened.database.prepare(`
+      SELECT id, quantity_source FROM draft_items WHERE id = 'draft-item-v1'
+    `).get()).toEqual({
+      id: 'draft-item-v1',
+      quantity_source: 'legacy_explicit_or_manual',
+    });
+    expect(reopened.database.prepare(`
+      SELECT id, quantity_source FROM order_items WHERE id = 'order-item-v1'
+    `).get()).toEqual({
+      id: 'order-item-v1',
+      quantity_source: 'legacy_explicit_or_manual',
+    });
+    expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(reopened.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+    reopened.close();
+
+    const application = new LocalApplication({
+      recognize: async () => {
+        throw new Error('该测试不应发起识别');
+      },
+    });
+    application.openDataDirectory(dataDirectory);
+    expect(application.getDraft('draft-v1').items[0]).toMatchObject({
+      quantity: 1,
+      quantitySource: 'legacy_explicit_or_manual',
+    });
+    const migratedOrder = application.getOrder('order-v1');
+    expect(migratedOrder.order.items[0]).toMatchObject({
+      quantity: 1,
+      quantitySource: 'legacy_explicit_or_manual',
+    });
+    expect(migratedOrder.sourceSnapshot).toMatchObject({
+      recognition: {
+        items: [{ quantitySource: 'legacy_explicit_or_manual' }],
+      },
+      confirmed: {
+        items: [{ quantitySource: 'legacy_explicit_or_manual' }],
+      },
+    });
+    application.close();
+  });
+
+  it('将带商品自定义字段值的 v9 数据库升级到 v10 时保留数量来源、标识与外键', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v9-quantity-source-migration-'));
+    createVersion9QuantitySourceDatabase(dataDirectory);
+
+    const legacy = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 9 });
+      expect(legacy.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      legacy.close();
+    }
+
+    const workspace = Workspace.open(dataDirectory);
+    try {
+      expect(
+        workspace.database
+          .prepare('SELECT version FROM schema_migrations ORDER BY version')
+          .all(),
+      ).toEqual([
+        { version: 1 },
+        { version: 2 },
+        { version: 3 },
+        { version: 4 },
+        { version: 5 },
+        { version: 6 },
+        { version: 7 },
+        { version: 8 },
+        { version: 9 },
+        { version: 10 },
+      ]);
+      expect(workspace.database.prepare(`
+        SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
+        FROM draft_items
+        WHERE id IN ('draft-item-v1', 'draft-item-explicit-v9')
+        ORDER BY position
+      `).all()).toEqual([
+        {
+          id: 'draft-item-v1',
+          draft_id: 'draft-v1',
+          position: 0,
+          quantity: 1,
+          unit_price_present: 1,
+          quantity_source: 'system_default_1',
+        },
+        {
+          id: 'draft-item-explicit-v9',
+          draft_id: 'draft-v1',
+          position: 1,
+          quantity: 3,
+          unit_price_present: 1,
+          quantity_source: 'legacy_explicit_or_manual',
+        },
+      ]);
+      expect(workspace.database.prepare(`
+        SELECT id, order_id, position, quantity, quantity_source, subtotal_cents
+        FROM order_items
+        WHERE id IN ('order-item-v1', 'order-item-explicit-v9')
+        ORDER BY position
+      `).all()).toEqual([
+        {
+          id: 'order-item-v1',
+          order_id: 'order-v1',
+          position: 0,
+          quantity: 1,
+          quantity_source: 'system_default_1',
+          subtotal_cents: 880,
+        },
+        {
+          id: 'order-item-explicit-v9',
+          order_id: 'order-v1',
+          position: 1,
+          quantity: 3,
+          quantity_source: 'legacy_explicit_or_manual',
+          subtotal_cents: 1980,
+        },
+      ]);
+      expect(workspace.database.prepare(`
+        SELECT id, definition_id, order_id, order_item_id, value_json, created_at, updated_at
+        FROM custom_field_values
+        WHERE id = 'value-item-v9'
+      `).get()).toEqual({
+        id: 'value-item-v9',
+        definition_id: 'field-item-v9',
+        order_id: null,
+        order_item_id: 'order-item-explicit-v9',
+        value_json: '"易碎品"',
+        created_at: '2026-07-30T00:00:00.000Z',
+        updated_at: '2026-07-30T00:00:00.000Z',
+      });
+      expect(
+        (
+          workspace.database.prepare('PRAGMA foreign_key_list(custom_field_values)').all() as unknown as Array<{
+            table: string;
+            from: string;
+            to: string;
+            on_delete: string;
+          }>
+        ).filter((foreignKey) => foreignKey.from === 'order_item_id'),
+      ).toMatchObject([{
+        table: 'order_items',
+        from: 'order_item_id',
+        to: 'id',
+        on_delete: 'CASCADE',
+      }]);
+      expect(workspace.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(workspace.database.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+      expect(() => workspace.database.prepare(`
+        UPDATE draft_items
+        SET quantity_source = 'unknown'
+        WHERE id = 'draft-item-v1'
+      `).run()).toThrow();
+      expect(() => workspace.database.prepare(`
+        UPDATE order_items
+        SET quantity_source = 'unknown'
+        WHERE id = 'order-item-v1'
+      `).run()).toThrow();
+    } finally {
+      workspace.close();
+    }
+  });
+
   it('升级前发现全角半角归一化后的订单身份碰撞时拒绝部分升级', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-identity-collision-'));
     createVersion1Database(dataDirectory);
@@ -536,6 +762,125 @@ describe('数据库升级', () => {
     }
   });
 });
+
+function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
+  createVersion1Database(dataDirectory);
+  const current = Workspace.open(dataDirectory);
+  current.close();
+
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    database.exec('PRAGMA foreign_keys = OFF;');
+    database.exec('BEGIN IMMEDIATE;');
+    try {
+      database.exec(`
+        CREATE TABLE draft_items_v9_fixture (
+          id TEXT PRIMARY KEY,
+          draft_id TEXT NOT NULL REFERENCES order_drafts(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL CHECK (position >= 0),
+          source_title TEXT NOT NULL,
+          source_spec TEXT NOT NULL,
+          unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+          quantity INTEGER NOT NULL CHECK (quantity > 0),
+          quantity_inferred INTEGER NOT NULL CHECK (quantity_inferred IN (0, 1)),
+          unit_price_present INTEGER NOT NULL DEFAULT 1
+            CHECK (unit_price_present IN (0, 1)),
+          UNIQUE (draft_id, position)
+        ) STRICT;
+
+        INSERT INTO draft_items_v9_fixture (
+          id, draft_id, position, source_title, source_spec,
+          unit_price_cents, quantity, quantity_inferred, unit_price_present
+        )
+        SELECT
+          id, draft_id, position, source_title, source_spec,
+          unit_price_cents, quantity,
+          CASE quantity_source WHEN 'system_default_1' THEN 1 ELSE 0 END,
+          unit_price_present
+        FROM draft_items;
+
+        CREATE TABLE order_items_v9_fixture (
+          id TEXT PRIMARY KEY,
+          order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL CHECK (position >= 0),
+          source_title TEXT NOT NULL,
+          source_spec TEXT NOT NULL,
+          unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+          quantity INTEGER NOT NULL CHECK (quantity > 0),
+          quantity_inferred INTEGER NOT NULL CHECK (quantity_inferred IN (0, 1)),
+          subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+          UNIQUE (order_id, position)
+        ) STRICT;
+
+        INSERT INTO order_items_v9_fixture (
+          id, order_id, position, source_title, source_spec,
+          unit_price_cents, quantity, quantity_inferred, subtotal_cents
+        )
+        SELECT
+          id, order_id, position, source_title, source_spec,
+          unit_price_cents, quantity,
+          CASE quantity_source WHEN 'system_default_1' THEN 1 ELSE 0 END,
+          subtotal_cents
+        FROM order_items;
+
+        DROP TABLE draft_items;
+        ALTER TABLE draft_items_v9_fixture RENAME TO draft_items;
+        DROP TABLE order_items;
+        ALTER TABLE order_items_v9_fixture RENAME TO order_items;
+        DELETE FROM schema_migrations WHERE version = 10;
+      `);
+      database.exec('COMMIT;');
+    } catch (error) {
+      database.exec('ROLLBACK;');
+      throw error;
+    } finally {
+      database.exec('PRAGMA foreign_keys = ON;');
+    }
+
+    database.exec(`
+      INSERT INTO draft_items (
+        id, draft_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_inferred, unit_price_present
+      ) VALUES (
+        'draft-item-explicit-v9', 'draft-v1', 1, '旧版明确数量商品', '旧版规格',
+        660, 3, 0, 1
+      );
+
+      INSERT INTO order_items (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_inferred, subtotal_cents
+      ) VALUES (
+        'order-item-explicit-v9', 'order-v1', 1, '旧版明确数量商品', '旧版规格',
+        660, 3, 0, 1980
+      );
+
+      INSERT INTO custom_field_definitions (
+        id, name, granularity, value_type, required,
+        default_value_json, options_json, created_at, updated_at
+      ) VALUES (
+        'field-item-v9', '商品备注', 'order_item', 'text', 0,
+        NULL, '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      );
+    `);
+    database.prepare(`
+      INSERT INTO custom_field_values (
+        id, definition_id, order_id, order_item_id,
+        value_json, created_at, updated_at
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?)
+    `).run(
+      'value-item-v9',
+      'field-item-v9',
+      'order-item-explicit-v9',
+      JSON.stringify('易碎品'),
+      '2026-07-30T00:00:00.000Z',
+      '2026-07-30T00:00:00.000Z',
+    );
+  } finally {
+    database.close();
+  }
+}
 
 function createVersion1Database(dataDirectory: string): void {
   const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {

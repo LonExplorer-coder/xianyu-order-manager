@@ -36,6 +36,12 @@ import type {
   OrderWorkbenchResult,
 } from '../core/order-workbench';
 import {
+  isQuantitySource,
+  quantitySourceFromLegacy,
+  quantitySourceLabel,
+  type QuantitySource,
+} from '../core/quantity-source';
+import {
   orderReviewIssueLabel,
   type OrderIntakeSettingsView,
 } from '../core/order-intake';
@@ -55,6 +61,7 @@ import {
 import {
   availableTableFields,
   createCustomFieldValueIndex,
+  DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   fieldReferenceKey,
   projectOrderItemTableCell,
   projectOrderTableCell,
@@ -103,14 +110,6 @@ const DEFAULT_ORDER_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'lifecycle_status' }, displayName: '生命周期状态' },
   { field: { kind: 'builtin', key: 'ordered_at' }, displayName: '下单时间' },
 ];
-const DEFAULT_ORDER_ITEM_COLUMNS: TableTemplateColumn[] = [
-  { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
-  { field: { kind: 'builtin', key: 'product_spec' }, displayName: '规格' },
-  { field: { kind: 'builtin', key: 'unit_price' }, displayName: '单价' },
-  { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
-  { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '小计' },
-];
-
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [draft, setDraft] = useState<OrderDraft | null>(null);
@@ -1961,7 +1960,7 @@ function OrdersWorkspace({
           customFieldValues={orderItemCustomFieldValues}
           columns={activeTableTemplate?.granularity === 'order_item'
             ? activeTableTemplate.columns
-            : DEFAULT_ORDER_ITEM_COLUMNS}
+            : DEFAULT_ORDER_ITEM_TABLE_COLUMNS}
           query={orderItemQuery}
           loading={orderItemQueryLoading}
           openingOrder={openingOrder}
@@ -2016,7 +2015,11 @@ function OrderItemsWorkbench({
   const patchQuery = (patch: Partial<OrderItemWorkbenchQuery>) => {
     onQueryChange({ ...query, ...patch });
   };
-  const hasActiveQuery = Boolean(query.customFieldFilter || query.customFieldSort);
+  const hasActiveQuery = Boolean(
+    query.sourceTitle || query.sourceSpec || query.unitPriceCents !== undefined ||
+    query.quantity !== undefined || query.quantitySource || query.sortField ||
+    query.customFieldFilter || query.customFieldSort,
+  );
 
   return (
     <div
@@ -2027,7 +2030,7 @@ function OrderItemsWorkbench({
       <section className="order-query order-item-query" aria-label="商品查询">
         <div className="order-item-query__heading">
           <strong>商品级字段</strong>
-          <span>筛选和排序只使用商品明细粒度的自定义字段。</span>
+          <span>精确筛选原始商品事实，也可组合商品明细粒度的自定义字段。</span>
         </div>
         <span className="order-query__result" role="status" aria-live="polite">
           {loading ? '正在查询…' : `显示 ${items.length} 条商品明细`}
@@ -2045,6 +2048,112 @@ function OrderItemsWorkbench({
           </button>
         )}
         <div className="order-query__filters order-item-query__filters">
+          <label>
+            <span>原始商品标题</span>
+            <input
+              type="search"
+              aria-label="原始商品标题精确筛选"
+              value={query.sourceTitle ?? ''}
+              onChange={(event) => patchQuery({
+                sourceTitle: event.target.value || undefined,
+              })}
+            />
+          </label>
+          <label>
+            <span>原始款式／规格</span>
+            <input
+              type="search"
+              aria-label="原始款式／规格精确筛选"
+              value={query.sourceSpec ?? ''}
+              onChange={(event) => patchQuery({
+                sourceSpec: event.target.value || undefined,
+              })}
+            />
+          </label>
+          <label>
+            <span>商品单价（元）</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              aria-label="商品单价（元）精确筛选"
+              value={formatMoneyInput(query.unitPriceCents ?? null)}
+              onChange={(event) => {
+                const value = event.target.value;
+                patchQuery({
+                  unitPriceCents: value === ''
+                    ? undefined
+                    : Math.round(Number(value) * 100),
+                });
+              }}
+            />
+          </label>
+          <label>
+            <span>商品数量</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label="商品数量精确筛选"
+              value={query.quantity ?? ''}
+              onChange={(event) => patchQuery({
+                quantity: event.target.value === '' ? undefined : Number(event.target.value),
+              })}
+            />
+          </label>
+          <label>
+            <span>数量来源</span>
+            <select
+              aria-label="商品数量来源精确筛选"
+              value={query.quantitySource ?? ''}
+              onChange={(event) => patchQuery({
+                quantitySource: event.target.value
+                  ? event.target.value as QuantitySource
+                  : undefined,
+              })}
+            >
+              <option value="">全部来源</option>
+              <option value="manual">人工修改</option>
+              <option value="ocr_explicit">OCR 识别</option>
+              <option value="system_default_1">系统默认 1</option>
+              <option value="legacy_explicit_or_manual">已明确（历史来源不明）</option>
+            </select>
+          </label>
+          <label>
+            <span>内置排序</span>
+            <select
+              aria-label="商品明细内置排序"
+              value={query.sortField
+                ? `${query.sortField}:${query.sortDirection ?? 'asc'}`
+                : ''}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  patchQuery({ sortField: undefined, sortDirection: undefined });
+                  return;
+                }
+                const separator = event.target.value.lastIndexOf(':');
+                patchQuery({
+                  sortField: event.target.value.slice(0, separator) as NonNullable<
+                    OrderItemWorkbenchQuery['sortField']
+                  >,
+                  sortDirection: event.target.value.slice(separator + 1) as 'asc' | 'desc',
+                  customFieldSort: undefined,
+                });
+              }}
+            >
+              <option value="">默认排序</option>
+              <option value="source_title:asc">原始商品标题：升序</option>
+              <option value="source_title:desc">原始商品标题：降序</option>
+              <option value="source_spec:asc">原始款式／规格：升序</option>
+              <option value="source_spec:desc">原始款式／规格：降序</option>
+              <option value="unit_price:asc">商品单价：从低到高</option>
+              <option value="unit_price:desc">商品单价：从高到低</option>
+              <option value="quantity:asc">商品数量：从少到多</option>
+              <option value="quantity:desc">商品数量：从多到少</option>
+              <option value="quantity_source:asc">数量来源：从系统默认到人工</option>
+              <option value="quantity_source:desc">数量来源：从人工到系统默认</option>
+            </select>
+          </label>
           <label>
             <span>自定义字段筛选</span>
             <select
@@ -2096,6 +2205,8 @@ function OrderItemsWorkbench({
                     definitionId: event.target.value.slice(0, separator),
                     direction: event.target.value.slice(separator + 1) as 'asc' | 'desc',
                   },
+                  sortField: undefined,
+                  sortDirection: undefined,
                 });
               }}
             >
@@ -2933,6 +3044,7 @@ function ReviewWorkspace({
           sourceSpec: '',
           unitPriceCents: null,
           quantity: 1,
+          quantitySource: 'manual',
           quantityInferred: false,
         },
       ],
@@ -3292,7 +3404,7 @@ function ReviewWorkspace({
                           <small className="field-error">{moneyErrors[`item:${item.id}:unitPrice`]}</small>
                         )}
                       </Field>
-                      <Field label="数量" suffix={item.quantityInferred ? '默认 1' : undefined}>
+                      <Field label="数量" suffix={draftItemQuantitySourceLabel(item)}>
                         <input
                           aria-label={draft.items.length === 1 ? '数量' : `商品 ${index + 1} 数量`}
                           type="number"
@@ -3301,14 +3413,15 @@ function ReviewWorkspace({
                           value={item.quantity}
                           onChange={(event) => patchItem(index, {
                             quantity: Number(event.target.value),
+                            quantitySource: 'manual',
                             quantityInferred: false,
                           })}
                         />
                       </Field>
                     </div>
-                    {item.quantityInferred && (
-                      <div className="inferred-note">截图未显示数量，已按 1 件处理</div>
-                    )}
+                    <div className="inferred-note">
+                      数量来源：{draftItemQuantitySourceLabel(item)}
+                    </div>
                     {itemCustomFields.length > 0 && (
                       <div className="item-custom-fields">
                         <span className="item-custom-fields__title">商品自定义字段</span>
@@ -3443,18 +3556,21 @@ function orderChangeFieldLabel(path: string): string {
     sourceSpec: '规格',
     unitPriceCents: '单价',
     quantity: '数量',
-    quantityInferred: '数量来源',
+    quantitySource: '数量来源',
   } as Record<string, string>)[field] : '整项';
   return `商品 ${position} · ${label ?? field}`;
 }
 
 function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
   if (value === null) return '—';
-  if (typeof value === 'boolean') return value ? '系统推定' : '截图明确';
+  if (typeof value === 'boolean') return value ? '是' : '否';
   if (typeof value === 'number') {
     return /(?:Cents|unitPriceCents)$/u.test(path) ? formatMoney(value) : String(value);
   }
   if (typeof value === 'string') {
+    if (path.endsWith('.quantitySource') && isQuantitySource(value)) {
+      return quantitySourceLabel(value);
+    }
     if (path === 'platformTransactionStatus') {
       return platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus']);
     }
@@ -3774,6 +3890,7 @@ function DetailWorkspace({
                   <div>
                     <strong>{item.sourceTitle}</strong>
                     <small>{item.sourceSpec || '无规格'}</small>
+                    <small>数量来源：{draftItemQuantitySourceLabel(item)}</small>
                   </div>
                   <span>{formatMoney(item.unitPriceCents)} × {item.quantity}</span>
                   <strong>{formatMoney(item.subtotalCents)}</strong>
@@ -4220,6 +4337,14 @@ function formatMoney(cents: number | null): string {
 
 function formatMoneyInput(cents: number | null): string {
   return cents === null ? '' : (cents / 100).toFixed(2);
+}
+
+function draftItemQuantitySourceLabel(
+  item: { quantitySource?: QuantitySource; quantityInferred: boolean },
+): string {
+  return quantitySourceLabel(
+    item.quantitySource ?? quantitySourceFromLegacy(item.quantityInferred),
+  );
 }
 
 function platformLabel(platform: OrderDraft['platform']): string {

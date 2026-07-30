@@ -87,6 +87,15 @@ describe('表格模板 Electron IPC', () => {
     expect(await invoke('order-items:query', {}, [])).toEqual(expect.objectContaining({
       customFieldValues: [],
     }));
+    expect(await invoke('order-items:query', {
+      sourceTitle: '海棠杯',
+      sourceSpec: '蓝色 300ml',
+      unitPriceCents: 1_200,
+      quantity: 1,
+      quantitySource: 'system_default_1',
+      sortField: 'unit_price',
+      sortDirection: 'desc',
+    }, [])).toEqual(expect.objectContaining({ items: [] }));
     await expect(invoke('orders:query', {}, 'field-1'))
       .rejects.toThrow(/自定义字段/);
     await expect(invoke('orders:query', {}, ['']))

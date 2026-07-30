@@ -50,11 +50,13 @@ const DEFAULT_FIELD_KEYS: Record<TableTemplateGranularity, string[]> = {
     'builtin:product_spec',
     'builtin:unit_price',
     'builtin:quantity',
+    'builtin:quantity_source',
     'computed:item_subtotal',
   ],
 };
 
 export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
+  const [libraryGranularity, setLibraryGranularity] = useState<TableTemplateGranularity>('order');
   const [draft, setDraft] = useState<TemplateDraft>(() => newDraft(
     'order',
     props.customFieldDefinitions,
@@ -72,6 +74,11 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   const selectedFieldKeys = new Set(
     draft.columns.map(({ field }) => fieldReferenceKey(field)),
   );
+  const visibleTemplates = props.templates.filter(
+    ({ granularity }) => granularity === libraryGranularity,
+  );
+  const showBuiltInOrderItemDefault = libraryGranularity === 'order_item' &&
+    visibleTemplates.length === 0;
 
   useEffect(() => {
     savingRef.current = props.saving;
@@ -120,6 +127,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
 
   function changeGranularity(granularity: TableTemplateGranularity) {
     const query = granularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    setLibraryGranularity(granularity);
     setDraft((current) => ({
       ...newDraft(granularity, props.customFieldDefinitions, query),
       name: current.name,
@@ -127,13 +135,33 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
     setFeedback('');
   }
 
-  function startNewTemplate() {
+  function openTemplateLibrary(granularity: TableTemplateGranularity) {
+    const query = granularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    setLibraryGranularity(granularity);
     setEditingTemplateId(null);
-    setDraft(newDraft('order', props.customFieldDefinitions, props.orderQuery));
+    setDraft(newDraft(granularity, props.customFieldDefinitions, query));
     setFeedback('');
   }
 
+  function startNewTemplate() {
+    setEditingTemplateId(null);
+    const query = libraryGranularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    setDraft(newDraft(libraryGranularity, props.customFieldDefinitions, query));
+    setFeedback('');
+  }
+
+  function copyBuiltInOrderItemTemplate() {
+    setLibraryGranularity('order_item');
+    setEditingTemplateId(null);
+    setDraft({
+      ...newDraft('order_item', props.customFieldDefinitions, props.orderItemQuery),
+      name: '商品明细默认模板副本',
+    });
+    setFeedback('已复制内置默认模板；保存后才会创建用户模板。');
+  }
+
   function editTemplate(template: TableTemplate) {
+    setLibraryGranularity(template.granularity);
     setEditingTemplateId(template.id);
     setDraft({
       name: template.name,
@@ -246,12 +274,35 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
 
       {props.error && <p className="template-feedback template-feedback--error" role="alert">{props.error}</p>}
 
+      <div className="workspace-view-switch" role="tablist" aria-label="模板类型">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={libraryGranularity === 'order'}
+          className={libraryGranularity === 'order' ? 'is-active' : ''}
+          onClick={() => openTemplateLibrary('order')}
+        >
+          订单总表模板
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={libraryGranularity === 'order_item'}
+          className={libraryGranularity === 'order_item' ? 'is-active' : ''}
+          onClick={() => openTemplateLibrary('order_item')}
+        >
+          商品明细表模板
+        </button>
+      </div>
+
       <div className="table-template-layout">
         <section className="template-library" aria-labelledby="template-library-heading">
           <div className="template-panel-heading">
             <div>
               <span className="section-kicker">已保存</span>
-              <h2 id="template-library-heading">{props.templates.length} 套模板</h2>
+              <h2 id="template-library-heading">
+                {granularityLabel(libraryGranularity)} · {visibleTemplates.length} 套用户模板
+              </h2>
             </div>
             {props.loading ? (
               <span role="status">正在读取…</span>
@@ -266,14 +317,34 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
               </button>
             )}
           </div>
-          {!props.loading && props.templates.length === 0 ? (
+          {!props.loading && showBuiltInOrderItemDefault ? (
+            <article
+              className="template-card"
+              aria-label="内置商品明细默认模板"
+            >
+              <strong>内置商品明细默认模板</strong>
+              <span>商品明细 · {DEFAULT_FIELD_KEYS.order_item.length} 列 · 只读</span>
+              <p>由系统维护，不会在工作区中创建或删除。</p>
+              <div className="template-card__actions">
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={props.saving}
+                  aria-label="复制内置商品明细默认模板"
+                  onClick={copyBuiltInOrderItemTemplate}
+                >
+                  复制后编辑
+                </button>
+              </div>
+            </article>
+          ) : !props.loading && visibleTemplates.length === 0 ? (
             <div className="template-empty">
-              <strong>还没有表格模板</strong>
+              <strong>还没有{granularityLabel(libraryGranularity)}用户模板</strong>
               <p>从右侧创建第一套，当前筛选和排序会一起保存。</p>
             </div>
           ) : (
             <div className="template-list">
-              {props.templates.map((template) => (
+              {visibleTemplates.map((template) => (
                 <article className="template-card" key={template.id}>
                   <strong>{template.name}</strong>
                   <span>{granularityLabel(template.granularity)} · {template.columns.length} 列</span>
@@ -346,8 +417,8 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
               value={draft.granularity}
               onChange={(event) => changeGranularity(event.target.value as TableTemplateGranularity)}
             >
-              <option value="order">订单</option>
-              <option value="order_item">商品明细</option>
+              <option value="order">订单总表模板</option>
+              <option value="order_item">商品明细表模板</option>
             </select>
           </label>
 

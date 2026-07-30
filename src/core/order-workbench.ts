@@ -12,6 +12,7 @@ import type {
   CustomFieldSort,
   CustomFieldValueRecord,
 } from './custom-fields';
+import type { QuantitySource } from './quantity-source';
 
 export type OrderWorkbenchDateField = 'ordered_at' | 'paid_at' | 'created_at';
 
@@ -56,7 +57,21 @@ export type OrderWorkbenchResult = {
   sellerAccounts: string[];
 };
 
+export type OrderItemWorkbenchSortField =
+  | 'source_title'
+  | 'source_spec'
+  | 'unit_price'
+  | 'quantity'
+  | 'quantity_source';
+
 export type OrderItemWorkbenchQuery = {
+  sourceTitle?: string;
+  sourceSpec?: string;
+  unitPriceCents?: number;
+  quantity?: number;
+  quantitySource?: QuantitySource;
+  sortField?: OrderItemWorkbenchSortField;
+  sortDirection?: 'asc' | 'desc';
   customFieldFilter?: CustomFieldFilter;
   customFieldSort?: CustomFieldSort;
 };

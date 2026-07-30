@@ -65,7 +65,7 @@ const ITEM_FIELD_PATHS = [
   'sourceSpec',
   'unitPriceCents',
   'quantity',
-  'quantityInferred',
+  'quantitySource',
 ] as const;
 
 export function diffOrderCurrentValues(
@@ -292,7 +292,7 @@ function canonicalItem(item: RecognitionItem) {
     sourceSpec: normalizedText(item.sourceSpec),
     unitPriceCents: item.unitPriceCents,
     quantity: item.quantity,
-    quantityInferred: item.quantityInferred,
+    quantitySource: item.quantitySource ?? null,
   };
 }
 
@@ -306,7 +306,7 @@ function comparableItemValue(item: RecognitionItem): { [key: string]: OrderChang
     sourceSpec: item.sourceSpec,
     unitPriceCents: item.unitPriceCents,
     quantity: item.quantity,
-    quantityInferred: item.quantityInferred,
+    quantitySource: item.quantitySource ?? null,
   };
 }
 

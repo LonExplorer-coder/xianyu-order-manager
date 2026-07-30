@@ -2,6 +2,7 @@ import type {
   CustomFieldDefinition,
   CustomFieldValueRecord,
 } from './custom-fields';
+import type { QuantitySource } from './quantity-source';
 
 export type RecognitionItem = {
   sourceTitle: string;
@@ -9,6 +10,8 @@ export type RecognitionItem = {
   unitPriceCents: number | null;
   quantity: number;
   quantityInferred: boolean;
+  /** Missing only at legacy/provider input boundaries; application reads always normalize it. */
+  quantitySource?: QuantitySource;
 };
 
 export type PlatformTransactionStatus = 'paid' | 'cancelled' | 'refunded' | 'unknown';

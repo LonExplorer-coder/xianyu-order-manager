@@ -235,6 +235,44 @@ describe('表格模板工作台', () => {
       .toContain('computed:item_subtotal');
   });
 
+  it('用固定双入口呈现只读商品明细默认模板，复制后才创建用户模板', async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderWorkspace();
+
+    expect(screen.getByRole('tab', { name: '订单总表模板' }))
+      .toHaveAttribute('aria-selected', 'true');
+    await user.click(screen.getByRole('tab', { name: '商品明细表模板' }));
+
+    expect(screen.getByRole('tab', { name: '商品明细表模板' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const builtIn = screen.getByRole('article', { name: '内置商品明细默认模板' });
+    expect(builtIn).toHaveTextContent('只读');
+    expect(within(builtIn).queryByRole('button', { name: /编辑|删除/u }))
+      .not.toBeInTheDocument();
+
+    await user.click(within(builtIn).getByRole('button', {
+      name: '复制内置商品明细默认模板',
+    }));
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: '模板名称' }))
+      .toHaveValue('商品明细默认模板副本');
+    expect(screen.getByRole('combobox', { name: '数据粒度' })).toHaveValue('order_item');
+
+    await user.click(screen.getByRole('button', { name: '创建模板' }));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
+    expect(input.granularity).toBe('order_item');
+    expect(input.columns.map(({ displayName }) => displayName)).toEqual([
+      '订单号',
+      '原始商品标题',
+      '原始款式／规格',
+      '商品单价',
+      '数量',
+      '数量来源',
+      '商品小计',
+    ]);
+  });
+
   it('明确呈现读取错误，保存期间禁用会改变模板的操作', () => {
     renderWorkspace({
       templates: [financeTemplate],

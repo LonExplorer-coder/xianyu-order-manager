@@ -328,3 +328,135 @@ describe('订单工作台查询', () => {
       .toBe('duplicate_skipped');
   });
 });
+
+describe('商品明细工作台查询', () => {
+  it('组合原始标题、原始款式或规格、单价、数量和数量来源精确筛选', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-ITEM-FILTER-001',
+        items: [{
+          sourceTitle: '海棠杯',
+          sourceSpec: '红色 450ml',
+          unitPriceCents: 1_800,
+          quantity: 2,
+          quantityInferred: false,
+        }, {
+          sourceTitle: '海棠杯',
+          sourceSpec: '蓝色 300ml',
+          unitPriceCents: 1_200,
+          quantity: 1,
+          quantityInferred: true,
+        }],
+      }),
+      recognition({
+        orderNumber: 'XY-ITEM-FILTER-002',
+        items: [{
+          sourceTitle: '海棠杯垫',
+          sourceSpec: '蓝色 300ml',
+          unitPriceCents: 1_200,
+          quantity: 1,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+
+    const result = application.queryOrderItems({
+      sourceTitle: '海棠杯',
+      sourceSpec: '蓝色 300ml',
+      unitPriceCents: 1_200,
+      quantity: 1,
+      quantitySource: 'system_default_1',
+    });
+
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        orderNumber: 'XY-ITEM-FILTER-001',
+        sourceTitle: '海棠杯',
+        sourceSpec: '蓝色 300ml',
+        unitPriceCents: 1_200,
+        quantity: 1,
+        quantitySource: 'system_default_1',
+        quantityInferred: true,
+      }),
+    ]);
+  });
+
+  it('按原始商品标题排序并保持同一订单的商品为独立明细行', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-ITEM-SORT-001',
+        items: [{
+          sourceTitle: 'B 海棠杯',
+          sourceSpec: '红色',
+          unitPriceCents: 1_800,
+          quantity: 2,
+          quantityInferred: false,
+        }, {
+          sourceTitle: 'A 备用杯盖',
+          sourceSpec: '透明',
+          unitPriceCents: 600,
+          quantity: 1,
+          quantityInferred: true,
+        }],
+      }),
+    ]);
+
+    const result = application.queryOrderItems({
+      sortField: 'source_title',
+      sortDirection: 'asc',
+    });
+
+    expect(result.items.map((item) => [item.orderNumber, item.sourceTitle])).toEqual([
+      ['XY-ITEM-SORT-001', 'A 备用杯盖'],
+      ['XY-ITEM-SORT-001', 'B 海棠杯'],
+    ]);
+  });
+
+  it('按原始款式或规格、单价、数量和数量来源排序', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-ITEM-SORT-FACTS',
+        items: [{
+          sourceTitle: '甲',
+          sourceSpec: 'C 规格',
+          unitPriceCents: 3_000,
+          quantity: 1,
+          quantityInferred: true,
+        }, {
+          sourceTitle: '乙',
+          sourceSpec: 'B 规格',
+          unitPriceCents: 2_000,
+          quantity: 3,
+          quantityInferred: false,
+        }, {
+          sourceTitle: '丙',
+          sourceSpec: 'A 规格',
+          unitPriceCents: 1_000,
+          quantity: 2,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+
+    expect(application.queryOrderItems({
+      sortField: 'source_spec',
+      sortDirection: 'asc',
+    }).items.map((item) => item.sourceTitle)).toEqual(['丙', '乙', '甲']);
+    expect(application.queryOrderItems({
+      sortField: 'unit_price',
+      sortDirection: 'desc',
+    }).items.map((item) => item.sourceTitle)).toEqual(['甲', '乙', '丙']);
+    expect(application.queryOrderItems({
+      sortField: 'quantity',
+      sortDirection: 'asc',
+    }).items.map((item) => item.sourceTitle)).toEqual(['甲', '丙', '乙']);
+    expect(application.queryOrderItems({
+      sortField: 'quantity_source',
+      sortDirection: 'asc',
+    }).items.map((item) => item.quantitySource)).toEqual([
+      'system_default_1',
+      'ocr_explicit',
+      'ocr_explicit',
+    ]);
+  });
+});

@@ -223,6 +223,185 @@ describe('完整订单工作流', () => {
     expect(recognizer.networkRequestCount).toBe(0);
   });
 
+  it('持久化 OCR 明确数量、系统默认 1 与人工修改的精确来源', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-quantity-source-'));
+    const sourcePath = join(testRoot, '数量来源订单.png');
+    await writeFile(sourcePath, Buffer.from('synthetic-quantity-source'));
+    const recognition = {
+      ...completeSyntheticRecognition('XY-SYNTH-QUANTITY-SOURCE-0001'),
+      productTotalCents: 2_400,
+      amountCents: 2_400,
+      items: [
+        {
+          sourceTitle: 'OCR 明确商品',
+          sourceSpec: '标准款',
+          unitPriceCents: 800,
+          quantity: 2,
+          quantityInferred: false,
+        },
+        {
+          sourceTitle: '默认数量商品',
+          sourceSpec: '单件',
+          unitPriceCents: 800,
+          quantity: 1,
+          quantityInferred: true,
+        },
+      ],
+    };
+    const application = new LocalApplication(new ControlledRecognizer(recognition));
+    openedApplications.push(application);
+    application.openDataDirectory(join(testRoot, '数据'));
+
+    const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+    expect(draft.items.map((item) => item.quantitySource)).toEqual([
+      'ocr_explicit',
+      'system_default_1',
+    ]);
+
+    const order = application.confirmDraft({
+      ...draft,
+      items: [
+        { ...draft.items[0], quantity: 3 },
+        draft.items[1],
+        {
+          id: 'manual-added-item',
+          position: 2,
+          sourceTitle: '人工新增商品',
+          sourceSpec: '',
+          unitPriceCents: 0,
+          quantity: 4,
+          quantityInferred: false,
+        },
+      ],
+    });
+
+    expect(order.items.map(({ quantity, quantitySource }) => ({ quantity, quantitySource })))
+      .toEqual([
+        { quantity: 3, quantitySource: 'manual' },
+        { quantity: 1, quantitySource: 'system_default_1' },
+        { quantity: 4, quantitySource: 'manual' },
+      ]);
+    expect(application.getOrder(order.id).sourceSnapshot).toMatchObject({
+      recognition: {
+        items: [
+          { quantity: 2, quantitySource: 'ocr_explicit' },
+          { quantity: 1, quantitySource: 'system_default_1' },
+        ],
+      },
+      confirmed: {
+        items: [
+          { quantity: 3, quantitySource: 'manual' },
+          { quantity: 1, quantitySource: 'system_default_1' },
+          { quantity: 4, quantitySource: 'manual' },
+        ],
+      },
+    });
+  });
+
+  it('后续来源更新时按 manual 高于 OCR 明确值高于系统默认的优先级保护数量', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-quantity-priority-'));
+    const firstPath = join(testRoot, '首次数量.png');
+    const secondPath = join(testRoot, '后续数量.png');
+    await writeFile(firstPath, Buffer.from('synthetic-quantity-priority-first'));
+    await writeFile(secondPath, Buffer.from('synthetic-quantity-priority-second'));
+    const orderNumber = 'XY-SYNTH-QUANTITY-PRIORITY-0001';
+    const results: RecognitionResult[] = [
+      {
+        ...completeSyntheticRecognition(orderNumber),
+        productTotalCents: 2_600,
+        amountCents: 2_600,
+        items: [
+          {
+            sourceTitle: '人工优先级商品',
+            sourceSpec: '标准款',
+            unitPriceCents: 800,
+            quantity: 2,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: 'OCR 优先级商品',
+            sourceSpec: '标准款',
+            unitPriceCents: 500,
+            quantity: 2,
+            quantityInferred: false,
+          },
+        ],
+      },
+      {
+        ...completeSyntheticRecognition(orderNumber),
+        productTotalCents: 3_700,
+        amountCents: 3_700,
+        items: [
+          {
+            sourceTitle: '人工优先级商品',
+            sourceSpec: '标准款',
+            unitPriceCents: 800,
+            quantity: 4,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: 'OCR 优先级商品',
+            sourceSpec: '标准款',
+            unitPriceCents: 500,
+            quantity: 1,
+            quantityInferred: true,
+          },
+        ],
+      },
+    ];
+    const recognizer: Recognizer = {
+      recognize: async () => {
+        const result = results.shift();
+        if (!result) throw new Error('测试识别结果已用尽');
+        return {
+          result,
+          evidences: [{
+            provider: 'controlled',
+            model: 'controlled',
+            requestId: '',
+            schemaVersion: 1,
+            rawResponse: '{}',
+          }],
+        };
+      },
+    };
+    const application = new LocalApplication(recognizer);
+    openedApplications.push(application);
+    application.openDataDirectory(join(testRoot, '数据'));
+
+    const [firstDraft] = (await application.submitRecognitionBatch([firstPath])).drafts;
+    const existing = application.confirmDraft({
+      ...firstDraft,
+      items: [{ ...firstDraft.items[0], quantity: 3 }, firstDraft.items[1]],
+    });
+    expect(existing.items[0]).toMatchObject({ quantity: 3, quantitySource: 'manual' });
+    expect(existing.items[1]).toMatchObject({ quantity: 2, quantitySource: 'ocr_explicit' });
+
+    const [incoming] = (await application.submitRecognitionBatch([secondPath])).drafts;
+    expect(incoming.items[0]).toMatchObject({ quantity: 4, quantitySource: 'ocr_explicit' });
+    expect(incoming.items[1]).toMatchObject({ quantity: 1, quantitySource: 'system_default_1' });
+    expect(() => application.confirmDraft(incoming)).toThrowError(/已转为订单更新/);
+    const review = application.getDraftReview(incoming.id);
+    expect(review.kind).toBe('order_update');
+    expect(review.draft.items[0]).toMatchObject({
+      quantity: 3,
+      quantitySource: 'manual',
+    });
+    expect(review.draft.items[1]).toMatchObject({
+      quantity: 2,
+      quantitySource: 'ocr_explicit',
+    });
+    if (review.kind !== 'order_update') throw new Error('未转为订单更新');
+    expect(review.sourceSnapshot.recognition.items[0]).toMatchObject({
+      quantity: 4,
+      quantitySource: 'ocr_explicit',
+    });
+    expect(review.sourceSnapshot.recognition.items[1]).toMatchObject({
+      quantity: 1,
+      quantitySource: 'system_default_1',
+    });
+  });
+
   it('把首次识别和定向复核作为两条不可变证据保存', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-review-evidence-'));
     const dataDirectory = join(testRoot, '数据');

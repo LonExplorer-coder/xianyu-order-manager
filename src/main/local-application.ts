@@ -72,6 +72,14 @@ import {
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
 import {
+  isQuantitySource,
+  quantityInferredFromSource,
+  quantitySourceFromLegacy,
+  quantitySourceFromOcr,
+  quantitySourcePriority,
+  type QuantitySource,
+} from '../core/quantity-source';
+import {
   DEFAULT_ORDER_EXPORT_COLUMNS,
   DEFAULT_ORDER_ITEM_EXPORT_COLUMNS,
   normalizeOrderExportInput,
@@ -641,7 +649,7 @@ export class LocalApplication {
         bytes,
       });
       onPhase?.('validating');
-      const recognition = attempt.result;
+      const recognition = withOcrQuantitySources(attempt.result);
       validateRecognition(recognition);
       const reviewIssues = assessAutomaticImport({
         ...recognition,
@@ -794,18 +802,22 @@ export class LocalApplication {
         : 'cancelled',
       reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json),
       createdAt: asString(row.created_at),
-      items: itemRows.map((item) => ({
-        id: asString(item.id),
-        position: asNumber(item.position),
-        sourceTitle: asString(item.source_title),
-        sourceSpec: asString(item.source_spec),
-        unitPriceCents: asOptionalStoredMoney(
-          item.unit_price_cents,
-          item.unit_price_present,
-        ),
-        quantity: asNumber(item.quantity),
-        quantityInferred: asNumber(item.quantity_inferred) === 1,
-      })),
+      items: itemRows.map((item) => {
+        const quantitySource = asQuantitySource(item.quantity_source);
+        return {
+          id: asString(item.id),
+          position: asNumber(item.position),
+          sourceTitle: asString(item.source_title),
+          sourceSpec: asString(item.source_spec),
+          unitPriceCents: asOptionalStoredMoney(
+            item.unit_price_cents,
+            item.unit_price_present,
+          ),
+          quantity: asNumber(item.quantity),
+          quantitySource,
+          quantityInferred: quantityInferredFromSource(quantitySource),
+        };
+      }),
     };
   }
 
@@ -851,20 +863,23 @@ export class LocalApplication {
     reviewedDraft?: OrderDraft,
   ): OrderDraft {
     const persistedDraft = this.getDraft(draftId);
-    const draft = reviewedDraft ?? persistedDraft;
+    let draft = reviewedDraft
+      ? withManualQuantityEdits(persistedDraft, reviewedDraft)
+      : persistedDraft;
     if (draft.id !== draftId) {
       throw new Error('校对订单与来源草稿不一致');
     }
-    if (reviewedDraft) validateDraft(reviewedDraft);
+    validateDraft(draft);
     const existing = this.getOrder(orderId).order;
     if (!hasSameOrderIdentity(existing, draft)) {
       throw new Error('订单草稿与候选原始订单身份不一致');
     }
+    draft = withHigherPriorityCurrentQuantities(existing, draft);
     return this.persistDraftReviewTarget(
       draftId,
       orderId,
       reviewIssues,
-      reviewedDraft,
+      draft,
     );
   }
 
@@ -873,16 +888,17 @@ export class LocalApplication {
     reviewIssues: readonly OrderReviewIssueCode[],
     reviewedDraft: OrderDraft,
   ): OrderDraft {
-    this.getDraft(draftId);
+    const persistedDraft = this.getDraft(draftId);
     if (reviewedDraft.id !== draftId) {
       throw new Error('校对订单与来源草稿不一致');
     }
-    validateDraft(reviewedDraft);
+    const draft = withManualQuantityEdits(persistedDraft, reviewedDraft);
+    validateDraft(draft);
     return this.persistDraftReviewTarget(
       draftId,
       null,
       reviewIssues,
-      reviewedDraft,
+      draft,
     );
   }
 
@@ -983,10 +999,11 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO draft_items (
           id, draft_id, position, source_title, source_spec,
-          unit_price_cents, unit_price_present, quantity, quantity_inferred
+          unit_price_cents, unit_price_present, quantity, quantity_source
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       draft.items.forEach((item, position) => {
+        const quantitySource = requiredQuantitySource(item);
         insertItem.run(
           randomUUID(),
           draftId,
@@ -996,7 +1013,7 @@ export class LocalApplication {
           item.unitPriceCents ?? 0,
           item.unitPriceCents === null ? 0 : 1,
           item.quantity,
-          item.quantityInferred ? 1 : 0,
+          quantitySource,
         );
       });
     });
@@ -1168,7 +1185,7 @@ export class LocalApplication {
       `)
       .run(
         orderId,
-        JSON.stringify(toRecognitionResult(existing)),
+        serializeRecognition(toRecognitionResult(existing)),
         now,
         draftId,
       );
@@ -1754,7 +1771,6 @@ export class LocalApplication {
     options: ConfirmDraftCustomFieldOptions = {},
   ): OriginalOrder {
     const workspace = this.requireWorkspace();
-    validateDraft(draft);
     const persistedDraft = this.getDraft(draft.id);
     if (persistedDraft.status === 'cancelled') {
       throw new Error('该订单草稿已取消，不能再确认入库');
@@ -1762,6 +1778,8 @@ export class LocalApplication {
     if (persistedDraft.status !== 'awaiting_review') {
       throw new Error('该订单草稿已经确认');
     }
+    draft = withManualQuantityEdits(persistedDraft, draft);
+    validateDraft(draft);
 
     const existingOrder = this.findOriginalOrderByIdentity(draft);
     if (existingOrder) {
@@ -1844,11 +1862,12 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
-          unit_price_cents, quantity, quantity_inferred, subtotal_cents
+          unit_price_cents, quantity, quantity_source, subtotal_cents
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
+        const quantitySource = requiredQuantitySource(item);
         const itemId = persistedItemIds.get(item.id);
         if (!itemId) throw new Error('订单草稿商品标识无效');
         insertItem.run(
@@ -1859,7 +1878,7 @@ export class LocalApplication {
           item.sourceSpec,
           unitPriceCents,
           item.quantity,
-          item.quantityInferred ? 1 : 0,
+          quantitySource,
           safeSubtotal(unitPriceCents, item.quantity),
         );
       });
@@ -1906,7 +1925,7 @@ export class LocalApplication {
         `)
         .run(
           orderId,
-          JSON.stringify(confirmedRecognition),
+          serializeRecognition(confirmedRecognition),
           now,
           draft.id,
         );
@@ -1954,7 +1973,6 @@ export class LocalApplication {
     customValues?: DraftCustomFieldValues,
   ): OrderUpdateConfirmation {
     const workspace = this.requireWorkspace();
-    validateDraft(draft);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
       throw new Error('订单版本无效，请刷新后重试');
     }
@@ -1978,6 +1996,8 @@ export class LocalApplication {
 
     const orderId = asString(draftRow.matched_order_id);
     const existing = this.getOrder(orderId).order;
+    draft = withManualQuantityEdits(this.getDraft(draft.id), draft);
+    validateDraft(draft);
     if (!hasSameOrderIdentity(existing, draft)) {
       const correctedExisting = this.findOriginalOrderByIdentity(draft);
       if (!correctedExisting) {
@@ -2000,6 +2020,7 @@ export class LocalApplication {
     if (existing.revision !== expectedRevision) {
       throw new Error('订单已在其他操作中更新，请刷新对比后重试');
     }
+    draft = withHigherPriorityCurrentQuantities(existing, draft);
     const changes = diffOrderCurrentValues(existing, draft);
 
     const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
@@ -2155,7 +2176,7 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
-          unit_price_cents, quantity, quantity_inferred, subtotal_cents
+          unit_price_cents, quantity, quantity_source, subtotal_cents
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateItem = workspace.database.prepare(`
@@ -2166,12 +2187,13 @@ export class LocalApplication {
           source_spec = ?,
           unit_price_cents = ?,
           quantity = ?,
-          quantity_inferred = ?,
+          quantity_source = ?,
           subtotal_cents = ?
         WHERE id = ? AND order_id = ?
       `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
+        const quantitySource = requiredQuantitySource(item);
         const itemId = persistedItemIds.get(item.id);
         if (!itemId) throw new Error('订单草稿商品标识无效');
         if (existingItemIds.has(itemId)) {
@@ -2181,7 +2203,7 @@ export class LocalApplication {
             item.sourceSpec,
             unitPriceCents,
             item.quantity,
-            item.quantityInferred ? 1 : 0,
+            quantitySource,
             safeSubtotal(unitPriceCents, item.quantity),
             itemId,
             orderId,
@@ -2195,7 +2217,7 @@ export class LocalApplication {
             item.sourceSpec,
             unitPriceCents,
             item.quantity,
-            item.quantityInferred ? 1 : 0,
+            quantitySource,
             safeSubtotal(unitPriceCents, item.quantity),
           );
           workspace.database.prepare(`
@@ -2277,7 +2299,7 @@ export class LocalApplication {
         `)
         .run(
           orderId,
-          JSON.stringify(confirmedRecognition),
+            serializeRecognition(confirmedRecognition),
           now,
           sourceSnapshotId,
         );
@@ -2655,6 +2677,37 @@ export class LocalApplication {
       where.push('orders.id IN (SELECT value FROM json_each(?))');
       parameters.push(JSON.stringify(normalizedScopedOrderIds));
     }
+    const sourceTitle = query.sourceTitle?.normalize('NFKC').trim();
+    if (sourceTitle) {
+      where.push('items.source_title = ? COLLATE NOCASE');
+      parameters.push(sourceTitle);
+    }
+    const sourceSpec = query.sourceSpec?.normalize('NFKC').trim();
+    if (sourceSpec) {
+      where.push('items.source_spec = ? COLLATE NOCASE');
+      parameters.push(sourceSpec);
+    }
+    if (query.unitPriceCents !== undefined) {
+      if (!Number.isSafeInteger(query.unitPriceCents) || query.unitPriceCents < 0) {
+        throw new Error('商品单价筛选值无效');
+      }
+      where.push('items.unit_price_cents = ?');
+      parameters.push(query.unitPriceCents);
+    }
+    if (query.quantity !== undefined) {
+      if (!Number.isSafeInteger(query.quantity) || query.quantity < 1) {
+        throw new Error('商品数量筛选值无效');
+      }
+      where.push('items.quantity = ?');
+      parameters.push(query.quantity);
+    }
+    if (query.quantitySource !== undefined) {
+      if (!isQuantitySource(query.quantitySource)) {
+        throw new Error('商品数量来源筛选值无效');
+      }
+      where.push('items.quantity_source = ?');
+      parameters.push(query.quantitySource);
+    }
     if (query.customFieldFilter) {
       const definition = this.getCustomFieldDefinition(
         query.customFieldFilter.definitionId,
@@ -2709,7 +2762,25 @@ export class LocalApplication {
     const sortParameters: Array<string | number> = [];
     let sortExpression = 'orders.created_at DESC, orders.id DESC, items.position';
     let sortDirection = '';
-    if (query.customFieldSort) {
+    if (query.sortField && query.customFieldSort) {
+      throw new Error('商品明细一次只能使用一种排序');
+    }
+    if (query.sortField) {
+      const expressions = {
+        source_title: 'items.source_title COLLATE NOCASE',
+        source_spec: 'items.source_spec COLLATE NOCASE',
+        unit_price: 'items.unit_price_cents',
+        quantity: 'items.quantity',
+        quantity_source: `CASE items.quantity_source
+          WHEN 'system_default_1' THEN 1
+          WHEN 'ocr_explicit' THEN 2
+          WHEN 'legacy_explicit_or_manual' THEN 2
+          WHEN 'manual' THEN 3
+        END`,
+      } as const;
+      sortExpression = expressions[query.sortField];
+      sortDirection = orderWorkbenchSortDirection(query.sortDirection ?? 'asc');
+    } else if (query.customFieldSort) {
       const definition = this.getCustomFieldDefinition(query.customFieldSort.definitionId);
       if (definition.granularity !== 'order_item') {
         throw new Error('订单粒度自定义字段不能用于商品排序');
@@ -2732,7 +2803,9 @@ export class LocalApplication {
       WHERE ${where.join('\n        AND ')}
       ORDER BY ${sortExpression} ${sortDirection}, items.id
     `).all(...parameters, ...sortParameters) as unknown as SqlRow[];
-    const items = rows.map((row) => ({
+    const items = rows.map((row) => {
+      const quantitySource = asQuantitySource(row.quantity_source);
+      return {
         id: asString(row.id),
         orderId: asString(row.order_id),
         orderNumber: asString(row.order_number),
@@ -2741,9 +2814,11 @@ export class LocalApplication {
         sourceSpec: asString(row.source_spec),
         unitPriceCents: asNumber(row.unit_price_cents),
         quantity: asNumber(row.quantity),
-        quantityInferred: asNumber(row.quantity_inferred) === 1,
+        quantitySource,
+        quantityInferred: quantityInferredFromSource(quantitySource),
         subtotalCents: asNumber(row.subtotal_cents),
-      }));
+      };
+    });
     if (normalizedScopedOrderIds) {
       const positionByOrderId = new Map(
         normalizedScopedOrderIds.map((id, index) => [id, index]),
@@ -2814,16 +2889,20 @@ export class LocalApplication {
     const itemRows = workspace.database
       .prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY position')
       .all(orderId) as unknown as SqlRow[];
-    const items: OrderItem[] = itemRows.map((item) => ({
-      id: asString(item.id),
-      position: asNumber(item.position),
-      sourceTitle: asString(item.source_title),
-      sourceSpec: asString(item.source_spec),
-      unitPriceCents: asNumber(item.unit_price_cents),
-      quantity: asNumber(item.quantity),
-      quantityInferred: asNumber(item.quantity_inferred) === 1,
-      subtotalCents: asNumber(item.subtotal_cents),
-    }));
+    const items: OrderItem[] = itemRows.map((item) => {
+      const quantitySource = asQuantitySource(item.quantity_source);
+      return {
+        id: asString(item.id),
+        position: asNumber(item.position),
+        sourceTitle: asString(item.source_title),
+        sourceSpec: asString(item.source_spec),
+        unitPriceCents: asNumber(item.unit_price_cents),
+        quantity: asNumber(item.quantity),
+        quantitySource,
+        quantityInferred: quantityInferredFromSource(quantitySource),
+        subtotalCents: asNumber(item.subtotal_cents),
+      };
+    });
 
     const order: OriginalOrder = {
       id: asString(row.id),
@@ -3110,7 +3189,7 @@ export class LocalApplication {
         recognition.amountCents === null ? 0 : 1,
         recognition.platformTransactionStatus,
         recognition.fulfillmentStatus,
-        JSON.stringify(recognition),
+        serializeRecognition(recognition),
         serializeOrderReviewIssues(input.reviewIssues),
         input.intakeDecisionPending ? 1 : 0,
         input.createdAt,
@@ -3127,17 +3206,18 @@ export class LocalApplication {
         randomUUID(),
         input.draftId,
         input.screenshotId,
-        JSON.stringify(recognition),
+        serializeRecognition(recognition),
         input.createdAt,
       );
 
     const insertItem = workspace.database.prepare(`
       INSERT INTO draft_items (
         id, draft_id, position, source_title, source_spec,
-        unit_price_cents, unit_price_present, quantity, quantity_inferred
+        unit_price_cents, unit_price_present, quantity, quantity_source
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     recognition.items.forEach((item, position) => {
+      const quantitySource = requiredQuantitySource(item);
       insertItem.run(
         randomUUID(),
         input.draftId,
@@ -3147,7 +3227,7 @@ export class LocalApplication {
         item.unitPriceCents ?? 0,
         item.unitPriceCents === null ? 0 : 1,
         item.quantity,
-        item.quantityInferred ? 1 : 0,
+        quantitySource,
       );
     });
 
@@ -3495,14 +3575,102 @@ function toRecognitionResult(
     amountCents: draft.amountCents,
     platformTransactionStatus: draft.platformTransactionStatus,
     fulfillmentStatus: draft.fulfillmentStatus,
-    items: draft.items.map(({ sourceTitle, sourceSpec, unitPriceCents, quantity, quantityInferred }) => ({
-      sourceTitle,
-      sourceSpec,
-      unitPriceCents,
-      quantity,
-      quantityInferred,
-    })),
+    items: draft.items.map((item) => {
+      const quantitySource = requiredQuantitySource(item);
+      return {
+        sourceTitle: item.sourceTitle,
+        sourceSpec: item.sourceSpec,
+        unitPriceCents: item.unitPriceCents,
+        quantity: item.quantity,
+        quantitySource,
+        quantityInferred: quantityInferredFromSource(quantitySource),
+      };
+    }),
   };
+}
+
+function withOcrQuantitySources(recognition: RecognitionResult): RecognitionResult {
+  return {
+    ...recognition,
+    items: recognition.items.map((item) => {
+      const quantitySource = quantitySourceFromOcr(item.quantityInferred);
+      if (item.quantitySource !== undefined && item.quantitySource !== quantitySource) {
+        throw new Error('OCR 数量来源与识别结果不一致');
+      }
+      return {
+        ...item,
+        quantitySource,
+        quantityInferred: quantityInferredFromSource(quantitySource),
+      };
+    }),
+  };
+}
+
+function withManualQuantityEdits(
+  persisted: OrderDraft,
+  reviewed: OrderDraft,
+): OrderDraft {
+  const persistedItems = new Map(persisted.items.map((item) => [item.id, item]));
+  return {
+    ...reviewed,
+    items: reviewed.items.map((item) => {
+      if (item.quantitySource !== undefined && !isQuantitySource(item.quantitySource)) {
+        throw new Error('商品数量来源格式错误');
+      }
+      const prior = persistedItems.get(item.id);
+      const quantitySource: QuantitySource = !prior ||
+          item.quantity !== prior.quantity ||
+          item.quantitySource === 'manual'
+        ? 'manual'
+        : requiredQuantitySource(prior);
+      return {
+        ...item,
+        quantitySource,
+        quantityInferred: quantityInferredFromSource(quantitySource),
+      };
+    }),
+  };
+}
+
+function withHigherPriorityCurrentQuantities(
+  current: OriginalOrder,
+  incoming: OrderDraft,
+): OrderDraft {
+  const currentIdByIncomingId = matchOrderItemIds(current.items, incoming.items);
+  const currentById = new Map(current.items.map((item) => [item.id, item]));
+  return {
+    ...incoming,
+    items: incoming.items.map((item) => {
+      const currentId = currentIdByIncomingId.get(item.id);
+      const currentItem = currentId ? currentById.get(currentId) : undefined;
+      if (!currentItem) return item;
+      const incomingSource = requiredQuantitySource(item);
+      const currentSource = requiredQuantitySource(currentItem);
+      if (quantitySourcePriority(currentSource) <= quantitySourcePriority(incomingSource)) {
+        return item;
+      }
+      return {
+        ...item,
+        quantity: currentItem.quantity,
+        quantitySource: currentSource,
+        quantityInferred: quantityInferredFromSource(currentSource),
+      };
+    }),
+  };
+}
+
+function requiredQuantitySource(item: RecognitionItem): QuantitySource {
+  if (!isQuantitySource(item.quantitySource)) {
+    throw new Error('商品数量来源格式错误');
+  }
+  return item.quantitySource;
+}
+
+function serializeRecognition(recognition: RecognitionResult): string {
+  return JSON.stringify({
+    ...recognition,
+    items: recognition.items.map(({ quantityInferred: _legacyFlag, ...item }) => item),
+  });
 }
 
 function validateRecognition(recognition: RecognitionResult): void {
@@ -3580,6 +3748,7 @@ function validateValues(
     throw new Error('订单至少需要一项商品明细');
   }
   for (const item of items) {
+    const quantitySource = requiredQuantitySource(item);
     if (strict && !item.sourceTitle.trim()) throw new Error('商品标题不能为空');
     if (item.unitPriceCents === null) {
       if (strict) throw new Error('商品单价不能为空');
@@ -3588,6 +3757,9 @@ function validateValues(
     }
     if (!Number.isSafeInteger(item.quantity) || item.quantity < 1) {
       throw new Error('商品数量必须为正整数');
+    }
+    if (quantitySource === 'system_default_1' && item.quantity !== 1) {
+      throw new Error('系统默认数量必须为 1');
     }
   }
 }
@@ -3602,7 +3774,20 @@ function parseStoredRecognition(serialized: string): RecognitionResult {
   const addressOriginal = storedText(stored.addressOriginal, '');
   const amountCents = storedOptionalAmount(stored.amountCents, null);
   const items = Array.isArray(stored.items)
-    ? (stored.items as RecognitionItem[])
+    ? stored.items.map((value) => {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw new Error('识别快照商品格式错误');
+        }
+        const item = value as RecognitionItem;
+        const quantitySource = item.quantitySource === undefined
+          ? quantitySourceFromLegacy(item.quantityInferred === true)
+          : asQuantitySource(item.quantitySource, '识别快照数量来源格式错误');
+        return {
+          ...item,
+          quantitySource,
+          quantityInferred: quantityInferredFromSource(quantitySource),
+        };
+      })
     : [];
 
   return {
@@ -3806,7 +3991,8 @@ function emptyManualRecognition(): RecognitionResult {
       sourceSpec: '',
       unitPriceCents: null,
       quantity: 1,
-      quantityInferred: true,
+      quantitySource: 'manual',
+      quantityInferred: false,
     }],
   };
 }
@@ -3818,6 +4004,14 @@ function asString(value: string | number | null | undefined): string {
 
 function asNumber(value: string | number | null | undefined): number {
   if (typeof value !== 'number') throw new Error('数据库数字字段格式错误');
+  return value;
+}
+
+function asQuantitySource(
+  value: unknown,
+  message = '数据库商品数量来源格式错误',
+): QuantitySource {
+  if (!isQuantitySource(value)) throw new Error(message);
   return value;
 }
 
@@ -3880,7 +4074,7 @@ function parseTableTemplateRow(
   if (Object.keys(config).some((key) => key !== 'columns' && key !== 'query')) {
     throw new Error('数据库表格模板配置包含未知属性');
   }
-  const normalized = normalizeTableTemplateCustomFilter(
+  const normalized = normalizeLegacyOrderItemDefaultDisplayNames(normalizeTableTemplateCustomFilter(
     normalizeCreateTableTemplateInput({
       name: asString(row.name),
       granularity: parseTableTemplateGranularity(row.granularity),
@@ -3888,7 +4082,7 @@ function parseTableTemplateRow(
       query: config.query,
     }, definitions),
     definitions,
-  );
+  ));
   if (tableTemplateNameKey(normalized.name) !== asString(row.name_key)) {
     throw new Error('数据库表格模板名称索引不一致');
   }
@@ -3898,6 +4092,25 @@ function parseTableTemplateRow(
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
   } as TableTemplate;
+}
+
+function normalizeLegacyOrderItemDefaultDisplayNames<T extends CreateTableTemplateInput>(
+  template: T,
+): T {
+  if (template.granularity !== 'order_item') return template;
+  return {
+    ...template,
+    columns: template.columns.map((column) => {
+      if (column.field.kind !== 'builtin') return column;
+      if (column.field.key === 'product_title' && column.displayName === '商品名称') {
+        return { ...column, displayName: '原始商品标题' };
+      }
+      if (column.field.key === 'product_spec' && column.displayName === '商品规格') {
+        return { ...column, displayName: '原始款式／规格' };
+      }
+      return column;
+    }),
+  } as T;
 }
 
 function normalizeTableTemplateCustomFilter<T extends CreateTableTemplateInput>(
