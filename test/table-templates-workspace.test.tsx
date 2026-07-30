@@ -9,8 +9,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CustomFieldDefinition } from '../src/core/custom-fields';
 import {
   fieldReferenceKey,
+  isDynamicProductTableGroup,
   type CreateTableTemplateInput,
   type TableTemplate,
+  type TableTemplateColumn,
   type UpdateTableTemplateInput,
 } from '../src/core/table-templates';
 import { TableTemplatesWorkspace } from '../src/renderer/TableTemplatesWorkspace';
@@ -90,7 +92,60 @@ function renderWorkspace(overrides: Partial<Parameters<typeof TableTemplatesWork
   return { onCreate, onUpdate, onDelete, onApply };
 }
 
+function scalarColumns(
+  input: CreateTableTemplateInput | UpdateTableTemplateInput,
+): TableTemplateColumn[] {
+  return Array.from(input.columns).filter((item): item is TableTemplateColumn => (
+    !isDynamicProductTableGroup(item)
+  ));
+}
+
 describe('表格模板工作台', () => {
+  it('把动态商品列组作为整体选择和移动并分别修改三个基础表头', async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderWorkspace();
+
+    await user.type(screen.getByRole('textbox', { name: '模板名称' }), '动态拣货表');
+    await user.click(screen.getByRole('button', { name: '清空全部字段' }));
+    await user.click(screen.getByRole('checkbox', { name: '订单号' }));
+    await user.click(screen.getByRole('checkbox', { name: '动态商品列组' }));
+    await user.clear(screen.getByRole('textbox', { name: '商品基础表头' }));
+    await user.type(screen.getByRole('textbox', { name: '商品基础表头' }), '货品');
+    await user.clear(screen.getByRole('textbox', { name: '款式或规格基础表头' }));
+    await user.type(screen.getByRole('textbox', { name: '款式或规格基础表头' }), '属性');
+    await user.clear(screen.getByRole('textbox', { name: '数量基础表头' }));
+    await user.type(screen.getByRole('textbox', { name: '数量基础表头' }), '件数');
+    await user.click(screen.getByRole('button', { name: '上移 动态商品列组' }));
+    await user.click(screen.getByRole('button', { name: '创建模板' }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
+    expect(input).toMatchObject({ granularity: 'order' });
+    expect(input.columns).toEqual([
+      {
+        kind: 'dynamic_product_group',
+        labels: { product: '货品', specification: '属性', quantity: '件数' },
+      },
+      { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+    ]);
+  });
+
+  it('取消动态商品列组时一次删除整个复合项且不再提供旧商品摘要', async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderWorkspace();
+
+    expect(screen.queryByRole('checkbox', { name: '商品摘要' })).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: '模板名称' }), '无商品列模板');
+    await user.click(screen.getByRole('checkbox', { name: '动态商品列组' }));
+    expect(screen.queryByRole('textbox', { name: '商品基础表头' }))
+      .not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '创建模板' }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
+    expect(input.columns.some(isDynamicProductTableGroup)).toBe(false);
+  });
+
   it('新建订单模板时捕获当前查询并保存非空列', async () => {
     const user = userEvent.setup();
     const { onCreate } = renderWorkspace();
@@ -106,7 +161,7 @@ describe('表格模板工作台', () => {
       query: orderQuery,
     });
     expect(input.columns.length).toBeGreaterThan(0);
-    expect(input.columns.map(({ field }) => fieldReferenceKey(field)))
+    expect(scalarColumns(input).map(({ field }) => fieldReferenceKey(field)))
       .toContain('builtin:order_number');
   });
 
@@ -132,12 +187,12 @@ describe('表格模板工作台', () => {
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
-    expect(input.columns.map(({ field }) => fieldReferenceKey(field))).toEqual([
+    expect(scalarColumns(input).map(({ field }) => fieldReferenceKey(field))).toEqual([
       'custom:field-order-note',
       'builtin:order_number',
       'computed:item_quantity_total',
     ]);
-    expect(input.columns.map(({ displayName }) => displayName)).toEqual([
+    expect(scalarColumns(input).map(({ displayName }) => displayName)).toEqual([
       '客服备注',
       '平台单号',
       '商品总数量',
@@ -164,7 +219,7 @@ describe('表格模板工作台', () => {
     const [templateId, input] = onUpdate.mock.calls[0] as [string, UpdateTableTemplateInput];
     expect(templateId).toBe(financeTemplate.id);
     expect(input).toMatchObject({ name: '财务复核', query: orderQuery });
-    expect(input.columns.map(({ displayName }) => displayName)).toEqual([
+    expect(scalarColumns(input).map(({ displayName }) => displayName)).toEqual([
       '成交金额',
       '平台单号',
     ]);
@@ -231,7 +286,7 @@ describe('表格模板工作台', () => {
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
     expect(input).toMatchObject({ granularity: 'order_item', query: itemQuery });
-    expect(input.columns.map(({ field }) => fieldReferenceKey(field)))
+    expect(scalarColumns(input).map(({ field }) => fieldReferenceKey(field)))
       .toContain('computed:item_subtotal');
   });
 
@@ -262,7 +317,7 @@ describe('表格模板工作台', () => {
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     const input = onCreate.mock.calls[0]?.[0] as CreateTableTemplateInput;
     expect(input.granularity).toBe('order_item');
-    expect(input.columns.map(({ displayName }) => displayName)).toEqual([
+    expect(scalarColumns(input).map(({ displayName }) => displayName)).toEqual([
       '订单号',
       '原始商品标题',
       '原始款式／规格',

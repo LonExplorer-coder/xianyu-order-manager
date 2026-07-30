@@ -160,6 +160,40 @@ describe('订单工作台查询', () => {
     expect(result.orders.map((order) => order.orderNumber)).toEqual(['XY-SEARCH-001']);
   });
 
+  it('订单级商品筛选命中任意一项后仍返回该订单的全部有序商品', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-PRODUCT-FILTER-001',
+        items: [
+          {
+            sourceTitle: '海棠杯',
+            sourceSpec: '红色',
+            unitPriceCents: 1_800,
+            quantity: 1,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: '海棠杯',
+            sourceSpec: '星空蓝限定',
+            unitPriceCents: 1_800,
+            quantity: 2,
+            quantityInferred: false,
+          },
+        ],
+      }),
+    ]);
+
+    const result = application.queryOrders({ productText: '星空蓝' });
+
+    expect(result.orders).toMatchObject([{
+      orderNumber: 'XY-PRODUCT-FILTER-001',
+      items: [
+        { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 1 },
+        { sourceTitle: '海棠杯', sourceSpec: '星空蓝限定', quantity: 2 },
+      ],
+    }]);
+  });
+
   it('日期、正交状态、平台账号、买家和商品筛选可以组合', async () => {
     const { application } = await createApplicationWithOrders([
       recognition({ orderNumber: 'XY-FILTER-001' }),

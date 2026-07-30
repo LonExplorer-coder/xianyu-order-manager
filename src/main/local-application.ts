@@ -93,11 +93,14 @@ import type {
   TableTemplate,
   TableTemplateColumn,
   TableTemplateGranularity,
+  TableTemplateLayoutItem,
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import {
   normalizeCreateTableTemplateInput,
   normalizeUpdateTableTemplateInput,
+  assertOrderTableLayoutFutureHeaderSafety,
+  isDynamicProductTableGroup,
   tableTemplateNameKey,
 } from '../core/table-templates';
 import {
@@ -1408,6 +1411,9 @@ export class LocalApplication {
       normalizeCreateTableTemplateInput(input, definitions),
       definitions,
     );
+    if (normalized.granularity === 'order') {
+      assertOrderTableLayoutFutureHeaderSafety(normalized.columns);
+    }
     const now = new Date().toISOString();
     const template: TableTemplate = {
       id: randomUUID(),
@@ -1425,7 +1431,7 @@ export class LocalApplication {
         INSERT INTO table_templates (
           id, name, name_key, granularity, configuration_version,
           configuration_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, 2, ?, ?, ?)
       `).run(
         template.id,
         template.name,
@@ -1458,6 +1464,9 @@ export class LocalApplication {
       ...normalizedInput,
       granularity: existing.granularity,
     } as CreateTableTemplateInput, definitions);
+    if (normalized.granularity === 'order') {
+      assertOrderTableLayoutFutureHeaderSafety(normalized.columns);
+    }
     const template: TableTemplate = {
       id: existing.id,
       ...normalized,
@@ -1521,7 +1530,9 @@ export class LocalApplication {
     if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
       throw new Error('商品明细表必须使用商品明细粒度模板');
     }
-    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS;
+    const orderColumns = orderTemplate
+      ? legacyOrderExportColumns(orderTemplate.columns)
+      : DEFAULT_ORDER_EXPORT_COLUMNS;
     const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
     const orderCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderColumns);
     const orderItemCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderItemColumns);
@@ -4058,7 +4069,7 @@ function parseTableTemplateRow(
   row: SqlRow,
   definitions: readonly CustomFieldDefinition[],
 ): TableTemplate {
-  if (asNumber(row.configuration_version) !== 1) {
+  if (asNumber(row.configuration_version) !== 2) {
     throw new Error('数据库表格模板配置版本不受支持');
   }
   let configuration: unknown;
@@ -4153,6 +4164,7 @@ function tableTemplateCustomFieldDependencies(template: TableTemplate): Array<{
     usage: 'column' | 'filter' | 'sort';
   }> = [];
   for (const column of template.columns) {
+    if (isDynamicProductTableGroup(column)) continue;
     if (column.field.kind === 'custom') {
       dependencies.push({ definitionId: column.field.definitionId, usage: 'column' });
     }
@@ -4193,6 +4205,19 @@ function customFieldDefinitionIdsForColumns(
 ): string[] {
   return columns.flatMap(({ field }) => (
     field.kind === 'custom' ? [field.definitionId] : []
+  ));
+}
+
+function legacyOrderExportColumns(
+  columns: readonly TableTemplateLayoutItem[],
+): TableTemplateColumn[] {
+  return columns.map((item): TableTemplateColumn => (
+    isDynamicProductTableGroup(item)
+      ? {
+          field: { kind: 'builtin', key: 'product_summary' },
+          displayName: item.labels.product,
+        }
+      : { field: { ...item.field }, displayName: item.displayName }
   ));
 }
 

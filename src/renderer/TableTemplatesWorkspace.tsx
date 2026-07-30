@@ -4,11 +4,15 @@ import type { CustomFieldDefinition } from '../core/custom-fields';
 import type { OrderItemWorkbenchQuery, OrderWorkbenchQuery } from '../core/order-workbench';
 import {
   availableTableFields,
+  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   fieldReferenceKey,
+  isDynamicProductTableGroup,
+  tableTemplateLayoutItemKey,
   type CreateTableTemplateInput,
   type TableTemplate,
   type TableTemplateColumn,
   type TableTemplateGranularity,
+  type TableTemplateLayoutItem,
   type UpdateTableTemplateInput,
 } from '../core/table-templates';
 
@@ -29,7 +33,7 @@ export type TableTemplatesWorkspaceProps = {
 type TemplateDraft = {
   name: string;
   granularity: TableTemplateGranularity;
-  columns: TableTemplateColumn[];
+  columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery | OrderItemWorkbenchQuery;
 };
 
@@ -38,7 +42,7 @@ const DEFAULT_FIELD_KEYS: Record<TableTemplateGranularity, string[]> = {
     'builtin:order_number',
     'builtin:buyer_nickname',
     'builtin:recipient',
-    'builtin:product_summary',
+    'dynamic_product_group',
     'computed:item_quantity_total',
     'computed:order_total',
     'builtin:fulfillment_status',
@@ -72,7 +76,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   const savingRef = useRef(props.saving);
   const availableFields = availableTableFields(draft.granularity, props.customFieldDefinitions);
   const selectedFieldKeys = new Set(
-    draft.columns.map(({ field }) => fieldReferenceKey(field)),
+    draft.columns.map(tableTemplateLayoutItemKey),
   );
   const visibleTemplates = props.templates.filter(
     ({ granularity }) => granularity === libraryGranularity,
@@ -166,7 +170,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
     setDraft({
       name: template.name,
       granularity: template.granularity,
-      columns: cloneColumns(template.columns),
+      columns: cloneLayoutItems(template.columns),
       query: cloneQuery(template.query),
     });
     setFeedback('');
@@ -188,13 +192,13 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
         ? {
             name: draft.name,
             granularity: 'order',
-            columns: cloneColumns(draft.columns),
+            columns: cloneLayoutItems(draft.columns),
             query: cloneQuery(draft.query as OrderWorkbenchQuery),
           }
         : {
             name: draft.name,
             granularity: 'order_item',
-            columns: cloneColumns(draft.columns),
+            columns: cloneLayoutItems(draft.columns) as TableTemplateColumn[],
             query: cloneQuery(draft.query as OrderItemWorkbenchQuery),
           };
       if (editingTemplateId) {
@@ -215,6 +219,17 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   }
 
   function toggleField(fieldKey: string, selected: boolean) {
+    if (fieldKey === 'dynamic_product_group') {
+      if (draft.granularity !== 'order') return;
+      setDraft((current) => ({
+        ...current,
+        columns: selected
+          ? [...current.columns, cloneDynamicProductGroup()]
+          : current.columns.filter((item) => !isDynamicProductTableGroup(item)),
+      }));
+      setFeedback('');
+      return;
+    }
     const available = availableFields.find(
       ({ reference }) => fieldReferenceKey(reference) === fieldKey,
     );
@@ -226,7 +241,9 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             ...current.columns,
             { field: { ...available.reference }, displayName: available.defaultLabel },
           ]
-        : current.columns.filter(({ field }) => fieldReferenceKey(field) !== fieldKey),
+        : current.columns.filter((item) => (
+            isDynamicProductTableGroup(item) || fieldReferenceKey(item.field) !== fieldKey
+          )),
     }));
     setFeedback('');
   }
@@ -235,7 +252,24 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
     setDraft((current) => ({
       ...current,
       columns: current.columns.map((column, columnIndex) => (
-        columnIndex === index ? { ...column, displayName } : column
+        columnIndex === index && !isDynamicProductTableGroup(column)
+          ? { ...column, displayName }
+          : column
+      )),
+    }));
+  }
+
+  function renameDynamicProductLabel(
+    index: number,
+    label: keyof typeof DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP.labels,
+    displayName: string,
+  ) {
+    setDraft((current) => ({
+      ...current,
+      columns: current.columns.map((item, itemIndex) => (
+        itemIndex === index && isDynamicProductTableGroup(item)
+          ? { ...item, labels: { ...item.labels, [label]: displayName } }
+          : item
       )),
     }));
   }
@@ -450,6 +484,20 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             </div>
             <p>可选系统字段、当前粒度自定义字段与受控计算字段。</p>
             <div className="template-field-options">
+              {draft.granularity === 'order' && (
+                <label className="template-field-option" key="dynamic_product_group">
+                  <input
+                    type="checkbox"
+                    aria-label="动态商品列组"
+                    checked={selectedFieldKeys.has('dynamic_product_group')}
+                    onChange={(event) => toggleField('dynamic_product_group', event.target.checked)}
+                  />
+                  <span>
+                    <strong>动态商品列组</strong>
+                    <small>复合布局项</small>
+                  </span>
+                </label>
+              )}
               {availableFields.map((field) => {
                 const key = fieldReferenceKey(field.reference);
                 return (
@@ -482,6 +530,75 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             ) : (
               <ol className="template-column-list">
                 {draft.columns.map((column, index) => {
+                  if (isDynamicProductTableGroup(column)) {
+                    return (
+                      <li className="template-column" key={column.kind}>
+                        <span className="template-column__position">{index + 1}</span>
+                        <div>
+                          <strong>动态商品列组</strong>
+                          <label>
+                            <span>商品基础表头</span>
+                            <input
+                              aria-label="商品基础表头"
+                              required
+                              value={column.labels.product}
+                              onChange={(event) => renameDynamicProductLabel(
+                                index,
+                                'product',
+                                event.target.value,
+                              )}
+                            />
+                          </label>
+                          <label>
+                            <span>款式或规格基础表头</span>
+                            <input
+                              aria-label="款式或规格基础表头"
+                              required
+                              value={column.labels.specification}
+                              onChange={(event) => renameDynamicProductLabel(
+                                index,
+                                'specification',
+                                event.target.value,
+                              )}
+                            />
+                          </label>
+                          <label>
+                            <span>数量基础表头</span>
+                            <input
+                              aria-label="数量基础表头"
+                              required
+                              value={column.labels.quantity}
+                              onChange={(event) => renameDynamicProductLabel(
+                                index,
+                                'quantity',
+                                event.target.value,
+                              )}
+                            />
+                          </label>
+                        </div>
+                        <div className="template-column__actions">
+                          <button
+                            className="button button--quiet"
+                            type="button"
+                            aria-label="上移 动态商品列组"
+                            disabled={index === 0}
+                            onClick={() => moveColumn(index, -1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            className="button button--quiet"
+                            type="button"
+                            aria-label="下移 动态商品列组"
+                            disabled={index === draft.columns.length - 1}
+                            onClick={() => moveColumn(index, 1)}
+                          >
+                            ↓
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  }
                   const field = availableFields.find(
                     ({ reference }) => fieldReferenceKey(reference) === fieldReferenceKey(column.field),
                   );
@@ -529,7 +646,11 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
           <button
             className="button button--primary"
             type="submit"
-            disabled={props.saving || draft.columns.length === 0 || draft.columns.some(({ displayName }) => !displayName.trim())}
+            disabled={props.saving || draft.columns.length === 0 || draft.columns.some((item) => (
+              isDynamicProductTableGroup(item)
+                ? Object.values(item.labels).some((label) => !label.trim())
+                : !item.displayName.trim()
+            ))}
           >
             {props.saving ? '正在保存…' : editingTemplateId ? '保存修改' : '创建模板'}
           </button>
@@ -583,24 +704,32 @@ function newDraft(
   query: OrderWorkbenchQuery | OrderItemWorkbenchQuery,
 ): TemplateDraft {
   const fields = availableTableFields(granularity, definitions);
-  const preferred = new Set(DEFAULT_FIELD_KEYS[granularity]);
-  let columns = fields
-    .filter(({ reference }) => preferred.has(fieldReferenceKey(reference)))
-    .map(({ reference, defaultLabel }): TableTemplateColumn => ({
-      field: { ...reference },
-      displayName: defaultLabel,
-    }));
+  let columns: TableTemplateLayoutItem[] = DEFAULT_FIELD_KEYS[granularity].flatMap(
+    (key): TableTemplateLayoutItem[] => {
+    if (key === 'dynamic_product_group') return [cloneDynamicProductGroup()];
+    const field = fields.find(({ reference }) => fieldReferenceKey(reference) === key);
+    return field ? [{ field: { ...field.reference }, displayName: field.defaultLabel }] : [];
+    },
+  );
   if (columns.length === 0 && fields[0]) {
     columns = [{ field: { ...fields[0].reference }, displayName: fields[0].defaultLabel }];
   }
   return { name: '', granularity, columns, query: cloneQuery(query) };
 }
 
-function cloneColumns(columns: readonly TableTemplateColumn[]): TableTemplateColumn[] {
-  return columns.map((column) => ({
-    field: { ...column.field },
-    displayName: column.displayName,
-  }));
+function cloneLayoutItems(columns: readonly TableTemplateLayoutItem[]): TableTemplateLayoutItem[] {
+  return columns.map((column) => (
+    isDynamicProductTableGroup(column)
+      ? { ...column, labels: { ...column.labels } }
+      : { field: { ...column.field }, displayName: column.displayName }
+  ));
+}
+
+function cloneDynamicProductGroup(): typeof DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP {
+  return {
+    ...DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
+    labels: { ...DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP.labels },
+  };
 }
 
 function cloneQuery<T extends OrderWorkbenchQuery | OrderItemWorkbenchQuery>(query: T): T {

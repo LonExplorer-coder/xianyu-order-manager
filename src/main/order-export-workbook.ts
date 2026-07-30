@@ -249,6 +249,13 @@ function requireDescriptor(
 ): AvailableTableField {
   const key = fieldReferenceKey(reference);
   const descriptor = catalog.find((field) => fieldReferenceKey(field.reference) === key);
+  if (!descriptor && reference.kind === 'builtin' && reference.key === 'product_summary') {
+    return {
+      reference: { ...reference },
+      defaultLabel: '商品',
+      valueType: 'text',
+    };
+  }
   if (!descriptor) throw new Error(`导出字段不可用：${key}`);
   return descriptor;
 }

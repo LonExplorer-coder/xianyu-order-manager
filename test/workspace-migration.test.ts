@@ -29,6 +29,7 @@ describe('数据库升级', () => {
       { version: 8 },
       { version: 9 },
       { version: 10 },
+      { version: 11 },
     ]);
     expect(
       first.database
@@ -82,8 +83,8 @@ describe('数据库升级', () => {
       '订单跟单表',
       '订单跟单表',
       'order',
-      1,
-      '{"columns":[]}',
+      2,
+      '{"columns":[],"query":{}}',
       '2026-07-30T00:00:00.000Z',
       '2026-07-30T00:00:00.000Z',
     );
@@ -112,7 +113,7 @@ describe('数据库升级', () => {
         id, name, name_key, granularity, configuration_version,
         configuration_json, created_at, updated_at
       ) VALUES (
-        'template-invalid-json-v9', '错误模板', '错误模板', 'order', 1,
+        'template-invalid-json-v9', '错误模板', '错误模板', 'order', 2,
         '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
       )
     `).run()).toThrow();
@@ -121,7 +122,7 @@ describe('数据库升级', () => {
         id, name, name_key, granularity, configuration_version,
         configuration_json, created_at, updated_at
       ) VALUES (
-        'template-duplicate-v9', '订单跟单表（重名）', '订单跟单表', 'order', 1,
+        'template-duplicate-v9', '订单跟单表（重名）', '订单跟单表', 'order', 2,
         '{"columns":[]}', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
       )
     `).run()).toThrow();
@@ -361,6 +362,7 @@ describe('数据库升级', () => {
       { version: 8 },
       { version: 9 },
       { version: 10 },
+      { version: 11 },
     ]);
     expect(
       (
@@ -408,8 +410,8 @@ describe('数据库升级', () => {
       name: '订单跟单表',
       name_key: '订单跟单表',
       granularity: 'order',
-      configuration_version: 1,
-      configuration_json: '{"columns":[]}',
+      configuration_version: 2,
+      configuration_json: '{"columns":[],"query":{}}',
     });
     reopened.close();
 
@@ -596,6 +598,7 @@ describe('数据库升级', () => {
         { version: 8 },
         { version: 9 },
         { version: 10 },
+        { version: 11 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -688,6 +691,173 @@ describe('数据库升级', () => {
     }
   });
 
+  it('将 v10 旧商品摘要原位迁移为动态列组并在重启后保持幂等', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v10-product-group-'));
+    createVersion1Database(dataDirectory);
+    const prepared = Workspace.open(dataDirectory);
+    prepared.close();
+    downgradeTableTemplatesToVersion10(dataDirectory);
+    seedVersion10ProductSummaryTemplates(dataDirectory);
+
+    let recognitionCalls = 0;
+    const application = new LocalApplication({
+      recognize: async () => {
+        recognitionCalls += 1;
+        throw new Error('表格模板升级不应调用 OCR');
+      },
+    });
+    application.openDataDirectory(dataDirectory);
+    const migrated = application.listTableTemplates();
+
+    expect(migrated).toMatchObject([
+      {
+        id: 'template-summary-v10',
+        name: '历史拣货表',
+        granularity: 'order',
+        columns: [
+          { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+          {
+            kind: 'dynamic_product_group',
+            labels: { product: '货品', specification: '款式或规格', quantity: '数量' },
+          },
+          { field: { kind: 'custom', definitionId: 'field-order-v10' }, displayName: '跟单备注' },
+        ],
+        query: {
+          productText: '旧商品第二款',
+          sortField: 'product',
+          sortDirection: 'asc',
+          customFieldFilter: { definitionId: 'field-order-v10', value: '加急' },
+          customFieldSort: { definitionId: 'field-order-v10', direction: 'desc' },
+        },
+        createdAt: '2026-07-30T01:00:00.000Z',
+        updatedAt: '2026-07-30T02:00:00.000Z',
+      },
+      {
+        id: 'template-no-summary-v10',
+        columns: [
+          { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+        ],
+      },
+      {
+        id: 'template-item-v10',
+        granularity: 'order_item',
+        columns: [
+          { field: { kind: 'builtin', key: 'product_title' }, displayName: '我的原始商品' },
+        ],
+      },
+      {
+        id: 'template-default-summary-v10',
+        granularity: 'order',
+        columns: [{
+          kind: 'dynamic_product_group',
+          labels: { product: '商品', specification: '款式或规格', quantity: '数量' },
+        }],
+      },
+    ]);
+    expect(application.queryOrders({ productText: '旧商品第二款' }).orders[0]?.items)
+      .toEqual([
+        { sourceTitle: '旧商品', sourceSpec: '旧规格', quantity: 1 },
+        { sourceTitle: '旧商品第二款', sourceSpec: '蓝色', quantity: 2 },
+      ]);
+    expect(recognitionCalls).toBe(0);
+    application.close();
+
+    const reopened = new LocalApplication({
+      recognize: async () => {
+        recognitionCalls += 1;
+        throw new Error('重启读取模板不应调用 OCR');
+      },
+    });
+    reopened.openDataDirectory(dataDirectory);
+    expect(reopened.listTableTemplates()).toEqual(migrated);
+    expect(recognitionCalls).toBe(0);
+    reopened.close();
+
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 11 });
+      expect(database.prepare(`
+        SELECT configuration_version, created_at, updated_at
+        FROM table_templates
+        WHERE id = 'template-summary-v10'
+      `).get()).toEqual({
+        configuration_version: 2,
+        created_at: '2026-07-30T01:00:00.000Z',
+        updated_at: '2026-07-30T02:00:00.000Z',
+      });
+      expect(database.prepare(`
+        SELECT definition_id, usage
+        FROM table_template_custom_field_dependencies
+        WHERE template_id = 'template-summary-v10'
+        ORDER BY usage
+      `).all()).toEqual([
+        { definition_id: 'field-order-v10', usage: 'column' },
+        { definition_id: 'field-order-v10', usage: 'filter' },
+        { definition_id: 'field-order-v10', usage: 'sort' },
+      ]);
+      expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('v11 迁移在重建表后发现外键损坏时整体回滚', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v11-template-rollback-'));
+    createVersion1Database(dataDirectory);
+    const prepared = Workspace.open(dataDirectory);
+    prepared.close();
+    downgradeTableTemplatesToVersion10(dataDirectory);
+
+    const corrupted = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      corrupted.exec('PRAGMA foreign_keys = OFF;');
+      corrupted.prepare(`
+        INSERT INTO table_template_custom_field_dependencies (
+          template_id, definition_id, usage
+        ) VALUES (?, ?, ?)
+      `).run('missing-template', 'missing-definition', 'column');
+    } finally {
+      corrupted.close();
+    }
+
+    expect(() => Workspace.open(dataDirectory)).toThrow(/外键完整性检查失败/u);
+
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 10 });
+      const table = database.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'table_templates'
+      `).get() as { sql: string };
+      expect(table.sql).toMatch(/configuration_version = 1/u);
+      expect(database.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name IN (
+            'table_template_dependencies_match_granularity_on_insert',
+            'table_template_dependencies_match_granularity_on_update',
+            'table_templates_prevent_granularity_change_with_dependencies',
+            'custom_field_definitions_keep_template_granularity_on_update'
+          )
+        ORDER BY name
+      `).all()).toEqual([
+        { name: 'custom_field_definitions_keep_template_granularity_on_update' },
+        { name: 'table_template_dependencies_match_granularity_on_insert' },
+        { name: 'table_template_dependencies_match_granularity_on_update' },
+        { name: 'table_templates_prevent_granularity_change_with_dependencies' },
+      ]);
+      expect(database.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'table_templates_v11'
+      `).get()).toBeUndefined();
+    } finally {
+      database.close();
+    }
+  });
+
   it('升级前发现全角半角归一化后的订单身份碰撞时拒绝部分升级', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-identity-collision-'));
     createVersion1Database(dataDirectory);
@@ -763,6 +933,170 @@ describe('数据库升级', () => {
   });
 });
 
+function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    const version = database.prepare('SELECT MAX(version) AS version FROM schema_migrations')
+      .get() as { version: number };
+    if (version.version < 11) return;
+    const triggerRows = database.prepare(`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name IN (
+          'table_template_dependencies_match_granularity_on_insert',
+          'table_template_dependencies_match_granularity_on_update',
+          'table_templates_prevent_granularity_change_with_dependencies',
+          'custom_field_definitions_keep_template_granularity_on_update'
+        )
+      ORDER BY name
+    `).all() as unknown as Array<{ name: string; sql: string }>;
+    database.exec('PRAGMA foreign_keys = OFF;');
+    database.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const trigger of triggerRows) {
+        database.exec(`DROP TRIGGER ${trigger.name};`);
+      }
+      database.exec(`
+        CREATE TABLE table_templates_v10_fixture (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          name_key TEXT NOT NULL,
+          granularity TEXT NOT NULL CHECK (granularity IN ('order', 'order_item')),
+          configuration_version INTEGER NOT NULL DEFAULT 1
+            CHECK (configuration_version = 1),
+          configuration_json TEXT NOT NULL CHECK (
+            json_valid(configuration_json)
+            AND json_type(configuration_json) = 'object'
+          ),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (granularity, name_key)
+        ) STRICT;
+        DROP TABLE table_templates;
+        ALTER TABLE table_templates_v10_fixture RENAME TO table_templates;
+        DELETE FROM schema_migrations WHERE version = 11;
+      `);
+      for (const trigger of triggerRows) database.exec(trigger.sql);
+      database.exec('COMMIT;');
+    } catch (error) {
+      database.exec('ROLLBACK;');
+      throw error;
+    } finally {
+      database.exec('PRAGMA foreign_keys = ON;');
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function seedVersion10ProductSummaryTemplates(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    database.exec(`
+      INSERT INTO order_items (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_source, subtotal_cents
+      ) VALUES (
+        'order-item-second-v10', 'order-v1', 1, '旧商品第二款', '蓝色',
+        440, 2, 'legacy_explicit_or_manual', 880
+      );
+
+      INSERT INTO custom_field_definitions (
+        id, name, granularity, value_type, required,
+        default_value_json, options_json, created_at, updated_at
+      ) VALUES (
+        'field-order-v10', '跟单备注', 'order', 'text', 0,
+        NULL, '[]', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      );
+    `);
+    const insertTemplate = database.prepare(`
+      INSERT INTO table_templates (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+    `);
+    insertTemplate.run(
+      'template-summary-v10',
+      '历史拣货表',
+      '历史拣货表',
+      'order',
+      JSON.stringify({
+        columns: [
+          { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+          { field: { kind: 'builtin', key: 'product_summary' }, displayName: '货品' },
+          { field: { kind: 'custom', definitionId: 'field-order-v10' }, displayName: '跟单备注' },
+        ],
+        query: {
+          productText: '旧商品第二款',
+          sortField: 'product',
+          sortDirection: 'asc',
+          customFieldFilter: { definitionId: 'field-order-v10', value: '加急' },
+          customFieldSort: { definitionId: 'field-order-v10', direction: 'desc' },
+        },
+      }),
+      '2026-07-30T01:00:00.000Z',
+      '2026-07-30T02:00:00.000Z',
+    );
+    insertTemplate.run(
+      'template-no-summary-v10',
+      '无商品列',
+      '无商品列',
+      'order',
+      JSON.stringify({
+        columns: [
+          { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+        ],
+        query: {},
+      }),
+      '2026-07-30T03:00:00.000Z',
+      '2026-07-30T03:00:00.000Z',
+    );
+    insertTemplate.run(
+      'template-item-v10',
+      '商品明细',
+      '商品明细',
+      'order_item',
+      JSON.stringify({
+        columns: [
+          { field: { kind: 'builtin', key: 'product_title' }, displayName: '我的原始商品' },
+        ],
+        query: {},
+      }),
+      '2026-07-30T04:00:00.000Z',
+      '2026-07-30T04:00:00.000Z',
+    );
+    insertTemplate.run(
+      'template-default-summary-v10',
+      '旧默认商品列',
+      '旧默认商品列',
+      'order',
+      JSON.stringify({
+        columns: [
+          { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品摘要' },
+        ],
+        query: {},
+      }),
+      '2026-07-30T05:00:00.000Z',
+      '2026-07-30T05:00:00.000Z',
+    );
+    const insertDependency = database.prepare(`
+      INSERT INTO table_template_custom_field_dependencies (
+        template_id, definition_id, usage
+      ) VALUES (?, ?, ?)
+    `);
+    insertDependency.run('template-summary-v10', 'field-order-v10', 'column');
+    insertDependency.run('template-summary-v10', 'field-order-v10', 'filter');
+    insertDependency.run('template-summary-v10', 'field-order-v10', 'sort');
+  } finally {
+    database.close();
+  }
+}
+
 function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
   createVersion1Database(dataDirectory);
   const current = Workspace.open(dataDirectory);
@@ -829,7 +1163,7 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         ALTER TABLE draft_items_v9_fixture RENAME TO draft_items;
         DROP TABLE order_items;
         ALTER TABLE order_items_v9_fixture RENAME TO order_items;
-        DELETE FROM schema_migrations WHERE version = 10;
+        DELETE FROM schema_migrations WHERE version IN (10, 11);
       `);
       database.exec('COMMIT;');
     } catch (error) {

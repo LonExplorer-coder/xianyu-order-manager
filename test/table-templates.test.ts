@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Recognizer } from '../src/core/contracts';
+import {
+  isDynamicProductTableGroup,
+  type TableTemplateColumn,
+} from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 
 const applications: LocalApplication[] = [];
@@ -59,6 +63,10 @@ describe('多套表格模板', () => {
       granularity: 'order',
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '单号' },
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '货品', specification: '属性', quantity: '件数' },
+        },
         { field: { kind: 'custom', definitionId: priority.id }, displayName: '优先级' },
         { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '总件数' },
         { field: { kind: 'computed', key: 'order_total' }, displayName: '实付' },
@@ -100,6 +108,7 @@ describe('多套表格模板', () => {
     });
 
     expect(picking.name).toBe('待发货拣货');
+    expect(picking.columns.some(isDynamicProductTableGroup)).toBe(true);
     expect(finance.id).not.toBe(picking.id);
     expect(itemTemplate.name).toBe(picking.name);
     expect(application.listTableTemplates()).toHaveLength(3);
@@ -226,6 +235,35 @@ describe('多套表格模板', () => {
     expect(application.listTableTemplates()).toHaveLength(1);
   });
 
+  it('保存时拒绝普通表头或基础表头可能与未来动态序号冲突', async () => {
+    const { application } = await openApplication();
+    const base = {
+      name: '动态表头冲突',
+      granularity: 'order' as const,
+      query: {},
+    };
+    const group = {
+      kind: 'dynamic_product_group' as const,
+      labels: { product: '商品', specification: '款式或规格', quantity: '数量' },
+    };
+
+    expect(() => application.createTableTemplate({
+      ...base,
+      columns: [
+        group,
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '商品1' },
+      ],
+    })).toThrow(/未来序号.*请修改/u);
+    expect(() => application.createTableTemplate({
+      ...base,
+      columns: [{
+        ...group,
+        labels: { product: '商品', specification: '商品1', quantity: '数量' },
+      }],
+    })).toThrow(/基础表头.*未来序号.*请修改/u);
+    expect(application.listTableTemplates()).toEqual([]);
+  });
+
   it('重启后完整恢复商品事实筛选和内置排序', async () => {
     const { application, dataDirectory } = await openApplication();
     const template = application.createTableTemplate({
@@ -310,7 +348,9 @@ describe('多套表格模板', () => {
     const templates = reopened.listTableTemplates('order_item');
     expect(Object.fromEntries(templates.map(({ name, columns }) => [
       name,
-      columns.map(({ displayName }) => displayName),
+      Array.from(columns)
+        .filter((item): item is TableTemplateColumn => !isDynamicProductTableGroup(item))
+        .map(({ displayName }) => displayName),
     ]))).toEqual({
       '旧默认名': ['原始商品标题', '原始款式／规格'],
       '用户别名': ['我的商品', '款式描述'],

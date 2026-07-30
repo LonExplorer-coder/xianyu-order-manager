@@ -893,11 +893,140 @@ describe('订单管理工作台', () => {
     expect(row).toHaveTextContent('闲鱼');
     expect(row).toHaveTextContent(summary.sellerAccount);
     expect(row).toHaveTextContent(`${summary.recipient}13800000000广东省深圳市南山区商务路88号`);
-    expect(row).toHaveTextContent('限量测试商品 · 商务黑 ×2');
+    expect(row).toHaveTextContent('限量测试商品商务黑2');
     expect(row).toHaveTextContent('已入库');
     expect(row).toHaveTextContent('已付款');
     expect(row).toHaveTextContent('待发货');
     expect(row).toHaveTextContent('正常');
+  });
+
+  it('系统订单总表按当前结果完整展开有序商品列组并让短订单尾列留空', async () => {
+    const multiItem = orderSummary(confirmedOrder, {
+      id: 'order-multi-item',
+      orderNumber: 'XY-MULTI-ITEM',
+      items: [
+        { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
+        { sourceTitle: '海棠杯', sourceSpec: '蓝色', quantity: 1 },
+      ],
+      itemCount: 3,
+    });
+    const singleItem = orderSummary(confirmedOrder, {
+      id: 'order-single-item',
+      orderNumber: 'XY-SINGLE-ITEM',
+      items: [{ sourceTitle: '杯盖', sourceSpec: '', quantity: 1 }],
+      itemCount: 1,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [multiItem, singleItem],
+      }),
+      listOrders: vi.fn().mockResolvedValue([multiItem, singleItem]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([multiItem, singleItem])),
+    });
+
+    render(<App api={api} />);
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent);
+    expect(headers.slice(8, 14)).toEqual([
+      '商品1', '款式或规格1', '数量1', '商品2', '款式或规格2', '数量2',
+    ]);
+
+    const multiRow = within(table).getByRole('button', { name: '查看订单 XY-MULTI-ITEM' })
+      .closest('tr');
+    expect(multiRow).not.toBeNull();
+    expect(within(multiRow as HTMLTableRowElement).getAllByText('海棠杯')).toHaveLength(2);
+    expect(multiRow).toHaveTextContent('海棠杯红色2海棠杯蓝色1');
+
+    const singleRow = within(table).getByRole('button', { name: '查看订单 XY-SINGLE-ITEM' })
+      .closest('tr');
+    expect(singleRow).not.toBeNull();
+    const singleCells = within(singleRow as HTMLTableRowElement).getAllByRole('cell');
+    expect(singleCells.slice(11, 14).map((cell) => cell.textContent)).toEqual(['', '', '']);
+  });
+
+  it('应用后动态表头与其他列冲突时在页面给出改名提示', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-dynamic-collision',
+      name: '表头冲突模板',
+      granularity: 'order',
+      columns: [
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '商品', specification: '款式或规格', quantity: '数量' },
+        },
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '商品1' },
+      ],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '动态商品列组生成表头“商品1”与其他列冲突',
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('请修改');
+  });
+
+  it('应用订单模板后用三个自定义基础表头重新编号动态商品列', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary(confirmedOrder, {
+      items: [
+        { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
+        { sourceTitle: '杯盖', sourceSpec: '透明', quantity: 1 },
+      ],
+      itemCount: 3,
+    });
+    const template: TableTemplate = {
+      id: 'template-dynamic-labels',
+      name: '自定义商品表头',
+      granularity: 'order',
+      columns: [{
+        kind: 'dynamic_product_group',
+        labels: { product: '货品', specification: '属性', quantity: '件数' },
+      }],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(within(table).getAllByRole('columnheader').slice(1, 7).map((cell) => cell.textContent))
+      .toEqual(['货品1', '属性1', '件数1', '货品2', '属性2', '件数2']);
   });
 
   it('主搜索框可按买家和商品找到订单', async () => {

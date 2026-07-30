@@ -65,6 +65,28 @@ export type TableTemplateColumn = {
   displayName: string;
 };
 
+export type DynamicProductTableGroup = {
+  kind: 'dynamic_product_group';
+  labels: {
+    product: string;
+    specification: string;
+    quantity: string;
+  };
+};
+
+export type TableTemplateLayoutItem =
+  | TableTemplateColumn
+  | DynamicProductTableGroup;
+
+export const DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP: DynamicProductTableGroup = {
+  kind: 'dynamic_product_group',
+  labels: {
+    product: '商品',
+    specification: '款式或规格',
+    quantity: '数量',
+  },
+};
+
 export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
   { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
@@ -78,7 +100,7 @@ export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
 type OrderTableTemplateConfiguration = {
   name: string;
   granularity: 'order';
-  columns: TableTemplateColumn[];
+  columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery;
 };
 
@@ -95,7 +117,7 @@ export type CreateTableTemplateInput =
 
 export type UpdateTableTemplateInput = {
   name: string;
-  columns: TableTemplateColumn[];
+  columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery | OrderItemWorkbenchQuery;
 };
 
@@ -118,6 +140,28 @@ export type AvailableTableField = {
 };
 
 export type TableCellValue = CustomFieldValue | null;
+
+export type OrderTableProjectionColumn =
+  | {
+    kind: 'field';
+    key: string;
+    header: string;
+    field: TableFieldReference;
+    valueType: CustomFieldType | null;
+  }
+  | {
+    kind: 'dynamic_product';
+    key: string;
+    header: string;
+    itemIndex: number;
+    value: 'product' | 'specification' | 'quantity';
+    valueType: 'text' | 'number';
+  };
+
+export type OrderTableProjectionPlan = {
+  maxItemCount: number;
+  columns: OrderTableProjectionColumn[];
+};
 
 export type CustomFieldValueIndex = ReadonlyMap<
   string,
@@ -146,7 +190,6 @@ const ORDER_BUILTIN_FIELDS = [
   fixedField('order', 'builtin', 'recipient', '收件人', 'text'),
   fixedField('order', 'builtin', 'phone', '手机号', 'text'),
   fixedField('order', 'builtin', 'address', '收货地址', 'text'),
-  fixedField('order', 'builtin', 'product_summary', '商品摘要', 'text'),
   fixedField('order', 'builtin', 'initial_source_recognition_status', '识别状态', 'text'),
   fixedField('order', 'builtin', 'platform_transaction_status', '平台交易状态', 'text'),
   fixedField('order', 'builtin', 'fulfillment_status', '履约状态', 'text'),
@@ -291,7 +334,12 @@ export function normalizeCreateTableTemplateInput(
   if (granularity === 'order') {
     return { name, granularity, columns, query: query as OrderWorkbenchQuery };
   }
-  return { name, granularity, columns, query: query as OrderItemWorkbenchQuery };
+  return {
+    name,
+    granularity,
+    columns: columns as TableTemplateColumn[],
+    query: query as OrderItemWorkbenchQuery,
+  };
 }
 
 export function normalizeUpdateTableTemplateInput(
@@ -328,6 +376,54 @@ export function fieldReferenceKey(reference: TableFieldReference): string {
     case 'custom':
       return `custom:${reference.definitionId}`;
   }
+}
+
+export function isDynamicProductTableGroup(
+  item: TableTemplateLayoutItem,
+): item is DynamicProductTableGroup {
+  return 'kind' in item && item.kind === 'dynamic_product_group';
+}
+
+export function tableTemplateLayoutItemKey(item: TableTemplateLayoutItem): string {
+  return isDynamicProductTableGroup(item)
+    ? item.kind
+    : fieldReferenceKey(item.field);
+}
+
+export function assertOrderTableLayoutFutureHeaderSafety(
+  layout: readonly TableTemplateLayoutItem[],
+): void {
+  const group = layout.find(isDynamicProductTableGroup);
+  if (!group || !isDynamicProductTableGroup(group)) return;
+  const labels = Object.values(group.labels);
+  for (let leftIndex = 0; leftIndex < labels.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < labels.length; rightIndex += 1) {
+      const left = labels[leftIndex];
+      const right = labels[rightIndex];
+      if (hasPositiveIntegerSuffix(left, right) || hasPositiveIntegerSuffix(right, left)) {
+        throw new Error(
+          `动态商品列组的基础表头“${left}”与“${right}”会在未来序号中冲突；` +
+          '请修改其中一个基础表头后重试',
+        );
+      }
+    }
+  }
+  for (const item of layout) {
+    if (isDynamicProductTableGroup(item)) continue;
+    const conflictingLabel = labels.find((label) => (
+      hasPositiveIntegerSuffix(item.displayName, label)
+    ));
+    if (conflictingLabel) {
+      throw new Error(
+        `普通表头“${item.displayName}”会与动态商品列组“${conflictingLabel}”的未来序号表头冲突；` +
+        '请修改普通表头或动态商品列组基础表头后重试',
+      );
+    }
+  }
+}
+
+function hasPositiveIntegerSuffix(value: string, prefix: string): boolean {
+  return value.startsWith(prefix) && /^[1-9]\d*$/u.test(value.slice(prefix.length));
 }
 
 export function tableTemplateNameKey(name: string): string {
@@ -391,6 +487,88 @@ export function projectOrderTableCell(
     case 'created_at': return order.createdAt;
     default: return null;
   }
+}
+
+export function createOrderTableProjectionPlan(
+  layout: readonly TableTemplateLayoutItem[],
+  orders: readonly OrderSummary[],
+  customFieldDefinitions: readonly CustomFieldDefinition[] = [],
+): OrderTableProjectionPlan {
+  const maxItemCount = orders.reduce(
+    (maximum, order) => Math.max(maximum, order.items.length),
+    0,
+  );
+  const columns = layout.flatMap((item): OrderTableProjectionColumn[] => {
+    if (!isDynamicProductTableGroup(item)) {
+      return [{
+        kind: 'field',
+        key: fieldReferenceKey(item.field),
+        header: item.displayName,
+        field: { ...item.field },
+        valueType: orderProjectionValueType(item.field, customFieldDefinitions),
+      }];
+    }
+    const dimensions = [
+      ['product', item.labels.product],
+      ['specification', item.labels.specification],
+      ['quantity', item.labels.quantity],
+    ] as const;
+    return Array.from({ length: maxItemCount }, (_, itemIndex) => (
+      dimensions.map(([value, label]): OrderTableProjectionColumn => ({
+        kind: 'dynamic_product',
+        key: `dynamic_product_group:${value}:${itemIndex + 1}`,
+        header: `${label}${itemIndex + 1}`,
+        itemIndex,
+        value,
+        valueType: value === 'quantity' ? 'number' : 'text',
+      }))
+    )).flat();
+  });
+  const columnsByHeader = new Map<string, OrderTableProjectionColumn>();
+  for (const column of columns) {
+    const headerKey = column.header.normalize('NFKC').trim();
+    const existing = columnsByHeader.get(headerKey);
+    if (existing) {
+      if (existing.kind === 'dynamic_product' || column.kind === 'dynamic_product') {
+        throw new Error(
+          `动态商品列组生成表头“${column.header}”与其他列冲突；` +
+          '请修改动态商品列组的基础表头或冲突列名后重试',
+        );
+      }
+      throw new Error(`表头“${column.header}”重复`);
+    }
+    columnsByHeader.set(headerKey, column);
+  }
+  return { maxItemCount, columns };
+}
+
+function orderProjectionValueType(
+  reference: TableFieldReference,
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+): CustomFieldType | null {
+  if (reference.kind === 'custom') {
+    return customFieldDefinitions.find(({ id }) => id === reference.definitionId)?.type ?? null;
+  }
+  return FIXED_FIELDS.find((field) => (
+    field.granularity === 'order' && fieldReferenceKey(field.reference) === fieldReferenceKey(reference)
+  ))?.valueType ?? null;
+}
+
+export function projectOrderTableProjectionRow(
+  plan: OrderTableProjectionPlan,
+  order: OrderSummary,
+  customFieldValues: CustomFieldValueProjectionSource = [],
+): TableCellValue[] {
+  return plan.columns.map((column): TableCellValue => {
+    if (column.kind === 'field') {
+      return projectOrderTableCell(order, column.field, customFieldValues);
+    }
+    const item = order.items[column.itemIndex];
+    if (!item) return null;
+    if (column.value === 'product') return item.sourceTitle;
+    if (column.value === 'specification') return item.sourceSpec;
+    return item.quantity;
+  });
 }
 
 export function projectOrderItemTableCell(
@@ -464,7 +642,7 @@ function normalizeColumns(
   value: unknown,
   granularity: TableTemplateGranularity,
   customFieldDefinitions: readonly CustomFieldDefinition[],
-): TableTemplateColumn[] {
+): TableTemplateLayoutItem[] {
   if (!Array.isArray(value)) throw new Error('表格模板列必须是数组');
   if (value.length === 0) throw new Error('表格模板至少选择一个字段');
   if (value.length > MAX_COLUMNS) throw new Error(`表格模板字段不能超过 ${MAX_COLUMNS} 个`);
@@ -472,7 +650,40 @@ function normalizeColumns(
     availableTableFields(granularity, customFieldDefinitions)
       .map(({ reference }) => fieldReferenceKey(reference)),
   );
-  const columns = value.map((entry): TableTemplateColumn => {
+  const columns = value.map((entry): TableTemplateLayoutItem => {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>).kind === 'dynamic_product_group'
+    ) {
+      if (granularity !== 'order') {
+        throw new Error('动态商品列组只能用于订单总表模板');
+      }
+      const group = strictRecord(entry, '动态商品列组', ['kind', 'labels']);
+      const labels = strictRecord(
+        group.labels,
+        '动态商品列组基础表头',
+        ['product', 'specification', 'quantity'],
+      );
+      const normalized: DynamicProductTableGroup = {
+        kind: 'dynamic_product_group',
+        labels: {
+          product: nonEmptyText(labels.product, '商品基础表头', MAX_DISPLAY_NAME_LENGTH),
+          specification: nonEmptyText(
+            labels.specification,
+            '款式或规格基础表头',
+            MAX_DISPLAY_NAME_LENGTH,
+          ),
+          quantity: nonEmptyText(labels.quantity, '数量基础表头', MAX_DISPLAY_NAME_LENGTH),
+        },
+      };
+      rejectDuplicates(
+        Object.values(normalized.labels),
+        '动态商品列组的三个基础表头不能重复',
+      );
+      return normalized;
+    }
     const record = strictRecord(entry, '表格模板列', ['field', 'displayName']);
     const field = normalizeFieldReference(record.field);
     const key = fieldReferenceKey(field);
@@ -489,8 +700,13 @@ function normalizeColumns(
       displayName: nonEmptyText(record.displayName, '字段显示名称', MAX_DISPLAY_NAME_LENGTH),
     };
   });
-  rejectDuplicates(columns.map(({ field }) => fieldReferenceKey(field)), '表格模板字段不能重复');
-  rejectDuplicates(columns.map(({ displayName }) => displayName), '字段显示名称不能重复');
+  rejectDuplicates(columns.map(tableTemplateLayoutItemKey), '表格模板字段不能重复');
+  rejectDuplicates(
+    columns.flatMap((column) => (
+      isDynamicProductTableGroup(column) ? [] : [column.displayName]
+    )),
+    '字段显示名称不能重复',
+  );
   return columns;
 }
 

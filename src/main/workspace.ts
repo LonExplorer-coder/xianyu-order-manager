@@ -152,6 +152,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 8) migrateToVersion8(database);
   if (row.version < 9) migrateToVersion9(database);
   if (row.version < 10) migrateToVersion10(database);
+  if (row.version < 11) migrateToVersion11(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1056,6 +1057,250 @@ function migrateToVersion10(database: DatabaseSync): void {
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
   }
+}
+
+function migrateToVersion11(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  let transactionStarted = false;
+  try {
+    database.exec('BEGIN IMMEDIATE;');
+    transactionStarted = true;
+    const rows = database.prepare(`
+      SELECT
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      FROM table_templates
+      ORDER BY created_at, id
+    `).all() as unknown as LegacyTableTemplateRow[];
+    const migratedRows = rows.map(migrateTableTemplateConfigurationToVersion2);
+
+    database.exec(`
+      DROP TRIGGER table_template_dependencies_match_granularity_on_insert;
+      DROP TRIGGER table_template_dependencies_match_granularity_on_update;
+      DROP TRIGGER table_templates_prevent_granularity_change_with_dependencies;
+      DROP TRIGGER custom_field_definitions_keep_template_granularity_on_update;
+
+      CREATE TABLE table_templates_v11 (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        granularity TEXT NOT NULL
+          CHECK (granularity IN ('order', 'order_item')),
+        configuration_version INTEGER NOT NULL DEFAULT 2
+          CHECK (configuration_version = 2),
+        configuration_json TEXT NOT NULL CHECK (
+          json_valid(configuration_json)
+          AND json_type(configuration_json) = 'object'
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (granularity, name_key)
+      ) STRICT;
+    `);
+    const insert = database.prepare(`
+      INSERT INTO table_templates_v11 (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 2, ?, ?, ?)
+    `);
+    for (const row of migratedRows) {
+      insert.run(
+        row.id,
+        row.name,
+        row.nameKey,
+        row.granularity,
+        row.configurationJson,
+        row.createdAt,
+        row.updatedAt,
+      );
+    }
+    database.exec(`
+      DROP TABLE table_templates;
+      ALTER TABLE table_templates_v11 RENAME TO table_templates;
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_insert
+      BEFORE INSERT ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_update
+      BEFORE UPDATE ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_templates_prevent_granularity_change_with_dependencies
+      BEFORE UPDATE OF granularity ON table_templates
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies AS dependencies
+          WHERE dependencies.template_id = OLD.id
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'cannot change table template granularity with custom field dependencies'
+        );
+      END;
+
+      CREATE TRIGGER custom_field_definitions_keep_template_granularity_on_update
+      BEFORE UPDATE OF granularity ON custom_field_definitions
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies AS dependencies
+          JOIN table_templates AS templates
+            ON templates.id = dependencies.template_id
+          WHERE dependencies.definition_id = OLD.id
+            AND templates.granularity <> NEW.granularity
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+    transactionStarted = false;
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        database.exec('ROLLBACK;');
+      } catch {
+        // Preserve migration failure.
+      }
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+type LegacyTableTemplateRow = {
+  id: string;
+  name: string;
+  name_key: string;
+  granularity: string;
+  configuration_version: number;
+  configuration_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type MigratedTableTemplateRow = {
+  id: string;
+  name: string;
+  nameKey: string;
+  granularity: 'order' | 'order_item';
+  configurationJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function migrateTableTemplateConfigurationToVersion2(
+  row: LegacyTableTemplateRow,
+): MigratedTableTemplateRow {
+  if (row.configuration_version !== 1) {
+    throw new Error(`表格模板“${row.name}”的旧配置版本不受支持`);
+  }
+  if (row.granularity !== 'order' && row.granularity !== 'order_item') {
+    throw new Error(`表格模板“${row.name}”的数据粒度无效`);
+  }
+  let configuration: unknown;
+  try {
+    configuration = JSON.parse(row.configuration_json);
+  } catch (error) {
+    throw new Error(`表格模板“${row.name}”的旧配置无法读取`, { cause: error });
+  }
+  if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) {
+    throw new Error(`表格模板“${row.name}”的旧配置必须是对象`);
+  }
+  const record = configuration as Record<string, unknown>;
+  if (
+    Object.keys(record).some((key) => key !== 'columns' && key !== 'query') ||
+    !Array.isArray(record.columns) ||
+    !record.query ||
+    typeof record.query !== 'object' ||
+    Array.isArray(record.query)
+  ) {
+    throw new Error(`表格模板“${row.name}”的旧配置结构无效`);
+  }
+
+  let summaryCount = 0;
+  const columns = record.columns.map((column) => {
+    if (!column || typeof column !== 'object' || Array.isArray(column)) {
+      throw new Error(`表格模板“${row.name}”的旧列配置无效`);
+    }
+    const value = column as Record<string, unknown>;
+    const field = value.field;
+    const legacySummary = row.granularity === 'order' &&
+      field !== null &&
+      typeof field === 'object' &&
+      !Array.isArray(field) &&
+      (field as Record<string, unknown>).kind === 'builtin' &&
+      (field as Record<string, unknown>).key === 'product_summary';
+    if (!legacySummary) return column;
+    summaryCount += 1;
+    if (
+      Object.keys(value).some((key) => key !== 'field' && key !== 'displayName') ||
+      typeof value.displayName !== 'string' ||
+      !value.displayName.trim()
+    ) {
+      throw new Error(`表格模板“${row.name}”的旧商品摘要配置无效`);
+    }
+    return {
+      kind: 'dynamic_product_group',
+      labels: {
+        product: value.displayName === '商品摘要' ? '商品' : value.displayName,
+        specification: '款式或规格',
+        quantity: '数量',
+      },
+    };
+  });
+  if (summaryCount > 1) {
+    throw new Error(`表格模板“${row.name}”包含重复的旧商品摘要`);
+  }
+
+  return {
+    id: row.id,
+    name: row.name,
+    nameKey: row.name_key,
+    granularity: row.granularity,
+    configurationJson: summaryCount === 0
+      ? row.configuration_json
+      : JSON.stringify({ columns, query: record.query }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function backfillNormalizedOrderIdentities(database: DatabaseSync): void {

@@ -9,11 +9,14 @@ import type { OrderItemWorkbenchItem } from '../src/core/order-workbench';
 import type { QuantitySource } from '../src/core/quantity-source';
 import {
   availableTableFields,
+  createOrderTableProjectionPlan,
   createCustomFieldValueIndex,
   fieldReferenceKey,
+  isDynamicProductTableGroup,
   normalizeCreateTableTemplateInput,
   normalizeUpdateTableTemplateInput,
   projectOrderItemTableCell,
+  projectOrderTableProjectionRow,
   projectOrderTableCell,
   tableTemplateNameKey,
   type TableTemplateColumn,
@@ -88,7 +91,119 @@ function validOrderInput(): unknown {
   };
 }
 
+function orderSummaryForProjection(
+  id: string,
+  orderNumber: string,
+  items: OrderSummary['items'],
+): OrderSummary {
+  return {
+    id,
+    platform: 'xianyu',
+    sellerAccount: '主账号',
+    orderNumber,
+    alipayTransactionNumber: '',
+    buyerNickname: '买家',
+    recipient: '林海棠',
+    phone: '13800000001',
+    addressOriginal: '广东省深圳市南山区海棠路1号',
+    amountCents: 3_600,
+    itemCount: items.reduce((total, item) => total + item.quantity, 0),
+    initialSourceRecognitionStatus: 'imported',
+    platformTransactionStatus: 'paid',
+    fulfillmentStatus: 'pending_shipment',
+    lifecycleStatus: 'active',
+    orderedAtNormalized: '2026-07-30T09:30:00+08:00',
+    paidAtNormalized: '2026-07-30T09:31:00+08:00',
+    createdAt: '2026-07-30T01:32:00.000Z',
+    items,
+  };
+}
+
 describe('表格模板核心契约', () => {
+  it('订单模板把动态商品列组作为一个不可拆分的布局项并保存三个基础表头', () => {
+    const normalized = normalizeCreateTableTemplateInput({
+      name: '拣货表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+        {
+          kind: 'dynamic_product_group',
+          labels: {
+            product: '商品名',
+            specification: '款式',
+            quantity: '件数',
+          },
+        },
+      ],
+      query: {},
+    }, definitions);
+
+    expect(normalized.columns).toEqual([
+      { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+      {
+        kind: 'dynamic_product_group',
+        labels: {
+          product: '商品名',
+          specification: '款式',
+          quantity: '件数',
+        },
+      },
+    ]);
+    expect(availableTableFields('order', definitions)
+      .map(({ reference }) => fieldReferenceKey(reference)))
+      .not.toContain('builtin:product_summary');
+  });
+
+  it('按当前结果最大商品数完整展开动态列并对短订单留空', () => {
+    const first = orderSummaryForProjection('order-1', 'XY-001', [
+      { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
+      { sourceTitle: '海棠杯', sourceSpec: '蓝色', quantity: 1 },
+    ]);
+    const second = orderSummaryForProjection('order-2', 'XY-002', [
+      { sourceTitle: '杯盖', sourceSpec: '', quantity: 1 },
+    ]);
+    const plan = createOrderTableProjectionPlan([
+      { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+      {
+        kind: 'dynamic_product_group',
+        labels: { product: '商品名', specification: '款式', quantity: '件数' },
+      },
+    ], [first, second]);
+
+    expect(plan).toMatchObject({
+      maxItemCount: 2,
+      columns: [
+        { kind: 'field', key: 'builtin:order_number', header: '订单号', valueType: 'text' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:product:1', header: '商品名1', valueType: 'text' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:specification:1', header: '款式1', valueType: 'text' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:quantity:1', header: '件数1', valueType: 'number' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:product:2', header: '商品名2', valueType: 'text' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:specification:2', header: '款式2', valueType: 'text' },
+        { kind: 'dynamic_product', key: 'dynamic_product_group:quantity:2', header: '件数2', valueType: 'number' },
+      ],
+    });
+    expect(projectOrderTableProjectionRow(plan, first)).toEqual([
+      'XY-001', '海棠杯', '红色', 2, '海棠杯', '蓝色', 1,
+    ]);
+    expect(projectOrderTableProjectionRow(plan, second)).toEqual([
+      'XY-002', '杯盖', '', 1, null, null, null,
+    ]);
+  });
+
+  it('动态生成的表头与普通列冲突时给出可操作错误', () => {
+    const order = orderSummaryForProjection('order-1', 'XY-001', [
+      { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
+    ]);
+
+    expect(() => createOrderTableProjectionPlan([
+      {
+        kind: 'dynamic_product_group',
+        labels: { product: '商品', specification: '款式', quantity: '数量' },
+      },
+      { field: { kind: 'builtin', key: 'order_number' }, displayName: '商品1' },
+    ], [order])).toThrow(/动态商品列组生成表头“商品1”.*请修改/u);
+  });
+
   it('按粒度公开稳定的系统、自定义和受控计算字段目录', () => {
     const orderFields = availableTableFields('order', definitions);
     expect(orderFields).toEqual(expect.arrayContaining([
@@ -169,7 +284,9 @@ describe('表格模板核心契约', () => {
 
     expect(normalized.name).toBe('待发货订单');
     expect(normalized.granularity).toBe('order');
-    expect(normalized.columns.map(({ displayName }) => displayName))
+    expect(Array.from(normalized.columns)
+      .filter((item): item is TableTemplateColumn => !isDynamicProductTableGroup(item))
+      .map(({ displayName }) => displayName))
       .toEqual(['订单号', '订单总额', '客服备注']);
     expect(normalized.query).toEqual((input.query as Record<string, unknown>));
     expect(normalized.query).not.toBe(input.query);

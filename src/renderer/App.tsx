@@ -61,16 +61,20 @@ import {
 import {
   availableTableFields,
   createCustomFieldValueIndex,
+  createOrderTableProjectionPlan,
+  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   fieldReferenceKey,
+  isDynamicProductTableGroup,
   projectOrderItemTableCell,
-  projectOrderTableCell,
+  projectOrderTableProjectionRow,
   type AvailableTableField,
   type CreateTableTemplateInput,
   type TableCellValue,
   type TableFieldReference,
   type TableTemplate,
   type TableTemplateColumn,
+  type TableTemplateLayoutItem,
   type UpdateTableTemplateInput,
 } from '../core/table-templates';
 import { CustomFieldInput } from './CustomFieldInput';
@@ -93,7 +97,7 @@ const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
   sortField: 'created_at',
   sortDirection: 'desc',
 };
-const DEFAULT_ORDER_COLUMNS: TableTemplateColumn[] = [
+const DEFAULT_ORDER_COLUMNS: TableTemplateLayoutItem[] = [
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
   { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
   { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
@@ -101,7 +105,7 @@ const DEFAULT_ORDER_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
   { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
   { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
-  { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品' },
+  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '商品总数量' },
   { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
   { field: { kind: 'builtin', key: 'initial_source_recognition_status' }, displayName: '初始来源识别状态' },
@@ -1395,6 +1399,16 @@ function OrdersWorkspace({
     () => createCustomFieldValueIndex(customFieldValues),
     [customFieldValues],
   );
+  const orderProjection = useMemo(() => {
+    try {
+      return {
+        plan: createOrderTableProjectionPlan(orderColumns, orders, customFieldDefinitions),
+        error: '',
+      };
+    } catch (projectionError) {
+      return { plan: null, error: errorMessage(projectionError) };
+    }
+  }, [customFieldDefinitions, orderColumns, orders]);
   const orderFieldCatalog = availableTableFields('order', customFieldDefinitions);
   const viewGranularity = view === 'orders' ? 'order' : 'order_item';
   const hasActiveQuery = Boolean(
@@ -1844,7 +1858,9 @@ function OrdersWorkspace({
         </button>
       </div>
 
-      {orders.length === 0 ? (
+      <InlineError message={orderProjection.error} />
+
+      {orderProjection.error ? null : orders.length === 0 ? (
         <div className="order-no-results">
           <h2>没有符合条件的订单</h2>
           <p>试试放宽日期或状态条件，也可一键清除全部筛选。</p>
@@ -1868,14 +1884,20 @@ function OrdersWorkspace({
                   }}
                 />
               </th>
-              {orderColumns.map((column) => (
-                <th key={fieldReferenceKey(column.field)}>{column.displayName}</th>
+              {orderProjection.plan?.columns.map((column) => (
+                <th key={column.key}>{column.header}</th>
               ))}
               <th><span className="visually-hidden">操作</span></th>
             </tr>
           </thead>
           <tbody>
-            {orders.map((order) => (
+            {orders.map((order) => {
+              const values = projectOrderTableProjectionRow(
+                orderProjection.plan!,
+                order,
+                customFieldValueIndex,
+              );
+              return (
               <tr className={selectedOrderIds.has(order.id) ? 'is-selected' : undefined} key={order.id}>
                 <td className="order-selection-cell">
                   <input
@@ -1893,13 +1915,20 @@ function OrdersWorkspace({
                     }}
                   />
                 </td>
-                {orderColumns.map((column) => {
+                {orderProjection.plan!.columns.map((column, columnIndex) => {
+                  const value = values[columnIndex] ?? null;
+                  if (column.kind === 'dynamic_product') {
+                    return (
+                      <td key={column.key}>
+                        {value === null || value === '' ? '' : String(value)}
+                      </td>
+                    );
+                  }
                   const descriptor = findTableFieldDescriptor(orderFieldCatalog, column.field);
-                  const value = projectOrderTableCell(order, column.field, customFieldValueIndex);
                   return (
                     <td
-                      className={descriptor?.valueType === 'money' ? 'money-cell' : undefined}
-                      key={fieldReferenceKey(column.field)}
+                      className={column.valueType === 'money' ? 'money-cell' : undefined}
+                      key={column.key}
                     >
                       {column.field.kind === 'builtin' && column.field.key === 'order_number' ? (
                         <button
@@ -1927,7 +1956,8 @@ function OrdersWorkspace({
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         </div>
@@ -4550,10 +4580,11 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(stableJsonValue(left)) === JSON.stringify(stableJsonValue(right));
 }
 
-function customFieldDefinitionIds(columns: readonly TableTemplateColumn[]): string[] {
-  return columns.flatMap(({ field }) => (
-    field.kind === 'custom' ? [field.definitionId] : []
-  ));
+function customFieldDefinitionIds(columns: readonly TableTemplateLayoutItem[]): string[] {
+  return columns.flatMap((item) => {
+    if (isDynamicProductTableGroup(item)) return [];
+    return item.field.kind === 'custom' ? [item.field.definitionId] : [];
+  });
 }
 
 function stableJsonValue(value: unknown): unknown {
