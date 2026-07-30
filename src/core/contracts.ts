@@ -10,6 +10,10 @@ export type PlatformTransactionStatus = 'paid' | 'cancelled' | 'refunded' | 'unk
 
 export type FulfillmentStatus = 'pending_shipment' | 'shipped' | 'unknown';
 
+export type OrderPlatform = 'xianyu';
+
+export type LifecycleStatus = 'active' | 'trashed' | 'deleted';
+
 export const ORDER_REVIEW_ISSUE_CODES = [
   'automatic_import_disabled',
   'automatic_import_failed',
@@ -51,7 +55,7 @@ export const ORDER_REVIEW_ISSUE_CODES = [
 export type OrderReviewIssueCode = (typeof ORDER_REVIEW_ISSUE_CODES)[number];
 
 export type RecognitionResult = {
-  platform: 'xianyu';
+  platform: OrderPlatform;
   sellerAccount: string;
   orderNumber: string;
   alipayTransactionNumber: string;
@@ -172,7 +176,7 @@ export type OriginalOrder = Omit<RecognitionResult, 'items' | 'amountCents'> & {
   id: string;
   amountCents: number;
   revision: number;
-  lifecycleStatus: 'active' | 'trashed' | 'deleted';
+  lifecycleStatus: LifecycleStatus;
   createdAt: string;
   updatedAt: string;
   items: OrderItem[];
@@ -190,14 +194,23 @@ export type OrderDraftConfirmation = {
 
 export type OrderSummary = {
   id: string;
+  platform: OrderPlatform;
+  sellerAccount: string;
   orderNumber: string;
   buyerNickname: string;
   recipient: string;
+  phone: string;
+  addressOriginal: string;
   amountCents: number;
   itemCount: number;
+  initialSourceRecognitionStatus: RecognitionBatchItemStatus;
   platformTransactionStatus: PlatformTransactionStatus;
   fulfillmentStatus: FulfillmentStatus;
+  lifecycleStatus: LifecycleStatus;
+  orderedAtNormalized: string;
+  paidAtNormalized: string;
   createdAt: string;
+  items: Array<Pick<OrderItem, 'sourceTitle' | 'sourceSpec' | 'quantity'>>;
 };
 
 export type SourceScreenshot = {
@@ -255,6 +268,7 @@ export type OrderDraftReview =
   };
 
 export type OrderSource = {
+  recognitionStatus: RecognitionBatchItemStatus;
   sourceScreenshot: SourceScreenshot;
   sourceSnapshot: SourceSnapshot;
 };

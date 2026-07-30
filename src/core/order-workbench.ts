@@ -1,0 +1,48 @@
+import type {
+  FulfillmentStatus,
+  LifecycleStatus,
+  OrderPlatform,
+  OrderSummary,
+  PlatformTransactionStatus,
+  RecognitionBatchItemStatus,
+} from './contracts';
+
+export type OrderWorkbenchDateField = 'ordered_at' | 'paid_at' | 'created_at';
+
+export type OrderWorkbenchSortField =
+  | OrderWorkbenchDateField
+  | 'amount'
+  | 'platform'
+  | 'seller_account'
+  | 'buyer'
+  | 'product'
+  | 'initial_source_recognition_status'
+  | 'platform_transaction_status'
+  | 'fulfillment_status'
+  | 'lifecycle_status';
+
+export type OrderWorkbenchQuery = {
+  text?: string;
+  buyerText?: string;
+  productText?: string;
+  dateField?: OrderWorkbenchDateField;
+  dateFrom?: string;
+  dateTo?: string;
+  platform?: OrderPlatform;
+  sellerAccount?: string;
+  initialSourceRecognitionStatus?: RecognitionBatchItemStatus;
+  platformTransactionStatus?: PlatformTransactionStatus;
+  fulfillmentStatus?: FulfillmentStatus;
+  lifecycleStatus?: LifecycleStatus | 'all';
+  sortField?: OrderWorkbenchSortField;
+  sortDirection?: 'asc' | 'desc';
+};
+
+export type OrderWorkbenchResult = {
+  orders: OrderSummary[];
+  allLifecycleOrderCount: number;
+  activeOrderCount: number;
+  pendingShipmentCount: number;
+  platforms: OrderPlatform[];
+  sellerAccounts: string[];
+};

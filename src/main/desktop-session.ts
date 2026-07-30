@@ -33,6 +33,7 @@ import type {
   OcrSettingsView,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
+import type { OrderWorkbenchQuery, OrderWorkbenchResult } from '../core/order-workbench';
 import {
   LocalApplication,
   type RecognitionBatchItemUpdate,
@@ -330,6 +331,10 @@ export class DesktopSession {
 
   public listOrders(): OrderSummary[] {
     return this.requireApplication().listOrders();
+  }
+
+  public queryOrders(query: OrderWorkbenchQuery): OrderWorkbenchResult {
+    return this.requireApplication().queryOrders(query);
   }
 
   public getOrder(orderId: string): OrderDetails {

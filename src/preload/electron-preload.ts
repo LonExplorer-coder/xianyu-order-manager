@@ -32,6 +32,7 @@ const api: DesktopApi = {
     ipcRenderer.invoke('workflow:confirm-order-update', draft, expectedRevision)
   ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
+  queryOrders: (query) => ipcRenderer.invoke('orders:query', query),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,

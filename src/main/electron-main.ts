@@ -9,6 +9,7 @@ import type {
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
+import type { OrderWorkbenchQuery } from '../core/order-workbench';
 import { DesktopSession } from './desktop-session';
 import { createConfiguredDesktopSession } from './production-session';
 import {
@@ -138,6 +139,9 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
+  ipcMain.handle('orders:query', (_event, input: unknown) => (
+    desktopSession.queryOrders(parseOrderWorkbenchQuery(input))
+  ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
@@ -162,6 +166,120 @@ function registerIpcHandlers(desktopSession: DesktopSession): void {
 
 function parseDraftId(draftId: unknown): string {
   return parseWorkflowId(draftId, '订单草稿');
+}
+
+const ORDER_WORKBENCH_QUERY_KEYS = new Set([
+  'text',
+  'buyerText',
+  'productText',
+  'dateField',
+  'dateFrom',
+  'dateTo',
+  'platform',
+  'sellerAccount',
+  'initialSourceRecognitionStatus',
+  'platformTransactionStatus',
+  'fulfillmentStatus',
+  'lifecycleStatus',
+  'sortField',
+  'sortDirection',
+]);
+
+function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
+  if (!isRecord(input)) throw new Error('订单工作台查询格式无效');
+  if (Object.keys(input).some((key) => !ORDER_WORKBENCH_QUERY_KEYS.has(key))) {
+    throw new Error('订单工作台查询包含未知字段');
+  }
+  const dateFrom = optionalWorkbenchDate(input.dateFrom);
+  const dateTo = optionalWorkbenchDate(input.dateTo);
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new Error('订单工作台开始日期不能晚于结束日期');
+  }
+  return {
+    text: optionalWorkbenchText(input.text, 256),
+    buyerText: optionalWorkbenchText(input.buyerText, 128),
+    productText: optionalWorkbenchText(input.productText, 128),
+    dateField: optionalWorkbenchEnum(
+      input.dateField,
+      ['ordered_at', 'paid_at', 'created_at'] as const,
+      '日期字段',
+    ),
+    dateFrom,
+    dateTo,
+    platform: optionalWorkbenchEnum(input.platform, ['xianyu'] as const, '平台'),
+    sellerAccount: optionalWorkbenchText(input.sellerAccount, 128),
+    initialSourceRecognitionStatus: optionalWorkbenchEnum(
+      input.initialSourceRecognitionStatus,
+      [
+        'waiting_recognition', 'recognizing', 'validating',
+        'awaiting_confirmation', 'imported', 'waiting_retry', 'failed',
+        'duplicate_skipped', 'cancelled',
+      ] as const,
+      '初始来源识别状态',
+    ),
+    platformTransactionStatus: optionalWorkbenchEnum(
+      input.platformTransactionStatus,
+      ['paid', 'cancelled', 'refunded', 'unknown'] as const,
+      '平台交易状态',
+    ),
+    fulfillmentStatus: optionalWorkbenchEnum(
+      input.fulfillmentStatus,
+      ['pending_shipment', 'shipped', 'unknown'] as const,
+      '履约状态',
+    ),
+    lifecycleStatus: optionalWorkbenchEnum(
+      input.lifecycleStatus,
+      ['active', 'trashed', 'deleted', 'all'] as const,
+      '生命周期状态',
+    ),
+    sortField: optionalWorkbenchEnum(
+      input.sortField,
+      [
+        'ordered_at', 'paid_at', 'created_at', 'amount', 'platform',
+        'seller_account', 'buyer', 'product', 'initial_source_recognition_status',
+        'platform_transaction_status', 'fulfillment_status', 'lifecycle_status',
+      ] as const,
+      '排序字段',
+    ),
+    sortDirection: optionalWorkbenchEnum(
+      input.sortDirection,
+      ['asc', 'desc'] as const,
+      '排序方向',
+    ),
+  };
+}
+
+function optionalWorkbenchText(value: unknown, maximumLength: number): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > maximumLength) {
+    throw new Error('订单工作台搜索文本格式无效');
+  }
+  const normalized = value.normalize('NFKC').trim();
+  return normalized || undefined;
+}
+
+function optionalWorkbenchDate(value: unknown): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    throw new Error('订单工作台日期格式无效');
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new Error('订单工作台日期格式无效');
+  }
+  return value;
+}
+
+function optionalWorkbenchEnum<const T extends readonly string[]>(
+  value: unknown,
+  values: T,
+  label: string,
+): T[number] | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !(values as readonly string[]).includes(value)) {
+    throw new Error(`订单工作台${label}格式无效`);
+  }
+  return value as T[number];
 }
 
 function parseExpectedRevision(value: unknown): number {

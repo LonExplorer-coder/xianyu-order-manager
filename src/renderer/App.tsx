@@ -20,6 +20,10 @@ import type {
 } from '../core/contracts';
 import { diffOrderCurrentValues } from '../core/order-comparison';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import type {
+  OrderWorkbenchQuery,
+  OrderWorkbenchResult,
+} from '../core/order-workbench';
 import {
   orderReviewIssueLabel,
   type OrderIntakeSettingsView,
@@ -45,6 +49,12 @@ type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 're
 type AppPage = 'orders' | 'batches' | 'settings';
 
 const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
+const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
+  dateField: 'ordered_at',
+  lifecycleStatus: 'active',
+  sortField: 'created_at',
+  sortDirection: 'desc',
+};
 
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -61,7 +71,12 @@ export function App({ api }: AppProps) {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [operationError, setOperationError] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('orders');
+  const [orderQuery, setOrderQuery] = useState<OrderWorkbenchQuery>(DEFAULT_ORDER_QUERY);
+  const [orderWorkbench, setOrderWorkbench] = useState<OrderWorkbenchResult | null>(null);
+  const [orderQueryRefreshToken, setOrderQueryRefreshToken] = useState(0);
+  const [orderQueryLoading, setOrderQueryLoading] = useState(false);
   const orderSnapshotVersion = useRef(0);
+  const orderQueryRequestVersion = useRef(0);
   const detailSourceRequestVersion = useRef(0);
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
@@ -94,6 +109,10 @@ export function App({ api }: AppProps) {
     setDetailScreenshotUrl('');
     setDetailScreenshotId('');
     detailSourceRequestVersion.current += 1;
+    orderQueryRequestVersion.current += 1;
+    setOrderQuery(DEFAULT_ORDER_QUERY);
+    setOrderWorkbench(null);
+    setOrderQueryRefreshToken(0);
     setActivePage('orders');
     setOperationError('');
   }, [readyDataDirectory]);
@@ -141,6 +160,7 @@ export function App({ api }: AppProps) {
           ? { ...current, orders }
           : current
       ));
+      setOrderQueryRefreshToken((current) => current + 1);
     });
     const requestedAtVersion = orderSnapshotVersion.current;
     void api.listOrders()
@@ -160,6 +180,31 @@ export function App({ api }: AppProps) {
       unsubscribe();
     };
   }, [api, readyDataDirectory]);
+
+  useEffect(() => {
+    if (!readyDataDirectory) return undefined;
+    let active = true;
+    const requestVersion = ++orderQueryRequestVersion.current;
+    setOrderQueryLoading(true);
+    void api.queryOrders(orderQuery)
+      .then((result) => {
+        if (!active || requestVersion !== orderQueryRequestVersion.current) return;
+        setOrderWorkbench(result);
+      })
+      .catch((error: unknown) => {
+        if (active && requestVersion === orderQueryRequestVersion.current) {
+          setOperationError(errorMessage(error));
+        }
+      })
+      .finally(() => {
+        if (active && requestVersion === orderQueryRequestVersion.current) {
+          setOrderQueryLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, orderQuery, orderQueryRefreshToken, readyDataDirectory]);
 
   async function uploadScreenshots() {
     setBusyAction('upload');
@@ -263,6 +308,7 @@ export function App({ api }: AppProps) {
             : current
         ));
       }
+      setOrderQueryRefreshToken((current) => current + 1);
       setRecognitionBatches((current) => updateBatchDraftStatus(
         current,
         draft.id,
@@ -490,8 +536,19 @@ export function App({ api }: AppProps) {
   } else {
     workspace = (
       <OrdersWorkspace
-        orders={bootstrap.orders}
+        orders={orderWorkbench?.orders ?? bootstrap.orders}
         batches={recognitionBatches}
+        pendingConfirmationCount={recognitionBatches.reduce(
+          (total, batch) => total + batch.counts.awaiting_confirmation,
+          0,
+        )}
+        activeOrderCount={orderWorkbench?.activeOrderCount ?? bootstrap.orders.length}
+        allLifecycleOrderCount={orderWorkbench?.allLifecycleOrderCount ?? bootstrap.orders.length}
+        pendingShipmentCount={orderWorkbench?.pendingShipmentCount ?? 0}
+        platforms={orderWorkbench?.platforms ?? []}
+        sellerAccounts={orderWorkbench?.sellerAccounts ?? []}
+        query={orderQuery}
+        queryLoading={orderQueryLoading}
         dataDirectory={bootstrap.dataDirectory}
         error={operationError}
         uploading={busyAction === 'upload'}
@@ -502,6 +559,7 @@ export function App({ api }: AppProps) {
           setActivePage('batches');
         }}
         onOpenOrder={(orderId) => void openOrder(orderId)}
+        onQueryChange={setOrderQuery}
       />
     );
   }
@@ -674,6 +732,14 @@ function SystemScreen(props: SystemScreenProps) {
 type OrdersWorkspaceProps = {
   orders: OrderSummary[];
   batches: RecognitionBatchView[];
+  pendingConfirmationCount: number;
+  activeOrderCount: number;
+  allLifecycleOrderCount: number;
+  pendingShipmentCount: number;
+  platforms: OrderWorkbenchResult['platforms'];
+  sellerAccounts: string[];
+  query: OrderWorkbenchQuery;
+  queryLoading: boolean;
   dataDirectory: string;
   error: string;
   uploading: boolean;
@@ -681,11 +747,20 @@ type OrdersWorkspaceProps = {
   onUpload: () => void;
   onOpenBatch: (batchId: string) => void;
   onOpenOrder: (orderId: string) => void;
+  onQueryChange: (query: OrderWorkbenchQuery) => void;
 };
 
 function OrdersWorkspace({
   orders,
   batches,
+  pendingConfirmationCount,
+  activeOrderCount,
+  allLifecycleOrderCount,
+  pendingShipmentCount,
+  platforms,
+  sellerAccounts,
+  query,
+  queryLoading,
   dataDirectory,
   error,
   uploading,
@@ -693,9 +768,19 @@ function OrdersWorkspace({
   onUpload,
   onOpenBatch,
   onOpenOrder,
+  onQueryChange,
 }: OrdersWorkspaceProps) {
   const latestBatch = batches[0];
-  if (orders.length === 0) {
+  const patchQuery = (patch: Partial<OrderWorkbenchQuery>) => onQueryChange({ ...query, ...patch });
+  const hasActiveQuery = Boolean(
+    query.text || query.buyerText || query.productText || query.dateFrom || query.dateTo ||
+    query.platform || query.sellerAccount || query.initialSourceRecognitionStatus ||
+    query.platformTransactionStatus || query.fulfillmentStatus ||
+    (query.lifecycleStatus && query.lifecycleStatus !== 'active') ||
+    query.sortField !== DEFAULT_ORDER_QUERY.sortField ||
+    query.sortDirection !== DEFAULT_ORDER_QUERY.sortDirection,
+  );
+  if (allLifecycleOrderCount === 0) {
     return (
       <section className="empty-workspace workspace-enter">
         <div className="empty-visual" aria-hidden="true">
@@ -730,7 +815,7 @@ function OrdersWorkspace({
         <div>
           <span className="section-kicker">原始订单</span>
           <h1>订单</h1>
-          <p>{orders.length} 笔订单，保留来源截图与来源快照。</p>
+          <p>显示 {orders.length} / {allLifecycleOrderCount} 笔，保留来源截图与来源快照。</p>
         </div>
         <div className="upload-action">
           <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
@@ -747,24 +832,246 @@ function OrdersWorkspace({
         <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
       )}
 
-      <div className="table-toolbar" aria-label="订单表概况">
-        <span><strong>{orders.length}</strong> 全部订单</span>
-        <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
-        <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
-      </div>
+      <section className="orders-overview" aria-label="订单概况">
+        <span><small>在库订单</small><strong>{activeOrderCount}</strong></span>
+        <span><small>待确认</small><strong>{pendingConfirmationCount}</strong></span>
+        <span>
+          <small>待发货</small>
+          <strong>{pendingShipmentCount}</strong>
+        </span>
+      </section>
 
-      <div className="table-frame">
+      <section className="order-query" aria-label="订单查询">
+        <label className="order-query__search">
+          <span>搜索订单</span>
+          <input
+            type="search"
+            placeholder="订单号、买家、收件信息或商品"
+            value={query.text ?? ''}
+            onChange={(event) => patchQuery({
+              text: event.target.value || undefined,
+            })}
+          />
+        </label>
+        <span className="order-query__result" role="status" aria-live="polite">
+          {queryLoading ? '正在查询…' : `显示 ${orders.length} / ${allLifecycleOrderCount} 笔`}
+        </span>
+        {hasActiveQuery && (
+          <button
+            className="button button--quiet order-query__clear"
+            type="button"
+            onClick={() => onQueryChange(DEFAULT_ORDER_QUERY)}
+          >
+            清除筛选
+          </button>
+        )}
+        <span className="visually-hidden">{platforms.length} 个平台，{sellerAccounts.length} 个卖家账号</span>
+        <div className="order-query__filters">
+          <label>
+            <span>日期字段</span>
+            <select
+              value={query.dateField ?? 'ordered_at'}
+              onChange={(event) => patchQuery({
+                dateField: event.target.value as NonNullable<OrderWorkbenchQuery['dateField']>,
+              })}
+            >
+              <option value="ordered_at">下单日期</option>
+              <option value="paid_at">付款日期</option>
+              <option value="created_at">入库日期</option>
+            </select>
+          </label>
+          <label>
+            <span>开始日期</span>
+            <input
+              type="date"
+              value={query.dateFrom ?? ''}
+              onChange={(event) => patchQuery({ dateFrom: event.target.value || undefined })}
+            />
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input
+              type="date"
+              value={query.dateTo ?? ''}
+              onChange={(event) => patchQuery({ dateTo: event.target.value || undefined })}
+            />
+          </label>
+          <label>
+            <span>平台</span>
+            <select
+              value={query.platform ?? ''}
+              onChange={(event) => patchQuery({
+                platform: (event.target.value || undefined) as OrderWorkbenchQuery['platform'],
+              })}
+            >
+              <option value="">全部平台</option>
+              {platforms.map((platform) => (
+                <option value={platform} key={platform}>{platformLabel(platform)}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>卖家账号</span>
+            <select
+              value={query.sellerAccount ?? ''}
+              onChange={(event) => patchQuery({ sellerAccount: event.target.value || undefined })}
+            >
+              <option value="">全部卖家</option>
+              {sellerAccounts.map((sellerAccount) => (
+                <option value={sellerAccount} key={sellerAccount}>{sellerAccount}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>买家</span>
+            <input
+              type="text"
+              placeholder="昵称、收件人或手机号"
+              value={query.buyerText ?? ''}
+              onChange={(event) => patchQuery({ buyerText: event.target.value || undefined })}
+            />
+          </label>
+          <label>
+            <span>商品</span>
+            <input
+              type="text"
+              placeholder="商品标题或规格"
+              value={query.productText ?? ''}
+              onChange={(event) => patchQuery({ productText: event.target.value || undefined })}
+            />
+          </label>
+          <label>
+            <span>初始来源识别状态</span>
+            <select
+              value={query.initialSourceRecognitionStatus ?? ''}
+              onChange={(event) => patchQuery({
+                initialSourceRecognitionStatus: (event.target.value || undefined) as OrderWorkbenchQuery['initialSourceRecognitionStatus'],
+              })}
+            >
+              <option value="">全部识别状态</option>
+              <option value="waiting_recognition">等待识别</option>
+              <option value="recognizing">识别中</option>
+              <option value="validating">校验中</option>
+              <option value="awaiting_confirmation">待确认</option>
+              <option value="imported">已入库</option>
+              <option value="waiting_retry">等待重试</option>
+              <option value="failed">识别失败</option>
+              <option value="duplicate_skipped">重复跳过</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </label>
+          <label>
+            <span>平台交易状态</span>
+            <select
+              value={query.platformTransactionStatus ?? ''}
+              onChange={(event) => patchQuery({
+                platformTransactionStatus: (event.target.value || undefined) as OrderWorkbenchQuery['platformTransactionStatus'],
+              })}
+            >
+              <option value="">全部交易状态</option>
+              <option value="paid">已付款</option>
+              <option value="cancelled">已取消</option>
+              <option value="refunded">已退款</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>履约状态</span>
+            <select
+              value={query.fulfillmentStatus ?? ''}
+              onChange={(event) => patchQuery({
+                fulfillmentStatus: (event.target.value || undefined) as OrderWorkbenchQuery['fulfillmentStatus'],
+              })}
+            >
+              <option value="">全部履约状态</option>
+              <option value="pending_shipment">待发货</option>
+              <option value="shipped">已发货</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>生命周期状态</span>
+            <select
+              value={query.lifecycleStatus ?? 'active'}
+              onChange={(event) => patchQuery({
+                lifecycleStatus: event.target.value as NonNullable<OrderWorkbenchQuery['lifecycleStatus']>,
+              })}
+            >
+              <option value="active">正常</option>
+              <option value="trashed">回收站</option>
+              <option value="deleted">已删除</option>
+              <option value="all">全部生命周期</option>
+            </select>
+          </label>
+          <label>
+            <span>排序方式</span>
+            <select
+              value={`${query.sortField ?? 'created_at'}:${query.sortDirection ?? 'desc'}`}
+              onChange={(event) => {
+                const [sortField, sortDirection] = event.target.value.split(':') as [
+                  NonNullable<OrderWorkbenchQuery['sortField']>,
+                  NonNullable<OrderWorkbenchQuery['sortDirection']>,
+                ];
+                patchQuery({ sortField, sortDirection });
+              }}
+            >
+              <option value="created_at:desc">入库时间：新到旧</option>
+              <option value="created_at:asc">入库时间：旧到新</option>
+              <option value="ordered_at:desc">下单时间：新到旧</option>
+              <option value="ordered_at:asc">下单时间：旧到新</option>
+              <option value="paid_at:desc">付款时间：新到旧</option>
+              <option value="paid_at:asc">付款时间：旧到新</option>
+              <option value="amount:desc">成交金额：高到低</option>
+              <option value="amount:asc">成交金额：低到高</option>
+              <option value="platform:asc">平台：升序</option>
+              <option value="platform:desc">平台：降序</option>
+              <option value="seller_account:asc">卖家账号：升序</option>
+              <option value="seller_account:desc">卖家账号：降序</option>
+              <option value="buyer:asc">买家：升序</option>
+              <option value="buyer:desc">买家：降序</option>
+              <option value="product:asc">商品：升序</option>
+              <option value="product:desc">商品：降序</option>
+              <option value="initial_source_recognition_status:asc">初始来源状态：升序</option>
+              <option value="initial_source_recognition_status:desc">初始来源状态：降序</option>
+              <option value="platform_transaction_status:asc">平台交易状态：升序</option>
+              <option value="platform_transaction_status:desc">平台交易状态：降序</option>
+              <option value="fulfillment_status:asc">履约状态：升序</option>
+              <option value="fulfillment_status:desc">履约状态：降序</option>
+              <option value="lifecycle_status:asc">生命周期状态：升序</option>
+              <option value="lifecycle_status:desc">生命周期状态：降序</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      {orders.length === 0 ? (
+        <div className="order-no-results">
+          <h2>没有符合条件的订单</h2>
+          <p>试试放宽日期或状态条件，也可一键清除全部筛选。</p>
+        </div>
+      ) : (
+        <>
+          <div className="table-toolbar" aria-label="订单表概况">
+            <span><strong>{orders.length}</strong> 当前结果</span>
+            <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
+            <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
+          </div>
+
+          <div className="table-frame">
         <table aria-label="原始订单">
           <thead>
             <tr>
               <th>订单号</th>
+              <th>平台 / 卖家</th>
               <th>买家</th>
-              <th>收件人</th>
+              <th>收件信息</th>
               <th>商品</th>
               <th>成交金额</th>
-              <th>交易状态</th>
+              <th>初始来源识别状态</th>
+              <th>平台交易状态</th>
               <th>履约状态</th>
-              <th>入库时间</th>
+              <th>生命周期状态</th>
+              <th>下单时间</th>
               <th><span className="visually-hidden">操作</span></th>
             </tr>
           </thead>
@@ -782,19 +1089,45 @@ function OrdersWorkspace({
                     {order.orderNumber}
                   </button>
                 </td>
+                <td>
+                  <div className="order-cell-stack">
+                    <strong>{platformLabel(order.platform)}</strong>
+                    <small>{order.sellerAccount || '—'}</small>
+                  </div>
+                </td>
                 <td>{order.buyerNickname || '—'}</td>
-                <td>{order.recipient}</td>
-                <td>{order.itemCount} 件</td>
+                <td>
+                  <div className="order-cell-stack order-cell-stack--recipient">
+                    <strong>{order.recipient}</strong>
+                    <small>{order.phone || '—'}</small>
+                    <small title={order.addressOriginal || undefined}>{order.addressOriginal || '—'}</small>
+                  </div>
+                </td>
+                <td>
+                  <div className="order-product-summary">
+                    {order.items.map((item, index) => (
+                      <span key={`${item.sourceTitle}-${index}`}>
+                        {item.sourceTitle || '未命名商品'}
+                        {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}
+                        {' ×'}{item.quantity}
+                      </span>
+                    ))}
+                  </div>
+                </td>
                 <td className="money-cell">{formatMoney(order.amountCents)}</td>
+                <td><span className="status-chip">{recognitionStatusLabel(order.initialSourceRecognitionStatus)}</span></td>
                 <td><span className="status-chip">{platformTransactionStatusLabel(order.platformTransactionStatus)}</span></td>
                 <td><span className="status-chip">{fulfillmentStatusLabel(order.fulfillmentStatus)}</span></td>
-                <td>{formatDateTime(order.createdAt)}</td>
+                <td><span className="status-chip">{lifecycleStatusLabel(order.lifecycleStatus)}</span></td>
+                <td>{formatDateTime(order.orderedAtNormalized || order.createdAt)}</td>
                 <td><Icon name="chevron" /></td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -2000,13 +2333,11 @@ function DetailWorkspace({
   onSelectSource: (screenshotId: string) => void;
 }) {
   const { order } = details;
-  const selectedSource = details.sources.find(({ sourceScreenshot: source }) => (
-    source.id === selectedScreenshotId
-  )) ?? {
-    sourceScreenshot: details.sourceScreenshot,
-    sourceSnapshot: details.sourceSnapshot,
-  };
-  const { sourceScreenshot, sourceSnapshot } = selectedSource;
+  const selectedSource = details.sources.find(
+    (source) => source.sourceScreenshot.id === selectedScreenshotId,
+  ) ?? details.sources[0];
+  const sourceScreenshot = selectedSource?.sourceScreenshot ?? details.sourceScreenshot;
+  const sourceSnapshot = selectedSource?.sourceSnapshot ?? details.sourceSnapshot;
   const recipientChanged = sourceSnapshot.confirmed !== null &&
     sourceSnapshot.recognition.recipient !== sourceSnapshot.confirmed.recipient;
 
@@ -2059,6 +2390,25 @@ function DetailWorkspace({
               <DetailTerm label="买家昵称" value={order.buyerNickname || '—'} />
               <DetailTerm label="平台交易状态" value={platformTransactionStatusLabel(order.platformTransactionStatus)} />
               <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
+            </dl>
+          </section>
+
+          <section className="detail-section" aria-label="订单状态">
+            <div className="detail-section-title">
+              <h2>订单状态</h2>
+              <span>来源与订单状态分开呈现</span>
+            </div>
+            <dl className="detail-grid detail-grid--status">
+              <DetailTerm
+                label="当前来源识别状态"
+                value={selectedSource ? recognitionStatusLabel(selectedSource.recognitionStatus) : '—'}
+              />
+              <DetailTerm
+                label="平台交易状态"
+                value={platformTransactionStatusLabel(order.platformTransactionStatus)}
+              />
+              <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
+              <DetailTerm label="生命周期状态" value={lifecycleStatusLabel(order.lifecycleStatus)} />
             </dl>
           </section>
 
@@ -2316,6 +2666,29 @@ function fulfillmentStatusLabel(status: OrderDraft['fulfillmentStatus']): string
   return '未知';
 }
 
+function recognitionStatusLabel(status: RecognitionBatchItemStatus): string {
+  const labels: Record<RecognitionBatchItemStatus, string> = {
+    waiting_recognition: '等待识别',
+    recognizing: '识别中',
+    validating: '校验中',
+    awaiting_confirmation: '待确认',
+    imported: '已入库',
+    waiting_retry: '等待重试',
+    failed: '失败',
+    duplicate_skipped: '重复跳过',
+    cancelled: '已取消',
+  };
+  return labels[status];
+}
+
+function lifecycleStatusLabel(status: OrderSummary['lifecycleStatus']): string {
+  return {
+    active: '正常',
+    trashed: '回收站',
+    deleted: '已删除',
+  }[status];
+}
+
 function displayValue(value?: string): string {
   return value?.trim() || '—';
 }
@@ -2363,19 +2736,7 @@ function recognitionBatchStatusLabel(
   item: RecognitionBatchView['items'][number],
 ): string {
   if (item.resolution === 'order_updated') return '已更新';
-  const { status } = item;
-  const labels: Record<RecognitionBatchItemStatus, string> = {
-    waiting_recognition: '等待识别',
-    recognizing: '识别中',
-    validating: '校验中',
-    awaiting_confirmation: '待确认',
-    imported: '已入库',
-    waiting_retry: '等待重试',
-    failed: '失败',
-    duplicate_skipped: '重复跳过',
-    cancelled: '已取消',
-  };
-  return labels[status];
+  return recognitionStatusLabel(item.status);
 }
 
 function recognitionBatchResultLabel(

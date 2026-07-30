@@ -18,6 +18,7 @@ import type {
   OrderIntakeSettingsView,
   SaveOrderIntakeSettingsInput,
 } from './order-intake';
+import type { OrderWorkbenchQuery, OrderWorkbenchResult } from './order-workbench';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -45,6 +46,7 @@ export interface DesktopApi {
     expectedRevision: number,
   ): Promise<OrderUpdateConfirmation>;
   listOrders(): Promise<OrderSummary[]>;
+  queryOrders(query: OrderWorkbenchQuery): Promise<OrderWorkbenchResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   getScreenshotDataUrl(screenshotId: string): Promise<string>;

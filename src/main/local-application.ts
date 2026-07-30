@@ -24,6 +24,12 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import type {
+  OrderWorkbenchDateField,
+  OrderWorkbenchQuery,
+  OrderWorkbenchResult,
+  OrderWorkbenchSortField,
+} from '../core/order-workbench';
 import {
   diffOrderCurrentValues,
   hasEquivalentOrderContent,
@@ -1619,39 +1625,197 @@ export class LocalApplication {
   }
 
   public listOrders(): OrderSummary[] {
+    return this.queryOrders({}).orders;
+  }
+
+  public queryOrders(query: OrderWorkbenchQuery): OrderWorkbenchResult {
     const workspace = this.requireWorkspace();
+    const where = [
+      query.lifecycleStatus === 'all'
+        ? '1 = 1'
+        : 'orders.lifecycle_status = ?',
+    ];
+    const parameters: string[] = query.lifecycleStatus === 'all'
+      ? []
+      : [query.lifecycleStatus ?? 'active'];
+    const text = query.text?.normalize('NFKC').trim();
+    if (text) {
+      const pattern = containsLikePattern(text);
+      where.push(`(
+        orders.platform_order_number LIKE ? ESCAPE '\\'
+        OR orders.buyer_nickname LIKE ? ESCAPE '\\'
+        OR orders.recipient LIKE ? ESCAPE '\\'
+        OR orders.phone LIKE ? ESCAPE '\\'
+        OR orders.phone_normalized LIKE ? ESCAPE '\\'
+        OR orders.address_original LIKE ? ESCAPE '\\'
+        OR orders.address_normalized LIKE ? ESCAPE '\\'
+        OR orders.seller_account LIKE ? ESCAPE '\\'
+        OR EXISTS (
+          SELECT 1
+          FROM order_items AS searched_items
+          WHERE searched_items.order_id = orders.id
+            AND (
+              searched_items.source_title LIKE ? ESCAPE '\\'
+              OR searched_items.source_spec LIKE ? ESCAPE '\\'
+            )
+        )
+      )`);
+      parameters.push(...Array<string>(10).fill(pattern));
+    }
+    const buyerText = query.buyerText?.normalize('NFKC').trim();
+    if (buyerText) {
+      const pattern = containsLikePattern(buyerText);
+      where.push(`(
+        orders.buyer_nickname LIKE ? ESCAPE '\\'
+        OR orders.recipient LIKE ? ESCAPE '\\'
+        OR orders.phone LIKE ? ESCAPE '\\'
+        OR orders.phone_normalized LIKE ? ESCAPE '\\'
+      )`);
+      parameters.push(...Array<string>(4).fill(pattern));
+    }
+    const productText = query.productText?.normalize('NFKC').trim();
+    if (productText) {
+      const pattern = containsLikePattern(productText);
+      where.push(`EXISTS (
+        SELECT 1
+        FROM order_items AS filtered_items
+        WHERE filtered_items.order_id = orders.id
+          AND (
+            filtered_items.source_title LIKE ? ESCAPE '\\'
+            OR filtered_items.source_spec LIKE ? ESCAPE '\\'
+          )
+      )`);
+      parameters.push(pattern, pattern);
+    }
+    if (query.platform) {
+      where.push('orders.platform = ?');
+      parameters.push(query.platform);
+    }
+    if (query.sellerAccount) {
+      where.push('orders.seller_account = ?');
+      parameters.push(query.sellerAccount);
+    }
+    if (query.initialSourceRecognitionStatus) {
+      where.push('source_items.status = ?');
+      parameters.push(query.initialSourceRecognitionStatus);
+    }
+    if (query.platformTransactionStatus) {
+      where.push('orders.platform_transaction_status = ?');
+      parameters.push(query.platformTransactionStatus);
+    }
+    if (query.fulfillmentStatus) {
+      where.push('orders.fulfillment_status = ?');
+      parameters.push(query.fulfillmentStatus);
+    }
+    const dateColumn = orderWorkbenchDateColumn(query.dateField ?? 'created_at');
+    if (query.dateFrom) {
+      where.push(`${dateColumn} >= ?`);
+      parameters.push(orderWorkbenchDateBoundary(query.dateFrom, dateColumn, 'start'));
+    }
+    if (query.dateTo) {
+      where.push(`${dateColumn} <= ?`);
+      parameters.push(orderWorkbenchDateBoundary(query.dateTo, dateColumn, 'end'));
+    }
+    const sortExpression = orderWorkbenchSortExpression(query.sortField ?? 'created_at');
+    const sortDirection = orderWorkbenchSortDirection(query.sortDirection ?? 'desc');
     const rows = workspace.database
       .prepare(`
         SELECT
           orders.id,
+          orders.platform,
+          orders.seller_account,
           orders.platform_order_number,
           orders.buyer_nickname,
           orders.recipient,
+          orders.phone,
+          orders.address_original,
           orders.amount_cents,
+          source_items.status AS initial_source_recognition_status,
           orders.platform_transaction_status,
           orders.fulfillment_status,
+          orders.lifecycle_status,
+          orders.ordered_at_normalized,
+          orders.paid_at_normalized,
           orders.created_at,
-          COALESCE(SUM(items.quantity), 0) AS item_count
+          COALESCE(SUM(items.quantity), 0) AS item_count,
+          COALESCE((
+            SELECT json_group_array(json_object(
+              'sourceTitle', ordered_items.source_title,
+              'sourceSpec', ordered_items.source_spec,
+              'quantity', ordered_items.quantity
+            ))
+            FROM (
+              SELECT source_title, source_spec, quantity
+              FROM order_items
+              WHERE order_id = orders.id
+              ORDER BY position
+            ) AS ordered_items
+          ), '[]') AS items_json
         FROM original_orders AS orders
+        JOIN recognition_batch_items AS source_items
+          ON source_items.draft_id = orders.draft_id
         LEFT JOIN order_items AS items ON items.order_id = orders.id
+        WHERE ${where.join('\n          AND ')}
         GROUP BY orders.id
-        ORDER BY orders.created_at DESC, orders.id DESC
+        ORDER BY ${sortExpression} ${sortDirection}, orders.id DESC
       `)
-      .all() as unknown as SqlRow[];
+      .all(...parameters) as unknown as SqlRow[];
 
-    return rows.map((row) => ({
+    const orders = rows.map((row) => ({
       id: asString(row.id),
+      platform: asOrderPlatform(row.platform),
+      sellerAccount: asString(row.seller_account),
       orderNumber: asString(row.platform_order_number),
       buyerNickname: asString(row.buyer_nickname),
       recipient: asString(row.recipient),
+      phone: asString(row.phone),
+      addressOriginal: asString(row.address_original),
       amountCents: asNumber(row.amount_cents),
       itemCount: asNumber(row.item_count),
+      initialSourceRecognitionStatus: asRecognitionBatchItemStatus(
+        row.initial_source_recognition_status,
+      ),
       platformTransactionStatus: asPlatformTransactionStatus(
         row.platform_transaction_status,
       ),
       fulfillmentStatus: asFulfillmentStatus(row.fulfillment_status),
+      lifecycleStatus: asLifecycleStatus(row.lifecycle_status),
+      orderedAtNormalized: asString(row.ordered_at_normalized),
+      paidAtNormalized: asString(row.paid_at_normalized),
       createdAt: asString(row.created_at),
+      items: parseOrderSummaryItems(asString(row.items_json)),
     }));
+
+    const counts = workspace.database.prepare(`
+      SELECT
+        COUNT(*) AS all_lifecycle_order_count,
+        COALESCE(SUM(lifecycle_status = 'active'), 0) AS active_order_count,
+        COALESCE(SUM(
+          lifecycle_status = 'active'
+          AND fulfillment_status = 'pending_shipment'
+          AND platform_transaction_status NOT IN ('cancelled', 'refunded')
+        ), 0) AS pending_shipment_count
+      FROM original_orders
+    `).get() as SqlRow;
+    const platforms = workspace.database.prepare(`
+      SELECT DISTINCT platform
+      FROM original_orders
+      ORDER BY platform
+    `).all() as unknown as SqlRow[];
+    const sellerAccounts = workspace.database.prepare(`
+      SELECT DISTINCT seller_account
+      FROM original_orders
+      ORDER BY seller_account
+    `).all() as unknown as SqlRow[];
+
+    return {
+      orders,
+      allLifecycleOrderCount: asNumber(counts.all_lifecycle_order_count),
+      activeOrderCount: asNumber(counts.active_order_count),
+      pendingShipmentCount: asNumber(counts.pending_shipment_count),
+      platforms: platforms.map((row) => asOrderPlatform(row.platform)),
+      sellerAccounts: sellerAccounts.map((row) => asString(row.seller_account)),
+    };
   }
 
   private completeBatchWhenReviewed(batchId: string): void {
@@ -1717,7 +1881,7 @@ export class LocalApplication {
     const order: OriginalOrder = {
       id: asString(row.id),
       revision: asNumber(row.revision),
-      platform: 'xianyu',
+      platform: asOrderPlatform(row.platform),
       sellerAccount: asString(row.seller_account),
       orderNumber: asString(row.platform_order_number),
       alipayTransactionNumber: asString(row.alipay_transaction_number),
@@ -1759,9 +1923,12 @@ export class LocalApplication {
           snapshots.id AS snapshot_id,
           snapshots.recognition_json,
           snapshots.confirmed_json,
-          snapshots.created_at AS snapshot_created_at
+          snapshots.created_at AS snapshot_created_at,
+          source_items.status AS recognition_status
         FROM source_snapshots AS snapshots
         JOIN source_screenshots AS screenshots ON screenshots.id = snapshots.screenshot_id
+        JOIN recognition_batch_items AS source_items
+          ON source_items.draft_id = snapshots.draft_id
         LEFT JOIN (
           SELECT source_snapshot_id, MAX(result_revision) AS result_revision
           FROM order_change_events
@@ -1776,6 +1943,7 @@ export class LocalApplication {
       `)
       .all(orderId) as unknown as SqlRow[];
     const sources = sourceRows.map((sourceRow) => ({
+      recognitionStatus: asRecognitionBatchItemStatus(sourceRow.recognition_status),
       sourceScreenshot: {
         id: asString(sourceRow.source_id),
         originalName: asString(sourceRow.original_name),
@@ -2299,6 +2467,13 @@ function asPlatformTransactionStatus(
   return value;
 }
 
+function asOrderPlatform(
+  value: string | number | null | undefined,
+): OriginalOrder['platform'] {
+  if (value !== 'xianyu') throw new Error('数据库订单平台格式错误');
+  return value;
+}
+
 function isFulfillmentStatus(value: unknown): value is OriginalOrder['fulfillmentStatus'] {
   return value === 'pending_shipment' || value === 'shipped' || value === 'unknown';
 }
@@ -2389,6 +2564,94 @@ function asNumber(value: string | number | null | undefined): number {
 function asNullableNumber(value: string | number | null | undefined): number | null {
   if (value === null) return null;
   return asNumber(value);
+}
+
+function containsLikePattern(value: string): string {
+  return `%${value.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`;
+}
+
+function orderWorkbenchDateColumn(
+  field: OrderWorkbenchDateField,
+): 'orders.ordered_at_normalized' | 'orders.paid_at_normalized' | 'orders.created_at' {
+  const columns = {
+    ordered_at: 'orders.ordered_at_normalized',
+    paid_at: 'orders.paid_at_normalized',
+    created_at: 'orders.created_at',
+  } as const;
+  const column = columns[field];
+  if (!column) throw new Error('订单工作台日期字段无效');
+  return column;
+}
+
+function orderWorkbenchDateBoundary(
+  date: string,
+  column: ReturnType<typeof orderWorkbenchDateColumn>,
+  edge: 'start' | 'end',
+): string {
+  const normalizedStart = normalizeShanghaiDateTime(`${date} 00:00:00`);
+  if (!normalizedStart || normalizedStart.slice(0, 10) !== date) {
+    throw new Error('订单工作台日期格式无效');
+  }
+  const localDateTime = edge === 'start'
+    ? `${date}T00:00:00+08:00`
+    : `${date}T23:59:59.999+08:00`;
+  if (column === 'orders.created_at') return new Date(localDateTime).toISOString();
+  return edge === 'start'
+    ? normalizedStart
+    : `${date}T23:59:59+08:00`;
+}
+
+function orderWorkbenchSortExpression(field: OrderWorkbenchSortField): string {
+  const expressions: Record<OrderWorkbenchSortField, string> = {
+    ordered_at: 'orders.ordered_at_normalized',
+    paid_at: 'orders.paid_at_normalized',
+    created_at: 'orders.created_at',
+    amount: 'orders.amount_cents',
+    platform: 'orders.platform COLLATE NOCASE',
+    seller_account: 'orders.seller_account COLLATE NOCASE',
+    buyer: 'orders.buyer_nickname COLLATE NOCASE',
+    product: `COALESCE((
+      SELECT sorted_items.source_title
+      FROM order_items AS sorted_items
+      WHERE sorted_items.order_id = orders.id
+      ORDER BY sorted_items.position
+      LIMIT 1
+    ), '') COLLATE NOCASE`,
+    initial_source_recognition_status: 'source_items.status',
+    platform_transaction_status: 'orders.platform_transaction_status',
+    fulfillment_status: 'orders.fulfillment_status',
+    lifecycle_status: 'orders.lifecycle_status',
+  };
+  const expression = expressions[field];
+  if (!expression) throw new Error('订单工作台排序字段无效');
+  return expression;
+}
+
+function orderWorkbenchSortDirection(direction: 'asc' | 'desc'): 'ASC' | 'DESC' {
+  if (direction === 'asc') return 'ASC';
+  if (direction === 'desc') return 'DESC';
+  throw new Error('订单工作台排序方向无效');
+}
+
+function parseOrderSummaryItems(serialized: string): OrderSummary['items'] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error('数据库订单商品摘要格式错误', { cause: error });
+  }
+  if (!Array.isArray(parsed) || !parsed.every((item) => (
+    typeof item === 'object' &&
+    item !== null &&
+    !Array.isArray(item) &&
+    typeof (item as Record<string, unknown>).sourceTitle === 'string' &&
+    typeof (item as Record<string, unknown>).sourceSpec === 'string' &&
+    Number.isSafeInteger((item as Record<string, unknown>).quantity) &&
+    ((item as Record<string, unknown>).quantity as number) > 0
+  ))) {
+    throw new Error('数据库订单商品摘要格式错误');
+  }
+  return parsed as OrderSummary['items'];
 }
 
 function asOptionalStoredMoney(

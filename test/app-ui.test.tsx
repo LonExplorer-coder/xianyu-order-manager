@@ -15,6 +15,10 @@ import type {
   RecognitionBatchItemStatus,
   RecognitionBatchView,
 } from '../src/core/contracts';
+import type {
+  OrderWorkbenchQuery,
+  OrderWorkbenchResult,
+} from '../src/core/order-workbench';
 import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
 import { App } from '../src/renderer/App';
@@ -117,9 +121,62 @@ const orderDetails: OrderDetails = {
   order: confirmedOrder,
   sourceScreenshot,
   sourceSnapshot,
-  sources: [{ sourceScreenshot, sourceSnapshot }],
+  sources: [{ recognitionStatus: 'imported', sourceScreenshot, sourceSnapshot }],
   changeEvents: [],
 };
+
+function orderSummary(
+  order: OriginalOrder = confirmedOrder,
+  overrides: Partial<OrderSummary> = {},
+): OrderSummary {
+  return {
+    id: order.id,
+    platform: order.platform,
+    sellerAccount: order.sellerAccount,
+    orderNumber: order.orderNumber,
+    buyerNickname: order.buyerNickname,
+    recipient: order.recipient,
+    phone: order.phone,
+    addressOriginal: order.addressOriginal,
+    amountCents: order.amountCents,
+    itemCount: order.items.reduce((total, item) => total + item.quantity, 0),
+    initialSourceRecognitionStatus: 'imported',
+    platformTransactionStatus: order.platformTransactionStatus,
+    fulfillmentStatus: order.fulfillmentStatus,
+    lifecycleStatus: order.lifecycleStatus,
+    orderedAtNormalized: order.orderedAtNormalized,
+    paidAtNormalized: order.paidAtNormalized,
+    createdAt: order.createdAt,
+    items: order.items.map(({ sourceTitle, sourceSpec, quantity }) => ({
+      sourceTitle,
+      sourceSpec,
+      quantity,
+    })),
+    ...overrides,
+  };
+}
+
+function workbenchResult(
+  orders: OrderSummary[],
+  overrides: Partial<OrderWorkbenchResult> = {},
+): OrderWorkbenchResult {
+  const activeOrderCount = overrides.activeOrderCount ?? orders.filter(
+    (order) => order.lifecycleStatus === 'active',
+  ).length;
+  return {
+    orders,
+    activeOrderCount,
+    allLifecycleOrderCount: Math.max(orders.length, activeOrderCount),
+    pendingShipmentCount: orders.filter((order) => (
+      order.lifecycleStatus === 'active' &&
+      order.platformTransactionStatus === 'paid' &&
+      order.fulfillmentStatus === 'pending_shipment'
+    )).length,
+    platforms: [...new Set(orders.map((order) => order.platform))],
+    sellerAccounts: [...new Set(orders.map((order) => order.sellerAccount))],
+    ...overrides,
+  };
+}
 
 type DesktopApiTestOverrides = Partial<DesktopApi> & {
   selectSourceScreenshot?: () => Promise<OrderDraft | null>;
@@ -128,6 +185,7 @@ type DesktopApiTestOverrides = Partial<DesktopApi> & {
 function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
   const {
     selectSourceScreenshot = vi.fn().mockResolvedValue(null),
+    queryOrders = vi.fn().mockResolvedValue(workbenchResult([])),
     ...desktopApiOverrides
   } = overrides;
   const selectOneSourceScreenshot = selectSourceScreenshot
@@ -170,6 +228,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       resolution: 'order_updated',
     }),
     listOrders: vi.fn().mockResolvedValue([]),
+    queryOrders,
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     getScreenshotDataUrl: vi.fn(),
@@ -244,6 +303,9 @@ describe('订单管理工作台', () => {
       order: confirmedOrder,
       resolution: 'new_order',
     });
+    const queryOrders = vi.fn()
+      .mockResolvedValueOnce(workbenchResult([]))
+      .mockResolvedValue(workbenchResult([orderSummary()]));
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -255,17 +317,8 @@ describe('订单管理工作台', () => {
       confirmDraft,
       listOrders: vi.fn()
         .mockResolvedValueOnce([])
-        .mockResolvedValue([{
-          id: confirmedOrder.id,
-          orderNumber: confirmedOrder.orderNumber,
-          buyerNickname: confirmedOrder.buyerNickname,
-          recipient: confirmedOrder.recipient,
-          amountCents: confirmedOrder.amountCents,
-          itemCount: 1,
-          platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-          fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-          createdAt: confirmedOrder.createdAt,
-        }]),
+        .mockResolvedValue([orderSummary()]),
+      queryOrders,
     });
 
     render(<App api={api} />);
@@ -650,39 +703,396 @@ describe('订单管理工作台', () => {
       .toHaveAttribute('readonly');
   });
 
+  it('有订单时首页明确汇总在库订单、全部待确认和待发货', async () => {
+    const awaitingBatch = recognitionBatchView('batch-workbench-summary', [
+      {
+        id: 'batch-item-awaiting-1',
+        batchId: 'batch-workbench-summary',
+        sourceName: '待确认1.png',
+        status: 'awaiting_confirmation',
+        draftId: 'draft-awaiting-1',
+      },
+      {
+        id: 'batch-item-awaiting-2',
+        batchId: 'batch-workbench-summary',
+        sourceName: '待确认2.png',
+        status: 'awaiting_confirmation',
+        draftId: 'draft-awaiting-2',
+      },
+    ]);
+    const summary = orderSummary();
+    const cancelled = orderSummary(confirmedOrder, {
+      id: 'order-cancelled',
+      orderNumber: 'XY-CANCELLED',
+      platformTransactionStatus: 'cancelled',
+    });
+    const refunded = orderSummary(confirmedOrder, {
+      id: 'order-refunded',
+      orderNumber: 'XY-REFUNDED',
+      platformTransactionStatus: 'refunded',
+    });
+    const trashed = orderSummary(confirmedOrder, {
+      id: 'order-trashed',
+      orderNumber: 'XY-TRASHED',
+      lifecycleStatus: 'trashed',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary, cancelled, refunded, trashed],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary, cancelled, refunded, trashed]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary], {
+        activeOrderCount: 1,
+        pendingShipmentCount: 1,
+      })),
+      listRecognitionBatches: vi.fn().mockResolvedValue([awaitingBatch]),
+    });
+
+    render(<App api={api} />);
+
+    const overview = await screen.findByRole('region', { name: '订单概况' });
+    expect(overview).toHaveTextContent('在库订单1');
+    await waitFor(() => expect(overview).toHaveTextContent('待确认2'));
+    expect(overview).toHaveTextContent('待发货1');
+  });
+
+  it('订单行直接展示完整收件信息、商品、平台卖家和四个独立状态', async () => {
+    const summary = orderSummary(confirmedOrder, {
+      addressOriginal: '广东省深圳市南山区商务路88号',
+      phone: '13800000000',
+      items: [{ sourceTitle: '限量测试商品', sourceSpec: '商务黑', quantity: 2 }],
+      itemCount: 2,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+    });
+
+    render(<App api={api} />);
+
+    const row = (await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    })).closest('tr');
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent('闲鱼');
+    expect(row).toHaveTextContent(summary.sellerAccount);
+    expect(row).toHaveTextContent(`${summary.recipient}13800000000广东省深圳市南山区商务路88号`);
+    expect(row).toHaveTextContent('限量测试商品 · 商务黑 ×2');
+    expect(row).toHaveTextContent('已入库');
+    expect(row).toHaveTextContent('已付款');
+    expect(row).toHaveTextContent('待发货');
+    expect(row).toHaveTextContent('正常');
+  });
+
+  it('主搜索框可按买家和商品找到订单', async () => {
+    const user = userEvent.setup();
+    const first = orderSummary(confirmedOrder, {
+      id: 'order-buyer-a',
+      orderNumber: 'XY-BUYER-A',
+      buyerNickname: '买家甲',
+      items: [{ sourceTitle: '苹果商品', sourceSpec: '', quantity: 1 }],
+    });
+    const second = orderSummary(confirmedOrder, {
+      id: 'order-buyer-b',
+      orderNumber: 'XY-BUYER-B',
+      buyerNickname: '买家乙',
+      items: [{ sourceTitle: '香蕉商品', sourceSpec: '', quantity: 1 }],
+    });
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      query.text === '买家乙' || query.text === '香蕉商品'
+        ? workbenchResult([second], { activeOrderCount: 2 })
+        : workbenchResult([first, second])
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [first, second],
+      }),
+      listOrders: vi.fn().mockResolvedValue([first, second]),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+    await screen.findByRole('button', { name: '查看订单 XY-BUYER-A' });
+
+    await user.type(screen.getByRole('searchbox', { name: '搜索订单' }), '买家乙');
+
+    expect(await screen.findByRole('button', { name: '查看订单 XY-BUYER-B' })).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('button', {
+      name: '查看订单 XY-BUYER-A',
+    })).not.toBeInTheDocument());
+    expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 2 笔');
+
+    await user.clear(screen.getByRole('searchbox', { name: '搜索订单' }));
+    await user.type(screen.getByRole('searchbox', { name: '搜索订单' }), '香蕉商品');
+    expect(await screen.findByRole('button', { name: '查看订单 XY-BUYER-B' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '查看订单 XY-BUYER-A' })).not.toBeInTheDocument();
+  });
+
+  it('查询无匹配时保留查询区并可一键清除条件', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      query.text
+        ? workbenchResult([], {
+          activeOrderCount: 1,
+          platforms: [summary.platform],
+          sellerAccounts: [summary.sellerAccount],
+        })
+        : workbenchResult([summary])
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+    await user.type(await screen.findByRole('searchbox', { name: '搜索订单' }), '不存在');
+
+    expect(await screen.findByRole('heading', { name: '没有符合条件的订单' })).toBeVisible();
+    expect(screen.getByRole('searchbox', { name: '搜索订单' })).toHaveValue('不存在');
+    await user.click(screen.getByRole('button', { name: '清除筛选' }));
+
+    expect(await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    })).toBeVisible();
+    expect(screen.getByRole('searchbox', { name: '搜索订单' })).toHaveValue('');
+  });
+
+  it('只有回收站订单时仍展示查询工作台并可切换生命周期', async () => {
+    const user = userEvent.setup();
+    const trashed = orderSummary(confirmedOrder, {
+      id: 'order-only-trashed',
+      orderNumber: 'XY-ONLY-TRASHED',
+      lifecycleStatus: 'trashed',
+    });
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      query.lifecycleStatus === 'trashed'
+        ? workbenchResult([trashed], { activeOrderCount: 0, allLifecycleOrderCount: 1 })
+        : workbenchResult([], {
+          activeOrderCount: 0,
+          allLifecycleOrderCount: 1,
+          platforms: [trashed.platform],
+          sellerAccounts: [trashed.sellerAccount],
+        })
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByRole('heading', { name: '没有符合条件的订单' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '还没有订单' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('显示 0 / 1 笔');
+    expect(screen.getByRole('region', { name: '订单概况' })).toHaveTextContent('在库订单0');
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '生命周期状态' }), 'trashed');
+
+    expect(await screen.findByRole('button', { name: '查看订单 XY-ONLY-TRASHED' })).toBeVisible();
+    expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
+  });
+
+  it('可组合日期、平台卖家和四个状态筛选订单', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => {
+      const matched = query.dateField === 'paid_at' &&
+        query.dateFrom === '2026-07-01' &&
+        query.dateTo === '2026-07-31' &&
+        query.platform === 'xianyu' &&
+        query.sellerAccount === summary.sellerAccount &&
+        query.buyerText === summary.buyerNickname &&
+        query.productText === summary.items[0].sourceTitle &&
+        query.initialSourceRecognitionStatus === 'imported' &&
+        query.platformTransactionStatus === 'paid' &&
+        query.fulfillmentStatus === 'pending_shipment' &&
+        query.lifecycleStatus === 'active';
+      return workbenchResult(matched ? [summary] : [], {
+        activeOrderCount: 1,
+        platforms: ['xianyu'],
+        sellerAccounts: [summary.sellerAccount],
+      });
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+    await screen.findByRole('region', { name: '订单查询' });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '日期字段' }), 'paid_at');
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-07-01' } });
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-07-31' } });
+    await user.selectOptions(screen.getByRole('combobox', { name: '平台' }), 'xianyu');
+    await user.selectOptions(screen.getByRole('combobox', { name: '卖家账号' }), summary.sellerAccount);
+    await user.type(screen.getByRole('textbox', { name: '买家' }), summary.buyerNickname);
+    await user.type(screen.getByRole('textbox', { name: '商品' }), summary.items[0].sourceTitle);
+    await user.selectOptions(screen.getByRole('combobox', { name: '初始来源识别状态' }), 'imported');
+    await user.selectOptions(screen.getByRole('combobox', { name: '平台交易状态' }), 'paid');
+    await user.selectOptions(screen.getByRole('combobox', { name: '履约状态' }), 'pending_shipment');
+    await user.selectOptions(screen.getByRole('combobox', { name: '生命周期状态' }), 'active');
+
+    expect(await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    })).toBeVisible();
+    expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
+  });
+
+  it('选择商品升序后表格按查询结果顺序呈现', async () => {
+    const user = userEvent.setup();
+    const zOrder = orderSummary(confirmedOrder, {
+      id: 'order-product-z',
+      orderNumber: 'XY-PRODUCT-Z',
+      items: [{ sourceTitle: 'Zeta 商品', sourceSpec: '', quantity: 1 }],
+    });
+    const aOrder = orderSummary(confirmedOrder, {
+      id: 'order-product-a',
+      orderNumber: 'XY-PRODUCT-A',
+      items: [{ sourceTitle: 'Alpha 商品', sourceSpec: '', quantity: 1 }],
+    });
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      query.sortField === 'product' && query.sortDirection === 'asc'
+        ? workbenchResult([aOrder, zOrder])
+        : workbenchResult([zOrder, aOrder])
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [zOrder, aOrder],
+      }),
+      listOrders: vi.fn().mockResolvedValue([zOrder, aOrder]),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    await user.selectOptions(screen.getByRole('combobox', { name: '排序方式' }), 'product:asc');
+
+    await waitFor(() => expect(
+      within(table).getAllByRole('button', { name: /查看订单/u })
+        .map((button) => button.getAttribute('aria-label')),
+    ).toEqual(['查看订单 XY-PRODUCT-A', '查看订单 XY-PRODUCT-Z']));
+  });
+
+  it('较晚返回的旧筛选响应不会覆盖较新的查询结果', async () => {
+    let finishOldQuery!: (result: OrderWorkbenchResult) => void;
+    const oldQuery = new Promise<OrderWorkbenchResult>((resolve) => {
+      finishOldQuery = resolve;
+    });
+    const initial = orderSummary(confirmedOrder, {
+      id: 'order-query-initial',
+      orderNumber: 'XY-QUERY-INITIAL',
+    });
+    const stale = orderSummary(confirmedOrder, {
+      id: 'order-query-stale',
+      orderNumber: 'XY-QUERY-STALE',
+    });
+    const latest = orderSummary(confirmedOrder, {
+      id: 'order-query-latest',
+      orderNumber: 'XY-QUERY-LATEST',
+    });
+    const queryOrders = vi.fn((query: OrderWorkbenchQuery) => {
+      if (query.text === '旧查询') return oldQuery;
+      if (query.text === '新查询') return Promise.resolve(workbenchResult([latest]));
+      return Promise.resolve(workbenchResult([initial]));
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [initial],
+      }),
+      queryOrders,
+    });
+
+    render(<App api={api} />);
+    const search = await screen.findByRole('searchbox', { name: '搜索订单' });
+    await screen.findByRole('button', { name: '查看订单 XY-QUERY-INITIAL' });
+
+    fireEvent.change(search, { target: { value: '旧查询' } });
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledWith(expect.objectContaining({
+      text: '旧查询',
+    })));
+    fireEvent.change(search, { target: { value: '新查询' } });
+
+    expect(await screen.findByRole('button', { name: '查看订单 XY-QUERY-LATEST' })).toBeVisible();
+    await act(async () => finishOldQuery(workbenchResult([stale])));
+
+    expect(screen.getByRole('button', { name: '查看订单 XY-QUERY-LATEST' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '查看订单 XY-QUERY-STALE' })).not.toBeInTheDocument();
+  });
+
+  it('从查询结果打开详情再返回时保留原条件', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      query.text === summary.buyerNickname
+        ? workbenchResult([summary])
+        : workbenchResult([summary])
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.type(await screen.findByRole('searchbox', { name: '搜索订单' }), summary.buyerNickname);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }));
+    await user.click(await screen.findByRole('button', { name: '返回订单表' }));
+
+    expect(await screen.findByRole('searchbox', { name: '搜索订单' })).toHaveValue(summary.buyerNickname);
+    expect(screen.getByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    })).toBeVisible();
+  });
+
   it('有订单时直接展示主表，并可查看带来源截图的订单详情', async () => {
     const user = userEvent.setup();
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
         dataDirectory: 'D:\\闲鱼订单',
-        orders: [
-          {
-            id: confirmedOrder.id,
-            orderNumber: confirmedOrder.orderNumber,
-            buyerNickname: confirmedOrder.buyerNickname,
-            recipient: confirmedOrder.recipient,
-            amountCents: confirmedOrder.amountCents,
-            itemCount: 1,
-            platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-            fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-            createdAt: confirmedOrder.createdAt,
-          },
-        ],
+        orders: [orderSummary()],
       }),
       getOrder: vi.fn().mockResolvedValue(orderDetails),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
-      listOrders: vi.fn().mockResolvedValue([{
-        id: confirmedOrder.id,
-        orderNumber: confirmedOrder.orderNumber,
-        buyerNickname: confirmedOrder.buyerNickname,
-        recipient: confirmedOrder.recipient,
-        amountCents: confirmedOrder.amountCents,
-        itemCount: 1,
-        platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-        fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-        createdAt: confirmedOrder.createdAt,
-      }]),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
     });
 
     render(<App api={api} />);
@@ -731,31 +1141,12 @@ describe('订单管理工作台', () => {
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
         dataDirectory: 'D:\\闲鱼订单',
-        orders: [{
-          id: detailedOrder.id,
-          orderNumber: detailedOrder.orderNumber,
-          buyerNickname: detailedOrder.buyerNickname,
-          recipient: detailedOrder.recipient,
-          amountCents: detailedOrder.amountCents,
-          itemCount: detailedOrder.items.length,
-          platformTransactionStatus: detailedOrder.platformTransactionStatus,
-          fulfillmentStatus: detailedOrder.fulfillmentStatus,
-          createdAt: detailedOrder.createdAt,
-        }],
+        orders: [orderSummary(detailedOrder)],
       }),
       getOrder: vi.fn().mockResolvedValue(detailsWithEvidence),
       getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
-      listOrders: vi.fn().mockResolvedValue([{
-        id: detailedOrder.id,
-        orderNumber: detailedOrder.orderNumber,
-        buyerNickname: detailedOrder.buyerNickname,
-        recipient: detailedOrder.recipient,
-        amountCents: detailedOrder.amountCents,
-        itemCount: detailedOrder.items.length,
-        platformTransactionStatus: detailedOrder.platformTransactionStatus,
-        fulfillmentStatus: detailedOrder.fulfillmentStatus,
-        createdAt: detailedOrder.createdAt,
-      }]),
+      listOrders: vi.fn().mockResolvedValue([orderSummary(detailedOrder)]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary(detailedOrder)])),
     });
 
     render(<App api={api} />);
@@ -776,6 +1167,38 @@ describe('订单管理工作台', () => {
     expect(detailPage).toHaveTextContent('2026-07-27T11:21:54+08:00');
     expect(detailPage).toHaveTextContent('广东省深圳市南山区科技路2号');
     expect(detailPage).not.toHaveTextContent('SECRET_RAW_OCR_RESPONSE');
+  });
+
+  it('订单详情分别呈现四个状态和完整收件信息', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${confirmedOrder.orderNumber}`,
+    }));
+
+    const statuses = await screen.findByRole('region', { name: '订单状态' });
+    expect(statuses).toHaveTextContent('当前来源识别状态已入库');
+    expect(statuses).toHaveTextContent('平台交易状态已付款');
+    expect(statuses).toHaveTextContent('履约状态待发货');
+    expect(statuses).toHaveTextContent('生命周期状态正常');
+
+    const recipientSection = screen.getByRole('heading', { name: '收货信息' }).closest('section');
+    expect(recipientSection).toHaveTextContent(confirmedOrder.recipient);
+    expect(recipientSection).toHaveTextContent(confirmedOrder.phone);
+    expect(recipientSection).toHaveTextContent(confirmedOrder.addressOriginal);
   });
 
   it('订单详情可切换查看全部来源截图并查看字段级修改记录', async () => {
@@ -810,8 +1233,16 @@ describe('订单管理工作台', () => {
       sourceScreenshot: latestScreenshot,
       sourceSnapshot: latestSnapshot,
       sources: [
-        { sourceScreenshot: latestScreenshot, sourceSnapshot: latestSnapshot },
-        { sourceScreenshot: earlierScreenshot, sourceSnapshot: earlierSnapshot },
+        {
+          recognitionStatus: 'imported',
+          sourceScreenshot: latestScreenshot,
+          sourceSnapshot: latestSnapshot,
+        },
+        {
+          recognitionStatus: 'duplicate_skipped',
+          sourceScreenshot: earlierScreenshot,
+          sourceSnapshot: earlierSnapshot,
+        },
       ],
       changeEvents: [{
         id: 'event-source-update',
@@ -849,31 +1280,12 @@ describe('订单管理工作台', () => {
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
         dataDirectory: 'D:\\闲鱼订单',
-        orders: [{
-          id: confirmedOrder.id,
-          orderNumber: confirmedOrder.orderNumber,
-          buyerNickname: confirmedOrder.buyerNickname,
-          recipient: confirmedOrder.recipient,
-          amountCents: confirmedOrder.amountCents,
-          itemCount: confirmedOrder.items.length,
-          platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-          fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-          createdAt: confirmedOrder.createdAt,
-        }],
+        orders: [orderSummary()],
       }),
       getOrder: vi.fn().mockResolvedValue(detailsWithHistory),
       getScreenshotDataUrl,
-      listOrders: vi.fn().mockResolvedValue([{
-        id: confirmedOrder.id,
-        orderNumber: confirmedOrder.orderNumber,
-        buyerNickname: confirmedOrder.buyerNickname,
-        recipient: confirmedOrder.recipient,
-        amountCents: confirmedOrder.amountCents,
-        itemCount: confirmedOrder.items.length,
-        platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-        fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-        createdAt: confirmedOrder.createdAt,
-      }]),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
     });
 
     render(<App api={api} />);
@@ -897,6 +1309,8 @@ describe('订单管理工作台', () => {
       'data:image/png;base64,ZWFybGllcg==',
     ));
     expect(screen.getByText('首次订单截图.png', { selector: 'figcaption span' })).toBeVisible();
+    expect(screen.getByRole('region', { name: '订单状态' }))
+      .toHaveTextContent('当前来源识别状态重复跳过');
     expect(screen.queryByText(/已在本次来源确认时修正/)).not.toBeInTheDocument();
   });
 
@@ -1146,6 +1560,9 @@ describe('订单管理工作台', () => {
       publishOrders = listener;
       return () => undefined;
     });
+    const queryOrders = vi.fn()
+      .mockResolvedValueOnce(workbenchResult([]))
+      .mockResolvedValue(workbenchResult([orderSummary()]));
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -1153,42 +1570,24 @@ describe('订单管理工作台', () => {
         orders: [],
       }),
       onOrdersChanged,
+      queryOrders,
     });
 
     render(<App api={api} />);
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
     await waitFor(() => expect(onOrdersChanged).toHaveBeenCalledOnce());
 
-    await act(async () => publishOrders([{
-      id: confirmedOrder.id,
-      orderNumber: confirmedOrder.orderNumber,
-      buyerNickname: confirmedOrder.buyerNickname,
-      recipient: confirmedOrder.recipient,
-      amountCents: confirmedOrder.amountCents,
-      itemCount: confirmedOrder.items.length,
-      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-      createdAt: confirmedOrder.createdAt,
-    }]));
+    await act(async () => publishOrders([orderSummary()]));
 
     expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledTimes(2));
     expect(screen.getByRole('button', {
       name: `查看订单 ${confirmedOrder.orderNumber}`,
     })).toBeVisible();
   });
 
   it('启动快照与事件订阅之间发生的自动入库会通过订阅后查询补齐', async () => {
-    const importedOrder: OrderSummary = {
-      id: confirmedOrder.id,
-      orderNumber: confirmedOrder.orderNumber,
-      buyerNickname: confirmedOrder.buyerNickname,
-      recipient: confirmedOrder.recipient,
-      amountCents: confirmedOrder.amountCents,
-      itemCount: confirmedOrder.items.length,
-      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-      createdAt: confirmedOrder.createdAt,
-    };
+    const importedOrder = orderSummary();
     const onOrdersChanged = vi.fn(() => () => undefined);
     const listOrders = vi.fn().mockResolvedValue([importedOrder]);
     const api = createApi({
@@ -1199,6 +1598,7 @@ describe('订单管理工作台', () => {
       }),
       onOrdersChanged,
       listOrders,
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([importedOrder])),
     });
 
     render(<App api={api} />);
@@ -1242,17 +1642,7 @@ describe('订单管理工作台', () => {
     const confirmationQuery = new Promise<OrderSummary[]>((resolve) => {
       finishConfirmationQuery = resolve;
     });
-    const confirmedSummary: OrderSummary = {
-      id: confirmedOrder.id,
-      orderNumber: confirmedOrder.orderNumber,
-      buyerNickname: confirmedOrder.buyerNickname,
-      recipient: confirmedOrder.recipient,
-      amountCents: confirmedOrder.amountCents,
-      itemCount: confirmedOrder.items.length,
-      platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-      fulfillmentStatus: confirmedOrder.fulfillmentStatus,
-      createdAt: confirmedOrder.createdAt,
-    };
+    const confirmedSummary = orderSummary();
     const automaticSummary: OrderSummary = {
       ...confirmedSummary,
       id: 'order-auto-newer',
@@ -1262,6 +1652,9 @@ describe('订单管理工作台', () => {
     const listOrders = vi.fn()
       .mockResolvedValueOnce([])
       .mockReturnValue(confirmationQuery);
+    const queryOrders = vi.fn()
+      .mockResolvedValueOnce(workbenchResult([]))
+      .mockResolvedValue(workbenchResult([automaticSummary, confirmedSummary]));
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -1275,6 +1668,7 @@ describe('订单管理工作台', () => {
         resolution: 'new_order',
       }),
       listOrders,
+      queryOrders,
       onOrdersChanged: vi.fn((listener) => {
         publishOrders = listener;
         return () => undefined;

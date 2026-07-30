@@ -51,6 +51,26 @@ afterEach(() => {
 });
 
 describe('桌面启动状态', () => {
+  it('通过桌面会话公开订单工作台查询', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-workbench-'));
+    const session = new DesktopSession(
+      new Preferences(join(testRoot, '启动配置')),
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(testRoot, '订单数据'));
+
+    expect(session.queryOrders({})).toEqual({
+      orders: [],
+      allLifecycleOrderCount: 0,
+      activeOrderCount: 0,
+      pendingShipmentCount: 0,
+      platforms: [],
+      sellerAccounts: [],
+    });
+  });
+
   it('首次要求选择数据目录，并在重启后自动打开最近目录', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-session-'));
     const preferences = new Preferences(join(testRoot, '启动配置'));
