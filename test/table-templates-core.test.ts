@@ -304,6 +304,8 @@ describe('表格模板核心契约', () => {
       granularity: 'order_item',
       columns: [orderColumn({ kind: 'builtin', key: 'product_title' }, '商品')],
       query: {
+        sourceTitle: 'Ａ款海棠杯',
+        sourceSpec: 'Ｌ码',
         customFieldFilter: { definitionId: itemField.id, value: 'A-01' },
         customFieldSort: { definitionId: itemField.id, direction: 'desc' },
       },

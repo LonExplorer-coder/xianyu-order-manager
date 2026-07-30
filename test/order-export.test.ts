@@ -120,6 +120,20 @@ describe('默认脱敏的两表工作簿导出', () => {
             quantity: 1,
             quantityInferred: false,
           },
+          {
+            sourceTitle: '默认数量勺',
+            sourceSpec: '标准款',
+            unitPriceCents: 300,
+            quantity: 1,
+            quantityInferred: true,
+          },
+          {
+            sourceTitle: '历史来源杯垫',
+            sourceSpec: '棉麻',
+            unitPriceCents: 400,
+            quantity: 3,
+            quantityInferred: false,
+          },
         ],
       }),
       recognition({
@@ -139,6 +153,20 @@ describe('默认脱敏的两表工作簿导出', () => {
     await writeFile(destinationPath, Buffer.from('existing-workbook-contents'));
     const currentResultIds = application.queryOrders({ buyerText: '海棠' })
       .orders.map(({ id }) => id);
+    const database = new DatabaseSync(join(testRoot, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.prepare(`
+        UPDATE order_items
+        SET quantity_source = CASE position
+          WHEN 0 THEN 'manual'
+          WHEN 3 THEN 'legacy_explicit_or_manual'
+          ELSE quantity_source
+        END
+        WHERE order_id = ?
+      `).run(currentResultIds[0]);
+    } finally {
+      database.close();
+    }
 
     const outcome = await application.exportOrdersToWorkbook({
       scope: {
@@ -150,7 +178,7 @@ describe('默认脱敏的两表工作簿导出', () => {
       masking: 'default',
     }, destinationPath);
 
-    expect(outcome).toEqual({ orderCount: 1, orderItemCount: 2 });
+    expect(outcome).toEqual({ orderCount: 1, orderItemCount: 4 });
 
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
@@ -159,7 +187,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     const orders = workbook.getWorksheet('订单总表');
     const items = workbook.getWorksheet('商品明细');
     expect(orders?.rowCount).toBe(2);
-    expect(items?.rowCount).toBe(3);
+    expect(items?.rowCount).toBe(5);
     if (!orders || !items) throw new Error('缺少导出工作表');
 
     expect(rowValues(items, 1)).toEqual([
@@ -226,10 +254,17 @@ describe('默认脱敏的两表工作簿导出', () => {
       value: 2,
       type: ExcelJS.ValueType.Number,
     });
-    expect(cellByHeader(items, 2, '数量来源')).toMatchObject({
-      value: 'OCR 识别',
-      type: ExcelJS.ValueType.String,
-    });
+    expect([2, 3, 4, 5].map((rowNumber) => (
+      cellByHeader(items, rowNumber, '数量来源')
+    ))).toEqual([
+      expect.objectContaining({ value: '人工修改', type: ExcelJS.ValueType.String }),
+      expect.objectContaining({ value: 'OCR 识别', type: ExcelJS.ValueType.String }),
+      expect.objectContaining({ value: '系统默认 1', type: ExcelJS.ValueType.String }),
+      expect.objectContaining({
+        value: '已明确（历史来源不明）',
+        type: ExcelJS.ValueType.String,
+      }),
+    ]);
     expect(cellByHeader(items, 2, '商品小计')).toMatchObject({
       value: 36,
       type: ExcelJS.ValueType.Number,

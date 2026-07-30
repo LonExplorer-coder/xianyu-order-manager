@@ -524,10 +524,18 @@ function normalizeQuery(
   if (granularity === 'order_item') {
     const query: OrderItemWorkbenchQuery = { ...common };
     if (record.sourceTitle !== undefined) {
-      query.sourceTitle = nonEmptyText(record.sourceTitle, '原始商品标题', MAX_QUERY_TEXT_LENGTH);
+      query.sourceTitle = nonEmptySourceText(
+        record.sourceTitle,
+        '原始商品标题',
+        MAX_QUERY_TEXT_LENGTH,
+      );
     }
     if (record.sourceSpec !== undefined) {
-      query.sourceSpec = nonEmptyText(record.sourceSpec, '原始款式或规格', MAX_QUERY_TEXT_LENGTH);
+      query.sourceSpec = nonEmptySourceText(
+        record.sourceSpec,
+        '原始款式或规格',
+        MAX_QUERY_TEXT_LENGTH,
+      );
     }
     if (record.unitPriceCents !== undefined) {
       query.unitPriceCents = integerInRange(record.unitPriceCents, '商品单价', 0);
@@ -717,6 +725,14 @@ function nonEmptyText(value: unknown, label: string, maxLength: number): string 
   if (!normalized) throw new Error(`${label}不能为空`);
   if (normalized.length > maxLength) throw new Error(`${label}不能超过 ${maxLength} 个字符`);
   return normalized;
+}
+
+function nonEmptySourceText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string') throw new Error(`${label}必须是文本`);
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${label}不能为空`);
+  if (trimmed.length > maxLength) throw new Error(`${label}不能超过 ${maxLength} 个字符`);
+  return trimmed;
 }
 
 function rejectDuplicates(values: readonly string[], message: string): void {

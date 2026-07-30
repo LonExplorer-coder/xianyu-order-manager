@@ -2677,12 +2677,12 @@ export class LocalApplication {
       where.push('orders.id IN (SELECT value FROM json_each(?))');
       parameters.push(JSON.stringify(normalizedScopedOrderIds));
     }
-    const sourceTitle = query.sourceTitle?.normalize('NFKC').trim();
+    const sourceTitle = query.sourceTitle?.trim();
     if (sourceTitle) {
       where.push('items.source_title = ? COLLATE NOCASE');
       parameters.push(sourceTitle);
     }
-    const sourceSpec = query.sourceSpec?.normalize('NFKC').trim();
+    const sourceSpec = query.sourceSpec?.trim();
     if (sourceSpec) {
       where.push('items.source_spec = ? COLLATE NOCASE');
       parameters.push(sourceSpec);

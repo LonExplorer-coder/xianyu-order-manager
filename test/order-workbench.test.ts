@@ -381,6 +381,35 @@ describe('商品明细工作台查询', () => {
     ]);
   });
 
+  it('精确筛选保留原始标题和规格的全角字符', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-ITEM-FILTER-WIDTH-001',
+        items: [{
+          sourceTitle: 'Ａ款海棠杯',
+          sourceSpec: 'Ｌ码',
+          unitPriceCents: 1_800,
+          quantity: 1,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+
+    expect(application.queryOrderItems({
+      sourceTitle: 'Ａ款海棠杯',
+      sourceSpec: 'Ｌ码',
+    }).items).toEqual([
+      expect.objectContaining({
+        sourceTitle: 'Ａ款海棠杯',
+        sourceSpec: 'Ｌ码',
+      }),
+    ]);
+    expect(application.queryOrderItems({
+      sourceTitle: 'A款海棠杯',
+      sourceSpec: 'L码',
+    }).items).toEqual([]);
+  });
+
   it('按原始商品标题排序并保持同一订单的商品为独立明细行', async () => {
     const { application } = await createApplicationWithOrders([
       recognition({

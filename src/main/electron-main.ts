@@ -395,8 +395,8 @@ function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
     throw new Error('商品明细一次只能使用一种排序');
   }
   return {
-    sourceTitle: optionalWorkbenchText(input.sourceTitle, 20_000),
-    sourceSpec: optionalWorkbenchText(input.sourceSpec, 20_000),
+    sourceTitle: optionalWorkbenchSourceText(input.sourceTitle, 20_000),
+    sourceSpec: optionalWorkbenchSourceText(input.sourceSpec, 20_000),
     unitPriceCents: optionalWorkbenchInteger(input.unitPriceCents, 0, '商品单价'),
     quantity: optionalWorkbenchInteger(input.quantity, 1, '商品数量'),
     quantitySource: optionalWorkbenchEnum(
@@ -687,6 +687,17 @@ function optionalWorkbenchText(value: unknown, maximumLength: number): string | 
   }
   const normalized = value.normalize('NFKC').trim();
   return normalized || undefined;
+}
+
+function optionalWorkbenchSourceText(
+  value: unknown,
+  maximumLength: number,
+): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > maximumLength) {
+    throw new Error('商品工作台原始文本格式无效');
+  }
+  return value.trim() || undefined;
 }
 
 function optionalWorkbenchDate(value: unknown): string | undefined {
