@@ -261,6 +261,13 @@ describe('多套表格模板', () => {
         labels: { product: '商品', specification: '商品1', quantity: '数量' },
       }],
     })).toThrow(/基础表头.*未来序号.*请修改/u);
+    expect(() => application.createTableTemplate({
+      ...base,
+      columns: [{
+        ...group,
+        labels: { product: '数量', specification: '款式或规格', quantity: '数量' },
+      }],
+    })).toThrow(/基础表头.*未来序号.*请修改/u);
     expect(application.listTableTemplates()).toEqual([]);
   });
 

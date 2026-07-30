@@ -98,8 +98,8 @@ import type {
 } from '../core/table-templates';
 import {
   normalizeCreateTableTemplateInput,
+  normalizeStoredTableTemplateInput,
   normalizeUpdateTableTemplateInput,
-  assertOrderTableLayoutFutureHeaderSafety,
   isDynamicProductTableGroup,
   tableTemplateNameKey,
 } from '../core/table-templates';
@@ -1411,9 +1411,6 @@ export class LocalApplication {
       normalizeCreateTableTemplateInput(input, definitions),
       definitions,
     );
-    if (normalized.granularity === 'order') {
-      assertOrderTableLayoutFutureHeaderSafety(normalized.columns);
-    }
     const now = new Date().toISOString();
     const template: TableTemplate = {
       id: randomUUID(),
@@ -1464,9 +1461,6 @@ export class LocalApplication {
       ...normalizedInput,
       granularity: existing.granularity,
     } as CreateTableTemplateInput, definitions);
-    if (normalized.granularity === 'order') {
-      assertOrderTableLayoutFutureHeaderSafety(normalized.columns);
-    }
     const template: TableTemplate = {
       id: existing.id,
       ...normalized,
@@ -4086,7 +4080,7 @@ function parseTableTemplateRow(
     throw new Error('数据库表格模板配置包含未知属性');
   }
   const normalized = normalizeLegacyOrderItemDefaultDisplayNames(normalizeTableTemplateCustomFilter(
-    normalizeCreateTableTemplateInput({
+    normalizeStoredTableTemplateInput({
       name: asString(row.name),
       granularity: parseTableTemplateGranularity(row.granularity),
       columns: config.columns,

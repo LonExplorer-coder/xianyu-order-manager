@@ -322,6 +322,21 @@ export function normalizeCreateTableTemplateInput(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[],
 ): CreateTableTemplateInput {
+  return normalizeTableTemplateInput(input, customFieldDefinitions, true);
+}
+
+export function normalizeStoredTableTemplateInput(
+  input: unknown,
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+): CreateTableTemplateInput {
+  return normalizeTableTemplateInput(input, customFieldDefinitions, false);
+}
+
+function normalizeTableTemplateInput(
+  input: unknown,
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+  enforceFutureHeaderSafety: boolean,
+): CreateTableTemplateInput {
   const record = strictRecord(
     input,
     '表格模板',
@@ -332,6 +347,9 @@ export function normalizeCreateTableTemplateInput(
   const columns = normalizeColumns(record.columns, granularity, customFieldDefinitions);
   const query = normalizeQuery(record.query, granularity, customFieldDefinitions);
   if (granularity === 'order') {
+    if (enforceFutureHeaderSafety) {
+      assertOrderTableLayoutFutureHeaderSafety(columns);
+    }
     return { name, granularity, columns, query: query as OrderWorkbenchQuery };
   }
   return {
@@ -400,7 +418,11 @@ export function assertOrderTableLayoutFutureHeaderSafety(
     for (let rightIndex = leftIndex + 1; rightIndex < labels.length; rightIndex += 1) {
       const left = labels[leftIndex];
       const right = labels[rightIndex];
-      if (hasPositiveIntegerSuffix(left, right) || hasPositiveIntegerSuffix(right, left)) {
+      if (
+        left === right ||
+        hasPositiveIntegerSuffix(left, right) ||
+        hasPositiveIntegerSuffix(right, left)
+      ) {
         throw new Error(
           `动态商品列组的基础表头“${left}”与“${right}”会在未来序号中冲突；` +
           '请修改其中一个基础表头后重试',
@@ -678,10 +700,6 @@ function normalizeColumns(
           quantity: nonEmptyText(labels.quantity, '数量基础表头', MAX_DISPLAY_NAME_LENGTH),
         },
       };
-      rejectDuplicates(
-        Object.values(normalized.labels),
-        '动态商品列组的三个基础表头不能重复',
-      );
       return normalized;
     }
     const record = strictRecord(entry, '表格模板列', ['field', 'displayName']);

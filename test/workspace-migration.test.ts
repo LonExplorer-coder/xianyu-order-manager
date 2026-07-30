@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 
 import type { Recognizer } from '../src/core/contracts';
+import { createOrderTableProjectionPlan } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
@@ -753,12 +754,31 @@ describe('数据库升级', () => {
           labels: { product: '商品', specification: '款式或规格', quantity: '数量' },
         }],
       },
+      {
+        id: 'template-conflicting-summary-v10',
+        granularity: 'order',
+        columns: [{
+          kind: 'dynamic_product_group',
+          labels: { product: '数量', specification: '款式或规格', quantity: '数量' },
+        }],
+      },
     ]);
-    expect(application.queryOrders({ productText: '旧商品第二款' }).orders[0]?.items)
+    const filteredOrders = application.queryOrders({ productText: '旧商品第二款' }).orders;
+    expect(filteredOrders[0]?.items)
       .toEqual([
         { sourceTitle: '旧商品', sourceSpec: '旧规格', quantity: 1 },
         { sourceTitle: '旧商品第二款', sourceSpec: '蓝色', quantity: 2 },
       ]);
+    const conflictingTemplate = migrated.find(({ id }) => (
+      id === 'template-conflicting-summary-v10'
+    ));
+    if (!conflictingTemplate || conflictingTemplate.granularity !== 'order') {
+      throw new Error('缺少已迁移的冲突模板');
+    }
+    expect(() => createOrderTableProjectionPlan(
+      conflictingTemplate.columns,
+      filteredOrders,
+    )).toThrow(/表头“数量1”.*冲突.*请修改/u);
     expect(recognitionCalls).toBe(0);
     application.close();
 
@@ -1083,6 +1103,20 @@ function seedVersion10ProductSummaryTemplates(dataDirectory: string): void {
       }),
       '2026-07-30T05:00:00.000Z',
       '2026-07-30T05:00:00.000Z',
+    );
+    insertTemplate.run(
+      'template-conflicting-summary-v10',
+      '旧冲突商品列',
+      '旧冲突商品列',
+      'order',
+      JSON.stringify({
+        columns: [
+          { field: { kind: 'builtin', key: 'product_summary' }, displayName: '数量' },
+        ],
+        query: {},
+      }),
+      '2026-07-30T06:00:00.000Z',
+      '2026-07-30T06:00:00.000Z',
     );
     const insertDependency = database.prepare(`
       INSERT INTO table_template_custom_field_dependencies (
