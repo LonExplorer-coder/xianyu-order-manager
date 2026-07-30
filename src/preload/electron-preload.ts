@@ -45,6 +45,7 @@ const api: DesktopApi = {
   queryOrderItems: (query, customFieldDefinitionIds) => (
     ipcRenderer.invoke('order-items:query', query, customFieldDefinitionIds)
   ),
+  exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,

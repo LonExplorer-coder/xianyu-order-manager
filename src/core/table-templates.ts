@@ -17,6 +17,7 @@ export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[num
 
 export type OrderBuiltinTableFieldId =
   | 'order_number'
+  | 'alipay_transaction_number'
   | 'platform'
   | 'seller_account'
   | 'buyer_nickname'
@@ -122,6 +123,7 @@ type FixedTableField = AvailableTableField & {
 
 const ORDER_BUILTIN_FIELDS = [
   fixedField('order', 'builtin', 'order_number', '订单号', 'text'),
+  fixedField('order', 'builtin', 'alipay_transaction_number', '支付宝交易号', 'text'),
   fixedField('order', 'builtin', 'platform', '平台', 'text'),
   fixedField('order', 'builtin', 'seller_account', '卖家账号', 'text'),
   fixedField('order', 'builtin', 'buyer_nickname', '买家昵称', 'text'),
@@ -336,6 +338,7 @@ export function projectOrderTableCell(
   }
   switch (reference.key) {
     case 'order_number': return order.orderNumber;
+    case 'alipay_transaction_number': return order.alipayTransactionNumber;
     case 'platform': return order.platform;
     case 'seller_account': return order.sellerAccount;
     case 'buyer_nickname': return order.buyerNickname;

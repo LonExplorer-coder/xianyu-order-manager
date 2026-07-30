@@ -39,6 +39,7 @@ import {
   orderReviewIssueLabel,
   type OrderIntakeSettingsView,
 } from '../core/order-intake';
+import type { OrderExportInput, OrderExportResult } from '../core/order-export';
 import {
   isActiveRecognitionBatchItemStatus,
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
@@ -67,6 +68,7 @@ import {
 } from '../core/table-templates';
 import { CustomFieldInput } from './CustomFieldInput';
 import { CustomFieldsWorkspace } from './CustomFieldsWorkspace';
+import { OrderExportDialog } from './OrderExportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 
 export type AppProps = {
@@ -1092,6 +1094,7 @@ export function App({ api }: AppProps) {
         onClearTableTemplate={clearTableTemplate}
         onManageTableTemplates={() => setActivePage('templates')}
         onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
+        onExport={(input) => api.exportOrders(input)}
       />
     );
   }
@@ -1310,6 +1313,7 @@ type OrdersWorkspaceProps = {
   onClearTableTemplate: (granularity: TableTemplate['granularity']) => void;
   onManageTableTemplates: () => void;
   onSaveActiveTableTemplate: () => void;
+  onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
 };
 
 function OrdersWorkspace({
@@ -1347,13 +1351,35 @@ function OrdersWorkspace({
   onClearTableTemplate,
   onManageTableTemplates,
   onSaveActiveTableTemplate,
+  onExport,
 }: OrdersWorkspaceProps) {
   const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
     query.customFieldFilter?.definitionId ?? '',
   );
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(() => new Set());
+  const [exportPreview, setExportPreview] = useState<{
+    kind: OrderExportInput['scope']['kind'];
+    orders: OrderSummary[];
+  } | null>(null);
+  const [exportFeedback, setExportFeedback] = useState('');
+  const selectAllOrdersRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
   }, [query.customFieldFilter?.definitionId]);
+  useEffect(() => {
+    const visibleIds = new Set(orders.map(({ id }) => id));
+    setSelectedOrderIds((current) => {
+      const retained = new Set([...current].filter((id) => visibleIds.has(id)));
+      return retained.size === current.size ? current : retained;
+    });
+  }, [orders]);
+  const selectedOrders = orders.filter(({ id }) => selectedOrderIds.has(id));
+  useEffect(() => {
+    if (selectAllOrdersRef.current) {
+      selectAllOrdersRef.current.indeterminate = selectedOrders.length > 0 &&
+        selectedOrders.length < orders.length;
+    }
+  }, [orders.length, selectedOrders.length]);
   const latestBatch = batches[0];
   const patchQuery = (patch: Partial<OrderWorkbenchQuery>) => onQueryChange({ ...query, ...patch });
   const orderCustomFields = customFieldDefinitions.filter(
@@ -1530,7 +1556,9 @@ function OrdersWorkspace({
           />
         </label>
         <span className="order-query__result" role="status" aria-live="polite">
-          {queryLoading ? '正在查询…' : `显示 ${orders.length} / ${allLifecycleOrderCount} 笔`}
+          {exportFeedback || (queryLoading
+            ? '正在查询…'
+            : `显示 ${orders.length} / ${allLifecycleOrderCount} 笔`)}
         </span>
         {hasActiveQuery && (
           <button
@@ -1793,23 +1821,54 @@ function OrdersWorkspace({
         </div>
       </section>
 
+      <div className="table-toolbar" aria-label="订单表概况">
+        <div className="table-toolbar__summary">
+          <span><strong>{orders.length}</strong> 当前结果</span>
+          <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
+          <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
+        </div>
+        <button
+          className="button button--quiet table-toolbar__export"
+          type="button"
+          disabled={queryLoading || orders.length === 0}
+          onClick={() => {
+            setExportFeedback('');
+            setExportPreview({
+              kind: selectedOrders.length > 0 ? 'selected_orders' : 'current_result',
+              orders: selectedOrders.length > 0 ? selectedOrders : orders,
+            });
+          }}
+        >
+          {selectedOrders.length > 0
+            ? `导出已选 ${selectedOrders.length} 笔`
+            : `导出当前结果 ${orders.length} 笔`}
+        </button>
+      </div>
+
       {orders.length === 0 ? (
         <div className="order-no-results">
           <h2>没有符合条件的订单</h2>
           <p>试试放宽日期或状态条件，也可一键清除全部筛选。</p>
         </div>
       ) : (
-        <>
-          <div className="table-toolbar" aria-label="订单表概况">
-            <span><strong>{orders.length}</strong> 当前结果</span>
-            <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
-            <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
-          </div>
-
-          <div className="table-frame">
+        <div className="table-frame">
         <table aria-label="原始订单">
           <thead>
             <tr>
+              <th className="order-selection-cell order-selection-cell--header" scope="col">
+                <input
+                  ref={selectAllOrdersRef}
+                  className="order-selection-checkbox"
+                  type="checkbox"
+                  aria-label="选择当前结果全部订单"
+                  checked={orders.length > 0 && selectedOrders.length === orders.length}
+                  onChange={(event) => {
+                    setSelectedOrderIds(event.target.checked
+                      ? new Set(orders.map(({ id }) => id))
+                      : new Set());
+                  }}
+                />
+              </th>
               {orderColumns.map((column) => (
                 <th key={fieldReferenceKey(column.field)}>{column.displayName}</th>
               ))}
@@ -1818,7 +1877,23 @@ function OrdersWorkspace({
           </thead>
           <tbody>
             {orders.map((order) => (
-              <tr key={order.id}>
+              <tr className={selectedOrderIds.has(order.id) ? 'is-selected' : undefined} key={order.id}>
+                <td className="order-selection-cell">
+                  <input
+                    className="order-selection-checkbox"
+                    type="checkbox"
+                    aria-label={`选择订单 ${order.orderNumber}`}
+                    checked={selectedOrderIds.has(order.id)}
+                    onChange={(event) => {
+                      setSelectedOrderIds((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) next.add(order.id);
+                        else next.delete(order.id);
+                        return next;
+                      });
+                    }}
+                  />
+                </td>
                 {orderColumns.map((column) => {
                   const descriptor = findTableFieldDescriptor(orderFieldCatalog, column.field);
                   const value = projectOrderTableCell(order, column.field, customFieldValueIndex);
@@ -1856,8 +1931,27 @@ function OrdersWorkspace({
             ))}
           </tbody>
         </table>
-          </div>
-        </>
+        </div>
+      )}
+
+      {exportPreview && (
+        <OrderExportDialog
+          scopeKind={exportPreview.kind}
+          orderIds={exportPreview.orders.map(({ id }) => id)}
+          orderItemCount={exportPreview.orders.reduce(
+            (total, order) => total + (order.items?.length ?? 0),
+            0,
+          )}
+          templates={tableTemplates}
+          onExport={onExport}
+          onClose={() => setExportPreview(null)}
+          onSaved={(result) => {
+            setExportFeedback(
+              `已导出 ${result.orderCount} 笔订单、${result.orderItemCount} 条商品明细：${result.fileName}`,
+            );
+            setExportPreview(null);
+          }}
+        />
       )}
         </div>
       ) : (

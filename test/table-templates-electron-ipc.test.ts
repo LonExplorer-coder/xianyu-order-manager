@@ -11,6 +11,7 @@ import { Preferences } from '../src/main/preferences';
 
 const electronBoundary = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
+  showSaveDialog: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -23,8 +24,15 @@ vi.mock('electron', () => ({
     public static getAllWindows(): unknown[] {
       return [];
     }
+
+    public static fromWebContents(): unknown {
+      return { isDestroyed: () => false };
+    }
   },
-  dialog: { showOpenDialog: vi.fn() },
+  dialog: {
+    showOpenDialog: vi.fn(),
+    showSaveDialog: electronBoundary.showSaveDialog,
+  },
   ipcMain: {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
       electronBoundary.handlers.set(channel, handler);
@@ -57,6 +65,7 @@ const unusedOcrSettings = new OcrSettingsService(
 
 afterEach(() => {
   electronBoundary.handlers.clear();
+  electronBoundary.showSaveDialog.mockReset();
   for (const session of sessions.splice(0)) session.close();
 });
 
@@ -135,10 +144,53 @@ describe('表格模板 Electron IPC', () => {
     await invoke('table-templates:delete', created.id);
     expect(await invoke('table-templates:list')).toEqual([]);
   });
+
+  it('导出通道严格校验范围和模板，并把保存窗口取消视为正常结果', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-export-ipc-'));
+    const session = new DesktopSession(
+      new Preferences(join(testRoot, '启动配置')),
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(testRoot, '订单数据'));
+    registerIpcHandlers(session);
+
+    const valid = {
+      scope: { kind: 'current_result', orderIds: ['order-1'] },
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      masking: 'default',
+    };
+    await expect(invoke('orders:export', { ...valid, destinationPath: '/tmp/leak.xlsx' }))
+      .rejects.toThrow(/未知属性/);
+    await expect(invoke('orders:export', {
+      ...valid,
+      scope: { kind: 'current_result', orderIds: [] },
+    })).rejects.toThrow(/至少选择/);
+    await expect(invoke('orders:export', {
+      ...valid,
+      scope: { kind: 'selected_orders', orderIds: ['order-1', 'order-1'] },
+    })).rejects.toThrow(/重复/);
+    await expect(invoke('orders:export', { ...valid, orderTemplateId: 42 }))
+      .rejects.toThrow(/模板/);
+    await expect(invoke('orders:export', { ...valid, masking: 'none' }))
+      .rejects.toThrow(/脱敏/);
+
+    electronBoundary.showSaveDialog.mockResolvedValue({ canceled: true, filePath: '' });
+    await expect(invoke('orders:export', valid)).resolves.toEqual({ kind: 'cancelled' });
+    expect(electronBoundary.showSaveDialog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: '导出订单 Excel',
+        filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      }),
+    );
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
   const handler = electronBoundary.handlers.get(channel);
   if (!handler) throw new Error(`IPC 通道未注册：${channel}`);
-  return handler({}, ...args);
+  return handler({ sender: {} }, ...args);
 }

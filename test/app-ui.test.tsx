@@ -138,6 +138,7 @@ function orderSummary(
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
+    alipayTransactionNumber: order.alipayTransactionNumber,
     buyerNickname: order.buyerNickname,
     recipient: order.recipient,
     phone: order.phone,
@@ -235,6 +236,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
+    exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
@@ -3251,7 +3253,7 @@ describe('订单管理工作台', () => {
 
     await waitFor(() => expect(queryOrders).toHaveBeenCalledWith(template.query, [noteField.id]));
     const table = await screen.findByRole('table', { name: '原始订单' });
-    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+    expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
       .toEqual(['跟单说明', '实付', '平台单号']);
     const row = within(table).getByRole('button', {
       name: `查看订单 ${summary.orderNumber}`,
@@ -3273,7 +3275,7 @@ describe('订单管理工作台', () => {
       sortDirection: 'desc',
     }, []));
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
-    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+    expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
       .toEqual(['订单号', '平台', '卖家账号']);
   });
 
@@ -3361,7 +3363,7 @@ describe('订单管理工作台', () => {
     expect(deleteTableTemplate).toHaveBeenCalledWith(template.id);
     await user.click(screen.getByRole('button', { name: '订单' }));
     const table = await screen.findByRole('table', { name: '原始订单' });
-    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+    expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
       .toEqual(['订单号', '平台', '卖家账号']);
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
   });
@@ -3526,5 +3528,141 @@ describe('订单管理工作台', () => {
       .toEqual(['关联单号', '货位', '行金额']);
     expect(within(table).getByText('A-01')).toBeVisible();
     expect(within(table).getByText('¥16.00')).toBeVisible();
+  });
+
+  it('导出前展示当前结果数量、两种模板和默认脱敏摘要，确认后保存两表工作簿', async () => {
+    const user = userEvent.setup();
+    const first = orderSummary();
+    const second = orderSummary(confirmedOrder, {
+      id: 'order-2',
+      orderNumber: 'XY-TEST-20260727-0002',
+      items: [
+        { sourceTitle: '测试商品 B', sourceSpec: '大号', quantity: 1 },
+        { sourceTitle: '测试商品 C', sourceSpec: '小号', quantity: 2 },
+      ],
+      itemCount: 3,
+    });
+    const orderTemplate: TableTemplate = {
+      id: 'template-export-orders',
+      name: '财务订单表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+        { field: { kind: 'computed', key: 'order_total' }, displayName: '实付' },
+      ],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const itemTemplate: TableTemplate = {
+      id: 'template-export-items',
+      name: '拣货商品表',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
+      ],
+      query: {},
+      createdAt: orderTemplate.createdAt,
+      updatedAt: orderTemplate.updatedAt,
+    };
+    const exportOrders = vi.fn().mockResolvedValue({
+      kind: 'saved',
+      fileName: '闲鱼订单-20260731.xlsx',
+      filePath: 'D:\\导出\\闲鱼订单-20260731.xlsx',
+      orderCount: 2,
+      orderItemCount: 3,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [first, second],
+      }),
+      listOrders: vi.fn().mockResolvedValue([first, second]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([first, second])),
+      listTableTemplates: vi.fn().mockResolvedValue([orderTemplate, itemTemplate]),
+      exportOrders,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '导出当前结果 2 笔' }));
+
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(within(dialog).getByText('2 笔订单')).toBeVisible();
+    expect(within(dialog).getByText('3 条商品明细')).toBeVisible();
+    expect(within(dialog).getByText('收件人仅保留姓氏')).toBeVisible();
+    expect(within(dialog).getByText('手机号保留前 3 后 4 位')).toBeVisible();
+    expect(within(dialog).getByText('地址仅保留省、市、区县')).toBeVisible();
+    expect(within(dialog).getByText('买家昵称仅保留首尾字符')).toBeVisible();
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '订单总表模板' }),
+      orderTemplate.id,
+    );
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '商品明细表模板' }),
+      itemTemplate.id,
+    );
+    await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
+
+    await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({
+      scope: {
+        kind: 'current_result',
+        orderIds: [first.id, second.id],
+      },
+      orderTemplateId: orderTemplate.id,
+      orderItemTemplateId: itemTemplate.id,
+      masking: 'default',
+    }));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '已导出 2 笔订单、3 条商品明细：闲鱼订单-20260731.xlsx',
+    );
+    expect(screen.queryByRole('dialog', { name: '导出订单 Excel' })).not.toBeInTheDocument();
+  });
+
+  it('勾选订单后仅预览并导出所选订单及其商品明细', async () => {
+    const user = userEvent.setup();
+    const first = orderSummary();
+    const second = orderSummary(confirmedOrder, {
+      id: 'order-selected-export',
+      orderNumber: 'XY-TEST-20260727-SELECTED',
+      items: [
+        { sourceTitle: '所选商品 A', sourceSpec: '大号', quantity: 1 },
+        { sourceTitle: '所选商品 B', sourceSpec: '小号', quantity: 2 },
+      ],
+      itemCount: 3,
+    });
+    const exportOrders = vi.fn().mockResolvedValue({ kind: 'cancelled' });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [first, second],
+      }),
+      listOrders: vi.fn().mockResolvedValue([first, second]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([first, second])),
+      exportOrders,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('checkbox', {
+      name: `选择订单 ${second.orderNumber}`,
+    }));
+    await user.click(screen.getByRole('button', { name: '导出已选 1 笔' }));
+
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(within(dialog).getByText('1 笔订单')).toBeVisible();
+    expect(within(dialog).getByText('2 条商品明细')).toBeVisible();
+    await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
+
+    await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({
+      scope: {
+        kind: 'selected_orders',
+        orderIds: [second.id],
+      },
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }));
   });
 });

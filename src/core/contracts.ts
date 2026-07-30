@@ -203,6 +203,7 @@ export type OrderSummary = {
   platform: OrderPlatform;
   sellerAccount: string;
   orderNumber: string;
+  alipayTransactionNumber: string;
   buyerNickname: string;
   recipient: string;
   phone: string;

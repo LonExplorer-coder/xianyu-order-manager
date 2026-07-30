@@ -31,6 +31,7 @@ import type {
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
 } from './order-workbench';
+import type { OrderExportInput, OrderExportResult } from './order-export';
 import type {
   CreateTableTemplateInput,
   TableTemplate,
@@ -76,6 +77,7 @@ export interface DesktopApi {
     query: OrderItemWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
   ): Promise<OrderItemWorkbenchResult>;
+  exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   listCustomFieldDefinitions(): Promise<CustomFieldDefinition[]>;

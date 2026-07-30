@@ -295,6 +295,7 @@ describe('表格模板核心契约', () => {
       platform: 'xianyu',
       sellerAccount: '主账号',
       orderNumber: 'XY-001',
+      alipayTransactionNumber: 'ALI-XY-001',
       buyerNickname: '买***家',
       recipient: '林海棠',
       phone: '13800000001',

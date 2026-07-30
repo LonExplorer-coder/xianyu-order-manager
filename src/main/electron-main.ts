@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 
 import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
 import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
@@ -17,6 +17,7 @@ import type {
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
+import { normalizeOrderExportInput } from '../core/order-export';
 import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
@@ -179,6 +180,26 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       parseProjectedCustomFieldDefinitionIds(definitionIds),
     )
   ));
+  ipcMain.handle('orders:export', async (event, input: unknown) => {
+    const normalized = normalizeOrderExportInput(input);
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showSaveDialog(window, {
+      title: '导出订单 Excel',
+      buttonLabel: '保存 Excel',
+      defaultPath: defaultOrderExportFileName(new Date()),
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      properties: ['showOverwriteConfirmation', 'createDirectory'],
+    });
+    if (selection.canceled || !selection.filePath) return { kind: 'cancelled' as const };
+    const filePath = xlsxFilePath(selection.filePath);
+    const outcome = await desktopSession.exportOrdersToWorkbook(normalized, filePath);
+    return {
+      kind: 'saved' as const,
+      fileName: basename(filePath),
+      filePath,
+      ...outcome,
+    };
+  });
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('custom-fields:list', () => (
     desktopSession.listCustomFieldDefinitions()
@@ -677,6 +698,15 @@ function parseWorkflowId(value: unknown, label: string): string {
 function requireWindow(): BrowserWindow {
   if (!mainWindow || mainWindow.isDestroyed()) throw new Error('应用窗口尚未就绪');
   return mainWindow;
+}
+
+function defaultOrderExportFileName(now: Date): string {
+  const part = (value: number): string => String(value).padStart(2, '0');
+  return `闲鱼订单-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
+}
+
+function xlsxFilePath(value: string): string {
+  return extname(value).toLowerCase() === '.xlsx' ? value : `${value}.xlsx`;
 }
 
 void app.whenReady().then(async () => {

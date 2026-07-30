@@ -206,6 +206,7 @@ function summary(order: OriginalOrder = confirmedOrder): OrderSummary {
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
+    alipayTransactionNumber: order.alipayTransactionNumber,
     buyerNickname: order.buyerNickname,
     recipient: order.recipient,
     phone: order.phone,

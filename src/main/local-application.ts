@@ -71,9 +71,19 @@ import {
   isRecognitionBatchItemStatus,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
+import {
+  DEFAULT_ORDER_EXPORT_COLUMNS,
+  DEFAULT_ORDER_ITEM_EXPORT_COLUMNS,
+  normalizeOrderExportInput,
+  normalizeOrderExportOrderIds,
+  type OrderExportAddressRegion,
+  type OrderExportInput,
+  type OrderExportWriteResult,
+} from '../core/order-export';
 import type {
   CreateTableTemplateInput,
   TableTemplate,
+  TableTemplateColumn,
   TableTemplateGranularity,
   UpdateTableTemplateInput,
 } from '../core/table-templates';
@@ -82,6 +92,10 @@ import {
   normalizeUpdateTableTemplateInput,
   tableTemplateNameKey,
 } from '../core/table-templates';
+import {
+  createOrderExportWorkbookPlan,
+  writeOrderExportWorkbook,
+} from './order-export-workbook';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -1468,6 +1482,65 @@ export class LocalApplication {
     if (result.changes !== 1) throw new Error('未找到表格模板');
   }
 
+  public async exportOrdersToWorkbook(
+    input: OrderExportInput,
+    destinationPath: string,
+  ): Promise<OrderExportWriteResult> {
+    const normalizedInput = normalizeOrderExportInput(input);
+    const orderIds = normalizedInput.scope.orderIds;
+    if (typeof destinationPath !== 'string' || !destinationPath.trim()) {
+      throw new Error('订单导出文件路径无效');
+    }
+
+    const orderTemplate = normalizedInput.orderTemplateId === null
+      ? null
+      : this.getTableTemplate(normalizedInput.orderTemplateId);
+    const orderItemTemplate = normalizedInput.orderItemTemplateId === null
+      ? null
+      : this.getTableTemplate(normalizedInput.orderItemTemplateId);
+    if (orderTemplate && orderTemplate.granularity !== 'order') {
+      throw new Error('订单总表必须使用订单粒度模板');
+    }
+    if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
+      throw new Error('商品明细表必须使用商品明细粒度模板');
+    }
+    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS;
+    const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
+    const orderCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderColumns);
+    const orderItemCustomDefinitionIds = customFieldDefinitionIdsForColumns(orderItemColumns);
+
+    const orderResult = this.queryOrders(
+      { lifecycleStatus: 'all' },
+      orderCustomDefinitionIds,
+      orderIds,
+    );
+    if (orderResult.orders.length !== orderIds.length) {
+      throw new Error('部分订单已变化，请刷新订单表后重新导出');
+    }
+    const orderItemResult = this.queryOrderItems(
+      {},
+      orderItemCustomDefinitionIds,
+      orderIds,
+      true,
+    );
+    const addressRegions = this.orderExportAddressRegions(orderIds);
+    const plan = createOrderExportWorkbookPlan({
+      orders: orderResult.orders,
+      orderItems: orderItemResult.items,
+      orderColumns,
+      orderItemColumns,
+      customFieldDefinitions: this.listCustomFieldDefinitions(),
+      orderCustomFieldValues: orderResult.customFieldValues,
+      orderItemCustomFieldValues: orderItemResult.customFieldValues,
+      addressRegions,
+    });
+    await writeOrderExportWorkbook(destinationPath, plan);
+    return {
+      orderCount: orderResult.orders.length,
+      orderItemCount: orderItemResult.items.length,
+    };
+  }
+
   private getTableTemplate(templateId: string): TableTemplate {
     const workspace = this.requireWorkspace();
     const row = workspace.database
@@ -1477,6 +1550,25 @@ export class LocalApplication {
     const template = parseTableTemplateRow(row, this.listCustomFieldDefinitions());
     this.assertTableTemplateDependenciesMatch(template);
     return template;
+  }
+
+  private orderExportAddressRegions(
+    orderIds: readonly string[],
+  ): ReadonlyMap<string, OrderExportAddressRegion> {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT id, province, city, district
+      FROM original_orders
+      WHERE id IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
+    return new Map(rows.map((row) => [
+      asString(row.id),
+      {
+        province: asString(row.province),
+        city: asString(row.city),
+        district: asString(row.district),
+      },
+    ]));
   }
 
   private assertTableTemplateNameAvailable(
@@ -2267,6 +2359,7 @@ export class LocalApplication {
   public queryOrders(
     query: OrderWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
+    scopedOrderIds?: readonly string[],
   ): OrderWorkbenchResult {
     const workspace = this.requireWorkspace();
     const where = [
@@ -2277,6 +2370,13 @@ export class LocalApplication {
     const parameters: Array<string | number> = query.lifecycleStatus === 'all'
       ? []
       : [query.lifecycleStatus ?? 'active'];
+    const normalizedScopedOrderIds = scopedOrderIds === undefined
+      ? undefined
+      : normalizeOrderExportOrderIds(scopedOrderIds);
+    if (normalizedScopedOrderIds) {
+      where.push('orders.id IN (SELECT value FROM json_each(?))');
+      parameters.push(JSON.stringify(normalizedScopedOrderIds));
+    }
     const text = query.text?.normalize('NFKC').trim();
     if (text) {
       const pattern = containsLikePattern(text);
@@ -2430,6 +2530,7 @@ export class LocalApplication {
           orders.platform,
           orders.seller_account,
           orders.platform_order_number,
+          orders.alipay_transaction_number,
           orders.buyer_nickname,
           orders.recipient,
           orders.phone,
@@ -2471,6 +2572,7 @@ export class LocalApplication {
       platform: asOrderPlatform(row.platform),
       sellerAccount: asString(row.seller_account),
       orderNumber: asString(row.platform_order_number),
+      alipayTransactionNumber: asString(row.alipay_transaction_number),
       buyerNickname: asString(row.buyer_nickname),
       recipient: asString(row.recipient),
       phone: asString(row.phone),
@@ -2490,6 +2592,15 @@ export class LocalApplication {
       createdAt: asString(row.created_at),
       items: parseOrderSummaryItems(asString(row.items_json)),
     }));
+    if (normalizedScopedOrderIds) {
+      const positionById = new Map(
+        normalizedScopedOrderIds.map((id, index) => [id, index]),
+      );
+      orders.sort((left, right) => (
+        (positionById.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+        (positionById.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      ));
+    }
 
     const counts = workspace.database.prepare(`
       SELECT
@@ -2531,10 +2642,19 @@ export class LocalApplication {
   public queryOrderItems(
     query: OrderItemWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
+    scopedOrderIds?: readonly string[],
+    includeAllLifecycles = false,
   ): OrderItemWorkbenchResult {
     const workspace = this.requireWorkspace();
-    const where = ["orders.lifecycle_status = 'active'"];
+    const where = [includeAllLifecycles ? '1 = 1' : "orders.lifecycle_status = 'active'"];
     const parameters: Array<string | number> = [];
+    const normalizedScopedOrderIds = scopedOrderIds === undefined
+      ? undefined
+      : normalizeOrderExportOrderIds(scopedOrderIds);
+    if (normalizedScopedOrderIds) {
+      where.push('orders.id IN (SELECT value FROM json_each(?))');
+      parameters.push(JSON.stringify(normalizedScopedOrderIds));
+    }
     if (query.customFieldFilter) {
       const definition = this.getCustomFieldDefinition(
         query.customFieldFilter.definitionId,
@@ -2624,6 +2744,17 @@ export class LocalApplication {
         quantityInferred: asNumber(row.quantity_inferred) === 1,
         subtotalCents: asNumber(row.subtotal_cents),
       }));
+    if (normalizedScopedOrderIds) {
+      const positionByOrderId = new Map(
+        normalizedScopedOrderIds.map((id, index) => [id, index]),
+      );
+      items.sort((left, right) => (
+        (positionByOrderId.get(left.orderId) ?? Number.MAX_SAFE_INTEGER) -
+          (positionByOrderId.get(right.orderId) ?? Number.MAX_SAFE_INTEGER) ||
+        left.position - right.position ||
+        left.id.localeCompare(right.id)
+      ));
+    }
     return {
       items,
       customFieldValues: this.listWorkbenchCustomFieldValues(
@@ -3842,6 +3973,14 @@ function normalizeTableTemplateId(value: unknown): string {
     throw new Error('表格模板 ID 格式无效');
   }
   return normalized;
+}
+
+function customFieldDefinitionIdsForColumns(
+  columns: readonly TableTemplateColumn[],
+): string[] {
+  return columns.flatMap(({ field }) => (
+    field.kind === 'custom' ? [field.definitionId] : []
+  ));
 }
 
 function parseCustomFieldDefinitionValueMetadata(row: SqlRow): {

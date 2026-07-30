@@ -47,6 +47,10 @@ import type {
   OrderWorkbenchResult,
 } from '../core/order-workbench';
 import type {
+  OrderExportInput,
+  OrderExportWriteResult,
+} from '../core/order-export';
+import type {
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -344,6 +348,13 @@ export class DesktopSession {
     customFieldDefinitionIds?: readonly string[],
   ): OrderItemWorkbenchResult {
     return this.requireApplication().queryOrderItems(query, customFieldDefinitionIds);
+  }
+
+  public exportOrdersToWorkbook(
+    input: OrderExportInput,
+    destinationPath: string,
+  ): Promise<OrderExportWriteResult> {
+    return this.requireApplication().exportOrdersToWorkbook(input, destinationPath);
   }
 
   public getOrder(orderId: string): OrderDetails {
