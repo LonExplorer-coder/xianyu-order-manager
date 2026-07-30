@@ -44,6 +44,7 @@ export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateLayoutItem[] = [
   { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
   { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
   { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
+  { field: { kind: 'builtin', key: 'note' }, displayName: '备注' },
   { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
   { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
   { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },

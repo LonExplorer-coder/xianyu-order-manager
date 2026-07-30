@@ -361,6 +361,12 @@ export class DesktopSession {
     return this.requireApplication().getOrder(orderId);
   }
 
+  public updateOrder(input: unknown): OrderDetails {
+    const details = this.requireApplication().confirmOrderEdit(input);
+    this.refreshOrders();
+    return details;
+  }
+
   public listCustomFieldDefinitions(): CustomFieldDefinition[] {
     return this.requireApplication().listCustomFieldDefinitions();
   }

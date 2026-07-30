@@ -202,6 +202,7 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     };
   });
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
+  ipcMain.handle('orders:update', (_event, input: unknown) => desktopSession.updateOrder(input));
   ipcMain.handle('custom-fields:list', () => (
     desktopSession.listCustomFieldDefinitions()
   ));

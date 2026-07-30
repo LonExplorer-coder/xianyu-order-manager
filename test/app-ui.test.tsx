@@ -245,6 +245,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
+    updateOrder: vi.fn(),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
@@ -1558,6 +1559,341 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('region', { name: '订单状态' }))
       .toHaveTextContent('当前来源识别状态重复跳过');
     expect(screen.queryByText(/已在本次来源确认时修正/)).not.toBeInTheDocument();
+  });
+
+  it('从订单详情显式编辑普通字段与多商品，预览差异后才保存', async () => {
+    const user = userEvent.setup();
+    const secondItem = {
+      ...confirmedOrder.items[0],
+      id: 'item-2',
+      position: 1,
+      sourceTitle: '待删除商品',
+      sourceSpec: '旧规格',
+    };
+    const editableOrder: OriginalOrder = {
+      ...confirmedOrder,
+      note: '原备注',
+      revision: 3,
+      items: [confirmedOrder.items[0], secondItem],
+    };
+    const itemBusinessField: CustomFieldDefinition = {
+      id: 'field-item-sku',
+      name: '仓库货号',
+      granularity: 'order_item',
+      type: 'text',
+      required: true,
+      defaultValue: null,
+      options: [],
+      createdAt: editableOrder.createdAt,
+      updatedAt: editableOrder.updatedAt,
+    };
+    const editableDetails: OrderDetails = {
+      ...orderDetails,
+      order: editableOrder,
+      lastManualEditAt: null,
+      customFieldDefinitions: [itemBusinessField],
+      customFieldValues: [{
+        definitionId: itemBusinessField.id,
+        orderId: null,
+        orderItemId: secondItem.id,
+        value: 'SKU-DELETED-02',
+        createdAt: editableOrder.createdAt,
+        updatedAt: editableOrder.updatedAt,
+      }],
+    };
+    const savedOrder: OriginalOrder = {
+      ...editableOrder,
+      revision: 4,
+      sellerAccount: '更正后卖家',
+      recipient: '新收件人',
+      note: '人工核对完成',
+      items: [
+        { ...editableOrder.items[0], sourceTitle: '已修改商品' },
+        {
+          ...editableOrder.items[0],
+          id: 'item-new-saved',
+          position: 1,
+          sourceTitle: '新增商品',
+          sourceSpec: '新规格',
+          unitPriceCents: 1_250,
+          quantity: 2,
+          subtotalCents: 2_500,
+        },
+      ],
+    };
+    const savedDetails: OrderDetails = {
+      ...editableDetails,
+      order: savedOrder,
+      lastManualEditAt: '2026-07-31T08:30:00.000Z',
+    };
+    const updateOrder = vi.fn().mockResolvedValue(savedDetails);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [orderSummary(editableOrder)],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary(editableOrder)]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary(editableOrder)])),
+      getOrder: vi.fn().mockResolvedValue(editableDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+    Object.assign(api, { updateOrder });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${editableOrder.orderNumber}` }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+
+    expect(screen.getByRole('textbox', { name: '卖家账号' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: '订单号' })).toBeDisabled();
+    expect(screen.queryByRole('combobox', { name: '平台交易状态' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '履约状态' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '更正订单身份' }));
+    expect(screen.getByRole('textbox', { name: '卖家账号' })).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: '订单号' })).toBeEnabled();
+    await user.clear(screen.getByRole('textbox', { name: '卖家账号' }));
+    await user.type(screen.getByRole('textbox', { name: '卖家账号' }), '更正后卖家');
+
+    await user.clear(screen.getByRole('textbox', { name: '收件人' }));
+    await user.type(screen.getByRole('textbox', { name: '收件人' }), '新收件人');
+    await user.clear(screen.getByRole('textbox', { name: '备注' }));
+    await user.type(screen.getByRole('textbox', { name: '备注' }), '人工核对完成');
+    await user.clear(screen.getByRole('textbox', { name: '商品 1 标题' }));
+    await user.type(screen.getByRole('textbox', { name: '商品 1 标题' }), '已修改商品');
+    await user.click(screen.getByRole('button', { name: '删除商品 2' }));
+    await user.click(screen.getByRole('button', { name: '添加商品' }));
+    await user.type(screen.getByRole('textbox', { name: '商品 2 标题' }), '新增商品');
+    await user.type(screen.getByRole('textbox', { name: '商品 2 规格' }), '新规格');
+    await user.clear(screen.getByRole('spinbutton', { name: '商品 2 单价' }));
+    await user.type(screen.getByRole('spinbutton', { name: '商品 2 单价' }), '12.50');
+    await user.clear(screen.getByRole('spinbutton', { name: '商品 2 数量' }));
+    await user.type(screen.getByRole('spinbutton', { name: '商品 2 数量' }), '2');
+    await user.type(screen.getByRole('textbox', { name: '仓库货号' }), 'SKU-NEW-02');
+
+    const previewButton = screen.getByRole('button', { name: '预览修改' });
+    await user.click(previewButton);
+    const dialog = await screen.findByRole('dialog', { name: '确认订单修改' });
+    expect(updateOrder).not.toHaveBeenCalled();
+    expect(dialog).toHaveTextContent('收件人');
+    expect(dialog).toHaveTextContent('卖家账号');
+    expect(dialog).not.toHaveTextContent('sellerAccount');
+    expect(dialog).toHaveTextContent('新增商品');
+    expect(dialog).toHaveTextContent('仓库货号');
+    expect(dialog).toHaveTextContent('SKU-NEW-02');
+    expect(dialog).toHaveTextContent('SKU-DELETED-02');
+    expect(dialog).not.toHaveTextContent(itemBusinessField.id);
+
+    const returnButton = within(dialog).getByRole('button', { name: '返回继续修改' });
+    const confirmButton = within(dialog).getByRole('button', { name: '确认保存' });
+    expect(returnButton).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(confirmButton).toHaveFocus();
+    await user.tab();
+    expect(returnButton).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: '确认订单修改' })).not.toBeInTheDocument();
+    expect(previewButton).toHaveFocus();
+
+    await user.click(previewButton);
+    const reopenedDialog = await screen.findByRole('dialog', { name: '确认订单修改' });
+    await user.click(within(reopenedDialog).getByRole('button', { name: '确认保存' }));
+
+    await waitFor(() => expect(updateOrder).toHaveBeenCalledTimes(1));
+    const input = updateOrder.mock.calls[0][0];
+    expect(input).toMatchObject({
+      orderId: editableOrder.id,
+      expectedRevision: 3,
+      recipient: '新收件人',
+      note: '人工核对完成',
+      identityCorrection: {
+        platform: 'xianyu',
+        sellerAccount: '更正后卖家',
+        orderNumber: editableOrder.orderNumber,
+      },
+    });
+    expect(input).not.toHaveProperty('platformTransactionStatus');
+    expect(input).not.toHaveProperty('fulfillmentStatus');
+    expect(input.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: editableOrder.items[0].id, sourceTitle: '已修改商品' }),
+      expect.objectContaining({
+        id: null,
+        sourceTitle: '新增商品',
+        unitPriceCents: 1_250,
+        quantity: 2,
+        customFieldValues: [{ definitionId: itemBusinessField.id, value: 'SKU-NEW-02' }],
+      }),
+    ]));
+    expect(await screen.findByText('已修改')).toBeVisible();
+    expect(screen.getByText(/最近修改/)).toBeVisible();
+    expect(screen.getByRole('heading', { name: '收货信息' }).closest('section'))
+      .toHaveTextContent('新收件人');
+    expect(screen.getByRole('heading', { name: '订单信息' }).closest('section'))
+      .toHaveTextContent('人工核对完成');
+  });
+
+  it('取消订单编辑不写入，且仅剩一件商品时禁止删除', async () => {
+    const user = userEvent.setup();
+    const updateOrder = vi.fn();
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+    Object.assign(api, { updateOrder });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+    expect(screen.getByRole('button', { name: '删除商品 1' })).toBeDisabled();
+    await user.clear(screen.getByRole('textbox', { name: '买家昵称' }));
+    await user.type(screen.getByRole('textbox', { name: '买家昵称' }), '未保存买家');
+    await user.click(screen.getByRole('button', { name: '取消编辑' }));
+
+    expect(updateOrder).not.toHaveBeenCalled();
+    expect(await screen.findByRole('heading', { name: '订单详情' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: '订单信息' }).closest('section'))
+      .toHaveTextContent(confirmedOrder.buyerNickname);
+  });
+
+  it('历史订单的空金额保持为空，必须由用户明确补齐才能预览保存', async () => {
+    const user = userEvent.setup();
+    const legacyOrder: OriginalOrder = {
+      ...confirmedOrder,
+      productTotalCents: null,
+      shippingFeeCents: null,
+    };
+    const legacyDetails: OrderDetails = { ...orderDetails, order: legacyOrder };
+    const summary = orderSummary(legacyOrder);
+    const updateOrder = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(legacyDetails),
+      updateOrder,
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+
+    const productTotal = screen.getByRole('spinbutton', { name: '商品总价' });
+    const shippingFee = screen.getByRole('spinbutton', { name: '运费' });
+    expect(productTotal).toHaveValue(null);
+    expect(shippingFee).toHaveValue(null);
+    await user.clear(screen.getByRole('textbox', { name: '收件人' }));
+    await user.type(screen.getByRole('textbox', { name: '收件人' }), '仅修改收件人');
+    await user.click(screen.getByRole('button', { name: '预览修改' }));
+
+    expect(productTotal).toBeInvalid();
+    expect(shippingFee).toBeInvalid();
+    expect(screen.queryByRole('dialog', { name: '确认订单修改' })).not.toBeInTheDocument();
+    expect(updateOrder).not.toHaveBeenCalled();
+
+    await user.type(productTotal, '0');
+    await user.type(shippingFee, '0');
+    await user.click(screen.getByRole('button', { name: '预览修改' }));
+    expect(await screen.findByRole('dialog', { name: '确认订单修改' }))
+      .toHaveTextContent('商品总价');
+    expect(updateOrder).not.toHaveBeenCalled();
+  });
+
+  it('订单表仅对人工修改过的订单显示最近修改标记', async () => {
+    const manuallyEdited = orderSummary(confirmedOrder, {
+      id: 'order-manually-edited',
+      orderNumber: 'XY-TEST-MANUAL-EDIT',
+      revision: 4,
+      updatedAt: '2026-07-31T08:40:00.000Z',
+      lastManualEditAt: '2026-07-31T08:35:00.000Z',
+    });
+    const sourceUpdatedOnly = orderSummary(confirmedOrder, {
+      id: 'order-source-updated',
+      orderNumber: 'XY-TEST-SOURCE-UPDATE',
+      revision: 5,
+      updatedAt: '2026-07-31T08:45:00.000Z',
+      lastManualEditAt: null,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [manuallyEdited, sourceUpdatedOnly],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([
+        manuallyEdited,
+        sourceUpdatedOnly,
+      ])),
+    });
+
+    render(<App api={api} />);
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    const manualRow = within(table).getByText(manuallyEdited.orderNumber).closest('tr');
+    const sourceRow = within(table).getByText(sourceUpdatedOnly.orderNumber).closest('tr');
+    expect(manualRow).not.toBeNull();
+    expect(sourceRow).not.toBeNull();
+    expect(manualRow).toHaveTextContent('已修改');
+    expect(manualRow).toHaveTextContent('最近修改');
+    expect(sourceRow).not.toHaveTextContent('已修改');
+    expect(sourceRow).not.toHaveTextContent('最近修改');
+  });
+
+  it('已发货订单提示快照不会改写，并发冲突时保留表单直到用户明确刷新', async () => {
+    const user = userEvent.setup();
+    const shippedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 5,
+      fulfillmentStatus: 'shipped',
+    };
+    const shippedDetails: OrderDetails = { ...orderDetails, order: shippedOrder };
+    const latestDetails: OrderDetails = {
+      ...shippedDetails,
+      order: { ...shippedOrder, revision: 6, buyerNickname: '其他窗口的新值' },
+    };
+    const getOrder = vi.fn()
+      .mockResolvedValueOnce(shippedDetails)
+      .mockResolvedValueOnce(latestDetails);
+    const updateOrder = vi.fn().mockRejectedValue(
+      new Error('订单已在其他操作中更新，请刷新后重试'),
+    );
+    const summary = orderSummary(shippedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder,
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+    Object.assign(api, { updateOrder });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+    expect(screen.getByRole('status')).toHaveTextContent('不会改写已冻结的发货快照');
+    await user.clear(screen.getByRole('textbox', { name: '买家昵称' }));
+    await user.type(screen.getByRole('textbox', { name: '买家昵称' }), '我的未保存值');
+    await user.click(screen.getByRole('button', { name: '预览修改' }));
+    await user.click(within(
+      await screen.findByRole('dialog', { name: '确认订单修改' }),
+    ).getByRole('button', { name: '确认保存' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('订单已在其他操作中更新');
+    expect(screen.getByRole('textbox', { name: '买家昵称' })).toHaveValue('我的未保存值');
+    await user.click(screen.getByRole('button', { name: '刷新最新订单' }));
+    expect(await screen.findByRole('textbox', { name: '买家昵称' })).toHaveValue('其他窗口的新值');
+    expect(getOrder).toHaveBeenCalledTimes(2);
   });
 
   it('数据目录被其他实例占用时说明原因，并允许选择其他目录', async () => {

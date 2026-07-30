@@ -153,6 +153,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 9) migrateToVersion9(database);
   if (row.version < 10) migrateToVersion10(database);
   if (row.version < 11) migrateToVersion11(database);
+  if (row.version < 12) migrateToVersion12(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1202,6 +1203,26 @@ function migrateToVersion11(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion12(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE original_orders ADD COLUMN note TEXT NOT NULL DEFAULT '';
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
   }
 }
 

@@ -6,6 +6,7 @@ import type {
   OrderDetails,
   OrderChangeEvent,
   OrderChangeValue,
+  OrderEditReview,
   OrderDraft,
   OrderDraftReview,
   OrderItem,
@@ -24,6 +25,7 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import { orderEditTargetId, prepareOrderEdit } from '../core/order-edit';
 import type {
   ConfirmDraftCustomFieldOptions,
   CreateCustomFieldDefinitionInput,
@@ -2376,6 +2378,236 @@ export class LocalApplication {
     };
   }
 
+  public reviewOrderEdit(input: unknown): OrderEditReview {
+    const current = this.getOrder(orderEditTargetId(input)).order;
+    const prepared = prepareOrderEdit(
+      current,
+      input,
+      this.listCustomFieldDefinitions(),
+      this.listCustomFieldValuesForOrder(current.id),
+    );
+    this.assertOrderEditIdentityAvailable(
+      current.id,
+      prepared.identity.platform,
+      prepared.identity.sellerAccount,
+      prepared.identity.orderNumber,
+    );
+    return prepared.review;
+  }
+
+  public confirmOrderEdit(input: unknown): OrderDetails {
+    const workspace = this.requireWorkspace();
+    const current = this.getOrder(orderEditTargetId(input)).order;
+    const prepared = prepareOrderEdit(
+      current,
+      input,
+      this.listCustomFieldDefinitions(),
+      this.listCustomFieldValuesForOrder(current.id),
+    );
+    this.assertOrderEditIdentityAvailable(
+      current.id,
+      prepared.identity.platform,
+      prepared.identity.sellerAccount,
+      prepared.identity.orderNumber,
+    );
+    if (prepared.review.changes.length === 0) return this.getOrder(current.id);
+
+    const now = new Date().toISOString();
+    try {
+      workspace.transaction(() => {
+        this.assertOrderEditIdentityAvailable(
+          current.id,
+          prepared.identity.platform,
+          prepared.identity.sellerAccount,
+          prepared.identity.orderNumber,
+        );
+        const updated = workspace.database.prepare(`
+          UPDATE original_orders
+          SET
+            platform = ?,
+            seller_account = ?,
+            seller_account_normalized = ?,
+            platform_order_number = ?,
+            platform_order_number_normalized = ?,
+            alipay_transaction_number = ?,
+            buyer_nickname = ?,
+            recipient = ?,
+            phone = ?,
+            phone_normalized = ?,
+            address_original = ?,
+            address_normalized = ?,
+            province = ?,
+            city = ?,
+            district = ?,
+            ordered_at_original = ?,
+            ordered_at_normalized = ?,
+            paid_at_original = ?,
+            paid_at_normalized = ?,
+            product_total_cents = ?,
+            shipping_fee_cents = ?,
+            amount_cents = ?,
+            note = ?,
+            revision = revision + 1,
+            updated_at = ?
+          WHERE id = ? AND revision = ?
+        `).run(
+          prepared.identity.platform,
+          prepared.identity.sellerAccount,
+          normalizedOrderIdentityPart(prepared.identity.sellerAccount),
+          prepared.identity.orderNumber,
+          normalizedOrderIdentityPart(prepared.identity.orderNumber),
+          prepared.values.alipayTransactionNumber,
+          prepared.values.buyerNickname,
+          prepared.values.recipient,
+          prepared.values.phone,
+          prepared.values.phoneNormalized,
+          prepared.values.addressOriginal,
+          prepared.values.addressNormalized,
+          prepared.values.province,
+          prepared.values.city,
+          prepared.values.district,
+          prepared.values.orderedAtOriginal,
+          prepared.values.orderedAtNormalized,
+          prepared.values.paidAtOriginal,
+          prepared.values.paidAtNormalized,
+          prepared.values.productTotalCents,
+          prepared.values.shippingFeeCents,
+          prepared.values.amountCents,
+          prepared.values.note,
+          now,
+          current.id,
+          prepared.review.expectedRevision,
+        );
+        if (updated.changes !== 1) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+
+        workspace.database
+          .prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
+          .run(current.id);
+        const retainedItemIds = new Set<string>();
+        const updateItem = workspace.database.prepare(`
+          UPDATE order_items
+          SET
+            position = ?,
+            source_title = ?,
+            source_spec = ?,
+            unit_price_cents = ?,
+            quantity = ?,
+            quantity_source = ?,
+            subtotal_cents = ?
+          WHERE id = ? AND order_id = ?
+        `);
+        const insertItem = workspace.database.prepare(`
+          INSERT INTO order_items (
+            id, order_id, position, source_title, source_spec,
+            unit_price_cents, quantity, quantity_source, subtotal_cents
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        prepared.items.forEach((item, position) => {
+          if (item.id !== null) {
+            retainedItemIds.add(item.id);
+            const itemUpdate = updateItem.run(
+              position,
+              item.sourceTitle,
+              item.sourceSpec,
+              item.unitPriceCents,
+              item.quantity,
+              item.quantitySource,
+              item.subtotalCents,
+              item.id,
+              current.id,
+            );
+            if (itemUpdate.changes !== 1) {
+              throw new Error('订单商品已变化，请刷新后重试');
+            }
+            return;
+          }
+          const itemId = randomUUID();
+          insertItem.run(
+            itemId,
+            current.id,
+            position,
+            item.sourceTitle,
+            item.sourceSpec,
+            item.unitPriceCents,
+            item.quantity,
+            item.quantitySource,
+            item.subtotalCents,
+          );
+          const insertCustomValue = workspace.database.prepare(`
+            INSERT INTO custom_field_values (
+              id, definition_id, order_id, order_item_id,
+              value_json, created_at, updated_at
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?)
+          `);
+          for (const customValue of item.customFieldValues ?? []) {
+            insertCustomValue.run(
+              randomUUID(),
+              customValue.definitionId,
+              itemId,
+              JSON.stringify(customValue.value),
+              now,
+              now,
+            );
+          }
+        });
+        const retainedIds = [...retainedItemIds];
+        if (retainedIds.length === 0) {
+          workspace.database
+            .prepare('DELETE FROM order_items WHERE order_id = ? AND position >= 100000')
+            .run(current.id);
+        } else {
+          workspace.database.prepare(`
+            DELETE FROM order_items
+            WHERE order_id = ?
+              AND position >= 100000
+              AND id NOT IN (${retainedIds.map(() => '?').join(', ')})
+          `).run(current.id, ...retainedIds);
+        }
+        this.assertRequiredCustomFieldValuesPresent(current.id);
+
+        const eventId = randomUUID();
+        workspace.database.prepare(`
+          INSERT INTO order_change_events (
+            id, order_id, source_snapshot_id, source,
+            base_revision, result_revision, created_at
+          ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+        `).run(
+          eventId,
+          current.id,
+          prepared.review.expectedRevision,
+          prepared.review.expectedRevision + 1,
+          now,
+        );
+        const insertChange = workspace.database.prepare(`
+          INSERT INTO order_field_changes (
+            id, event_id, field_path, before_json, after_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const change of prepared.review.changes) {
+          insertChange.run(
+            randomUUID(),
+            eventId,
+            change.path,
+            JSON.stringify(change.before),
+            JSON.stringify(change.after),
+          );
+        }
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /original_orders_by_normalized_identity|UNIQUE constraint failed: original_orders\.platform/u
+          .test(error.message)
+      ) {
+        throw new Error('订单身份与另一笔已有订单冲突，请更正后重试');
+      }
+      throw error;
+    }
+    return this.getOrder(current.id);
+  }
+
   public listOrders(): OrderSummary[] {
     return this.queryOrders({}, []).orders;
   }
@@ -2413,6 +2645,7 @@ export class LocalApplication {
         OR orders.address_original LIKE ? ESCAPE '\\'
         OR orders.address_normalized LIKE ? ESCAPE '\\'
         OR orders.seller_account LIKE ? ESCAPE '\\'
+        OR orders.note LIKE ? ESCAPE '\\'
         OR EXISTS (
           SELECT 1
           FROM order_items AS searched_items
@@ -2423,7 +2656,7 @@ export class LocalApplication {
             )
         )
       )`);
-      parameters.push(...Array<string>(10).fill(pattern));
+      parameters.push(...Array<string>(11).fill(pattern));
     }
     const buyerText = query.buyerText?.normalize('NFKC').trim();
     if (buyerText) {
@@ -2563,6 +2796,17 @@ export class LocalApplication {
           orders.city,
           orders.district,
           orders.amount_cents,
+          orders.note,
+          orders.revision,
+          orders.updated_at,
+          (
+            SELECT manual_events.created_at
+            FROM order_change_events AS manual_events
+            WHERE manual_events.order_id = orders.id
+              AND manual_events.source = 'manual_edit'
+            ORDER BY manual_events.result_revision DESC, manual_events.id DESC
+            LIMIT 1
+          ) AS last_manual_edit_at,
           source_items.status AS initial_source_recognition_status,
           orders.platform_transaction_status,
           orders.fulfillment_status,
@@ -2608,6 +2852,12 @@ export class LocalApplication {
       city: asString(row.city),
       district: asString(row.district),
       amountCents: asNumber(row.amount_cents),
+      note: asString(row.note),
+      revision: asNumber(row.revision),
+      updatedAt: asString(row.updated_at),
+      lastManualEditAt: row.last_manual_edit_at === null
+        ? null
+        : asString(row.last_manual_edit_at),
       itemCount: asNumber(row.item_count),
       initialSourceRecognitionStatus: asRecognitionBatchItemStatus(
         row.initial_source_recognition_status,
@@ -2935,6 +3185,7 @@ export class LocalApplication {
       productTotalCents: asNullableNumber(row.product_total_cents),
       shippingFeeCents: asNullableNumber(row.shipping_fee_cents),
       amountCents: asNumber(row.amount_cents),
+      note: asString(row.note),
       platformTransactionStatus: asPlatformTransactionStatus(
         row.platform_transaction_status,
       ),
@@ -3054,6 +3305,8 @@ export class LocalApplication {
       sourceSnapshot: latestSource.sourceSnapshot,
       sources,
       changeEvents: [...eventsById.values()],
+      lastManualEditAt: [...eventsById.values()]
+        .find((event) => event.source === 'manual_edit')?.createdAt ?? null,
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       customFieldValues: this.listCustomFieldValuesForOrder(orderId),
     };
@@ -3549,6 +3802,31 @@ export class LocalApplication {
       })),
       itemValues: [...itemValues.values()],
     };
+  }
+
+  private assertOrderEditIdentityAvailable(
+    orderId: string,
+    platform: OriginalOrder['platform'],
+    sellerAccount: string,
+    orderNumber: string,
+  ): void {
+    const conflict = this.requireWorkspace().database.prepare(`
+      SELECT id
+      FROM original_orders
+      WHERE platform = ?
+        AND seller_account_normalized = ?
+        AND platform_order_number_normalized = ?
+        AND id <> ?
+      LIMIT 1
+    `).get(
+      platform,
+      normalizedOrderIdentityPart(sellerAccount),
+      normalizedOrderIdentityPart(orderNumber),
+      orderId,
+    );
+    if (conflict) {
+      throw new Error('订单身份与另一笔已有订单冲突，请更正后重试');
+    }
   }
 
   private requireWorkspace(): Workspace {

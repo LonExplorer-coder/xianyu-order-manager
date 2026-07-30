@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v10 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v12 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -31,6 +31,7 @@ describe('数据库升级', () => {
       { version: 9 },
       { version: 10 },
       { version: 11 },
+      { version: 12 },
     ]);
     expect(
       first.database
@@ -364,6 +365,7 @@ describe('数据库升级', () => {
       { version: 9 },
       { version: 10 },
       { version: 11 },
+      { version: 12 },
     ]);
     expect(
       (
@@ -600,6 +602,7 @@ describe('数据库升级', () => {
         { version: 9 },
         { version: 10 },
         { version: 11 },
+        { version: 12 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -798,7 +801,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 11 });
+        .toEqual({ version: 12 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -875,6 +878,70 @@ describe('数据库升级', () => {
       `).get()).toBeUndefined();
     } finally {
       database.close();
+    }
+  });
+
+  it('将 v11 既有订单升级到 v12 时补充空备注、保留订单数据并在重启后保持幂等', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v11-note-migration-'));
+    createVersion1Database(dataDirectory);
+    const prepared = Workspace.open(dataDirectory);
+    prepared.close();
+    downgradeOriginalOrdersToVersion11(dataDirectory);
+
+    const legacy = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 11 });
+      const columns = legacy.prepare('PRAGMA table_info(original_orders)').all() as unknown as Array<{
+        name: string;
+      }>;
+      expect(columns.map(({ name }) => name)).not.toContain('note');
+      expect(legacy.prepare(`
+        SELECT id, platform_order_number, recipient, amount_cents
+        FROM original_orders
+        WHERE id = 'order-v1'
+      `).get()).toEqual({
+        id: 'order-v1',
+        platform_order_number: 'XY-V1-001',
+        recipient: '旧收件人',
+        amount_cents: 880,
+      });
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = Workspace.open(dataDirectory);
+    try {
+      expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 12 });
+      expect(migrated.database.prepare(`
+        SELECT id, platform_order_number, recipient, amount_cents, note
+        FROM original_orders
+        WHERE id = 'order-v1'
+      `).get()).toEqual({
+        id: 'order-v1',
+        platform_order_number: 'XY-V1-001',
+        recipient: '旧收件人',
+        amount_cents: 880,
+        note: '',
+      });
+      expect(migrated.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+
+    const reopened = Workspace.open(dataDirectory);
+    try {
+      expect(reopened.database.prepare(
+        'SELECT version FROM schema_migrations WHERE version = 12',
+      ).all()).toEqual([{ version: 12 }]);
+      expect(reopened.database.prepare(
+        "SELECT note FROM original_orders WHERE id = 'order-v1'",
+      ).get()).toEqual({ note: '' });
+    } finally {
+      reopened.close();
     }
   });
 
@@ -997,7 +1064,8 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         ) STRICT;
         DROP TABLE table_templates;
         ALTER TABLE table_templates_v10_fixture RENAME TO table_templates;
-        DELETE FROM schema_migrations WHERE version = 11;
+        ALTER TABLE original_orders DROP COLUMN note;
+        DELETE FROM schema_migrations WHERE version IN (11, 12);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1007,6 +1075,22 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
     } finally {
       database.exec('PRAGMA foreign_keys = ON;');
     }
+  } finally {
+    database.close();
+  }
+}
+
+function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE original_orders DROP COLUMN note;
+      DELETE FROM schema_migrations WHERE version = 12;
+      COMMIT;
+    `);
   } finally {
     database.close();
   }
@@ -1197,7 +1281,8 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         ALTER TABLE draft_items_v9_fixture RENAME TO draft_items;
         DROP TABLE order_items;
         ALTER TABLE order_items_v9_fixture RENAME TO order_items;
-        DELETE FROM schema_migrations WHERE version IN (10, 11);
+        ALTER TABLE original_orders DROP COLUMN note;
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12);
       `);
       database.exec('COMMIT;');
     } catch (error) {

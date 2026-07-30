@@ -8,6 +8,7 @@ import yauzl from 'yauzl';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type {
+  OrderEditInput,
   RecognitionAttempt,
   RecognitionResult,
   Recognizer,
@@ -190,13 +191,17 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(items?.rowCount).toBe(5);
     if (!orders || !items) throw new Error('缺少导出工作表');
 
-    expect(rowValues(orders, 1).slice(8, 20)).toEqual([
+    const defaultOrderHeaders = rowValues(orders, 1);
+    const firstProductColumnIndex = defaultOrderHeaders.indexOf('商品1');
+    expect(firstProductColumnIndex).toBeGreaterThanOrEqual(0);
+    expect(defaultOrderHeaders.slice(firstProductColumnIndex, firstProductColumnIndex + 12)).toEqual([
       '商品1', '款式或规格1', '数量1',
       '商品2', '款式或规格2', '数量2',
       '商品3', '款式或规格3', '数量3',
       '商品4', '款式或规格4', '数量4',
     ]);
     expect(rowValues(orders, 1)).not.toContain('商品');
+    expect(cellByHeader(orders, 2, '备注').value).toBeNull();
     expect(cellByHeader(orders, 2, '商品1')).toMatchObject({
       value: '夏日海棠杯',
       type: ExcelJS.ValueType.String,
@@ -330,6 +335,151 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(archiveText).not.toContain('海棠买家');
     expect(archiveText).not.toMatch(/<f(?:>|\s)/u);
     expect(archiveText).not.toContain('/comments');
+  });
+
+  it('人工修改后默认与自定义模板都导出当前备注和当前商品明细', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-MANUAL-EXPORT-001',
+        productTotalCents: 4_000,
+        amountCents: 4_000,
+        items: [
+          {
+            sourceTitle: '来源商品一',
+            sourceSpec: '来源规格一',
+            unitPriceCents: 1_000,
+            quantity: 2,
+            quantityInferred: false,
+          },
+          {
+            sourceTitle: '来源商品二',
+            sourceSpec: '来源规格二',
+            unitPriceCents: 2_000,
+            quantity: 1,
+            quantityInferred: false,
+          },
+        ],
+      }),
+    ]);
+    const before = application.getOrder(application.queryOrders({}).orders[0].id).order;
+    const input: OrderEditInput = {
+      orderId: before.id,
+      expectedRevision: before.revision,
+      identityCorrection: null,
+      alipayTransactionNumber: before.alipayTransactionNumber,
+      buyerNickname: before.buyerNickname,
+      recipient: before.recipient,
+      phone: before.phone,
+      addressOriginal: before.addressOriginal,
+      province: before.province,
+      city: before.city,
+      district: before.district,
+      orderedAtOriginal: before.orderedAtOriginal,
+      paidAtOriginal: before.paidAtOriginal,
+      productTotalCents: 5_500,
+      shippingFeeCents: before.shippingFeeCents ?? 0,
+      amountCents: 5_500,
+      note: '人工修改后的导出备注',
+      items: [
+        {
+          id: before.items[0].id,
+          sourceTitle: '人工商品一',
+          sourceSpec: '人工规格一',
+          unitPriceCents: 1_500,
+          quantity: 3,
+        },
+        {
+          id: before.items[1].id,
+          sourceTitle: '人工商品二',
+          sourceSpec: '人工规格二',
+          unitPriceCents: 1_000,
+          quantity: 1,
+        },
+      ],
+    };
+    const saved = application.confirmOrderEdit(input);
+    const currentSummary = application.queryOrders({ text: '人工修改后的导出备注' }).orders[0];
+    expect(currentSummary).toMatchObject({
+      id: before.id,
+      note: '人工修改后的导出备注',
+      revision: 2,
+      updatedAt: saved.order.updatedAt,
+      lastManualEditAt: saved.lastManualEditAt,
+    });
+    expect(application.queryOrders({ productText: '人工商品一' }).orders)
+      .toHaveLength(1);
+    expect(application.queryOrders({ productText: '人工规格二' }).orders)
+      .toHaveLength(1);
+
+    const defaultPath = join(testRoot, '人工修改默认导出.xlsx');
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [before.id] },
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }, defaultPath);
+    const defaultWorkbook = new ExcelJS.Workbook();
+    await defaultWorkbook.xlsx.readFile(defaultPath);
+    const defaultOrders = defaultWorkbook.getWorksheet('订单总表');
+    const defaultItems = defaultWorkbook.getWorksheet('商品明细');
+    if (!defaultOrders || !defaultItems) throw new Error('缺少默认导出工作表');
+    expect(cellByHeader(defaultOrders, 2, '备注').value).toBe('人工修改后的导出备注');
+    expect(cellByHeader(defaultOrders, 2, '商品1').value).toBe('人工商品一');
+    expect(cellByHeader(defaultOrders, 2, '款式或规格1').value).toBe('人工规格一');
+    expect(cellByHeader(defaultOrders, 2, '数量1').value).toBe(3);
+    expect(cellByHeader(defaultOrders, 2, '商品2').value).toBe('人工商品二');
+    expect(cellByHeader(defaultItems, 2, '原始商品标题').value).toBe('人工商品一');
+    expect(cellByHeader(defaultItems, 2, '原始款式／规格').value).toBe('人工规格一');
+    expect(cellByHeader(defaultItems, 2, '数量').value).toBe(3);
+
+    const orderTemplate = application.createTableTemplate({
+      name: '人工当前值订单模板',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'note' }, displayName: '当前备注' },
+        {
+          kind: 'dynamic_product_group',
+          labels: { product: '当前商品', specification: '当前规格', quantity: '当前数量' },
+        },
+      ],
+      query: {},
+    });
+    const itemTemplate = application.createTableTemplate({
+      name: '人工当前值商品模板',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '当前商品标题' },
+        { field: { kind: 'builtin', key: 'product_spec' }, displayName: '当前商品规格' },
+        { field: { kind: 'builtin', key: 'quantity' }, displayName: '当前商品数量' },
+      ],
+      query: {},
+    });
+    const customPath = join(testRoot, '人工修改自定义导出.xlsx');
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [before.id] },
+      orderTemplateId: orderTemplate.id,
+      orderItemTemplateId: itemTemplate.id,
+      masking: 'default',
+    }, customPath);
+    const customWorkbook = new ExcelJS.Workbook();
+    await customWorkbook.xlsx.readFile(customPath);
+    const customOrders = customWorkbook.getWorksheet('订单总表');
+    const customItems = customWorkbook.getWorksheet('商品明细');
+    if (!customOrders || !customItems) throw new Error('缺少自定义导出工作表');
+    expect(rowValues(customOrders, 1)).toEqual([
+      '当前备注',
+      '当前商品1', '当前规格1', '当前数量1',
+      '当前商品2', '当前规格2', '当前数量2',
+    ]);
+    expect(cellByHeader(customOrders, 2, '当前备注').value).toBe('人工修改后的导出备注');
+    expect(cellByHeader(customOrders, 2, '当前商品1').value).toBe('人工商品一');
+    expect(cellByHeader(customOrders, 2, '当前规格1').value).toBe('人工规格一');
+    expect(cellByHeader(customOrders, 2, '当前数量1').value).toBe(3);
+    expect(rowValues(customItems, 1)).toEqual([
+      '当前商品标题', '当前商品规格', '当前商品数量',
+    ]);
+    expect(rowValues(customItems, 2)).toEqual(['人工商品一', '人工规格一', 3]);
+    expect(rowValues(customItems, 3)).toEqual(['人工商品二', '人工规格二', 1]);
   });
 
   it('当前结果完整展开并留空短订单尾列，所选订单只按自身宽度导出', async () => {

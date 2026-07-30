@@ -1,5 +1,6 @@
 import type {
   CustomFieldDefinition,
+  CustomFieldValue,
   CustomFieldValueRecord,
 } from './custom-fields';
 import type { QuantitySource } from './quantity-source';
@@ -184,6 +185,7 @@ export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
 export type OriginalOrder = Omit<RecognitionResult, 'items' | 'amountCents'> & {
   id: string;
   amountCents: number;
+  note?: string;
   revision: number;
   lifecycleStatus: LifecycleStatus;
   createdAt: string;
@@ -215,6 +217,10 @@ export type OrderSummary = {
   city?: string;
   district?: string;
   amountCents: number;
+  note?: string;
+  revision?: number;
+  updatedAt?: string;
+  lastManualEditAt?: string | null;
   itemCount: number;
   initialSourceRecognitionStatus: RecognitionBatchItemStatus;
   platformTransactionStatus: PlatformTransactionStatus;
@@ -293,6 +299,55 @@ export type OrderDetails = {
   sourceSnapshot: SourceSnapshot;
   sources: OrderSource[];
   changeEvents: OrderChangeEvent[];
+  lastManualEditAt?: string | null;
   customFieldDefinitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];
+};
+
+export type OrderEditIdentityCorrection = {
+  platform: OrderPlatform;
+  sellerAccount: string;
+  orderNumber: string;
+};
+
+export type OrderEditItemInput = {
+  /** Existing persisted item id, or null for a new item. */
+  id: string | null;
+  sourceTitle: string;
+  sourceSpec: string;
+  unitPriceCents: number;
+  quantity: number;
+  customFieldValues?: Array<{
+    definitionId: string;
+    value: CustomFieldValue | null;
+  }>;
+};
+
+export type OrderEditInput = {
+  orderId: string;
+  expectedRevision: number;
+  identityCorrection: OrderEditIdentityCorrection | null;
+  alipayTransactionNumber: string;
+  buyerNickname: string;
+  recipient: string;
+  phone: string;
+  addressOriginal: string;
+  province: string;
+  city: string;
+  district: string;
+  orderedAtOriginal: string;
+  paidAtOriginal: string;
+  productTotalCents: number | null;
+  shippingFeeCents: number | null;
+  amountCents: number;
+  note: string;
+  items: OrderEditItemInput[];
+};
+
+export type OrderEditReview = {
+  orderId: string;
+  expectedRevision: number;
+  input: OrderEditInput;
+  changes: OrderFieldChange[];
+  shippedSnapshotWarning: boolean;
 };

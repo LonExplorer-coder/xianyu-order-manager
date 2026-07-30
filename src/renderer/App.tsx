@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
 
@@ -22,10 +23,14 @@ import type {
   OrderDetails,
   OrderDraft,
   OrderDraftReview,
+  OrderEditInput,
+  OrderEditReview,
+  OriginalOrder,
   OrderSummary,
   RecognitionBatchView,
   RecognitionBatchItemStatus,
 } from '../core/contracts';
+import { reviewOrderEdit } from '../core/order-edit';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
@@ -86,9 +91,10 @@ export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | null;
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | null;
 type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
+type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 
 const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
 const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
@@ -122,7 +128,7 @@ export function App({ api }: AppProps) {
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
   const [detailScreenshotId, setDetailScreenshotId] = useState('');
-  const [detailCustomFieldsDirty, setDetailCustomFieldsDirty] = useState(false);
+  const [detailDirtyKind, setDetailDirtyKind] = useState<DetailDirtyKind>('none');
   const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
   const [reviewBatchId, setReviewBatchId] = useState('');
@@ -204,7 +210,7 @@ export function App({ api }: AppProps) {
     setOrderDetails(null);
     setDetailScreenshotUrl('');
     setDetailScreenshotId('');
-    setDetailCustomFieldsDirty(false);
+    setDetailDirtyKind('none');
     detailSourceRequestVersion.current += 1;
     orderQueryRequestVersion.current += 1;
     preloadedOrderTemplateQuery.current = null;
@@ -845,7 +851,7 @@ export function App({ api }: AppProps) {
       if (requestVersion !== detailSourceRequestVersion.current) return;
       setDetailScreenshotUrl(screenshotUrl);
       setDetailScreenshotId(details.sourceScreenshot.id);
-      setDetailCustomFieldsDirty(false);
+      setDetailDirtyKind('none');
       setOrderDetails(details);
     } catch (error) {
       if (requestVersion === detailSourceRequestVersion.current) {
@@ -896,6 +902,37 @@ export function App({ api }: AppProps) {
     }
   }
 
+  async function updateExistingOrder(input: OrderEditInput): Promise<OrderDetails> {
+    setBusyAction('order-edit');
+    setOperationError('');
+    try {
+      const details = await api.updateOrder(input);
+      setOrderDetails(details);
+      setOrderQueryRefreshToken((current) => current + 1);
+      return details;
+    } catch (error) {
+      setOperationError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function refreshOrderForEdit(orderId: string): Promise<OrderDetails> {
+    setBusyAction('order-edit');
+    setOperationError('');
+    try {
+      const details = await api.getOrder(orderId);
+      setOrderDetails(details);
+      return details;
+    } catch (error) {
+      setOperationError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function chooseDataDirectory() {
     setBusyAction('directory');
     setOperationError('');
@@ -924,15 +961,17 @@ export function App({ api }: AppProps) {
     setOrderDetails(null);
     setDetailScreenshotUrl('');
     setDetailScreenshotId('');
-    setDetailCustomFieldsDirty(false);
+    setDetailDirtyKind('none');
     setOperationError('');
     setBusyAction(null);
   }
 
   function leaveOrderDetails(action: () => void) {
     if (
-      detailCustomFieldsDirty &&
-      !window.confirm('自定义字段还有未保存修改，确定放弃吗？')
+      detailDirtyKind !== 'none' &&
+      !window.confirm(detailDirtyKind === 'custom_fields'
+        ? '自定义字段还有未保存修改，确定放弃吗？'
+        : '当前订单还有未保存修改，确定放弃吗？')
     ) {
       return;
     }
@@ -1040,11 +1079,14 @@ export function App({ api }: AppProps) {
         selectedScreenshotId={detailScreenshotId}
         sourceLoading={busyAction === 'detail'}
         customFieldsSaving={busyAction === 'custom-fields'}
+        orderEditSaving={busyAction === 'order-edit'}
         error={operationError}
         onBack={() => leaveOrderDetails(() => undefined)}
-        onDirtyChange={setDetailCustomFieldsDirty}
+        onDirtyChange={setDetailDirtyKind}
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
         onSaveCustomFieldValues={saveOrderCustomFieldValues}
+        onUpdateOrder={updateExistingOrder}
+        onRefreshOrder={refreshOrderForEdit}
       />
     );
   } else if (activePage === 'batches') {
@@ -1954,15 +1996,23 @@ function OrdersWorkspace({
                   );
                 })}
                 <td>
-                  <button
-                    className="order-link"
-                    type="button"
-                    aria-label={`打开订单详情 ${order.orderNumber}`}
-                    onClick={() => onOpenOrder(order.id)}
-                    disabled={openingOrder}
-                  >
-                    详情
-                  </button>
+                  <div className="order-row-actions">
+                    <button
+                      className="order-link"
+                      type="button"
+                      aria-label={`打开订单详情 ${order.orderNumber}`}
+                      onClick={() => onOpenOrder(order.id)}
+                      disabled={openingOrder}
+                    >
+                      详情
+                    </button>
+                    {order.lastManualEditAt && (
+                      <span className="manual-edit-marker">
+                        <strong>已修改</strong>
+                        <small>最近修改 {formatDateTime(order.lastManualEditAt)}</small>
+                      </span>
+                    )}
+                  </div>
                 </td>
               </tr>
               );
@@ -3556,6 +3606,9 @@ function OrderUpdateComparison({
 }
 
 const ORDER_CHANGE_FIELD_LABELS: Record<string, string> = {
+  platform: '平台',
+  sellerAccount: '卖家账号',
+  orderNumber: '订单号',
   alipayTransactionNumber: '支付宝交易号',
   buyerNickname: '买家昵称',
   recipient: '收件人',
@@ -3573,6 +3626,7 @@ const ORDER_CHANGE_FIELD_LABELS: Record<string, string> = {
   productTotalCents: '商品总价',
   shippingFeeCents: '运费',
   amountCents: '成交金额',
+  note: '备注',
   platformTransactionStatus: '平台交易状态',
   fulfillmentStatus: '履约状态',
 };
@@ -3619,6 +3673,57 @@ function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
   return JSON.stringify(value);
 }
 
+function formatCustomFieldValue(value: CustomFieldValue | null): string {
+  if (value === null) return '—';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (Array.isArray(value)) return value.join('、') || '—';
+  return String(value) || '—';
+}
+
+function formatOrderEditPreviewValue(
+  path: string,
+  value: OrderChangeValue,
+  definitions: readonly CustomFieldDefinition[],
+): string {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !/^items(?:\[\d+\]|\.removed\[\d+\])$/u.test(path)
+  ) {
+    return formatOrderChangeValue(path, value);
+  }
+  const item = value as Record<string, OrderChangeValue>;
+  const title = typeof item.sourceTitle === 'string' ? item.sourceTitle : '未命名商品';
+  const spec = typeof item.sourceSpec === 'string' && item.sourceSpec
+    ? ` / ${item.sourceSpec}`
+    : '';
+  const price = typeof item.unitPriceCents === 'number'
+    ? formatMoney(item.unitPriceCents)
+    : '—';
+  const quantity = typeof item.quantity === 'number' ? item.quantity : '—';
+  const customValues = Array.isArray(item.customFieldValues)
+    ? item.customFieldValues.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+      const record = entry as Record<string, OrderChangeValue>;
+      if (typeof record.definitionId !== 'string') return [];
+      const definition = definitions.find(({ id }) => id === record.definitionId);
+      const raw = record.value;
+      const formatted = raw === null ||
+        typeof raw === 'string' ||
+        typeof raw === 'number' ||
+        typeof raw === 'boolean' ||
+        (Array.isArray(raw) && raw.every((part) => typeof part === 'string'))
+        ? formatCustomFieldValue(raw as CustomFieldValue | null)
+        : '—';
+      return [`${definition?.name ?? '自定义字段'}：${formatted}`];
+    })
+    : [];
+  return `${title}${spec} / ${price} × ${quantity}${
+    customValues.length > 0 ? `；${customValues.join('；')}` : ''
+  }`;
+}
+
 function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return (
     <section className="form-section">
@@ -3655,30 +3760,713 @@ function Field({
   );
 }
 
+type OrderEditMoneyInputs = {
+  productTotal: string;
+  shippingFee: string;
+  amount: string;
+  itemUnitPrices: string[];
+};
+
+function createOrderEditInput(order: OriginalOrder): OrderEditInput {
+  return {
+    orderId: order.id,
+    expectedRevision: order.revision,
+    identityCorrection: null,
+    alipayTransactionNumber: order.alipayTransactionNumber,
+    buyerNickname: order.buyerNickname,
+    recipient: order.recipient,
+    phone: order.phone,
+    addressOriginal: order.addressOriginal,
+    province: order.province,
+    city: order.city,
+    district: order.district,
+    orderedAtOriginal: order.orderedAtOriginal,
+    paidAtOriginal: order.paidAtOriginal,
+    productTotalCents: order.productTotalCents,
+    shippingFeeCents: order.shippingFeeCents,
+    amountCents: order.amountCents,
+    note: order.note ?? '',
+    items: order.items.map((item) => ({
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      unitPriceCents: item.unitPriceCents,
+      quantity: item.quantity,
+    })),
+  };
+}
+
+function createOrderEditMoneyInputs(input: OrderEditInput): OrderEditMoneyInputs {
+  return {
+    productTotal: formatMoneyInput(input.productTotalCents),
+    shippingFee: formatMoneyInput(input.shippingFeeCents),
+    amount: formatMoneyInput(input.amountCents),
+    itemUnitPrices: input.items.map((item) => formatMoneyInput(item.unitPriceCents)),
+  };
+}
+
+function OrderEditWorkspace({
+  details,
+  screenshotUrl,
+  saving,
+  error,
+  onDirtyChange,
+  onCancel,
+  onSave,
+  onRefresh,
+}: {
+  details: OrderDetails;
+  screenshotUrl: string;
+  saving: boolean;
+  error: string;
+  onDirtyChange: (dirty: boolean) => void;
+  onCancel: () => void;
+  onSave: (input: OrderEditInput) => Promise<void>;
+  onRefresh: (orderId: string) => Promise<OrderDetails>;
+}) {
+  const baselineInput = useMemo(() => createOrderEditInput(details.order), [details.order]);
+  const [input, setInput] = useState<OrderEditInput>(baselineInput);
+  const [moneyInputs, setMoneyInputs] = useState<OrderEditMoneyInputs>(
+    () => createOrderEditMoneyInputs(baselineInput),
+  );
+  const [review, setReview] = useState<OrderEditReview | null>(null);
+  const [localError, setLocalError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const previewButtonRef = useRef<HTMLButtonElement>(null);
+  const reviewDialogRef = useRef<HTMLDivElement>(null);
+  const reviewFirstActionRef = useRef<HTMLButtonElement>(null);
+  const [itemCustomFieldValidity, setItemCustomFieldValidity] = useState<Record<string, boolean>>({});
+  const itemCustomFieldDefinitions = details.customFieldDefinitions.filter(
+    (definition) => definition.granularity === 'order_item',
+  );
+  const baselineMoneyInputs = useMemo(
+    () => createOrderEditMoneyInputs(baselineInput),
+    [baselineInput],
+  );
+  const dirty = JSON.stringify(input) !== JSON.stringify(baselineInput) ||
+    JSON.stringify(moneyInputs) !== JSON.stringify(baselineMoneyInputs);
+  const shippedSnapshotWarning = details.order.fulfillmentStatus === 'shipped';
+
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!review) return undefined;
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : previewButtonRef.current;
+    reviewFirstActionRef.current?.focus();
+    return () => (returnFocus ?? previewButtonRef.current)?.focus();
+  }, [review]);
+
+  function patchInput(patch: Partial<OrderEditInput>) {
+    setLocalError('');
+    setReview(null);
+    setInput((current) => ({ ...current, ...patch }));
+  }
+
+  function patchItem(index: number, patch: Partial<OrderEditInput['items'][number]>) {
+    setInput((current) => ({
+      ...current,
+      items: current.items.map((item, itemIndex) => (
+        itemIndex === index ? { ...item, ...patch } : item
+      )),
+    }));
+    setLocalError('');
+    setReview(null);
+  }
+
+  function patchOrderMoney(
+    key: 'productTotal' | 'shippingFee' | 'amount',
+    inputKey: 'productTotalCents' | 'shippingFeeCents' | 'amountCents',
+    value: string,
+  ) {
+    setMoneyInputs((current) => ({ ...current, [key]: value }));
+    const cents = yuanToCents(value);
+    if (cents !== null) patchInput({ [inputKey]: cents });
+  }
+
+  function patchItemMoney(index: number, value: string) {
+    setMoneyInputs((current) => ({
+      ...current,
+      itemUnitPrices: current.itemUnitPrices.map((entry, itemIndex) => (
+        itemIndex === index ? value : entry
+      )),
+    }));
+    const cents = yuanToCents(value);
+    if (cents !== null) patchItem(index, { unitPriceCents: cents });
+  }
+
+  function removeItem(index: number) {
+    if (input.items.length <= 1) return;
+    setItemCustomFieldValidity((current) => Object.fromEntries(
+      Object.entries(current).flatMap(([key, valid]) => {
+        const separator = key.indexOf(':');
+        const itemIndex = Number(key.slice(0, separator));
+        const definitionId = key.slice(separator + 1);
+        if (!Number.isInteger(itemIndex) || itemIndex === index) return [];
+        return [[`${itemIndex > index ? itemIndex - 1 : itemIndex}:${definitionId}`, valid]];
+      }),
+    ));
+    patchInput({ items: input.items.filter((_, itemIndex) => itemIndex !== index) });
+    setMoneyInputs((current) => ({
+      ...current,
+      itemUnitPrices: current.itemUnitPrices.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  function addItem() {
+    patchInput({
+      items: [
+        ...input.items,
+        {
+          id: null,
+          sourceTitle: '',
+          sourceSpec: '',
+          unitPriceCents: 0,
+          quantity: 1,
+          customFieldValues: itemCustomFieldDefinitions.map((definition) => ({
+            definitionId: definition.id,
+            value: definition.defaultValue,
+          })),
+        },
+      ],
+    });
+    setMoneyInputs((current) => ({
+      ...current,
+      itemUnitPrices: [...current.itemUnitPrices, ''],
+    }));
+  }
+
+  function patchNewItemCustomField(
+    index: number,
+    definitionId: string,
+    value: CustomFieldValue | null,
+  ) {
+    const item = input.items[index];
+    if (!item || item.id !== null) return;
+    const values = (item.customFieldValues ?? [])
+      .filter((entry) => entry.definitionId !== definitionId);
+    patchItem(index, {
+      customFieldValues: [...values, { definitionId, value }],
+    });
+  }
+
+  function finalizedInput(): OrderEditInput | null {
+    const productTotalCents = yuanToCents(moneyInputs.productTotal);
+    const shippingFeeCents = yuanToCents(moneyInputs.shippingFee);
+    const amountCents = yuanToCents(moneyInputs.amount);
+    const itemUnitPrices = moneyInputs.itemUnitPrices.map(yuanToCents);
+    if (
+      productTotalCents === null ||
+      shippingFeeCents === null ||
+      amountCents === null ||
+      itemUnitPrices.some((value) => value === null)
+    ) {
+      setLocalError('金额仅支持普通数字，最多两位小数。');
+      return null;
+    }
+    return {
+      ...input,
+      productTotalCents,
+      shippingFeeCents,
+      amountCents,
+      items: input.items.map((item, index) => ({
+        ...item,
+        unitPriceCents: itemUnitPrices[index]!,
+      })),
+    };
+  }
+
+  function previewChanges(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const missingRequiredCustomField = input.items.some((item) => (
+      item.id === null && itemCustomFieldDefinitions.some((definition) => (
+        definition.required && !hasCustomFieldValue(
+          item.customFieldValues?.find((entry) => (
+            entry.definitionId === definition.id
+          ))?.value ?? null,
+        )
+      ))
+    ));
+    if (missingRequiredCustomField) {
+      setLocalError('请填写新增商品的全部必填自定义字段。');
+      return;
+    }
+    if (Object.values(itemCustomFieldValidity).some((valid) => valid === false)) {
+      setLocalError('新增商品的自定义字段格式无效。');
+      return;
+    }
+    const finalized = finalizedInput();
+    if (!finalized) return;
+    try {
+      const nextReview = reviewOrderEdit(
+        details.order,
+        finalized,
+        details.customFieldDefinitions,
+        details.customFieldValues,
+      );
+      if (nextReview.changes.length === 0) {
+        setLocalError('当前没有需要保存的修改。');
+        return;
+      }
+      setLocalError('');
+      setReview(nextReview);
+    } catch (reviewError) {
+      setLocalError(errorMessage(reviewError));
+    }
+  }
+
+  async function confirmSave() {
+    if (!review) return;
+    try {
+      await onSave(review.input);
+    } catch {
+      setReview(null);
+    }
+  }
+
+  async function refreshLatestOrder() {
+    setRefreshing(true);
+    setLocalError('');
+    setReview(null);
+    try {
+      const latest = await onRefresh(details.order.id);
+      const latestInput = createOrderEditInput(latest.order);
+      setInput(latestInput);
+      setMoneyInputs(createOrderEditMoneyInputs(latestInput));
+    } catch {
+      // The shared error banner already explains why the refresh failed.
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  function handleReviewDialogKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      if (!saving) {
+        event.preventDefault();
+        setReview(null);
+      }
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = reviewDialogRef.current
+      ? Array.from(reviewDialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ))
+      : [];
+    if (focusable.length === 0) {
+      event.preventDefault();
+      reviewDialogRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return (
+    <section className="review-workspace review-enter order-edit-workspace">
+      <header
+        className="workspace-header workspace-header--review"
+        aria-hidden={review ? true : undefined}
+        inert={review ? true : undefined}
+      >
+        <div className="header-title-row">
+          <div>
+            <span className="section-kicker">订单当前值 · 人工修改</span>
+            <h1>编辑订单</h1>
+            <p>修改会记录字段级前后值，左侧来源截图与 OCR 证据不会被改写。</p>
+          </div>
+        </div>
+        <div className="header-actions">
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onCancel}>
+            取消编辑
+          </button>
+          <button
+            ref={previewButtonRef}
+            className="button button--primary"
+            type="submit"
+            form="order-edit-form"
+            disabled={saving}
+          >
+            {saving ? '正在保存…' : '预览修改'}
+          </button>
+        </div>
+      </header>
+
+      <InlineError message={localError || error} />
+      {error.includes('刷新') && (
+        <div className="order-edit-conflict-actions">
+          <span>表单已保留，只有明确刷新才会换成最新订单值。</span>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={refreshing || saving}
+            onClick={() => void refreshLatestOrder()}
+          >
+            {refreshing ? '正在刷新…' : '刷新最新订单'}
+          </button>
+        </div>
+      )}
+      {shippedSnapshotWarning && (
+        <div className="order-edit-warning" role="status">
+          <Icon name="warning" />
+          <span>该订单已发货；保存只更新订单当前值，不会改写已冻结的发货快照。</span>
+        </div>
+      )}
+
+      <div
+        className="review-layout"
+        aria-hidden={review ? true : undefined}
+        inert={review ? true : undefined}
+      >
+        <figure className="source-panel">
+          <div className="panel-label">
+            <span><Icon name="image" />来源证据</span>
+            <span>只读 · 不会改写</span>
+          </div>
+          <div className="source-image-stage">
+            <img src={screenshotUrl} alt="来源截图" />
+          </div>
+        </figure>
+
+        <form id="order-edit-form" className="review-form" onSubmit={previewChanges}>
+          <fieldset className="review-form__controls" disabled={saving} aria-busy={saving}>
+            <div className="review-summary">
+              <div><span>订单号</span><strong>{details.order.orderNumber}</strong></div>
+              <div><span>商品</span><strong>{input.items.length} 项</strong></div>
+              <div><span>当前状态</span><strong>{fulfillmentStatusLabel(details.order.fulfillmentStatus)}</strong></div>
+            </div>
+
+            <FormSection title="订单信息" description="身份字段默认锁定；交易状态和履约状态在对应业务功能中维护。">
+              <div className="identity-edit-heading">
+                <span>订单身份</span>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => patchInput({
+                    identityCorrection: input.identityCorrection ? null : {
+                      platform: details.order.platform,
+                      sellerAccount: details.order.sellerAccount,
+                      orderNumber: details.order.orderNumber,
+                    },
+                  })}
+                >
+                  {input.identityCorrection ? '取消更正身份' : '更正订单身份'}
+                </button>
+              </div>
+              <div className="field-grid field-grid--two">
+                <Field label="平台"><input value={platformLabel(details.order.platform)} disabled /></Field>
+                <Field label="卖家账号" required>
+                  <input
+                    required
+                    disabled={!input.identityCorrection}
+                    value={input.identityCorrection?.sellerAccount ?? details.order.sellerAccount}
+                    onChange={(event) => patchInput({
+                      identityCorrection: {
+                        ...input.identityCorrection!,
+                        sellerAccount: event.target.value,
+                      },
+                    })}
+                  />
+                </Field>
+                <Field label="订单号" required>
+                  <input
+                    required
+                    disabled={!input.identityCorrection}
+                    value={input.identityCorrection?.orderNumber ?? details.order.orderNumber}
+                    onChange={(event) => patchInput({
+                      identityCorrection: {
+                        ...input.identityCorrection!,
+                        orderNumber: event.target.value,
+                      },
+                    })}
+                  />
+                </Field>
+                <Field label="支付宝交易号">
+                  <input value={input.alipayTransactionNumber} onChange={(event) => patchInput({ alipayTransactionNumber: event.target.value })} />
+                </Field>
+                <Field label="买家昵称">
+                  <input value={input.buyerNickname} onChange={(event) => patchInput({ buyerNickname: event.target.value })} />
+                </Field>
+                <Field label="备注" wide>
+                  <textarea rows={2} value={input.note} onChange={(event) => patchInput({ note: event.target.value })} />
+                </Field>
+              </div>
+              <div className="order-edit-readonly-statuses" aria-label="不可在此编辑的订单状态">
+                <span>平台交易状态：<strong>{platformTransactionStatusLabel(details.order.platformTransactionStatus)}</strong></span>
+                <span>履约状态：<strong>{fulfillmentStatusLabel(details.order.fulfillmentStatus)}</strong></span>
+              </div>
+            </FormSection>
+
+            <FormSection title="金额" description="仅支持普通数字与最多两位小数，保存时以分精确记录。">
+              <div className="field-grid field-grid--three">
+                <Field label="商品总价" required suffix="元">
+                  <input aria-label="商品总价" required type="number" min="0" step="0.01" value={moneyInputs.productTotal} onChange={(event) => patchOrderMoney('productTotal', 'productTotalCents', event.target.value)} />
+                </Field>
+                <Field label="运费" required suffix="元">
+                  <input aria-label="运费" required type="number" min="0" step="0.01" value={moneyInputs.shippingFee} onChange={(event) => patchOrderMoney('shippingFee', 'shippingFeeCents', event.target.value)} />
+                </Field>
+                <Field label="成交金额" required suffix="元">
+                  <input aria-label="成交金额" required type="number" min="0" step="0.01" value={moneyInputs.amount} onChange={(event) => patchOrderMoney('amount', 'amountCents', event.target.value)} />
+                </Field>
+              </div>
+            </FormSection>
+
+            <FormSection title="交易时间" description="输入平台页面显示的时间原文，系统在保存时统一规范化。">
+              <div className="field-grid field-grid--two">
+                <Field label="下单时间">
+                  <input value={input.orderedAtOriginal} onChange={(event) => patchInput({ orderedAtOriginal: event.target.value })} />
+                </Field>
+                <Field label="付款时间">
+                  <input value={input.paidAtOriginal} onChange={(event) => patchInput({ paidAtOriginal: event.target.value })} />
+                </Field>
+              </div>
+            </FormSection>
+
+            <FormSection title="收货信息" description="手机号、地址与行政区划会在保存前重新校验。">
+              <div className="field-grid field-grid--two">
+                <Field label="收件人" required>
+                  <input required value={input.recipient} onChange={(event) => patchInput({ recipient: event.target.value })} />
+                </Field>
+                <Field label="手机号" required>
+                  <input required inputMode="tel" value={input.phone} onChange={(event) => patchInput({ phone: event.target.value })} />
+                </Field>
+                <Field label="完整收货地址" required wide>
+                  <textarea required rows={3} value={input.addressOriginal} onChange={(event) => patchInput({ addressOriginal: event.target.value })} />
+                </Field>
+              </div>
+              <div className="field-grid field-grid--three field-grid--spaced">
+                <Field label="省"><input value={input.province} onChange={(event) => patchInput({ province: event.target.value })} /></Field>
+                <Field label="市"><input value={input.city} onChange={(event) => patchInput({ city: event.target.value })} /></Field>
+                <Field label="区 / 县"><input value={input.district} onChange={(event) => patchInput({ district: event.target.value })} /></Field>
+              </div>
+            </FormSection>
+
+            <FormSection title={`商品明细 · ${input.items.length}`} description="可增加、修改或删除商品，订单至少保留一件商品。">
+              <div className="item-list">
+                {input.items.map((item, index) => (
+                  <div className="item-editor" key={`${item.id ?? 'new'}-${index}`}>
+                    <div className="item-index">{String(index + 1).padStart(2, '0')}</div>
+                    <div className="item-fields">
+                      <div className="item-title-row">
+                        <Field label="商品标题" required>
+                          <input
+                            aria-label={`商品 ${index + 1} 标题`}
+                            required
+                            value={item.sourceTitle}
+                            onChange={(event) => patchItem(index, { sourceTitle: event.target.value })}
+                          />
+                        </Field>
+                        <button
+                          className="item-remove-button"
+                          type="button"
+                          aria-label={`删除商品 ${index + 1}`}
+                          disabled={input.items.length <= 1}
+                          title={input.items.length <= 1 ? '订单至少保留一件商品' : undefined}
+                          onClick={() => removeItem(index)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                      <div className="field-grid field-grid--item">
+                        <Field label="规格">
+                          <input aria-label={`商品 ${index + 1} 规格`} value={item.sourceSpec} onChange={(event) => patchItem(index, { sourceSpec: event.target.value })} />
+                        </Field>
+                        <Field label="单价" required suffix="元">
+                          <input
+                            aria-label={`商品 ${index + 1} 单价`}
+                            required
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={moneyInputs.itemUnitPrices[index] ?? ''}
+                            onChange={(event) => patchItemMoney(index, event.target.value)}
+                          />
+                        </Field>
+                        <Field label="数量" required>
+                          <input
+                            aria-label={`商品 ${index + 1} 数量`}
+                            required
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={item.quantity}
+                            onChange={(event) => patchItem(index, { quantity: Number(event.target.value) })}
+                          />
+                        </Field>
+                      </div>
+                      {item.id === null && itemCustomFieldDefinitions.length > 0 && (
+                        <div className="item-custom-fields">
+                          <span className="item-custom-fields__title">新增商品自定义字段</span>
+                          <div className="custom-field-grid">
+                            {itemCustomFieldDefinitions.map((definition) => (
+                              <CustomFieldInput
+                                key={definition.id}
+                                definition={definition}
+                                label={definition.name}
+                                value={item.customFieldValues?.find((entry) => (
+                                  entry.definitionId === definition.id
+                                ))?.value ?? null}
+                                onChange={(value) => patchNewItemCustomField(
+                                  index,
+                                  definition.id,
+                                  value,
+                                )}
+                                onValidityChange={(valid) => setItemCustomFieldValidity((current) => ({
+                                  ...current,
+                                  [`${index}:${definition.id}`]: valid,
+                                }))}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button className="add-item-button" type="button" onClick={addItem}>
+                <span aria-hidden="true">+</span>添加商品
+              </button>
+            </FormSection>
+          </fieldset>
+        </form>
+      </div>
+
+      {review && (
+        <div
+          ref={reviewDialogRef}
+          className="order-edit-dialog-backdrop"
+          tabIndex={-1}
+          onKeyDown={handleReviewDialogKeyDown}
+        >
+          <section
+            className="order-edit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="order-edit-confirm-title"
+          >
+            <header>
+              <div>
+                <span className="section-kicker">保存前确认</span>
+                <h2 id="order-edit-confirm-title">确认订单修改</h2>
+              </div>
+              <span>{review.changes.length} 个字段变化</span>
+            </header>
+            {review.shippedSnapshotWarning && (
+              <div className="order-edit-warning" role="status">
+                <Icon name="warning" />
+                <span>保存不会改写已冻结的发货快照。</span>
+              </div>
+            )}
+            <div className="order-update-comparison__table-frame">
+              <table aria-label="订单修改差异">
+                <thead><tr><th>字段</th><th>当前值</th><th>修改后</th></tr></thead>
+                <tbody>
+                  {review.changes.map((change) => (
+                    <tr key={change.path}>
+                      <th scope="row">{orderChangeFieldLabel(change.path)}</th>
+                      <td>{formatOrderEditPreviewValue(
+                        change.path,
+                        change.before,
+                        details.customFieldDefinitions,
+                      )}</td>
+                      <td className="order-update-comparison__new-value">{formatOrderEditPreviewValue(
+                        change.path,
+                        change.after,
+                        details.customFieldDefinitions,
+                      )}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {review.input.items.some((item) => (
+              item.id === null && (item.customFieldValues?.length ?? 0) > 0
+            )) && (
+              <section className="order-edit-custom-preview" aria-label="新增商品自定义字段">
+                <h3>新增商品自定义字段</h3>
+                <dl>
+                  {review.input.items.flatMap((item, index) => (
+                    item.id === null ? (item.customFieldValues ?? []).map((entry) => {
+                      const definition = itemCustomFieldDefinitions.find(
+                        ({ id }) => id === entry.definitionId,
+                      );
+                      return (
+                        <div key={`${index}:${entry.definitionId}`}>
+                          <dt>商品 {index + 1} · {definition?.name ?? entry.definitionId}</dt>
+                          <dd>{formatCustomFieldValue(entry.value)}</dd>
+                        </div>
+                      );
+                    }) : []
+                  ))}
+                </dl>
+              </section>
+            )}
+            <footer>
+              <button
+                ref={reviewFirstActionRef}
+                className="button button--quiet"
+                type="button"
+                disabled={saving}
+                onClick={() => setReview(null)}
+              >
+                返回继续修改
+              </button>
+              <button className="button button--primary" type="button" disabled={saving} onClick={() => void confirmSave()}>
+                {saving ? '正在保存…' : '确认保存'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DetailWorkspace({
   details,
   screenshotUrl,
   selectedScreenshotId,
   sourceLoading,
   customFieldsSaving,
+  orderEditSaving,
   error,
   onBack,
   onDirtyChange,
   onSelectSource,
   onSaveCustomFieldValues,
+  onUpdateOrder,
+  onRefreshOrder,
 }: {
   details: OrderDetails;
   screenshotUrl: string;
   selectedScreenshotId: string;
   sourceLoading: boolean;
   customFieldsSaving: boolean;
+  orderEditSaving: boolean;
   error: string;
   onBack: () => void;
-  onDirtyChange: (dirty: boolean) => void;
+  onDirtyChange: (kind: DetailDirtyKind) => void;
   onSelectSource: (screenshotId: string) => void;
   onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
+  onUpdateOrder: (input: OrderEditInput) => Promise<OrderDetails>;
+  onRefreshOrder: (orderId: string) => Promise<OrderDetails>;
 }) {
   const { order } = details;
+  const [editing, setEditing] = useState(false);
+  const [orderEditDirty, setOrderEditDirty] = useState(false);
   const definitions = details.customFieldDefinitions ?? [];
   const persistedCustomFieldValues = details.customFieldValues ?? [];
   const [customValues, setCustomValues] = useState<CustomFieldValueRecord[]>(
@@ -3700,19 +4488,22 @@ function DetailWorkspace({
     customValues,
     persistedCustomFieldValues,
   );
+  const detailDirty = customFieldsDirty || orderEditDirty;
   useEffect(() => {
-    onDirtyChange(customFieldsDirty);
-  }, [customFieldsDirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+    onDirtyChange(customFieldsDirty
+      ? (orderEditDirty ? 'both' : 'custom_fields')
+      : (orderEditDirty ? 'order_edit' : 'none'));
+  }, [customFieldsDirty, onDirtyChange, orderEditDirty]);
+  useEffect(() => () => onDirtyChange('none'), [onDirtyChange]);
   useEffect(() => {
-    if (!customFieldsDirty) return undefined;
+    if (!detailDirty) return undefined;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', warnBeforeUnload);
     return () => window.removeEventListener('beforeunload', warnBeforeUnload);
-  }, [customFieldsDirty]);
+  }, [detailDirty]);
   const orderCustomFields = definitions.filter(
     (definition) => definition.granularity === 'order',
   );
@@ -3792,6 +4583,28 @@ function DetailWorkspace({
     }
   }
 
+  if (editing) {
+    return (
+      <OrderEditWorkspace
+        details={details}
+        screenshotUrl={screenshotUrl}
+        saving={orderEditSaving}
+        error={error}
+        onDirtyChange={setOrderEditDirty}
+        onCancel={() => {
+          setOrderEditDirty(false);
+          setEditing(false);
+        }}
+        onSave={async (input) => {
+          await onUpdateOrder(input);
+          setOrderEditDirty(false);
+          setEditing(false);
+        }}
+        onRefresh={onRefreshOrder}
+      />
+    );
+  }
+
   return (
     <section className="detail-workspace detail-enter">
       <header className="workspace-header workspace-header--detail">
@@ -3805,9 +4618,29 @@ function DetailWorkspace({
             <p>{order.orderNumber}</p>
           </div>
         </div>
-        <span className="status-chip status-chip--large">
-          {platformTransactionStatusLabel(order.platformTransactionStatus)} · {fulfillmentStatusLabel(order.fulfillmentStatus)}
-        </span>
+        <div className="header-actions">
+          {details.lastManualEditAt && (
+            <span className="manual-edit-marker manual-edit-marker--detail">
+              <strong>已修改</strong>
+              <small>最近修改 {formatDateTime(details.lastManualEditAt)}</small>
+            </span>
+          )}
+          <span className="status-chip status-chip--large">
+            {platformTransactionStatusLabel(order.platformTransactionStatus)} · {fulfillmentStatusLabel(order.fulfillmentStatus)}
+          </span>
+          <button
+            className="button button--primary"
+            type="button"
+            disabled={customFieldsDirty || customFieldsSaving}
+            title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
+            onClick={() => {
+              setOrderEditDirty(false);
+              setEditing(true);
+            }}
+          >
+            编辑订单
+          </button>
+        </div>
       </header>
 
       <InlineError message={error} />
@@ -3839,6 +4672,7 @@ function DetailWorkspace({
               <DetailTerm label="订单号" value={order.orderNumber} />
               <DetailTerm label="支付宝交易号" value={displayValue(order.alipayTransactionNumber)} />
               <DetailTerm label="买家昵称" value={order.buyerNickname || '—'} />
+              <DetailTerm label="备注" value={displayValue(order.note)} wide />
               <DetailTerm label="平台交易状态" value={platformTransactionStatusLabel(order.platformTransactionStatus)} />
               <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
             </dl>

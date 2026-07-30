@@ -26,6 +26,7 @@ export type OrderBuiltinTableFieldId =
   | 'platform'
   | 'seller_account'
   | 'buyer_nickname'
+  | 'note'
   | 'recipient'
   | 'phone'
   | 'address'
@@ -187,6 +188,7 @@ const ORDER_BUILTIN_FIELDS = [
   fixedField('order', 'builtin', 'platform', '平台', 'text'),
   fixedField('order', 'builtin', 'seller_account', '卖家账号', 'text'),
   fixedField('order', 'builtin', 'buyer_nickname', '买家昵称', 'text'),
+  fixedField('order', 'builtin', 'note', '备注', 'text'),
   fixedField('order', 'builtin', 'recipient', '收件人', 'text'),
   fixedField('order', 'builtin', 'phone', '手机号', 'text'),
   fixedField('order', 'builtin', 'address', '收货地址', 'text'),
@@ -503,6 +505,7 @@ export function projectOrderTableCell(
     case 'platform': return order.platform;
     case 'seller_account': return order.sellerAccount;
     case 'buyer_nickname': return order.buyerNickname;
+    case 'note': return order.note ?? '';
     case 'recipient': return order.recipient;
     case 'phone': return order.phone;
     case 'address': return order.addressOriginal;
