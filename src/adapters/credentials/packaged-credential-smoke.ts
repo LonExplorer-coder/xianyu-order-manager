@@ -1,19 +1,20 @@
-import { AsyncEntry } from '@napi-rs/keyring';
 import { randomUUID } from 'node:crypto';
+
+import { SystemApiKeyStore } from './system-api-key-store';
 
 export async function runPackagedCredentialStoreSmoke(): Promise<void> {
   const marker = `temporary-${randomUUID()}`;
   const account = `packaged-credential-smoke-${randomUUID()}`;
-  const entry = new AsyncEntry(
-    'com.lonexplorer.xianyu-order-manager.smoke',
-    account,
-  );
+  const store = new SystemApiKeyStore({
+    serviceName: 'com.lonexplorer.xianyu-order-manager.smoke',
+    accountName: account,
+  });
   let operationError: unknown = null;
   let cleanupError: unknown = null;
 
   try {
-    await entry.setPassword(marker);
-    if ((await entry.getPassword()) !== marker) {
+    await store.setApiKey(marker);
+    if ((await store.getApiKey()) !== marker) {
       throw new Error('系统凭据读回结果不一致');
     }
   } catch (error) {
@@ -21,8 +22,8 @@ export async function runPackagedCredentialStoreSmoke(): Promise<void> {
   }
 
   try {
-    await entry.deleteCredential();
-    if ((await entry.getPassword()) !== null) {
+    await store.deleteApiKey();
+    if ((await store.getApiKey()) !== null) {
       throw new Error('临时系统凭据未被清理');
     }
   } catch (error) {

@@ -1945,6 +1945,36 @@ describe('订单管理工作台', () => {
     expect(retryDataDirectory).toHaveBeenCalledOnce();
   });
 
+  it('启动异常时可重新选择数据目录，且保留重试原目录入口', async () => {
+    const user = userEvent.setup();
+    const retryDataDirectory = vi.fn().mockResolvedValue({
+      kind: 'error',
+      message: '上次使用的数据目录不存在或无法访问',
+    });
+    const selectDataDirectory = vi.fn().mockResolvedValue({
+      kind: 'ready',
+      dataDirectory: 'E:\\新订单数据',
+      orders: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'error',
+        message: '上次使用的数据目录不存在或无法访问，请重新选择数据目录',
+      }),
+      retryDataDirectory,
+      selectDataDirectory,
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByRole('button', { name: '重新尝试' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '重新选择数据目录' }));
+
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    expect(selectDataDirectory).toHaveBeenCalledOnce();
+    expect(retryDataDirectory).not.toHaveBeenCalled();
+  });
+
   it('识别期间锁定上传动作，用户取消选图后安静返回空状态', async () => {
     const user = userEvent.setup();
     let finishSelection!: (value: OrderDraft | null) => void;

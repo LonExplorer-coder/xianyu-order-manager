@@ -29,6 +29,8 @@ import {
   type TableTemplateGranularity,
 } from '../core/table-templates';
 import { DesktopSession } from './desktop-session';
+import { assertDataDirectoryOutsideProgram } from './portable-data-directory';
+import { runPortableReleaseDataSmoke } from './portable-release-smoke';
 import { createConfiguredDesktopSession } from './production-session';
 import {
   selectedSourceScreenshotDirectory,
@@ -82,11 +84,19 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     const selection = await dialog.showOpenDialog(window, {
       title: '选择闲鱼订单数据目录',
       buttonLabel: '使用此目录',
-      properties: ['openDirectory', 'createDirectory', 'promptToCreate'],
+      defaultPath: join(app.getPath('documents'), '闲鱼订单数据'),
+      properties: process.platform === 'darwin'
+        ? ['openDirectory', 'createDirectory']
+        : ['openDirectory', 'promptToCreate'],
     });
     if (selection.canceled || selection.filePaths.length === 0) {
       return desktopSession.getState();
     }
+    assertDataDirectoryOutsideProgram({
+      dataDirectory: selection.filePaths[0],
+      executablePath: app.getPath('exe'),
+      platform: process.platform,
+    });
     return desktopSession.useDataDirectory(selection.filePaths[0]);
   });
 
@@ -766,6 +776,32 @@ function xlsxFilePath(value: string): string {
 }
 
 void app.whenReady().then(async () => {
+  if (process.env.XIANYU_PACKAGED_PORTABLE_SMOKE) {
+    try {
+      if (!app.isPackaged) throw new Error('便携版冒烟只能针对打包后的应用运行');
+      const result = await runPortableReleaseDataSmoke({
+        phase: portableSmokePhase(process.env.XIANYU_PACKAGED_PORTABLE_SMOKE),
+        configDirectory: requiredSmokePath(
+          process.env.XIANYU_PORTABLE_SMOKE_CONFIG_DIRECTORY,
+          '启动配置目录',
+        ),
+        dataDirectory: requiredSmokePath(
+          process.env.XIANYU_PORTABLE_SMOKE_DATA_DIRECTORY,
+          '订单数据目录',
+        ),
+      });
+      console.log(`Packaged portable release smoke passed: ${JSON.stringify(result)}`);
+      app.exit(0);
+    } catch (error) {
+      console.error(
+        'Packaged portable release smoke failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      app.exit(1);
+    }
+    return;
+  }
+
   if (process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1') {
     try {
       await runPackagedCredentialStoreSmoke();
@@ -782,9 +818,17 @@ void app.whenReady().then(async () => {
   }
 
   const configDirectory = join(app.getPath('userData'), 'bootstrap');
+  const validateDataDirectory = (dataDirectory: string): void => {
+    assertDataDirectoryOutsideProgram({
+      dataDirectory,
+      executablePath: app.getPath('exe'),
+      platform: process.platform,
+    });
+  };
   session = createConfiguredDesktopSession({
     configDirectory,
     apiKeyStore: new SystemApiKeyStore(),
+    validateDataDirectory,
   });
   session.restore();
   registerIpcHandlers(session);
@@ -794,6 +838,16 @@ void app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
 });
+
+function portableSmokePhase(value: string): 'write' | 'read' {
+  if (value === 'write' || value === 'read') return value;
+  throw new Error('便携版冒烟阶段无效');
+}
+
+function requiredSmokePath(value: string | undefined, label: string): string {
+  if (!value?.trim()) throw new Error(`便携版冒烟缺少${label}`);
+  return value;
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -34,6 +34,28 @@ afterEach(() => {
 });
 
 describe('正式 OCR 装配', () => {
+  it('把生产目录安全校验接入新选目录和恢复流程', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-production-directory-policy-'));
+    const dataDirectory = join(testRoot, '订单数据');
+    const validateDataDirectory = vi.fn((selectedDirectory: string) => {
+      if (selectedDirectory === dataDirectory) {
+        throw new Error('数据目录安全校验拒绝');
+      }
+    });
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      validateDataDirectory,
+    });
+    sessions.push(session);
+
+    expect(session.useDataDirectory(dataDirectory)).toEqual({
+      kind: 'error',
+      message: '数据目录安全校验拒绝',
+    });
+    expect(validateDataDirectory).toHaveBeenCalledWith(dataDirectory);
+  });
+
   it('保存百炼配置后，上传截图使用真实识别适配器而不是演示订单', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-production-ocr-'));
     const uploadDirectory = join(testRoot, '待上传');

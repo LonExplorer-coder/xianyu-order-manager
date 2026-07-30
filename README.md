@@ -2,7 +2,7 @@
 
 一个面向个人卖家的本机订单管理工具：批量识别包含闲鱼订单详情的来源截图，将结果校对后汇总为可自定义表头的订单表、商品明细表和合并发货表。
 
-当前状态：已进入第一阶段实施。应用已打通“批量选择 1–50 张闲鱼订单截图 → 本机队列持久化 → 后台逐张真实识别 → 确定性校验 → 自动入库或带原因校对 → 重复来源判断或新旧值确认更新 → 自定义业务字段 → 多套表格模板 → 默认脱敏的两表 Excel 导出 → 退出重启后继续”的纵向流程。Mac 与 Windows 免安装交付、合并发货和历史导入仍按后续 Issue 实施。
+当前状态：已进入第一阶段实施。应用已打通“批量选择 1–50 张闲鱼订单截图 → 本机队列持久化 → 后台逐张真实识别 → 确定性校验 → 自动入库或带原因校对 → 重复来源判断或新旧值确认更新 → 自定义业务字段 → 多套表格模板 → 默认脱敏的两表 Excel 导出 → 退出重启后继续”的纵向流程。Mac 与 Windows 免安装 ZIP 的构建和自动验证流程已经建立；合并发货和历史导入仍按后续 Issue 实施。
 
 ## 当前可运行能力
 
@@ -55,6 +55,20 @@ pnpm check
 pnpm package
 ```
 
+两平台免安装 ZIP 在对应系统上构建并验证：
+
+```bash
+# Apple 芯片 Mac
+pnpm make:mac:portable
+pnpm verify:portable
+
+# 64 位 Windows
+pnpm make:windows:portable
+pnpm verify:portable
+```
+
+验证会从最终 ZIP 启动程序两次：首次选择独立数据目录并导入一单，删除第一份程序目录后，再从第二份程序读回原订单和来源截图；同时检查最终 ZIP 中的系统凭据库。日常 CI 会保留 ZIP、SHA-256 和机器可读验收证据 14 天。
+
 macOS 普通本地打包会对整个应用执行临时签名，因此钥匙串功能可用；这个包仅适合本机或内部验证。正式对外分发使用 Apple Developer Program 的 `Developer ID Application` 证书，并把公证凭据保存在 macOS 钥匙串，而不是项目文件中：
 
 ```bash
@@ -90,6 +104,8 @@ Excel 导出验收可先筛选出数笔订单，直接点击“导出当前结�
 ## 文档
 
 - [产品规格](docs/specs/001-xianyu-order-management-system.md)
+- [免安装版使用说明](docs/release/portable-user-guide.md)
+- [Mac 与 Windows 免安装版验收记录](docs/release/portable-acceptance.md)
 - [GitHub 规格 Issue #1](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/1)
 - [领域词汇](CONTEXT.md)
 - [架构决策](docs/adr/)

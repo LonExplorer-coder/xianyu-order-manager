@@ -1018,8 +1018,11 @@ export function App({ api }: AppProps) {
       <SystemScreen
         kind="error"
         message={bootstrap.message}
-        busy={busyAction === 'retry'}
-        onAction={() => void retryBootstrap()}
+        busyAction={busyAction === 'retry' || busyAction === 'directory'
+          ? busyAction
+          : null}
+        onRetry={() => void retryBootstrap()}
+        onChooseDirectory={() => void chooseDataDirectory()}
       />
     );
   }
@@ -1271,7 +1274,13 @@ type SystemScreenProps =
       busy: boolean;
       onAction: () => void;
     }
-  | { kind: 'error'; message: string; busy: boolean; onAction: () => void };
+  | {
+      kind: 'error';
+      message: string;
+      busyAction: 'retry' | 'directory' | null;
+      onRetry: () => void;
+      onChooseDirectory: () => void;
+    };
 
 function SystemScreen(props: SystemScreenProps) {
   if (props.kind === 'loading') {
@@ -1324,9 +1333,31 @@ function SystemScreen(props: SystemScreenProps) {
         <h1>{isLocked ? '数据目录正在使用' : '无法打开订单数据'}</h1>
         <p role={isLocked ? undefined : 'alert'}>{props.message}</p>
         {isLocked && <p className="system-path">{props.dataDirectory}</p>}
-        <button className="button button--primary" type="button" onClick={props.onAction} disabled={props.busy}>
-          {props.busy ? '正在处理…' : isLocked ? '选择其他目录' : '重新尝试'}
-        </button>
+        {isLocked ? (
+          <button className="button button--primary" type="button" onClick={props.onAction} disabled={props.busy}>
+            {props.busy ? '正在打开…' : '选择其他目录'}
+          </button>
+        ) : (
+          <div className="system-actions">
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={props.onRetry}
+              disabled={props.busyAction !== null}
+            >
+              {props.busyAction === 'retry' ? '正在重试…' : '重新尝试'}
+            </button>
+            <button
+              className="button button--quiet"
+              type="button"
+              onClick={props.onChooseDirectory}
+              disabled={props.busyAction !== null}
+            >
+              <Icon name="folder" />
+              {props.busyAction === 'directory' ? '正在打开…' : '重新选择数据目录'}
+            </button>
+          </div>
+        )}
       </section>
     </main>
   );

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -118,6 +118,68 @@ describe('桌面启动状态', () => {
       dataDirectory,
       orders: [],
     });
+  });
+
+  it('记住的数据目录被移除后明确报错且不静默创建空订单库', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-missing-workspace-'));
+    const configDirectory = join(testRoot, '启动配置');
+    const dataDirectory = join(testRoot, '订单数据');
+    const recognizer = new ControlledRecognizer(unusedRecognition);
+    const first = new DesktopSession(
+      new Preferences(configDirectory),
+      recognizer,
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    expect(first.useDataDirectory(dataDirectory)).toMatchObject({ kind: 'ready' });
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+    await rm(dataDirectory, { recursive: true, force: true });
+
+    const reopened = new DesktopSession(
+      new Preferences(configDirectory),
+      recognizer,
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    expect(reopened.restore()).toMatchObject({
+      kind: 'error',
+      message: expect.stringContaining('上次使用的数据目录不存在'),
+    });
+    await expect(access(dataDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('新选和恢复数据目录都必须通过目录安全校验', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-directory-validator-'));
+    const preferences = new Preferences(join(testRoot, '启动配置'));
+    const rememberedDirectory = join(testRoot, '已记住目录');
+    const newlySelectedDirectory = join(testRoot, '新选目录');
+    await mkdir(rememberedDirectory);
+    preferences.setLastDataDirectory(rememberedDirectory);
+    const session = new DesktopSession(
+      preferences,
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+      (dataDirectory) => {
+        if (
+          dataDirectory === rememberedDirectory ||
+          dataDirectory === newlySelectedDirectory
+        ) {
+          throw new Error('数据目录必须位于程序目录之外');
+        }
+      },
+    );
+    sessions.push(session);
+
+    expect(session.restore()).toEqual({
+      kind: 'error',
+      message: '数据目录必须位于程序目录之外',
+    });
+    expect(session.useDataDirectory(newlySelectedDirectory)).toEqual({
+      kind: 'error',
+      message: '数据目录必须位于程序目录之外',
+    });
+    await expect(access(newlySelectedDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('自动入库只有显式开启才生效，并在重启后保留', async () => {

@@ -3464,6 +3464,13 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.system-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 .fields-workspace {
   min-height: 100%;
   background: var(--surface);

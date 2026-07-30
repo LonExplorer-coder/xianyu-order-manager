@@ -32,6 +32,7 @@ import {
 } from '../core/order-intake';
 import { hasEquivalentOrderContent } from '../core/order-comparison';
 import { createHash, randomUUID } from 'node:crypto';
+import { statSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type {
@@ -64,6 +65,8 @@ import { OcrSettingsService } from './ocr-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
 
+export type DataDirectoryValidator = (dataDirectory: string) => void;
+
 export class DesktopSession {
   private application?: LocalApplication;
   private state: BootstrapState = { kind: 'needs_data_directory' };
@@ -83,6 +86,7 @@ export class DesktopSession {
     private readonly preferences: Preferences,
     private readonly recognizer: Recognizer,
     private readonly ocrSettings: OcrSettingsService,
+    private readonly validateDataDirectory: DataDirectoryValidator = () => undefined,
   ) {}
 
   public restore(): BootstrapState {
@@ -478,6 +482,8 @@ export class DesktopSession {
     if (previousApplication) this.retireApplication(previousApplication);
     const application = new LocalApplication(this.recognizer);
     try {
+      this.validateDataDirectory(dataDirectory);
+      if (!remember) assertRememberedDataDirectoryExists(dataDirectory);
       application.openDataDirectory(dataDirectory);
       this.reconcilePendingOrderIntake(application);
       const recognitionBatches = application.restoreRecognitionBatches();
@@ -981,6 +987,15 @@ export class DesktopSession {
       draft: application.saveDraftReviewIssues(draft.id, reviewIssues),
     };
   }
+}
+
+function assertRememberedDataDirectoryExists(dataDirectory: string): void {
+  try {
+    if (statSync(dataDirectory).isDirectory()) return;
+  } catch {
+    // The user-facing error below covers missing and temporarily inaccessible paths.
+  }
+  throw new Error('上次使用的数据目录不存在或无法访问，请重新选择数据目录');
 }
 
 function uniqueReviewIssues(
