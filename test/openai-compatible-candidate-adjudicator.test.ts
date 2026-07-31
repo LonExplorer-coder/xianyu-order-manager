@@ -787,6 +787,78 @@ describe('OpenAI 兼容候选裁决客户端', () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
+  it('连接测试向 DeepSeek 明确给出唯一 decisions 结构和两种决定示例', async () => {
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      const systemPrompt = body.messages[0]?.content ?? '';
+      const hasExplicitDecisionContract =
+        systemPrompt.includes('根对象必须且只能包含 decisions') &&
+        systemPrompt.includes('不得回传 candidateSets') &&
+        systemPrompt.includes('"resolution":"selected"') &&
+        systemPrompt.includes('"resolution":"unresolved"');
+      const content = hasExplicitDecisionContract
+        ? JSON.stringify({
+            decisions: [{
+              ambiguityId: 'candidate-verification-connection-check',
+              resolution: 'selected',
+              candidateId: 'expected-blue',
+            }],
+          })
+        : body.messages[1]!.content;
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-deepseek-contract',
+        choices: [{ message: { content } }],
+      }), { status: 200 });
+    });
+    const adjudicator = new OpenAICompatibleCandidateAdjudicator({
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'connection-contract-key',
+      fetcher,
+    });
+
+    await expect(adjudicator.testConnection()).resolves.toEqual({
+      ok: true,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      requestId: 'chatcmpl-deepseek-contract',
+    });
+  });
+
+  it('连接测试在模型回传 candidateSets 时返回明确且脱敏的失败原因', async () => {
+    const echoedInput = {
+      candidateSets: [{
+        ambiguityId: 'candidate-verification-connection-check',
+        candidates: ['expected-blue', 'alternative-red'],
+      }],
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      id: 'chatcmpl-echoed-candidates',
+      choices: [{ message: { content: JSON.stringify(echoedInput) } }],
+    }), { status: 200 }));
+    const adjudicator = new OpenAICompatibleCandidateAdjudicator({
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'echo-diagnostic-key',
+      fetcher,
+    });
+
+    await expect(adjudicator.testConnection()).resolves.toEqual({
+      ok: false,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      requestId: 'chatcmpl-echoed-candidates',
+      failure: {
+        code: 'invalid_response',
+        message: '候选裁决模型回传了输入，缺少 decisions',
+      },
+    });
+  });
+
   it.each([
     [{ model: '' }, '空模型名'],
     [{ apiKey: '' }, '空 API Key'],
