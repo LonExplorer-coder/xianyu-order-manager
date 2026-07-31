@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v13 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v14 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -33,6 +33,7 @@ describe('数据库升级', () => {
       { version: 11 },
       { version: 12 },
       { version: 13 },
+      { version: 14 },
     ]);
     expect(
       first.database
@@ -368,6 +369,7 @@ describe('数据库升级', () => {
       { version: 11 },
       { version: 12 },
       { version: 13 },
+      { version: 14 },
     ]);
     expect(
       (
@@ -606,6 +608,7 @@ describe('数据库升级', () => {
         { version: 11 },
         { version: 12 },
         { version: 13 },
+        { version: 14 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -804,7 +807,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 13 });
+        .toEqual({ version: 14 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -918,7 +921,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 13 });
+        .toEqual({ version: 14 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -938,8 +941,8 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13) ORDER BY version',
-      ).all()).toEqual([{ version: 12 }, { version: 13 }]);
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14) ORDER BY version',
+      ).all()).toEqual([{ version: 12 }, { version: 13 }, { version: 14 }]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
       ).get()).toEqual({ note: '' });
@@ -972,7 +975,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 13 });
+        .toEqual({ version: 14 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1018,6 +1021,98 @@ describe('数据库升级', () => {
       `).get()).toEqual({ recognition_conflicts_json: '[]' });
     } finally {
       reopened.close();
+    }
+  });
+
+  it('新工作区建立不可变的候选裁决运行与逐项记录', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v14-adjudication-audit-'));
+    const workspace = Workspace.open(dataDirectory);
+    try {
+      expect(workspace.database.prepare(
+        'SELECT version FROM schema_migrations WHERE version = 14',
+      ).get()).toEqual({ version: 14 });
+      const tables = workspace.database.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN (
+          'candidate_adjudication_runs',
+          'candidate_adjudication_decisions'
+        )
+        ORDER BY name
+      `).all();
+      expect(tables).toEqual([
+        { name: 'candidate_adjudication_decisions' },
+        { name: 'candidate_adjudication_runs' },
+      ]);
+      const runColumns = workspace.database
+        .prepare('PRAGMA table_info(candidate_adjudication_runs)')
+        .all() as unknown as Array<{ name: string }>;
+      expect(runColumns.map(({ name }) => name)).not.toContain('raw_response');
+      expect(runColumns.map(({ name }) => name)).not.toContain('request_id');
+
+      workspace.database.prepare(`
+        INSERT INTO recognition_batches (
+          id, platform, seller_account, status, created_at
+        ) VALUES (
+          'batch-v14', 'xianyu', '默认闲鱼账号', 'awaiting_review',
+          '2026-08-01T00:00:00.000Z'
+        )
+      `).run();
+      workspace.database.prepare(`
+        INSERT INTO source_screenshots (
+          id, batch_id, original_name, relative_path,
+          content_sha256, mime_type, created_at
+        ) VALUES (
+          'screenshot-v14', 'batch-v14', '候选裁决.png', 'screenshots/v14.png',
+          'sha-v14', 'image/png', '2026-08-01T00:00:00.000Z'
+        )
+      `).run();
+      workspace.database.prepare(`
+        INSERT INTO order_drafts (
+          id, batch_id, screenshot_id, platform, seller_account,
+          order_number, buyer_nickname, recipient, phone,
+          address_original, amount_cents, platform_transaction_status,
+          fulfillment_status, status, recognition_json, created_at
+        ) VALUES (
+          'draft-v14', 'batch-v14', 'screenshot-v14', 'xianyu',
+          '默认闲鱼账号', 'XY-V14-0001', '', '', '', '', 0,
+          'unknown', 'unknown', 'awaiting_review', '{}',
+          '2026-08-01T00:00:00.000Z'
+        )
+      `).run();
+      workspace.database.prepare(`
+        INSERT INTO candidate_adjudication_runs (
+          id, screenshot_id, draft_id, provider, model,
+          status, failure_code, failure_message, created_at
+        ) VALUES (
+          'run-v14', 'screenshot-v14', 'draft-v14', 'deepseek',
+          'deepseek-v4-flash', 'succeeded', NULL, NULL,
+          '2026-08-01T00:00:00.001Z'
+        )
+      `).run();
+      workspace.database.prepare(`
+        INSERT INTO candidate_adjudication_decisions (
+          run_id, position, ambiguity_id, region, field, item_index,
+          candidates_json, selected_candidate_id, context_lines_json,
+          outcome, failure_code
+        ) VALUES (
+          'run-v14', 0, 'ambiguity-1', 'shipping_information', 'phone', NULL,
+          '[{"candidateId":"candidate-1","displayText":"候选一"}]',
+          'candidate-1', '[{"lineId":"line-1","text":"候选一","left":0,"top":0,"right":10,"bottom":10}]', 'selected', NULL
+        )
+      `).run();
+
+      expect(() => workspace.database.prepare(`
+        UPDATE candidate_adjudication_runs
+        SET model = 'changed'
+        WHERE id = 'run-v14'
+      `).run()).toThrow(/immutable|不可变/u);
+      expect(() => workspace.database.prepare(`
+        DELETE FROM candidate_adjudication_decisions
+        WHERE run_id = 'run-v14'
+      `).run()).toThrow(/immutable|不可变/u);
+    } finally {
+      workspace.close();
     }
   });
 
@@ -1142,7 +1237,9 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         ALTER TABLE table_templates_v10_fixture RENAME TO table_templates;
         ALTER TABLE original_orders DROP COLUMN note;
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13);
+        DROP TABLE IF EXISTS candidate_adjudication_decisions;
+        DROP TABLE IF EXISTS candidate_adjudication_runs;
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1166,7 +1263,9 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       BEGIN IMMEDIATE;
       ALTER TABLE original_orders DROP COLUMN note;
       ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
-      DELETE FROM schema_migrations WHERE version IN (12, 13);
+      DROP TABLE IF EXISTS candidate_adjudication_decisions;
+      DROP TABLE IF EXISTS candidate_adjudication_runs;
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14);
       COMMIT;
     `);
   } finally {
@@ -1187,7 +1286,9 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       database.exec('ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;');
     }
     database.exec(`
-      DELETE FROM schema_migrations WHERE version = 13;
+      DROP TABLE IF EXISTS candidate_adjudication_decisions;
+      DROP TABLE IF EXISTS candidate_adjudication_runs;
+      DELETE FROM schema_migrations WHERE version IN (13, 14);
       COMMIT;
     `);
   } catch (error) {
@@ -1385,7 +1486,9 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         ALTER TABLE order_items_v9_fixture RENAME TO order_items;
         ALTER TABLE original_orders DROP COLUMN note;
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13);
+        DROP TABLE IF EXISTS candidate_adjudication_decisions;
+        DROP TABLE IF EXISTS candidate_adjudication_runs;
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14);
       `);
       database.exec('COMMIT;');
     } catch (error) {

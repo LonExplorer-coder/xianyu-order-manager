@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import type { RecognitionResult, Recognizer } from '../src/core/contracts';
+import type { CandidateAdjudicationAudit } from '../src/core/candidate-adjudication-audit';
 import { LocalApplication } from '../src/main/local-application';
 
 const openedApplications: LocalApplication[] = [];
@@ -469,6 +470,252 @@ describe('完整订单工作流', () => {
       requestId: 'synthetic-review',
       rawResponse: '{"stage":"review"}',
     });
+  });
+
+  it('把有限候选裁决与逐项依据持久保存但不向界面暴露原始响应', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-adjudication-audit-'));
+    const dataDirectory = join(testRoot, '数据');
+    const sourcePath = join(testRoot, '候选裁决订单.png');
+    await writeFile(
+      sourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    const recognizer: Recognizer = {
+      recognize: async () => ({
+        result: completeSyntheticRecognition('XY-SYNTH-ADJUDICATION-0001'),
+        evidences: [{
+          provider: 'controlled',
+          model: 'controlled',
+          requestId: 'synthetic-ocr',
+          schemaVersion: 1,
+          rawResponse: '{"stage":"ocr"}',
+        }],
+        candidateAdjudication: {
+          provider: 'deepseek',
+          model: 'deepseek-v4-flash',
+          status: 'succeeded',
+          decisions: [{
+            ambiguityId: 'shipping-phone',
+            region: 'shipping_information',
+            field: 'phone',
+            candidates: [{
+              candidateId: 'phone-1',
+              displayText: '合成收件人 13900000001',
+              evidenceRefs: [{ lineId: 'shipping-1' }],
+            }, {
+              candidateId: 'phone-2',
+              displayText: '备用联系人 13700000002',
+              evidenceRefs: [{ lineId: 'shipping-2' }],
+            }],
+            contextLines: [{
+              lineId: 'shipping-1',
+              text: '合成收件人 13900000001',
+              left: 10,
+              top: 20,
+              right: 200,
+              bottom: 40,
+            }, {
+              lineId: 'shipping-2',
+              text: '备用联系人 13700000002',
+              left: 10,
+              top: 45,
+              right: 200,
+              bottom: 65,
+            }],
+            selectedCandidateId: 'phone-1',
+            outcome: 'selected',
+          }],
+        },
+      }),
+    };
+    const application = new LocalApplication(recognizer);
+    openedApplications.push(application);
+    application.openDataDirectory(dataDirectory);
+
+    const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+    application.close();
+    const reopened = new LocalApplication(recognizer);
+    openedApplications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+    const audit = reopened.getCandidateAdjudicationAudit(draft.id);
+
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'succeeded',
+      decisions: [{
+        ambiguityId: 'shipping-phone',
+        selectedCandidateId: 'phone-1',
+        outcome: 'selected',
+      }],
+    });
+    expect(JSON.stringify(audit)).not.toContain('rawResponse');
+
+    const database = new DatabaseSync(
+      join(dataDirectory, 'xianyu-order-manager.sqlite3'),
+      { readOnly: true },
+    );
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM candidate_adjudication_runs
+      WHERE draft_id = ?
+    `).get(draft.id)).toEqual({ count: 1 });
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM candidate_adjudication_decisions AS decisions
+      JOIN candidate_adjudication_runs AS runs ON runs.id = decisions.run_id
+      WHERE runs.draft_id = ?
+    `).get(draft.id)).toEqual({ count: 1 });
+    database.close();
+  });
+
+  it.each(['succeeded', 'partial', 'failed'] as const)(
+    '合法的 2000 字符内候选依据在 %s 状态下都不会让 OCR 草稿保存失败',
+    async (status) => {
+      const testRoot = await mkdtemp(join(tmpdir(), `xianyu-long-audit-${status}-`));
+      const dataDirectory = join(testRoot, '数据');
+      const sourcePath = join(testRoot, `${status}.png`);
+      await writeFile(sourcePath, Buffer.from('synthetic-order-image'));
+      const outcome = status === 'succeeded'
+        ? 'selected' as const
+        : status === 'partial'
+          ? 'unresolved' as const
+          : 'invalid' as const;
+      const candidateAdjudication: CandidateAdjudicationAudit = {
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        status,
+        ...(status === 'failed'
+          ? {
+              failureCode: 'timeout' as const,
+              failureMessage: '候选裁决请求超时',
+            }
+          : {}),
+        decisions: [{
+          ambiguityId: 'long-context-line',
+          region: 'purchased_items',
+          field: 'item_title',
+          itemIndex: 0,
+          candidates: [{
+            candidateId: 'title-a',
+            displayText: '候选标题 A',
+            evidenceRefs: [{ lineId: 'long-line' }],
+          }, {
+            candidateId: 'title-b',
+            displayText: '候选标题 B',
+            evidenceRefs: [{ lineId: 'long-line' }],
+          }],
+          contextLines: [{
+            lineId: 'long-line',
+            text: '长'.repeat(1_500),
+            left: 10,
+            top: 20,
+            right: 700,
+            bottom: 60,
+          }],
+          ...(outcome === 'selected' ? { selectedCandidateId: 'title-a' } : {}),
+          outcome,
+          ...(outcome === 'invalid' ? { failureCode: 'timeout' as const } : {}),
+        }],
+      };
+      const recognizer: Recognizer = {
+        recognize: async () => ({
+          result: completeSyntheticRecognition(`XY-LONG-AUDIT-${status}`),
+          evidences: [{
+            provider: 'controlled',
+            model: 'controlled',
+            requestId: `ocr-${status}`,
+            schemaVersion: 1,
+            rawResponse: '{}',
+          }],
+          candidateAdjudication,
+        }),
+      };
+      const application = new LocalApplication(recognizer);
+      openedApplications.push(application);
+      application.openDataDirectory(dataDirectory);
+
+      const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+
+      expect(draft.status).toBe('awaiting_review');
+      expect(application.getCandidateAdjudicationAudit(draft.id)).toMatchObject([{
+        status,
+        decisions: [{ outcome }],
+      }]);
+    },
+  );
+
+  it('非法的可选候选裁决审计不会回滚已完成的 OCR 草稿', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-invalid-audit-isolation-'));
+    const dataDirectory = join(testRoot, '数据');
+    const sourcePath = join(testRoot, '候选裁决无效.png');
+    await writeFile(sourcePath, Buffer.from('synthetic-order-image'));
+    const recognizer: Recognizer = {
+      recognize: async () => ({
+        result: completeSyntheticRecognition('XY-INVALID-AUDIT-ISOLATION'),
+        evidences: [{
+          provider: 'controlled',
+          model: 'controlled',
+          requestId: 'ocr-before-invalid-audit',
+          schemaVersion: 1,
+          rawResponse: '{}',
+        }],
+        candidateAdjudication: {
+          provider: 'deepseek',
+          model: 'deepseek-v4-flash',
+          status: 'failed',
+          failureCode: 'invalid_request',
+          failureMessage: '候选请求超出安全上限',
+          decisions: [{
+            ambiguityId: 'oversized-context-line',
+            region: 'purchased_items',
+            field: 'item_title',
+            itemIndex: 0,
+            candidates: [{
+              candidateId: 'title-a',
+              displayText: '候选标题 A',
+              evidenceRefs: [{ lineId: 'oversized-line' }],
+            }, {
+              candidateId: 'title-b',
+              displayText: '候选标题 B',
+              evidenceRefs: [{ lineId: 'oversized-line' }],
+            }],
+            contextLines: [{
+              lineId: 'oversized-line',
+              text: '超'.repeat(2_001),
+              left: 10,
+              top: 20,
+              right: 700,
+              bottom: 60,
+            }],
+            outcome: 'invalid',
+            failureCode: 'invalid_request',
+          }],
+        },
+      }),
+    };
+    const application = new LocalApplication(recognizer);
+    openedApplications.push(application);
+    application.openDataDirectory(dataDirectory);
+
+    const batch = await application.submitRecognitionBatch([sourcePath]);
+
+    expect(batch.drafts).toHaveLength(1);
+    expect(batch.drafts[0]).toMatchObject({
+      orderNumber: 'XY-INVALID-AUDIT-ISOLATION',
+      status: 'awaiting_review',
+    });
+    expect(application.getCandidateAdjudicationAudit(batch.drafts[0]!.id)).toMatchObject([{
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'rejected',
+      failureCode: 'invalid_response',
+      decisions: [],
+    }]);
   });
 
   it('保留字段缺失的识别结果供校对，但不允许直接确认入库', async () => {

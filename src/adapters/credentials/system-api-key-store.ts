@@ -10,6 +10,7 @@ import type { ApiKeyStore } from '../../main/ocr-settings';
 
 const SERVICE_NAME = 'com.lonexplorer.xianyu-order-manager';
 const ACCOUNT_NAME = 'aliyun-bailian-api-key';
+const SECRET_LABEL = '百炼 API Key';
 
 export type SystemCredentialEntry = {
   getPassword(): Promise<string | undefined>;
@@ -30,6 +31,7 @@ export type SystemCredentialBackend = {
 export type SystemApiKeyStoreOptions = {
   serviceName?: string;
   accountName?: string;
+  secretLabel?: string;
   backend?: SystemCredentialBackend;
   platform?: NodeJS.Platform;
   entry?: SystemCredentialEntry;
@@ -39,10 +41,12 @@ export type SystemApiKeyStoreOptions = {
 
 export class SystemApiKeyStore implements ApiKeyStore {
   private readonly backend: SystemCredentialBackend;
+  private readonly secretLabel: string;
 
   public constructor(options: SystemApiKeyStoreOptions = {}) {
     const serviceName = options.serviceName ?? SERVICE_NAME;
     const accountName = options.accountName ?? ACCOUNT_NAME;
+    this.secretLabel = options.secretLabel?.trim() || SECRET_LABEL;
     this.backend = options.backend ?? createSystemCredentialBackend({
       serviceName,
       accountName,
@@ -58,7 +62,7 @@ export class SystemApiKeyStore implements ApiKeyStore {
       const result = await this.backend.readCredential();
       return result.status === 'found' ? result.password : null;
     } catch {
-      throw new Error('无法读取系统凭据库中的百炼 API Key');
+      throw new Error(`无法读取系统凭据库中的${this.secretLabel}`);
     }
   }
 
@@ -66,7 +70,7 @@ export class SystemApiKeyStore implements ApiKeyStore {
     try {
       await this.backend.setPassword(apiKey);
     } catch {
-      throw new Error('无法把百炼 API Key 保存到系统凭据库');
+      throw new Error(`无法把 ${this.secretLabel} 保存到系统凭据库`);
     }
   }
 
@@ -78,7 +82,7 @@ export class SystemApiKeyStore implements ApiKeyStore {
         throw new Error('系统凭据库拒绝删除条目');
       }
     } catch {
-      throw new Error('无法从系统凭据库移除百炼 API Key');
+      throw new Error(`无法从系统凭据库移除${this.secretLabel}`);
     }
   }
 

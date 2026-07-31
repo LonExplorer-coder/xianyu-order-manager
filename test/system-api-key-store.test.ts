@@ -27,6 +27,22 @@ function backend(
 }
 
 describe('系统 API Key 凭据库适配器', () => {
+  it('候选裁决凭据可使用独立账号并在错误中显示对应秘密名称', async () => {
+    const store = new SystemApiKeyStore({
+      accountName: 'candidate-verification-deepseek-api-key',
+      secretLabel: 'DeepSeek 验证模型 API Key',
+      backend: backend({
+        setPassword: vi.fn(async () => {
+          throw new Error('native access denied');
+        }),
+      }),
+    });
+
+    await expect(store.setApiKey('sk-independent-verifier')).rejects.toThrow(
+      '无法把 DeepSeek 验证模型 API Key 保存到系统凭据库',
+    );
+  });
+
   it('通过可报告错误的系统枚举读取精确账号，不混用同服务其他凭据', async () => {
     const store = new SystemApiKeyStore({
       platform: 'win32',

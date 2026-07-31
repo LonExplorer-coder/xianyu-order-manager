@@ -1,6 +1,7 @@
 import type {
   BootstrapState,
 } from '../core/desktop-api';
+import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type {
   CreateCustomFieldDefinitionInput,
   CustomFieldDefinition,
@@ -42,6 +43,12 @@ import type {
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import type {
+  CandidateVerificationConnectionTestInput,
+  CandidateVerificationConnectionTestResult,
+  CandidateVerificationSettingsView,
+  SaveCandidateVerificationSettingsInput,
+} from '../core/candidate-verification-settings';
+import type {
   OrderItemWorkbenchQuery,
   OrderItemWorkbenchResult,
   OrderWorkbenchQuery,
@@ -62,6 +69,7 @@ import {
   type RecognitionBatchItemUpdate,
 } from './local-application';
 import { OcrSettingsService } from './ocr-settings';
+import { CandidateVerificationSettingsService } from './candidate-verification-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
 
@@ -87,6 +95,7 @@ export class DesktopSession {
     private readonly recognizer: Recognizer,
     private readonly ocrSettings: OcrSettingsService,
     private readonly validateDataDirectory: DataDirectoryValidator = () => undefined,
+    private readonly candidateVerificationSettings?: CandidateVerificationSettingsService,
   ) {}
 
   public restore(): BootstrapState {
@@ -274,6 +283,14 @@ export class DesktopSession {
     return structuredClone(this.requireApplication().getDraftReview(draftId));
   }
 
+  public getCandidateAdjudicationAudit(
+    draftId: string,
+  ): CandidateAdjudicationAuditView[] {
+    return structuredClone(
+      this.requireApplication().getCandidateAdjudicationAudit(draftId),
+    );
+  }
+
   public onRecognitionBatchesChanged(
     listener: (batches: RecognitionBatchView[]) => void,
   ): () => void {
@@ -441,6 +458,26 @@ export class DesktopSession {
     return this.ocrSettings.testConnection(input);
   }
 
+  public getCandidateVerificationSettings(): Promise<CandidateVerificationSettingsView> {
+    return this.requireCandidateVerificationSettings().getSettings();
+  }
+
+  public saveCandidateVerificationSettings(
+    input: SaveCandidateVerificationSettingsInput,
+  ): Promise<CandidateVerificationSettingsView> {
+    return this.requireCandidateVerificationSettings().saveSettings(input);
+  }
+
+  public removeCandidateVerificationApiKey(): Promise<CandidateVerificationSettingsView> {
+    return this.requireCandidateVerificationSettings().removeApiKey();
+  }
+
+  public testCandidateVerificationConnection(
+    input: CandidateVerificationConnectionTestInput,
+  ): Promise<CandidateVerificationConnectionTestResult> {
+    return this.requireCandidateVerificationSettings().testConnection(input);
+  }
+
   public getOrderIntakeSettings(): OrderIntakeSettingsView {
     return {
       automaticImportEnabled: this.preferences.getAutomaticImportEnabled(),
@@ -451,6 +488,13 @@ export class DesktopSession {
     input: SaveOrderIntakeSettingsInput,
   ): OrderIntakeSettingsView {
     return this.preferences.saveOrderIntakeSettings(input);
+  }
+
+  private requireCandidateVerificationSettings(): CandidateVerificationSettingsService {
+    if (!this.candidateVerificationSettings) {
+      throw new Error('当前运行环境未配置候选裁决服务');
+    }
+    return this.candidateVerificationSettings;
   }
 
   public close(): void {

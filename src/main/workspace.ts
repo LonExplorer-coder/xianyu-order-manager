@@ -155,6 +155,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 11) migrateToVersion11(database);
   if (row.version < 12) migrateToVersion12(database);
   if (row.version < 13) migrateToVersion13(database);
+  if (row.version < 14) migrateToVersion14(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1240,6 +1241,113 @@ function migrateToVersion13(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion14(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE candidate_adjudication_runs (
+        id TEXT PRIMARY KEY,
+        screenshot_id TEXT NOT NULL
+          REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        draft_id TEXT NOT NULL
+          REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        provider TEXT NOT NULL CHECK (
+          provider IN ('deepseek', 'aliyun-bailian', 'openai-compatible')
+        ),
+        model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+        status TEXT NOT NULL CHECK (
+          status IN ('succeeded', 'partial', 'failed', 'rejected')
+        ),
+        failure_code TEXT,
+        failure_message TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (status = 'succeeded' AND failure_code IS NULL AND failure_message IS NULL)
+          OR status <> 'succeeded'
+        )
+      ) STRICT;
+
+      CREATE INDEX candidate_adjudication_runs_by_screenshot
+        ON candidate_adjudication_runs(screenshot_id, created_at);
+      CREATE INDEX candidate_adjudication_runs_by_draft
+        ON candidate_adjudication_runs(draft_id, created_at);
+
+      CREATE TABLE candidate_adjudication_decisions (
+        run_id TEXT NOT NULL
+          REFERENCES candidate_adjudication_runs(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        ambiguity_id TEXT NOT NULL CHECK (length(trim(ambiguity_id)) > 0),
+        region TEXT NOT NULL CHECK (
+          region IN (
+            'platform_status',
+            'shipping_information',
+            'purchased_items',
+            'amount_summary',
+            'order_details',
+            'fulfillment_signals'
+          )
+        ),
+        field TEXT NOT NULL CHECK (length(trim(field)) > 0),
+        item_index INTEGER CHECK (item_index IS NULL OR item_index >= 0),
+        candidates_json TEXT NOT NULL CHECK (
+          json_valid(candidates_json)
+          AND json_type(candidates_json) = 'array'
+        ),
+        selected_candidate_id TEXT,
+        context_lines_json TEXT NOT NULL CHECK (
+          json_valid(context_lines_json)
+          AND json_type(context_lines_json) = 'array'
+        ),
+        outcome TEXT NOT NULL CHECK (
+          outcome IN ('selected', 'unresolved', 'invalid')
+        ),
+        failure_code TEXT,
+        PRIMARY KEY (run_id, position),
+        UNIQUE (run_id, ambiguity_id),
+        CHECK (
+          (outcome = 'selected' AND selected_candidate_id IS NOT NULL)
+          OR (outcome <> 'selected' AND selected_candidate_id IS NULL)
+        )
+      ) STRICT;
+
+      CREATE TRIGGER candidate_adjudication_runs_are_immutable_on_update
+      BEFORE UPDATE ON candidate_adjudication_runs
+      BEGIN
+        SELECT RAISE(ABORT, 'candidate adjudication runs are immutable');
+      END;
+
+      CREATE TRIGGER candidate_adjudication_runs_are_immutable_on_delete
+      BEFORE DELETE ON candidate_adjudication_runs
+      BEGIN
+        SELECT RAISE(ABORT, 'candidate adjudication runs are immutable');
+      END;
+
+      CREATE TRIGGER candidate_adjudication_decisions_are_immutable_on_update
+      BEFORE UPDATE ON candidate_adjudication_decisions
+      BEGIN
+        SELECT RAISE(ABORT, 'candidate adjudication decisions are immutable');
+      END;
+
+      CREATE TRIGGER candidate_adjudication_decisions_are_immutable_on_delete
+      BEFORE DELETE ON candidate_adjudication_decisions
+      BEGIN
+        SELECT RAISE(ABORT, 'candidate adjudication decisions are immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

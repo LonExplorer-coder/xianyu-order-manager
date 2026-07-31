@@ -18,14 +18,31 @@ import type {
   RecognizerSource,
 } from '../../core/contracts';
 import type {
+  CandidateAdjudicationAudit,
+  CandidateAdjudicationDecisionAudit,
+} from '../../core/candidate-adjudication-audit';
+import type {
+  CandidateAdjudicationFailureCode,
+  CandidateAdjudicationResult,
+  CandidateAdjudicator,
+  CandidateDecision,
+  CandidateSet,
+} from '../../core/candidate-verification';
+import type {
   BailianConnectionTester,
   BailianRegion,
 } from '../../main/ocr-settings';
 import {
   planXianyuSemanticRegions,
-  type XianyuSemanticRegionLayout,
 } from './xianyu-semantic-regions';
-import { processXianyuSixRegionExtraction } from './xianyu-six-region-extraction';
+import {
+  processXianyuSixRegionExtraction,
+  type XianyuSixRegionModularExtraction,
+} from './xianyu-six-region-extraction';
+import {
+  applyXianyuCandidateDecisions,
+  planXianyuCandidateAdjudication,
+} from './xianyu-candidate-adjudication';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -292,6 +309,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     apiKey: string;
     sellerAccount: string;
     source: RecognizerSource;
+    candidateAdjudicator?: CandidateAdjudicator;
   }): Promise<RecognitionAttempt> {
     if (!this.legacyKieCompatibility) {
       return this.recognizeOrderWithSemanticRegions(input);
@@ -391,6 +409,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     apiKey: string;
     sellerAccount: string;
     source: RecognizerSource;
+    candidateAdjudicator?: CandidateAdjudicator;
   }): Promise<RecognitionAttempt> {
     const endpoint = orderRecognitionEndpointFor(input.workspaceId, input.region);
     const imageDataUrl = toImageDataUrl(input.source);
@@ -401,10 +420,68 @@ export class BailianOcrClient implements BailianConnectionTester {
     });
 
     const layout = planXianyuSemanticRegions(advanced.wordsInfo);
-    const sixRegionExtraction = layout
-      ? flattenSixRegionExtraction({}, layout)
+    const sixRegionProcessing = layout
+      ? processXianyuSixRegionExtraction({ extracted: {}, layout })
       : undefined;
-    const flattened = sixRegionExtraction?.extracted ?? {};
+    let modularExtraction = sixRegionProcessing?.modularExtraction;
+    let recognitionConflicts = sixRegionProcessing?.recognitionConflicts ?? [];
+    let candidateAdjudication: CandidateAdjudicationAudit | undefined;
+    if (layout && modularExtraction && input.candidateAdjudicator) {
+      const plan = planXianyuCandidateAdjudication({
+        extracted: modularExtraction,
+        layout,
+      });
+      if (plan.candidateSets.length > 0) {
+        let adjudicationResult: CandidateAdjudicationResult;
+        try {
+          adjudicationResult = await input.candidateAdjudicator.adjudicate(
+            plan.candidateSets,
+          );
+        } catch {
+          adjudicationResult = {
+            status: 'failed',
+            provider: input.candidateAdjudicator.provider ?? 'openai-compatible',
+            model: safeCandidateModelName(input.candidateAdjudicator.model),
+            failure: {
+              code: 'remote_error',
+              message: '候选裁决服务调用失败',
+            },
+          };
+        }
+        const acceptedDecisions = acceptedCandidateDecisions(
+          plan.candidateSets,
+          adjudicationResult,
+        );
+        if (acceptedDecisions) {
+          modularExtraction = applyXianyuCandidateDecisions(
+            modularExtraction,
+            plan,
+            acceptedDecisions,
+          ) as XianyuSixRegionModularExtraction;
+          recognitionConflicts = removeResolvedCandidateConflicts(
+            recognitionConflicts,
+            acceptedDecisions,
+          );
+        }
+        candidateAdjudication = candidateAdjudicationAudit(
+          plan.candidateSets,
+          plan.rejectedCandidateSets,
+          adjudicationResult,
+          acceptedDecisions,
+        );
+      } else if (plan.rejectedCandidateSets.length > 0) {
+        candidateAdjudication = rejectedCandidateSetsAudit(
+          plan.rejectedCandidateSets,
+          input.candidateAdjudicator,
+        );
+      }
+    }
+    const flattened = modularExtraction
+      ? flattenModularExtraction({
+          [XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY]: true,
+          ...modularExtraction,
+        })
+      : {};
     const result = normalizeOrderResult(
       sanitizeOrderExtraction(flattened),
       input.sellerAccount,
@@ -417,7 +494,8 @@ export class BailianOcrClient implements BailianConnectionTester {
       result,
       evidences: [advanced.evidence],
       reviewIssues,
-      recognitionConflicts: sixRegionExtraction?.recognitionConflicts ?? [],
+      recognitionConflicts,
+      ...(candidateAdjudication ? { candidateAdjudication } : {}),
     };
   }
 
@@ -624,6 +702,17 @@ export class BailianOcrClient implements BailianConnectionTester {
       clearTimeout(timeout);
     }
   }
+}
+
+function safeCandidateModelName(value: string | undefined): string {
+  if (
+    typeof value === 'string' &&
+    value.trim() === value &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  ) return value;
+  return 'unknown';
 }
 
 function endpointFor(workspaceId: string, region: BailianRegion): string {
@@ -1337,29 +1426,178 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
   };
 }
 
-function flattenSixRegionExtraction(
-  extracted: Record<string, unknown>,
-  layout: XianyuSemanticRegionLayout,
-): {
-  extracted: Record<string, unknown>;
-  hasCriticalConflict: boolean;
-  recognitionConflicts: RecognitionConflictDetail[];
-} {
-  const processed = processXianyuSixRegionExtraction({
-    extracted,
-    layout,
-    processedOrderNumber: validatedOrderNumber(
-      extracted[XIANYU_PROCESSED_ORDER_NUMBER_KEY],
-    ),
-  });
-  return {
-    hasCriticalConflict: processed.hasCriticalConflict,
-    recognitionConflicts: processed.recognitionConflicts,
-    extracted: flattenModularExtraction({
-      [XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY]: true,
-      ...processed.modularExtraction,
+function acceptedCandidateDecisions(
+  candidateSets: readonly CandidateSet[],
+  result: CandidateAdjudicationResult,
+): CandidateDecision[] | undefined {
+  if (result.status !== 'completed') return undefined;
+  if (result.decisions.length !== candidateSets.length) return undefined;
+  const byAmbiguity = new Map<string, CandidateDecision>();
+  for (const decision of result.decisions) {
+    if (byAmbiguity.has(decision.ambiguityId)) return undefined;
+    byAmbiguity.set(decision.ambiguityId, decision);
+  }
+  for (const candidateSet of candidateSets) {
+    const decision = byAmbiguity.get(candidateSet.ambiguityId);
+    if (!decision) return undefined;
+    if (
+      decision.resolution === 'selected' &&
+      !candidateSet.candidates.some(
+        ({ candidateId }) => candidateId === decision.candidateId,
+      )
+    ) return undefined;
+  }
+  if ([...byAmbiguity.keys()].some((ambiguityId) =>
+    !candidateSets.some((candidateSet) => candidateSet.ambiguityId === ambiguityId)
+  )) return undefined;
+  return candidateSets.map((candidateSet) =>
+    byAmbiguity.get(candidateSet.ambiguityId)!
+  );
+}
+
+function candidateAdjudicationAudit(
+  candidateSets: readonly CandidateSet[],
+  rejectedCandidateSets: readonly CandidateSet[],
+  result: CandidateAdjudicationResult,
+  acceptedDecisions: readonly CandidateDecision[] | undefined,
+): CandidateAdjudicationAudit {
+  const rejectedDecisions = rejectedCandidateSets.map((candidateSet) => ({
+    ...candidateDecisionAuditBase(candidateSet),
+    outcome: 'invalid' as const,
+    failureCode: 'invalid_request' as const,
+  }));
+  if (result.status === 'failed') {
+    return {
+      provider: result.provider,
+      model: result.model,
+      status: candidateFailureIsRejection(result.failure.code)
+        ? 'rejected'
+        : 'failed',
+      failureCode: result.failure.code,
+      failureMessage: result.failure.message,
+      decisions: [
+        ...candidateSets.map((candidateSet) => ({
+          ...candidateDecisionAuditBase(candidateSet),
+          outcome: 'invalid' as const,
+          failureCode: result.failure.code,
+        })),
+        ...rejectedDecisions,
+      ],
+    };
+  }
+  if (!acceptedDecisions) {
+    return {
+      provider: result.provider,
+      model: result.model,
+      status: 'rejected',
+      failureCode: 'invalid_response',
+      failureMessage: '候选裁决服务返回了不符合有限候选约束的结果',
+      decisions: [
+        ...candidateSets.map((candidateSet) => ({
+          ...candidateDecisionAuditBase(candidateSet),
+          outcome: 'invalid' as const,
+          failureCode: 'invalid_response' as const,
+        })),
+        ...rejectedDecisions,
+      ],
+    };
+  }
+  const decisions = [
+    ...candidateSets.map((candidateSet, index) => {
+      const decision = acceptedDecisions[index]!;
+      return {
+        ...candidateDecisionAuditBase(candidateSet),
+        ...(decision.resolution === 'selected'
+          ? {
+              selectedCandidateId: decision.candidateId,
+              outcome: 'selected' as const,
+            }
+          : { outcome: 'unresolved' as const }),
+      } satisfies CandidateAdjudicationDecisionAudit;
     }),
+    ...rejectedDecisions,
+  ];
+  return {
+    provider: result.provider,
+    model: result.model,
+    status: decisions.every(({ outcome }) => outcome === 'selected')
+      ? 'succeeded'
+      : 'partial',
+    decisions,
   };
+}
+
+function rejectedCandidateSetsAudit(
+  candidateSets: readonly CandidateSet[],
+  adjudicator: CandidateAdjudicator,
+): CandidateAdjudicationAudit {
+  return {
+    provider: adjudicator.provider ?? 'openai-compatible',
+    model: safeCandidateModelName(adjudicator.model),
+    status: 'rejected',
+    failureCode: 'invalid_request',
+    failureMessage: '候选歧义超出单次调用安全边界，未发送远程模型',
+    decisions: candidateSets.map((candidateSet) => ({
+      ...candidateDecisionAuditBase(candidateSet),
+      outcome: 'invalid',
+      failureCode: 'invalid_request',
+    })),
+  };
+}
+
+function candidateDecisionAuditBase(
+  candidateSet: CandidateSet,
+): Omit<
+  CandidateAdjudicationDecisionAudit,
+  'outcome' | 'selectedCandidateId' | 'failureCode'
+> {
+  return {
+    ambiguityId: candidateSet.ambiguityId,
+    region: candidateSet.region,
+    field: candidateSet.field,
+    ...(candidateSet.itemIndex === undefined
+      ? {}
+      : { itemIndex: candidateSet.itemIndex }),
+    candidates: structuredClone(candidateSet.candidates),
+    contextLines: structuredClone(candidateSet.contextLines),
+  };
+}
+
+function candidateFailureIsRejection(
+  code: CandidateAdjudicationFailureCode,
+): boolean {
+  return [
+    'invalid_request',
+    'invalid_response',
+    'unsafe_response',
+    'response_too_large',
+  ].includes(code);
+}
+
+function removeResolvedCandidateConflicts(
+  conflicts: readonly RecognitionConflictDetail[],
+  decisions: readonly CandidateDecision[],
+): RecognitionConflictDetail[] {
+  const selectedAmbiguities = new Set(
+    decisions
+      .filter((decision) => decision.resolution === 'selected')
+      .map((decision) => decision.ambiguityId),
+  );
+  return conflicts.filter((conflict) => {
+    if (
+      selectedAmbiguities.has('xianyu:shipping_information:contact') &&
+      conflict.region === 'shipping_information' &&
+      conflict.field === 'phone' &&
+      conflict.kind === 'multiple_candidates'
+    ) return false;
+    if (
+      selectedAmbiguities.has('xianyu:platform_status:transaction_status') &&
+      conflict.region === 'platform_status' &&
+      conflict.field === 'platform_status' &&
+      conflict.kind === 'multiple_candidates'
+    ) return false;
+    return true;
+  });
 }
 
 function hasModularExtraction(extracted: Record<string, unknown>): boolean {

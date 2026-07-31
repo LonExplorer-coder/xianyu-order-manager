@@ -4,6 +4,7 @@ import type {
   CustomFieldValueRecord,
 } from './custom-fields';
 import type { QuantitySource } from './quantity-source';
+import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
 
 export type RecognitionItem = {
   sourceTitle: string;
@@ -173,6 +174,7 @@ export type RecognitionAttempt = {
   evidences: [RecognitionEvidence, ...RecognitionEvidence[]];
   reviewIssues?: OrderReviewIssueCode[];
   recognitionConflicts?: RecognitionConflictDetail[];
+  candidateAdjudication?: CandidateAdjudicationAudit;
 };
 
 export type RecognizerSource = {

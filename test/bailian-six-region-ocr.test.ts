@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { BailianOcrClient } from '../src/adapters/recognition/bailian-ocr-client';
+import type { CandidateAdjudicator } from '../src/core/candidate-verification';
 
 type LocatedWord = {
   text: string;
@@ -269,8 +270,12 @@ describe('闲鱼订单六区识别', () => {
 
   it('收货区出现多个不同手机号时不猜测联系人或手机号', async () => {
     const words = [
-      ...completeLocatedWords(),
-      locatedWord('备用联系人 13700000002', 50, 350, 620, 375),
+      ...completeLocatedWords().map((word) =>
+        word.text === '测试省测试市示例区安全路1号'
+          ? locatedWord(word.text, 50, 420, 720, 455)
+          : word
+      ),
+      locatedWord('备用联系人 13700000002', 50, 370, 620, 405),
     ];
 
     const attempt = await semanticClient(rawOnlyRequest(words))
@@ -287,6 +292,224 @@ describe('闲鱼订单六区识别', () => {
       extractedValues: [],
       retainedValue: null,
     }));
+  });
+
+  it('启用候选裁决后一次文本调用只能选择本机预绑定的平台状态候选', async () => {
+    const words = [
+      ...completeLocatedWords(),
+      locatedWord('交易已取消', 40, 245, 300, 280),
+    ];
+    const request = rawOnlyRequest(words);
+    const adjudicate = vi.fn<CandidateAdjudicator['adjudicate']>(
+      async (candidateSets) => {
+        const platformStatus = candidateSets.find(
+          ({ ambiguityId }) => ambiguityId === 'xianyu:platform_status:transaction_status',
+        );
+        const selected = platformStatus?.candidates.find(
+          ({ displayText }) => displayText === '已取消',
+        );
+        return {
+          status: 'completed',
+          provider: 'deepseek',
+          model: 'deepseek-v4-flash',
+          requestId: 'request-candidate-selection',
+          decisions: [{
+            ambiguityId: platformStatus?.ambiguityId ?? '',
+            resolution: 'selected',
+            candidateId: selected?.candidateId ?? '',
+          }],
+        };
+      },
+    );
+    const adjudicator = {
+      adjudicate,
+      testConnection: vi.fn(),
+    } as unknown as CandidateAdjudicator;
+
+    const attempt = await semanticClient(request).recognizeOrder({
+      ...recognitionInput(),
+      candidateAdjudicator: adjudicator,
+    });
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(adjudicate).toHaveBeenCalledOnce();
+    expect(attempt.result.platformTransactionStatus).toBe('cancelled');
+    expect(attempt.recognitionConflicts).not.toContainEqual(
+      expect.objectContaining({
+        region: 'platform_status',
+        field: 'platform_status',
+        kind: 'multiple_candidates',
+      }),
+    );
+    expect(attempt.candidateAdjudication).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'succeeded',
+      decisions: [{
+        ambiguityId: 'xianyu:platform_status:transaction_status',
+        selectedCandidateId: expect.stringContaining('cancelled'),
+        outcome: 'selected',
+      }],
+    });
+  });
+
+  it('超出调用边界的歧义不发送模型但会与其他裁决一起留下逐项失败记录', async () => {
+    const words = completeLocatedWords().flatMap((entry) => (
+      entry.text === '合成真实商品 ¥6.00'
+        ? [
+            locatedWord(`未知标签：${'长'.repeat(2_001)}`, 250, 500, 740, 530),
+            locatedWord('尾部商品 ¥6.00', 250, 540, 740, 580),
+          ]
+        : [entry]
+    ));
+    words.push(locatedWord('交易已取消', 40, 245, 300, 280));
+    const request = rawOnlyRequest(words);
+    const adjudicate = vi.fn<CandidateAdjudicator['adjudicate']>(async (candidateSets) => {
+      expect(candidateSets).toHaveLength(1);
+      expect(candidateSets[0]?.ambiguityId).toBe(
+        'xianyu:platform_status:transaction_status',
+      );
+      return {
+        status: 'completed',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        decisions: [{
+          ambiguityId: candidateSets[0]!.ambiguityId,
+          resolution: 'unresolved',
+        }],
+      };
+    });
+    const adjudicator = {
+      provider: 'deepseek' as const,
+      model: 'deepseek-v4-flash',
+      adjudicate,
+      testConnection: vi.fn(),
+    } as unknown as CandidateAdjudicator;
+
+    const attempt = await semanticClient(request).recognizeOrder({
+      ...recognitionInput(),
+      candidateAdjudicator: adjudicator,
+    });
+
+    expect(adjudicate).toHaveBeenCalledOnce();
+    expect(attempt.candidateAdjudication).toMatchObject({
+      status: 'partial',
+      decisions: [{
+        ambiguityId: 'xianyu:platform_status:transaction_status',
+        outcome: 'unresolved',
+      }, {
+        ambiguityId: 'xianyu:purchased_items:item_title:0',
+        outcome: 'invalid',
+        failureCode: 'invalid_request',
+      }],
+    });
+    expect(attempt.candidateAdjudication).not.toHaveProperty('rawResponse');
+  });
+
+  it('全部歧义都超出调用边界时不调用模型且 OCR 结果和拒绝审计仍可用', async () => {
+    const words = completeLocatedWords().flatMap((entry) => (
+      entry.text === '合成真实商品 ¥6.00'
+        ? [
+            locatedWord(`未知标签：${'长'.repeat(2_001)}`, 250, 500, 740, 530),
+            locatedWord('尾部商品 ¥6.00', 250, 540, 740, 580),
+          ]
+        : [entry]
+    ));
+    const request = rawOnlyRequest(words);
+    const adjudicate = vi.fn<CandidateAdjudicator['adjudicate']>();
+    const adjudicator = {
+      provider: 'deepseek' as const,
+      model: 'deepseek-v4-flash',
+      adjudicate,
+      testConnection: vi.fn(),
+    } as unknown as CandidateAdjudicator;
+
+    const attempt = await semanticClient(request).recognizeOrder({
+      ...recognitionInput(),
+      candidateAdjudicator: adjudicator,
+    });
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(adjudicate).not.toHaveBeenCalled();
+    expect(attempt.result.items).not.toHaveLength(0);
+    expect(attempt.candidateAdjudication).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'rejected',
+      failureCode: 'invalid_request',
+      decisions: [{
+        ambiguityId: 'xianyu:purchased_items:item_title:0',
+        outcome: 'invalid',
+        failureCode: 'invalid_request',
+      }],
+    });
+  });
+
+  it('候选裁决超时时保留规则结果和失败审计而不让 OCR 任务失败', async () => {
+    const request = rawOnlyRequest([
+      ...completeLocatedWords(),
+      locatedWord('交易已取消', 40, 245, 300, 280),
+    ]);
+    const adjudicator = {
+      adjudicate: vi.fn(async () => ({
+        status: 'failed' as const,
+        provider: 'deepseek' as const,
+        model: 'deepseek-v4-flash',
+        failure: {
+          code: 'timeout' as const,
+          message: '候选裁决请求超时',
+        },
+      })),
+      testConnection: vi.fn(),
+    } as unknown as CandidateAdjudicator;
+
+    const attempt = await semanticClient(request).recognizeOrder({
+      ...recognitionInput(),
+      candidateAdjudicator: adjudicator,
+    });
+
+    expect(attempt.result.platformTransactionStatus).toBe('unknown');
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
+    expect(attempt.candidateAdjudication).toMatchObject({
+      status: 'failed',
+      failureCode: 'timeout',
+      failureMessage: '候选裁决请求超时',
+      decisions: [{ outcome: 'invalid', failureCode: 'timeout' }],
+    });
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('候选裁决实现直接抛错时仍保留 OCR 规则结果和失败审计', async () => {
+    const request = rawOnlyRequest([
+      ...completeLocatedWords(),
+      locatedWord('交易已取消', 40, 245, 300, 280),
+    ]);
+    const adjudicator = {
+      provider: 'deepseek' as const,
+      model: 'deepseek-v4-flash',
+      adjudicate: vi.fn(async () => {
+        throw new Error('候选服务适配器异常');
+      }),
+      testConnection: vi.fn(),
+    } as unknown as CandidateAdjudicator;
+
+    const recognition = semanticClient(request).recognizeOrder({
+      ...recognitionInput(),
+      candidateAdjudicator: adjudicator,
+    });
+
+    await expect(recognition).resolves.toMatchObject({
+      result: { platformTransactionStatus: 'unknown' },
+      reviewIssues: ['screenshot_content_incomplete'],
+      candidateAdjudication: {
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        status: 'failed',
+        failureCode: 'remote_error',
+        decisions: [{ outcome: 'invalid', failureCode: 'remote_error' }],
+      },
+    });
+    expect(request).toHaveBeenCalledOnce();
   });
 
   it('缺少六区锚点时只保留识别原文并进入待确认', async () => {

@@ -162,6 +162,90 @@ describe('批量来源截图识别队列', () => {
     expect(observedOrders.at(-1)).toMatchObject([{ orderNumber: 'AUTO-IMPORT-COMPLETE' }]);
   });
 
+  it('自动入库后的候选裁决记录在关闭重开后仍能从已入库批次查看', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-auto-import-audit-restart-'));
+    const preferencesDirectory = join(root, '启动配置');
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '带裁决自动入库.png');
+    await writeFile(sourcePath, 'auto-import-adjudication-audit');
+    const recognizer: Recognizer = {
+      recognize: async () => ({
+        ...attempt('AUTO-IMPORT-ADJUDICATION-AUDIT'),
+        candidateAdjudication: {
+          provider: 'deepseek',
+          model: 'deepseek-v4-flash',
+          status: 'succeeded',
+          decisions: [{
+            ambiguityId: 'xianyu:platform_status:transaction_status',
+            region: 'platform_status',
+            field: 'platform_status',
+            contextLines: [{
+              lineId: 'platform-status-line',
+              text: '买家已付款，请尽快发货',
+              left: 40,
+              top: 180,
+              right: 720,
+              bottom: 235,
+            }],
+            candidates: [{
+              candidateId: 'platform-status-paid',
+              displayText: '已付款',
+              evidenceRefs: [{ lineId: 'platform-status-line' }],
+            }, {
+              candidateId: 'platform-status-cancelled',
+              displayText: '已取消',
+              evidenceRefs: [{ lineId: 'platform-status-line' }],
+            }],
+            selectedCandidateId: 'platform-status-paid',
+            outcome: 'selected',
+          }],
+        },
+      }),
+    };
+    const first = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      recognizer,
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+    first.saveOrderIntakeSettings({ automaticImportEnabled: true });
+
+    const batch = await first.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0]).toMatchObject({
+        id: batch.id,
+        counts: { imported: 1, awaiting_confirmation: 0 },
+        items: [{ status: 'imported', draftId: expect.any(String) }],
+      });
+    });
+    const draftId = first.listRecognitionBatches()[0].items[0]!.draftId!;
+    const originalAudit = first.getCandidateAdjudicationAudit(draftId);
+    expect(originalAudit).toMatchObject([{
+      id: expect.any(String),
+      provider: 'deepseek',
+      status: 'succeeded',
+    }]);
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: async () => attempt('SHOULD-NOT-RUN') },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    await eventually(() => {
+      expect(reopened.restore()).toMatchObject({ kind: 'ready', dataDirectory });
+    });
+    expect(reopened.listRecognitionBatches()[0]).toMatchObject({
+      id: batch.id,
+      counts: { imported: 1 },
+      items: [{ status: 'imported', draftId }],
+    });
+    expect(reopened.getCandidateAdjudicationAudit(draftId)).toEqual(originalAudit);
+  });
+
   it('已入库订单的同平台账号与订单号但内容变化时不会被静默重复导入', async () => {
     const firstRecognition = {
       ...recognition,

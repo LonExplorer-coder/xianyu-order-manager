@@ -16,6 +16,9 @@ const api: DesktopApi = {
   ),
   getDraft: (draftId) => ipcRenderer.invoke('workflow:get-draft', draftId),
   getDraftReview: (draftId) => ipcRenderer.invoke('workflow:get-draft-review', draftId),
+  getCandidateAdjudicationAudit: (draftId) => (
+    ipcRenderer.invoke('workflow:get-candidate-adjudication-audit', draftId)
+  ),
   onRecognitionBatchesChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,
@@ -85,6 +88,18 @@ const api: DesktopApi = {
   saveOcrSettings: (input) => ipcRenderer.invoke('settings:save-ocr', input),
   removeOcrApiKey: () => ipcRenderer.invoke('settings:remove-ocr-api-key'),
   testOcrConnection: (input) => ipcRenderer.invoke('settings:test-ocr', input),
+  getCandidateVerificationSettings: () => (
+    ipcRenderer.invoke('settings:get-candidate-verification')
+  ),
+  saveCandidateVerificationSettings: (input) => (
+    ipcRenderer.invoke('settings:save-candidate-verification', input)
+  ),
+  removeCandidateVerificationApiKey: () => (
+    ipcRenderer.invoke('settings:remove-candidate-verification-api-key')
+  ),
+  testCandidateVerificationConnection: (input) => (
+    ipcRenderer.invoke('settings:test-candidate-verification', input)
+  ),
 };
 
 contextBridge.exposeInMainWorld('xianyuApi', api);

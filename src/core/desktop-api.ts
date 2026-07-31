@@ -23,6 +23,13 @@ import type {
   SaveOcrSettingsInput,
 } from './ocr-settings';
 import type {
+  CandidateVerificationConnectionTestInput,
+  CandidateVerificationConnectionTestResult,
+  CandidateVerificationSettingsView,
+  SaveCandidateVerificationSettingsInput,
+} from './candidate-verification-settings';
+import type { CandidateAdjudicationAuditView } from './candidate-adjudication-audit';
+import type {
   OrderIntakeSettingsView,
   SaveOrderIntakeSettingsInput,
 } from './order-intake';
@@ -56,6 +63,9 @@ export interface DesktopApi {
   createManualDraft(batchId: string, itemId: string): Promise<OrderDraft>;
   getDraft(draftId: string): Promise<OrderDraft>;
   getDraftReview(draftId: string): Promise<OrderDraftReview>;
+  getCandidateAdjudicationAudit(
+    draftId: string,
+  ): Promise<CandidateAdjudicationAuditView[]>;
   onRecognitionBatchesChanged(
     listener: (batches: RecognitionBatchView[]) => void,
   ): () => void;
@@ -107,4 +117,12 @@ export interface DesktopApi {
   saveOcrSettings(input: SaveOcrSettingsInput): Promise<OcrSettingsView>;
   removeOcrApiKey(): Promise<OcrSettingsView>;
   testOcrConnection(input: OcrConnectionTestInput): Promise<OcrConnectionTestResult>;
+  getCandidateVerificationSettings(): Promise<CandidateVerificationSettingsView>;
+  saveCandidateVerificationSettings(
+    input: SaveCandidateVerificationSettingsInput,
+  ): Promise<CandidateVerificationSettingsView>;
+  removeCandidateVerificationApiKey(): Promise<CandidateVerificationSettingsView>;
+  testCandidateVerificationConnection(
+    input: CandidateVerificationConnectionTestInput,
+  ): Promise<CandidateVerificationConnectionTestResult>;
 }

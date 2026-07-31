@@ -16,6 +16,11 @@ import type {
   OcrConnectionTestInput,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
+import type {
+  CandidateVerificationConnectionTestInput,
+  CandidateVerificationProvider,
+  SaveCandidateVerificationSettingsInput,
+} from '../core/candidate-verification-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
 import { normalizeOrderExportInput } from '../core/order-export';
 import type {
@@ -142,6 +147,12 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('workflow:get-draft-review', (_event, draftId: unknown) => {
     return desktopSession.getDraftReview(parseDraftId(draftId));
   });
+  ipcMain.handle(
+    'workflow:get-candidate-adjudication-audit',
+    (_event, draftId: unknown) => (
+      desktopSession.getCandidateAdjudicationAudit(parseDraftId(draftId))
+    ),
+  );
   desktopSession.onRecognitionBatchesChanged((batches) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('workflow:recognition-batches-changed', batches);
@@ -275,6 +286,22 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('settings:test-ocr', (_event, input: unknown) => {
     return desktopSession.testOcrConnection(parseConnectionTestInput(input));
   });
+  ipcMain.handle('settings:get-candidate-verification', () => (
+    desktopSession.getCandidateVerificationSettings()
+  ));
+  ipcMain.handle('settings:save-candidate-verification', (_event, input: unknown) => (
+    desktopSession.saveCandidateVerificationSettings(
+      parseSaveCandidateVerificationSettingsInput(input),
+    )
+  ));
+  ipcMain.handle('settings:remove-candidate-verification-api-key', () => (
+    desktopSession.removeCandidateVerificationApiKey()
+  ));
+  ipcMain.handle('settings:test-candidate-verification', (_event, input: unknown) => (
+    desktopSession.testCandidateVerificationConnection(
+      parseCandidateVerificationConnectionTestInput(input),
+    )
+  ));
 }
 
 function parseDraftId(draftId: unknown): string {
@@ -828,6 +855,20 @@ void app.whenReady().then(async () => {
   session = createConfiguredDesktopSession({
     configDirectory,
     apiKeyStore: new SystemApiKeyStore(),
+    candidateVerificationApiKeyStores: {
+      deepseek: new SystemApiKeyStore({
+        accountName: 'candidate-verification-deepseek-api-key',
+        secretLabel: 'DeepSeek 候选裁决 API Key',
+      }),
+      'aliyun-bailian': new SystemApiKeyStore({
+        accountName: 'candidate-verification-aliyun-bailian-api-key',
+        secretLabel: '百炼候选裁决 API Key',
+      }),
+      'openai-compatible': new SystemApiKeyStore({
+        accountName: 'candidate-verification-openai-compatible-api-key',
+        secretLabel: '自定义候选裁决 API Key',
+      }),
+    },
     validateDataDirectory,
   });
   session.restore();
@@ -870,6 +911,93 @@ function parseSaveOrderIntakeSettingsInput(input: unknown): SaveOrderIntakeSetti
     throw new Error('订单接收设置格式无效');
   }
   return { automaticImportEnabled: input.automaticImportEnabled };
+}
+
+const CANDIDATE_VERIFICATION_SETTINGS_KEYS = new Set([
+  'enabled',
+  'provider',
+  'baseUrl',
+  'model',
+  'apiKey',
+]);
+
+const CANDIDATE_VERIFICATION_CONNECTION_TEST_KEYS = new Set([
+  'consentToPaidCall',
+]);
+
+function parseSaveCandidateVerificationSettingsInput(
+  input: unknown,
+): SaveCandidateVerificationSettingsInput {
+  if (!isRecord(input) || typeof input.enabled !== 'boolean') {
+    throw new Error('候选裁决设置格式无效');
+  }
+  rejectUnknownKeys(
+    input,
+    CANDIDATE_VERIFICATION_SETTINGS_KEYS,
+    '候选裁决设置',
+  );
+  requireOwnKeys(
+    input,
+    CANDIDATE_VERIFICATION_SETTINGS_KEYS,
+    '候选裁决设置',
+  );
+  return {
+    enabled: input.enabled,
+    provider: parseCandidateVerificationProvider(input.provider),
+    baseUrl: asCandidateVerificationString(input.baseUrl, 2_048, 'Base URL'),
+    model: asCandidateVerificationString(input.model, 200, '模型名称'),
+    apiKey: asCandidateVerificationString(input.apiKey, 4_096, 'API Key', true),
+  };
+}
+
+function parseCandidateVerificationProvider(
+  value: unknown,
+): CandidateVerificationProvider {
+  if (
+    value === 'deepseek' ||
+    value === 'aliyun-bailian' ||
+    value === 'openai-compatible'
+  ) return value;
+  throw new Error('候选裁决服务商格式无效');
+}
+
+function parseCandidateVerificationConnectionTestInput(
+  input: unknown,
+): CandidateVerificationConnectionTestInput {
+  if (!isRecord(input)) {
+    throw new Error('请先确认本次测试会产生一次文本模型调用');
+  }
+  rejectUnknownKeys(
+    input,
+    CANDIDATE_VERIFICATION_CONNECTION_TEST_KEYS,
+    '候选裁决连接测试',
+  );
+  requireOwnKeys(
+    input,
+    CANDIDATE_VERIFICATION_CONNECTION_TEST_KEYS,
+    '候选裁决连接测试',
+  );
+  if (input.consentToPaidCall !== true) {
+    throw new Error('请先确认本次测试会产生一次文本模型调用');
+  }
+  return { consentToPaidCall: true };
+}
+
+function asCandidateVerificationString(
+  value: unknown,
+  maximumLength: number,
+  label: string,
+  allowEmpty = false,
+): string {
+  if (typeof value !== 'string' || value.length > maximumLength) {
+    throw new Error(`候选裁决${label}格式无效`);
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error(`候选裁决${label}格式无效`);
+  }
+  const normalized = value.trim();
+  if (!allowEmpty && !normalized) throw new Error(`请输入候选裁决${label}`);
+  return normalized;
 }
 
 function parseConnectionTestInput(input: unknown): OcrConnectionTestInput {

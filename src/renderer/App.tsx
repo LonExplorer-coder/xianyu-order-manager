@@ -38,6 +38,12 @@ import { reviewOrderEdit } from '../core/order-edit';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
+import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
+import type {
+  CandidateVerificationProvider,
+  CandidateVerificationSettingsView,
+} from '../core/candidate-verification-settings';
 import type {
   OrderItemWorkbenchQuery,
   OrderItemWorkbenchResult,
@@ -99,7 +105,7 @@ type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 
-const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。';
+const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图调用 1 次 advanced_recognition，并由本机规则按六区拆分字段；有有限候选且已启用候选裁决时，最多追加 1 次文本模型调用。无法确定时会转入人工确认。';
 const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
   dateField: 'ordered_at',
   lifecycleStatus: 'active',
@@ -1045,6 +1051,7 @@ export function App({ api }: AppProps) {
   } else if (draft) {
     workspace = (
       <ReviewWorkspace
+        api={api}
         draft={draft}
         review={draftReview ?? { kind: 'new_order', draft }}
         screenshotUrl={reviewScreenshotUrl}
@@ -1081,6 +1088,7 @@ export function App({ api }: AppProps) {
   } else if (activePage === 'batches') {
     workspace = (
       <BatchesWorkspace
+        api={api}
         batches={recognitionBatches}
         activeBatchId={activeBatchId}
         error={operationError}
@@ -2404,6 +2412,7 @@ function OrderItemsWorkbench({
 }
 
 type BatchesWorkspaceProps = {
+  api: DesktopApi;
   batches: RecognitionBatchView[];
   activeBatchId: string;
   error: string;
@@ -2418,6 +2427,7 @@ type BatchesWorkspaceProps = {
 };
 
 function BatchesWorkspace({
+  api,
   batches,
   activeBatchId,
   error,
@@ -2532,36 +2542,44 @@ function BatchesWorkspace({
                         />
                       </td>
                       <td>
-                        {item.status === 'awaiting_confirmation' && item.draftId && (
-                          <button
-                            className="text-button"
-                            type="button"
-                            disabled={openingDraft}
-                            onClick={() => onReview(item.draftId!, activeBatch.id)}
-                          >
-                            校对
-                          </button>
-                        )}
-                        {(item.status === 'waiting_retry' || item.status === 'failed') && (
-                          <div className="batch-item-actions">
+                        <div className="batch-item-actions">
+                          {item.status === 'awaiting_confirmation' && item.draftId && (
                             <button
                               className="text-button"
                               type="button"
-                              disabled={busyBatchItemId !== ''}
-                              onClick={() => onRetry(activeBatch.id, item.id)}
+                              disabled={openingDraft}
+                              onClick={() => onReview(item.draftId!, activeBatch.id)}
                             >
-                              {busyBatchItemId === item.id ? '处理中…' : '立即重试'}
+                              校对
                             </button>
-                            <button
-                              className="text-button"
-                              type="button"
-                              disabled={busyBatchItemId !== ''}
-                              onClick={() => onManualEntry(activeBatch.id, item.id)}
-                            >
-                              人工录入
-                            </button>
-                          </div>
-                        )}
+                          )}
+                          {(item.status === 'waiting_retry' || item.status === 'failed') && (
+                            <>
+                              <button
+                                className="text-button"
+                                type="button"
+                                disabled={busyBatchItemId !== ''}
+                                onClick={() => onRetry(activeBatch.id, item.id)}
+                              >
+                                {busyBatchItemId === item.id ? '处理中…' : '立即重试'}
+                              </button>
+                              <button
+                                className="text-button"
+                                type="button"
+                                disabled={busyBatchItemId !== ''}
+                                onClick={() => onManualEntry(activeBatch.id, item.id)}
+                              >
+                                人工录入
+                              </button>
+                            </>
+                          )}
+                          {item.draftId && (
+                            <BatchCandidateAdjudicationAction
+                              api={api}
+                              draftId={item.draftId}
+                            />
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -2572,6 +2590,24 @@ function BatchesWorkspace({
         </div>
       )}
     </section>
+  );
+}
+
+function BatchCandidateAdjudicationAction({
+  api,
+  draftId,
+}: {
+  api: DesktopApi;
+  draftId: string;
+}) {
+  const candidateAudit = useCandidateAdjudicationAudit(api, draftId);
+  return (
+    <CandidateAdjudicationSummary
+      audits={candidateAudit.audits}
+      loading={candidateAudit.loading}
+      error={candidateAudit.error}
+      compact
+    />
   );
 }
 
@@ -2638,9 +2674,9 @@ const RECOGNITION_CONFLICT_FIELD_LABELS: Record<RecognitionConflictDetail['field
 };
 
 const RECOGNITION_CONFLICT_KIND_LABELS: Record<RecognitionConflictDetail['kind'], string> = {
-  multiple_candidates: '首次定位发现多个候选值',
-  value_mismatch: '两次识别值不一致',
-  unsupported_value: '首次定位未找到对应内容',
+  multiple_candidates: '同一区域发现多个候选值',
+  value_mismatch: '字段候选值未能自动对齐',
+  unsupported_value: '指定区域未找到对应内容',
   outside_region: '内容来自指定区域外',
   instruction_echo: '把字段说明当成识别结果',
 };
@@ -2763,7 +2799,7 @@ function RecognitionConflictDetails({
         >
           <header className="recognition-conflict-popover__header">
             <div>
-              <span className="section-kicker">定位与提取对照</span>
+              <span className="section-kicker">区域与字段候选对照</span>
               <h2>识别冲突详情</h2>
             </div>
             <button
@@ -2797,10 +2833,10 @@ function RecognitionConflictDetails({
                       </div>
                       <dl>
                         <ConflictValueRow
-                          label={isAddressPartConflict(detail) ? '地址拆分值' : '首次定位值'}
+                          label={isAddressPartConflict(detail) ? '地址拆分值' : '区域候选值'}
                           values={detail.locatedValues}
                         />
-                        <ConflictValueRow label="二次提取值" values={detail.extractedValues} />
+                        <ConflictValueRow label="字段候选值" values={detail.extractedValues} />
                         <ConflictValueRow
                           label={isAddressPartConflict(detail) ? '当前采用值' : '当前保留值'}
                           values={detail.retainedValue === null ? [] : [detail.retainedValue]}
@@ -2818,6 +2854,348 @@ function RecognitionConflictDetails({
       )}
     </>
   );
+}
+
+const CANDIDATE_AUDIT_REGION_LABELS: Record<
+  CandidateAdjudicationAuditView['decisions'][number]['region'],
+  string
+> = {
+  platform_status: '平台状态区',
+  shipping_information: '收货信息区',
+  purchased_items: '商品信息区',
+  amount_summary: '金额汇总区',
+  order_details: '订单详情区',
+  fulfillment_signals: '履约信号区',
+};
+
+function useCandidateAdjudicationAudit(api: DesktopApi, draftId: string) {
+  const [audits, setAudits] = useState<CandidateAdjudicationAuditView[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    setAudits([]);
+    setLoading(true);
+    setError('');
+    void api.getCandidateAdjudicationAudit(draftId)
+      .then((value) => {
+        if (active) setAudits(value);
+      })
+      .catch((caught: unknown) => {
+        if (active) setError(errorMessage(caught));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, draftId]);
+
+  return { audits, loading, error };
+}
+
+function CandidateAdjudicationSummary({
+  audits,
+  loading,
+  error,
+  compact = false,
+}: {
+  audits: CandidateAdjudicationAuditView[];
+  loading: boolean;
+  error: string;
+  compact?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<ConflictPopoverPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogId = useId();
+  const decisions = audits.flatMap((audit) => audit.decisions);
+  const selectedCount = decisions.filter((decision) => decision.outcome === 'selected').length;
+  const unresolvedCount = decisions.filter((decision) => decision.outcome !== 'selected').length;
+  const failedCount = audits.filter((audit) => (
+    audit.status === 'failed' || audit.status === 'rejected'
+  )).length;
+
+  function updatePosition() {
+    if (!triggerRef.current) return;
+    setPosition(conflictPopoverPosition(triggerRef.current.getBoundingClientRect()));
+  }
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    updatePosition();
+    dialogRef.current?.focus();
+    const handleViewportChange = () => updatePosition();
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (dialogRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const closeWithEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('focusin', closeOutside);
+    document.addEventListener('keydown', closeWithEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('focusin', closeOutside);
+      document.removeEventListener('keydown', closeWithEscape);
+    };
+  }, [open]);
+
+  if (loading && audits.length === 0) return null;
+  if (audits.length === 0) {
+    return error && !compact ? (
+      <p className="candidate-audit-load-error" role="status">
+        候选裁决记录暂时无法读取，可继续人工校对。
+      </p>
+    ) : null;
+  }
+
+  const dialogStyle: CSSProperties | undefined = position
+    ? {
+      left: position.left,
+      width: position.width,
+      maxHeight: position.maxHeight,
+      ...(position.top === undefined ? {} : { top: position.top }),
+      ...(position.bottom === undefined ? {} : { bottom: position.bottom }),
+    }
+    : { visibility: 'hidden' };
+
+  return (
+    <section
+      className={`candidate-audit-summary${compact ? ' candidate-audit-summary--compact' : ''}`}
+      aria-label="候选裁决摘要"
+    >
+      {!compact && (
+        <div>
+          <span className="section-kicker">有限候选裁决</span>
+          <p>
+            {selectedCount > 0 && <strong>已选择 {selectedCount} 项</strong>}
+            {unresolvedCount > 0 && <strong>未确定 {unresolvedCount} 项</strong>}
+            {failedCount > 0 && <strong>调用失败 {failedCount} 次</strong>}
+          </p>
+        </div>
+      )}
+      <button
+        ref={triggerRef}
+        className="recognition-conflict-trigger"
+        type="button"
+        aria-label={compact ? '查看候选裁决详情' : undefined}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? dialogId : undefined}
+        onClick={() => {
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          updatePosition();
+          setOpen(true);
+        }}
+      >
+        {compact ? '查看裁决' : '查看候选裁决详情'}
+      </button>
+      {open && createPortal(
+        <div
+          ref={dialogRef}
+          id={dialogId}
+          className="recognition-conflict-popover candidate-audit-popover"
+          role="dialog"
+          aria-label="候选裁决详情"
+          tabIndex={-1}
+          style={dialogStyle}
+        >
+          <header className="recognition-conflict-popover__header">
+            <div>
+              <span className="section-kicker">有界输入 · 可追溯结果</span>
+              <h2>候选裁决详情</h2>
+            </div>
+            <button
+              className="recognition-conflict-popover__close"
+              type="button"
+              aria-label="关闭候选裁决详情"
+              onClick={() => {
+                setOpen(false);
+                triggerRef.current?.focus();
+              }}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </header>
+          <p className="recognition-conflict-popover__intro">
+            这里只展示发送前的有限候选、依据行和最终选择，不展示密钥或模型原始响应。
+          </p>
+          <div className="candidate-audit-runs">
+            {audits.map((audit) => (
+              <section className="candidate-audit-run" key={audit.id}>
+                <header>
+                  <div>
+                    <span>{candidateProviderLabel(audit.provider)}</span>
+                    <strong>{audit.model}</strong>
+                  </div>
+                  <span className={`candidate-audit-status is-${audit.status}`}>
+                    {candidateAuditStatusLabel(audit.status)}
+                  </span>
+                </header>
+                <dl className="candidate-audit-meta">
+                  <div>
+                    <dt>调用时间</dt>
+                    <dd><time dateTime={audit.createdAt}>{formatDateTime(audit.createdAt)}</time></dd>
+                  </div>
+                  <div>
+                    <dt>本地调用编号</dt>
+                    <dd>{audit.id}</dd>
+                  </div>
+                  {audit.failureCode && (
+                    <div>
+                      <dt>失败类型</dt>
+                      <dd>{candidateFailureCodeLabel(audit.failureCode)}</dd>
+                    </div>
+                  )}
+                </dl>
+                {audit.failureMessage && (
+                  <p className="candidate-audit-failure">{audit.failureMessage}</p>
+                )}
+                {audit.decisions.length === 0 ? (
+                  <p className="candidate-audit-empty">本次未形成可采用的裁决结果。</p>
+                ) : (
+                  <ol className="candidate-audit-decisions">
+                    {audit.decisions.map((decision) => (
+                      <li key={decision.ambiguityId}>
+                        <div className="candidate-audit-decision__heading">
+                          <div>
+                            <span>{CANDIDATE_AUDIT_REGION_LABELS[decision.region]}</span>
+                            <strong>
+                              {candidateFieldLabel(decision.field)}
+                              {decision.itemIndex === undefined
+                                ? ''
+                                : ` · 商品 ${decision.itemIndex + 1}`}
+                            </strong>
+                          </div>
+                          <span className={`candidate-audit-outcome is-${decision.outcome}`}>
+                            {candidateOutcomeLabel(decision.outcome)}
+                          </span>
+                        </div>
+                        <ul className="candidate-audit-candidates" aria-label="候选值">
+                          {decision.candidates.map((candidate) => {
+                            const selected = decision.selectedCandidateId === candidate.candidateId;
+                            return (
+                              <li className={selected ? 'is-selected' : ''} key={candidate.candidateId}>
+                                <span aria-hidden="true">{selected ? '✓' : '○'}</span>
+                                <div>
+                                  <strong>{candidate.displayText}</strong>
+                                  <small>{candidate.candidateId}</small>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        <div className="candidate-audit-evidence">
+                          <strong>依据行</strong>
+                          <ul>
+                            {decision.contextLines.map((line) => (
+                              <li key={line.lineId}>
+                                <span>{line.lineId}</span>
+                                <p>{line.text}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </section>
+  );
+}
+
+function candidateProviderLabel(
+  provider: CandidateAdjudicationAuditView['provider'],
+): string {
+  return {
+    deepseek: 'DeepSeek',
+    'aliyun-bailian': '阿里云百炼',
+    'openai-compatible': 'OpenAI 兼容服务',
+  }[provider];
+}
+
+function candidateAuditStatusLabel(
+  status: CandidateAdjudicationAuditView['status'],
+): string {
+  return {
+    succeeded: '已完成',
+    partial: '部分确定',
+    failed: '调用失败',
+    rejected: '结果已拒绝',
+  }[status];
+}
+
+function candidateOutcomeLabel(
+  outcome: CandidateAdjudicationAuditView['decisions'][number]['outcome'],
+): string {
+  return {
+    selected: '已选择',
+    unresolved: '未确定',
+    invalid: '无效结果',
+  }[outcome];
+}
+
+function candidateFailureCodeLabel(
+  code: CandidateAdjudicationFailureCode,
+): string {
+  return {
+    invalid_request: '请求不符合有限候选约束',
+    timeout: '调用超时',
+    authentication: '鉴权失败',
+    rate_limited: '请求过于频繁',
+    network: '网络连接失败',
+    remote_error: '服务端异常',
+    response_too_large: '响应过大',
+    unsafe_response: '响应包含不安全内容',
+    invalid_response: '响应格式无效',
+  }[code];
+}
+
+function candidateFieldLabel(field: string): string {
+  const labels: Record<string, string> = {
+    platform_status: '平台交易状态',
+    shipping_contact: '收货联系人',
+    recipient: '收件人',
+    phone: '手机号',
+    address: '收货地址',
+    item_title: '商品标题',
+    item_spec: '商品规格',
+    item_unit_price: '商品单价',
+    item_quantity: '商品数量',
+    order_number: '订单号',
+    fulfillment_status: '履约状态',
+  };
+  return labels[field] ?? field;
 }
 
 function isAddressPartConflict(detail: RecognitionConflictDetail): boolean {
@@ -2895,6 +3273,25 @@ function BatchStats({ batch, compact = false }: { batch: RecognitionBatchView; c
 
 type SettingsAction = 'loading' | 'saving' | 'removing' | 'testing' | null;
 type SettingsFeedback = { kind: 'success' | 'error'; message: string } | null;
+type CandidateSettingsAction = 'loading' | 'saving' | 'removing' | 'testing' | null;
+
+const CANDIDATE_PROVIDER_PRESETS: Record<
+  CandidateVerificationProvider,
+  { baseUrl: string; model: string }
+> = {
+  deepseek: {
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+  },
+  'aliyun-bailian': {
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen3.7-plus',
+  },
+  'openai-compatible': {
+    baseUrl: '',
+    model: '',
+  },
+};
 
 function SettingsWorkspace({ api }: { api: DesktopApi }) {
   const [settings, setSettings] = useState<OcrSettingsView | null>(null);
@@ -2908,6 +3305,19 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
   const [feedback, setFeedback] = useState<SettingsFeedback>(null);
   const [orderIntakeFeedback, setOrderIntakeFeedback] = useState<SettingsFeedback>(null);
   const [showPaidCallConfirmation, setShowPaidCallConfirmation] = useState(false);
+  const [candidateSettings, setCandidateSettings] =
+    useState<CandidateVerificationSettingsView | null>(null);
+  const [candidateEnabled, setCandidateEnabled] = useState(false);
+  const [candidateProvider, setCandidateProvider] =
+    useState<CandidateVerificationProvider>('deepseek');
+  const [candidateBaseUrl, setCandidateBaseUrl] = useState('https://api.deepseek.com');
+  const [candidateModel, setCandidateModel] = useState('deepseek-v4-flash');
+  const [candidateApiKey, setCandidateApiKey] = useState('');
+  const [candidateBusy, setCandidateBusy] =
+    useState<CandidateSettingsAction>('loading');
+  const [candidateFeedback, setCandidateFeedback] = useState<SettingsFeedback>(null);
+  const [showCandidatePaidCallConfirmation, setShowCandidatePaidCallConfirmation] =
+    useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -2918,6 +3328,10 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
     setOrderIntakeLoading(true);
     setFeedback(null);
     setOrderIntakeFeedback(null);
+    setCandidateSettings(null);
+    setCandidateBusy('loading');
+    setCandidateFeedback(null);
+    setShowCandidatePaidCallConfirmation(false);
     void api
       .getOrderIntakeSettings()
       .then((intakeValue) => {
@@ -2945,6 +3359,25 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
       })
       .finally(() => {
         if (active) setBusy(null);
+      });
+    void api
+      .getCandidateVerificationSettings()
+      .then((value) => {
+        if (!active) return;
+        setCandidateSettings(value);
+        setCandidateEnabled(value.enabled);
+        setCandidateProvider(value.provider);
+        setCandidateBaseUrl(value.baseUrl);
+        setCandidateModel(value.model);
+        setCandidateApiKey('');
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setCandidateFeedback({ kind: 'error', message: errorMessage(error) });
+        }
+      })
+      .finally(() => {
+        if (active) setCandidateBusy(null);
       });
     return () => {
       active = false;
@@ -3026,6 +3459,79 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
     }
   }
 
+  function selectCandidateProvider(provider: CandidateVerificationProvider) {
+    const preset = CANDIDATE_PROVIDER_PRESETS[provider];
+    setCandidateProvider(provider);
+    setCandidateBaseUrl(preset.baseUrl);
+    setCandidateModel(preset.model);
+    setCandidateApiKey('');
+    setCandidateFeedback(null);
+    setShowCandidatePaidCallConfirmation(false);
+  }
+
+  async function saveCandidateSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setCandidateBusy('saving');
+    setCandidateFeedback(null);
+    try {
+      const saved = await api.saveCandidateVerificationSettings({
+        enabled: candidateEnabled,
+        provider: candidateProvider,
+        baseUrl: candidateBaseUrl,
+        model: candidateModel,
+        apiKey: candidateApiKey,
+      });
+      setCandidateSettings(saved);
+      setCandidateEnabled(saved.enabled);
+      setCandidateProvider(saved.provider);
+      setCandidateBaseUrl(saved.baseUrl);
+      setCandidateModel(saved.model);
+      setCandidateApiKey('');
+      setShowCandidatePaidCallConfirmation(false);
+      setCandidateFeedback({ kind: 'success', message: '候选裁决设置已保存' });
+    } catch (error) {
+      setCandidateFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
+  async function removeCandidateApiKey() {
+    setCandidateBusy('removing');
+    setCandidateFeedback(null);
+    try {
+      const updated = await api.removeCandidateVerificationApiKey();
+      setCandidateSettings(updated);
+      setCandidateEnabled(updated.enabled);
+      setCandidateProvider(updated.provider);
+      setCandidateBaseUrl(updated.baseUrl);
+      setCandidateModel(updated.model);
+      setCandidateApiKey('');
+      setShowCandidatePaidCallConfirmation(false);
+      setCandidateFeedback({ kind: 'success', message: '候选裁决 API Key 已移除' });
+    } catch (error) {
+      setCandidateFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
+  async function confirmCandidateConnectionTest() {
+    setCandidateBusy('testing');
+    setCandidateFeedback(null);
+    try {
+      const result = await api.testCandidateVerificationConnection({
+        consentToPaidCall: true,
+      });
+      setShowCandidatePaidCallConfirmation(false);
+      setCandidateFeedback({ kind: 'success', message: result.message });
+    } catch (error) {
+      setCandidateFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
   return (
     <section className="settings-workspace workspace-enter">
       <header className="workspace-header workspace-header--settings">
@@ -3037,7 +3543,7 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
       </header>
 
       <div className="settings-body">
-        <form className="settings-form" aria-label="应用设置" onSubmit={(event) => void saveSettings(event)}>
+        <div className="settings-form" role="group" aria-label="应用设置">
           {orderIntakeLoading && !orderIntakeSettings && (
             <div className="settings-loading" role="status">正在读取自动入库设置…</div>
           )}
@@ -3102,6 +3608,11 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
           ) : (
             <>
             <section className="settings-section">
+              <form
+                className="settings-section-form"
+                aria-label="百炼 OCR 设置"
+                onSubmit={(event) => void saveSettings(event)}
+              >
               <div className="settings-section-heading">
                 <div>
                   <span className="section-kicker">识别服务</span>
@@ -3176,6 +3687,7 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
                   {busy === 'saving' ? '正在保存…' : '保存设置'}
                 </button>
               </div>
+              </form>
             </section>
 
             <section className="settings-section settings-section--connection">
@@ -3231,7 +3743,209 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
             <SettingsNotice feedback={feedback} />
             </>
           )}
-        </form>
+
+          {candidateBusy === 'loading' && !candidateSettings ? (
+            <div className="settings-loading settings-loading--compact" role="status">
+              正在读取候选裁决设置…
+            </div>
+          ) : !candidateSettings ? (
+            <div className="settings-load-error settings-load-error--compact">
+              <SettingsNotice feedback={candidateFeedback} />
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={() => setReloadToken((value) => value + 1)}
+              >
+                重新读取候选裁决设置
+              </button>
+            </div>
+          ) : (
+            <section
+              className="settings-section settings-section--candidate"
+              aria-labelledby="candidate-verification-heading"
+            >
+              <form
+                className="settings-section-form"
+                aria-label="候选裁决设置"
+                onSubmit={(event) => void saveCandidateSettings(event)}
+              >
+              <div className="settings-section-heading">
+                <div>
+                  <span className="section-kicker">有限候选 · 文字复核</span>
+                  <h2 id="candidate-verification-heading">候选裁决（可选）</h2>
+                  <p>
+                    只发送有界 OCR 文字、坐标和本机生成的候选编号，不发送截图；
+                    模型只能选择候选或返回未确定，失败时回到人工确认。
+                  </p>
+                </div>
+                <button
+                  className={`settings-switch${candidateEnabled ? ' is-on' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={candidateEnabled}
+                  aria-label="候选裁决"
+                  disabled={candidateBusy !== null}
+                  onClick={() => {
+                    setCandidateEnabled((value) => !value);
+                    setCandidateFeedback(null);
+                    setShowCandidatePaidCallConfirmation(false);
+                  }}
+                >
+                  <span className="settings-switch-track" aria-hidden="true"><i /></span>
+                  <span>{candidateEnabled ? '已开启' : '已关闭'}</span>
+                </button>
+              </div>
+
+              {candidateEnabled && (
+                <>
+                  <div className="settings-fields settings-fields--candidate">
+                    <Field label="文本模型服务商" required>
+                      <select
+                        aria-label="文本模型服务商"
+                        value={candidateProvider}
+                        disabled={candidateBusy !== null}
+                        onChange={(event) => selectCandidateProvider(
+                          event.target.value as CandidateVerificationProvider,
+                        )}
+                      >
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="aliyun-bailian">阿里云百炼</option>
+                        <option value="openai-compatible">自定义 OpenAI 兼容</option>
+                      </select>
+                    </Field>
+                    <Field label="Base URL" required>
+                      <input
+                        aria-label="候选裁决 Base URL"
+                        value={candidateBaseUrl}
+                        readOnly={candidateProvider === 'deepseek'}
+                        spellCheck={false}
+                        onChange={(event) => setCandidateBaseUrl(event.target.value)}
+                        placeholder="https://example.com/v1"
+                      />
+                      {candidateProvider === 'deepseek' && (
+                        <small className="field-help">DeepSeek 使用固定官方地址</small>
+                      )}
+                    </Field>
+                    <Field label="模型" required>
+                      <input
+                        aria-label="候选裁决模型"
+                        value={candidateModel}
+                        spellCheck={false}
+                        onChange={(event) => setCandidateModel(event.target.value)}
+                        placeholder="输入模型名称"
+                      />
+                    </Field>
+                    <Field label="独立 API Key" required>
+                      <input
+                        aria-label="候选裁决 API Key"
+                        type="password"
+                        value={candidateApiKey}
+                        autoComplete="new-password"
+                        spellCheck={false}
+                        onChange={(event) => setCandidateApiKey(event.target.value)}
+                        placeholder={candidateSettings.apiKeyConfigured
+                          ? '输入新密钥以替换'
+                          : '输入当前文本模型的 API Key'}
+                      />
+                    </Field>
+                  </div>
+
+                  <div className="credential-row">
+                    <div className="credential-copy">
+                      <span className="credential-mask">
+                        {candidateSettings.apiKeyConfigured &&
+                        candidateSettings.provider === candidateProvider &&
+                        candidateSettings.baseUrl === candidateBaseUrl
+                          ? '••••••••'
+                          : '当前目标尚未保存 API Key'}
+                      </span>
+                      <small>与百炼 OCR 密钥分开保存在 {candidateSettings.credentialStore}</small>
+                    </div>
+                    {candidateSettings.apiKeyConfigured &&
+                    candidateSettings.provider === candidateProvider &&
+                    candidateSettings.baseUrl === candidateBaseUrl && (
+                      <button
+                        className="text-button text-button--danger"
+                        type="button"
+                        disabled={candidateBusy !== null}
+                        onClick={() => void removeCandidateApiKey()}
+                      >
+                        {candidateBusy === 'removing' ? '正在移除…' : '移除候选裁决 API Key'}
+                      </button>
+                    )}
+                  </div>
+                  <p className="credential-policy">
+                    API Key 不会回填；每张截图只有出现有限歧义时才会调用，最多调用一次。
+                  </p>
+                  <p className="credential-policy">
+                    Base URL 可填写到版本路径，也可粘贴完整地址；系统会自动追加
+                    {' '}/chat/completions。自定义服务需兼容 Bearer 鉴权、Chat Completions 和 JSON Output。
+                  </p>
+                </>
+              )}
+
+              <div className="settings-actions settings-actions--candidate">
+                {candidateEnabled && !showCandidatePaidCallConfirmation && (
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    disabled={
+                      candidateBusy !== null ||
+                      !candidateSettings.apiKeyConfigured ||
+                      candidateSettings.provider !== candidateProvider ||
+                      candidateSettings.baseUrl !== candidateBaseUrl ||
+                      candidateSettings.model !== candidateModel
+                    }
+                    onClick={() => {
+                      setCandidateFeedback(null);
+                      setShowCandidatePaidCallConfirmation(true);
+                    }}
+                  >
+                    测试候选裁决连接
+                  </button>
+                )}
+                <button
+                  className="button button--primary"
+                  type="submit"
+                  disabled={candidateBusy !== null}
+                >
+                  <Icon name="check" />
+                  {candidateBusy === 'saving' ? '正在保存…' : '保存候选裁决设置'}
+                </button>
+              </div>
+
+              {showCandidatePaidCallConfirmation && (
+                <div className="paid-call-notice" aria-label="候选裁决连接测试确认">
+                  <div>
+                    <strong>本次测试会产生 1 次文本模型调用</strong>
+                    <p>只发送内置的有限候选文字，不会发送订单截图。</p>
+                  </div>
+                  <div className="paid-call-actions">
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={candidateBusy === 'testing'}
+                      onClick={() => setShowCandidatePaidCallConfirmation(false)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      disabled={candidateBusy === 'testing'}
+                      onClick={() => void confirmCandidateConnectionTest()}
+                    >
+                      {candidateBusy === 'testing' ? '正在测试…' : '确认并测试文本模型'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <SettingsNotice feedback={candidateFeedback} />
+              </form>
+            </section>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -3251,6 +3965,7 @@ function SettingsNotice({ feedback }: { feedback: SettingsFeedback }) {
 }
 
 type ReviewWorkspaceProps = {
+  api: DesktopApi;
   draft: OrderDraft;
   review: OrderDraftReview;
   screenshotUrl: string;
@@ -3267,6 +3982,7 @@ type ReviewWorkspaceProps = {
 };
 
 function ReviewWorkspace({
+  api,
   draft,
   review,
   screenshotUrl,
@@ -3283,6 +3999,7 @@ function ReviewWorkspace({
 }: ReviewWorkspaceProps) {
   const [moneyErrors, setMoneyErrors] = useState<Record<string, string>>({});
   const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
+  const candidateAudit = useCandidateAdjudicationAudit(api, draft.id);
   const isOrderUpdate = review.kind === 'order_update';
   const updateChanges = isOrderUpdate
     ? diffOrderCurrentValues(review.currentOrder, draft)
@@ -3519,6 +4236,11 @@ function ReviewWorkspace({
               </div>
             </section>
           )}
+          <CandidateAdjudicationSummary
+            audits={candidateAudit.audits}
+            loading={candidateAudit.loading}
+            error={candidateAudit.error}
+          />
           {isOrderUpdate && (
             <OrderUpdateComparison changes={updateChanges} />
           )}

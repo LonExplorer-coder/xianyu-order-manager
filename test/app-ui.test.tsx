@@ -270,6 +270,20 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     saveOcrSettings: vi.fn(),
     removeOcrApiKey: vi.fn(),
     testOcrConnection: vi.fn(),
+    getCandidateVerificationSettings: vi.fn().mockResolvedValue({
+      enabled: false,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      baseUrlLocked: true,
+      model: 'deepseek-v4-flash',
+      apiKeyConfigured: false,
+      apiKeyMask: '',
+      credentialStore: '测试系统凭据库',
+    }),
+    saveCandidateVerificationSettings: vi.fn(),
+    removeCandidateVerificationApiKey: vi.fn(),
+    testCandidateVerificationConnection: vi.fn(),
+    getCandidateAdjudicationAudit: vi.fn().mockResolvedValue([]),
     ...desktopApiOverrides,
   };
 }
@@ -314,7 +328,7 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
     expect(screen.getByRole('button', { name: '上传订单截图' })).toBeVisible();
     expect(screen.getByText(
-      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。',
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图调用 1 次 advanced_recognition，并由本机规则按六区拆分字段；有有限候选且已启用候选裁决时，最多追加 1 次文本模型调用。无法确定时会转入人工确认。',
     )).toBeVisible();
     expect(screen.getByText('/Users/test/闲鱼订单')).toBeVisible();
   });
@@ -1356,7 +1370,7 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
     expect(screen.getByText(
-      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。',
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图调用 1 次 advanced_recognition，并由本机规则按六区拆分字段；有有限候选且已启用候选裁决时，最多追加 1 次文本模型调用。无法确定时会转入人工确认。',
     )).toBeVisible();
     await user.click(
       screen.getByRole('button', { name: `查看订单 ${confirmedOrder.orderNumber}` }),
@@ -2645,24 +2659,90 @@ describe('订单管理工作台', () => {
     expect(within(dialog).getAllByRole('heading', { name: '收货信息区' })).toHaveLength(1);
     expect(within(dialog).getByRole('heading', { name: '金额汇总区' })).toBeVisible();
     expect(dialog).toHaveTextContent('收件人');
-    expect(dialog).toHaveTextContent('首次定位发现多个候选值');
+    expect(dialog).toHaveTextContent('同一区域发现多个候选值');
     expect(dialog).toHaveTextContent('手机号');
-    expect(dialog).toHaveTextContent('两次识别值不一致');
+    expect(dialog).toHaveTextContent('字段候选值未能自动对齐');
     expect(dialog).toHaveTextContent('成交金额');
-    expect(dialog).toHaveTextContent('首次定位未找到对应内容');
-    expect(dialog).toHaveTextContent('首次定位值张三李四');
-    expect(dialog).toHaveTextContent('二次提取值李四');
+    expect(dialog).toHaveTextContent('指定区域未找到对应内容');
+    expect(dialog).toHaveTextContent('区域候选值张三李四');
+    expect(dialog).toHaveTextContent('字段候选值李四');
     expect(dialog).toHaveTextContent('当前保留值李四');
     const districtItem = within(dialog).getByText('区县').closest('li');
     if (!districtItem) throw new Error('未找到区县冲突详情');
     expect(districtItem).toHaveTextContent('地址拆分值锦江区');
-    expect(districtItem).toHaveTextContent('二次提取值江城区');
+    expect(districtItem).toHaveTextContent('字段候选值江城区');
     expect(districtItem).toHaveTextContent('当前采用值锦江区');
     expect(districtItem).not.toHaveTextContent('未返回');
     expect(districtItem).not.toHaveTextContent('未保留');
 
     fireEvent.focusIn(triggers[1]);
     expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();
+  });
+
+  it('已自动入库的批次项仍可查看持久化的候选裁决记录', async () => {
+    const user = userEvent.setup();
+    const importedDraftId = 'draft-auto-imported-with-audit';
+    const batch = recognitionBatchView('batch-auto-imported-with-audit', [{
+      id: 'batch-item-auto-imported-with-audit',
+      batchId: 'batch-auto-imported-with-audit',
+      sourceName: '自动入库订单.png',
+      status: 'imported',
+      draftId: importedDraftId,
+      resolution: 'new_order',
+    }]);
+    const getCandidateAdjudicationAudit = vi.fn().mockResolvedValue([{
+      id: 'candidate-run-auto-imported',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'succeeded',
+      decisions: [{
+        ambiguityId: 'shipping-phone',
+        region: 'shipping_information',
+        field: 'shipping_contact',
+        candidates: [{
+          candidateId: 'phone-a',
+          displayText: '彭 13881173018',
+          evidenceRefs: [{ lineId: 'shipping-line-1' }],
+        }],
+        contextLines: [{
+          lineId: 'shipping-line-1',
+          text: '彭 13881173018 复制',
+          left: 0.08,
+          top: 0.2,
+          right: 0.45,
+          bottom: 0.24,
+        }],
+        selectedCandidateId: 'phone-a',
+        outcome: 'selected',
+      }],
+    }]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+      getCandidateAdjudicationAudit,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+
+    const table = await screen.findByRole('table', { name: '批次截图状态' });
+    const row = within(table).getByText('自动入库订单.png').closest('tr');
+    if (!row) throw new Error('未找到已自动入库的批次项');
+    const auditTrigger = await within(row).findByRole('button', { name: '查看候选裁决详情' });
+    expect(within(row).queryByRole('button', { name: '校对' })).not.toBeInTheDocument();
+    expect(getCandidateAdjudicationAudit).toHaveBeenCalledWith(importedDraftId);
+
+    await user.click(auditTrigger);
+    const dialog = screen.getByRole('dialog', { name: '候选裁决详情' });
+    expect(dialog).toHaveTextContent('DeepSeek');
+    expect(dialog).toHaveTextContent('本地调用编号');
+    expect(dialog).toHaveTextContent('candidate-run-auto-imported');
+    expect(dialog).toHaveTextContent('彭 13881173018');
   });
 
   it('校对页可查看同一份冲突明细，并可用 Escape 或点击外部关闭', async () => {
@@ -2714,6 +2794,114 @@ describe('订单管理工作台', () => {
     expect(dialog).toBeVisible();
     await user.click(screen.getByRole('heading', { name: '校对识别结果' }));
     expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();
+  });
+
+  it('校对页即使没有传统冲突也会显示候选裁决摘要并按需查看安全审计详情', async () => {
+    const user = userEvent.setup();
+    const getCandidateAdjudicationAudit = vi.fn().mockResolvedValue([{
+      id: 'candidate-run-1',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'partial',
+      rawResponse: 'SECRET_RAW_MODEL_RESPONSE',
+      apiKey: 'SECRET_API_KEY',
+      decisions: [
+        {
+          ambiguityId: 'shipping-phone',
+          region: 'shipping_information',
+          field: 'shipping_contact',
+          candidates: [
+            {
+              candidateId: 'phone-a',
+              displayText: '彭 13881173018',
+              evidenceRefs: [{ lineId: 'shipping-line-1' }],
+            },
+            {
+              candidateId: 'phone-b',
+              displayText: '彭 13981173018',
+              evidenceRefs: [{ lineId: 'shipping-line-2' }],
+            },
+          ],
+          contextLines: [
+            {
+              lineId: 'shipping-line-1',
+              text: '彭 13881173018 复制',
+              left: 0.08,
+              top: 0.2,
+              right: 0.45,
+              bottom: 0.24,
+            },
+            {
+              lineId: 'shipping-line-2',
+              text: '13981173018',
+              left: 0.08,
+              top: 0.25,
+              right: 0.3,
+              bottom: 0.29,
+            },
+          ],
+          selectedCandidateId: 'phone-a',
+          outcome: 'selected',
+        },
+        {
+          ambiguityId: 'item-title',
+          region: 'purchased_items',
+          field: 'item_title',
+          itemIndex: 0,
+          candidates: [{
+            candidateId: 'title-a',
+            displayText: '苹果 iPhone 15 Pro',
+            evidenceRefs: [{ lineId: 'item-line-1' }],
+          }],
+          contextLines: [{
+            lineId: 'item-line-1',
+            text: '苹果 iPhone 15 Pro ¥10.00',
+            left: 0.25,
+            top: 0.35,
+            right: 0.9,
+            bottom: 0.4,
+          }],
+          outcome: 'unresolved',
+        },
+      ],
+    }]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      getCandidateAdjudicationAudit,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    const summary = await screen.findByRole('region', { name: '候选裁决摘要' });
+    expect(getCandidateAdjudicationAudit).toHaveBeenCalledWith(draft.id);
+    expect(summary).toHaveTextContent('已选择 1 项');
+    expect(summary).toHaveTextContent('未确定 1 项');
+    await user.click(within(summary).getByRole('button', { name: '查看候选裁决详情' }));
+
+    const dialog = screen.getByRole('dialog', { name: '候选裁决详情' });
+    expect(dialog).toHaveTextContent('DeepSeek');
+    expect(dialog).toHaveTextContent('deepseek-v4-flash');
+    expect(dialog).toHaveTextContent('调用时间');
+    expect(dialog).toHaveTextContent('2026/08/01');
+    expect(dialog).toHaveTextContent('本地调用编号');
+    expect(dialog).toHaveTextContent('candidate-run-1');
+    expect(dialog).toHaveTextContent('收货信息区');
+    expect(dialog).toHaveTextContent('收货联系人');
+    expect(dialog).toHaveTextContent('已选择');
+    expect(dialog).toHaveTextContent('彭 13881173018');
+    expect(dialog).toHaveTextContent('依据行');
+    expect(dialog).toHaveTextContent('彭 13881173018 复制');
+    expect(dialog).toHaveTextContent('未确定');
+    expect(dialog).not.toHaveTextContent('SECRET_RAW_MODEL_RESPONSE');
+    expect(dialog).not.toHaveTextContent('SECRET_API_KEY');
   });
 
   it('订单内容变化时展示当前值与新识别值并通过明确动作确认更新', async () => {
@@ -3592,8 +3780,8 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
-    const settingsForm = screen.getByRole('form', { name: '应用设置' });
-    expect(within(settingsForm).getAllByRole('heading', { level: 2 }).slice(0, 2)
+    const settingsGroup = screen.getByRole('group', { name: '应用设置' });
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 2)
       .map((heading) => heading.textContent)).toEqual(['自动入库', '百炼 OCR']);
     expect(automaticImport).toHaveAttribute('aria-checked', 'false');
 
@@ -3857,6 +4045,195 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('API Key 已移除');
     expect(screen.getByText('尚未保存 API Key')).toBeVisible();
     expect(screen.queryByText('••••••••')).not.toBeInTheDocument();
+  });
+
+  it('候选裁决默认关闭并以独立配置接入 DeepSeek', async () => {
+    const user = userEvent.setup();
+    const savedSettings = {
+      enabled: true,
+      provider: 'deepseek' as const,
+      baseUrl: 'https://api.deepseek.com',
+      baseUrlLocked: true,
+      model: 'deepseek-v4-flash',
+      apiKeyConfigured: true,
+      apiKeyMask: '••••••••',
+      credentialStore: 'macOS 钥匙串',
+    };
+    const saveCandidateVerificationSettings = vi.fn().mockResolvedValue(savedSettings);
+    const removeCandidateVerificationApiKey = vi.fn().mockResolvedValue({
+      ...savedSettings,
+      enabled: false,
+      apiKeyConfigured: false,
+      apiKeyMask: '',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [],
+      }),
+      saveCandidateVerificationSettings,
+      removeCandidateVerificationApiKey,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const section = await screen.findByRole('region', { name: '候选裁决（可选）' });
+    const toggle = within(section).getByRole('switch', { name: '候选裁决' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(section).toHaveTextContent('不发送截图');
+    expect(section).toHaveTextContent('失败时回到人工确认');
+    expect(within(section).queryByRole('combobox', { name: '文本模型服务商' }))
+      .not.toBeInTheDocument();
+
+    await user.click(toggle);
+
+    expect(within(section).getByRole('combobox', { name: '文本模型服务商' }))
+      .toHaveValue('deepseek');
+    expect(within(section).getByRole('textbox', { name: '候选裁决 Base URL' }))
+      .toHaveValue('https://api.deepseek.com');
+    expect(within(section).getByRole('textbox', { name: '候选裁决 Base URL' }))
+      .toHaveAttribute('readonly');
+    expect(within(section).getByRole('textbox', { name: '候选裁决模型' }))
+      .toHaveValue('deepseek-v4-flash');
+
+    await user.type(
+      within(section).getByLabelText('候选裁决 API Key'),
+      'sk-deepseek-independent',
+    );
+    await user.click(within(section).getByRole('button', { name: '保存候选裁决设置' }));
+
+    expect(saveCandidateVerificationSettings).toHaveBeenCalledWith({
+      enabled: true,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-deepseek-independent',
+    });
+    expect(within(section).getByLabelText('候选裁决 API Key')).toHaveValue('');
+    expect(within(section).getByRole('status')).toHaveTextContent('候选裁决设置已保存');
+
+    await user.click(within(section).getByRole('button', { name: '移除候选裁决 API Key' }));
+    expect(removeCandidateVerificationApiKey).toHaveBeenCalledOnce();
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(within(section).queryByRole('combobox', { name: '文本模型服务商' }))
+      .not.toBeInTheDocument();
+  });
+
+  it('在候选裁决输入框按 Enter 只保存候选配置而不会误保存 OCR', async () => {
+    const user = userEvent.setup();
+    const saveOcrSettings = vi.fn().mockResolvedValue({
+      workspaceId: '',
+      region: 'cn-beijing' as const,
+      regionLabel: '中国（北京）',
+      model: 'qwen3.5-ocr' as const,
+      apiKeyConfigured: false,
+      apiKeyMask: '',
+      credentialStore: '测试系统凭据库',
+    });
+    const savedCandidateSettings = {
+      enabled: true,
+      provider: 'deepseek' as const,
+      baseUrl: 'https://api.deepseek.com',
+      baseUrlLocked: true,
+      model: 'deepseek-v4-flash',
+      apiKeyConfigured: true,
+      apiKeyMask: '••••••••',
+      credentialStore: '测试系统凭据库',
+    };
+    const saveCandidateVerificationSettings = vi.fn()
+      .mockResolvedValue(savedCandidateSettings);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [],
+      }),
+      saveOcrSettings,
+      saveCandidateVerificationSettings,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const section = await screen.findByRole('region', { name: '候选裁决（可选）' });
+    await user.click(within(section).getByRole('switch', { name: '候选裁决' }));
+    await user.type(
+      within(section).getByLabelText('候选裁决 API Key'),
+      'sk-enter-submit{Enter}',
+    );
+
+    await waitFor(() => {
+      expect(saveCandidateVerificationSettings).toHaveBeenCalledWith({
+        enabled: true,
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-v4-flash',
+        apiKey: 'sk-enter-submit',
+      });
+    });
+    expect(saveOcrSettings).not.toHaveBeenCalled();
+    expect(within(section).getByRole('status')).toHaveTextContent('候选裁决设置已保存');
+  });
+
+  it('候选裁决支持百炼与自定义 OpenAI 兼容端点，连接测试需独立确认费用', async () => {
+    const user = userEvent.setup();
+    const testCandidateVerificationConnection = vi.fn().mockResolvedValue({
+      ok: true,
+      provider: 'aliyun-bailian',
+      model: 'qwen3.7-plus',
+      message: '连接成功，qwen3.7-plus 可以用于候选裁决',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getCandidateVerificationSettings: vi.fn().mockResolvedValue({
+        enabled: true,
+        provider: 'aliyun-bailian',
+        baseUrl: 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        baseUrlLocked: false,
+        model: 'qwen3.7-plus',
+        apiKeyConfigured: true,
+        apiKeyMask: '••••••••',
+        credentialStore: 'Windows 凭据管理器',
+      }),
+      testCandidateVerificationConnection,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const section = await screen.findByRole('region', { name: '候选裁决（可选）' });
+    const provider = within(section).getByRole('combobox', { name: '文本模型服务商' });
+    expect(within(provider).getByRole('option', { name: '阿里云百炼' })).toBeInTheDocument();
+    expect(within(provider).getByRole('option', { name: '自定义 OpenAI 兼容' }))
+      .toBeInTheDocument();
+    expect(section).toHaveTextContent('自动追加 /chat/completions');
+    expect(section).toHaveTextContent('JSON Output');
+
+    const testConnectionButton = within(section).getByRole('button', {
+      name: '测试候选裁决连接',
+    });
+    const modelInput = within(section).getByRole('textbox', { name: '候选裁决模型' });
+    await user.clear(modelInput);
+    await user.type(modelInput, 'qwen3.7-plus-preview');
+    expect(testConnectionButton).toBeDisabled();
+    await user.clear(modelInput);
+    await user.type(modelInput, 'qwen3.7-plus');
+
+    await user.click(testConnectionButton);
+    expect(testCandidateVerificationConnection).not.toHaveBeenCalled();
+    expect(within(section).getByText('本次测试会产生 1 次文本模型调用')).toBeVisible();
+
+    await user.click(within(section).getByRole('button', { name: '确认并测试文本模型' }));
+    expect(testCandidateVerificationConnection).toHaveBeenCalledWith({
+      consentToPaidCall: true,
+    });
+    expect(await within(section).findByRole('status')).toHaveTextContent(
+      'qwen3.7-plus 可以用于候选裁决',
+    );
   });
 
   it('打开已保存订单模板后原子恢复查询、列别名、顺序和自定义字段值', async () => {

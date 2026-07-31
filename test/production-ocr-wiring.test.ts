@@ -238,6 +238,155 @@ describe('正式 OCR 装配', () => {
     });
     expect(request).not.toHaveBeenCalled();
   });
+
+  it('独立保存 DeepSeek 候选裁决配置且不会串用 OCR 凭据', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-candidate-settings-wiring-'));
+    const ocrApiKeyStore = new MemoryApiKeyStore();
+    ocrApiKeyStore.apiKey = 'sk-ocr-only';
+    const deepseekStore = new MemoryApiKeyStore();
+    const bailianVerifierStore = new MemoryApiKeyStore();
+    const compatibleStore = new MemoryApiKeyStore();
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: ocrApiKeyStore,
+      candidateVerificationApiKeyStores: {
+        deepseek: deepseekStore,
+        'aliyun-bailian': bailianVerifierStore,
+        'openai-compatible': compatibleStore,
+      },
+    });
+    sessions.push(session);
+
+    await expect(session.getCandidateVerificationSettings()).resolves.toMatchObject({
+      enabled: false,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKeyConfigured: false,
+    });
+
+    const saved = await session.saveCandidateVerificationSettings({
+      enabled: true,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-deepseek-only',
+    });
+
+    expect(saved).toMatchObject({ enabled: true, apiKeyConfigured: true });
+    expect(deepseekStore.apiKey).toBe('sk-deepseek-only');
+    expect(ocrApiKeyStore.apiKey).toBe('sk-ocr-only');
+    expect(bailianVerifierStore.apiKey).toBeNull();
+    expect(compatibleStore.apiKey).toBeNull();
+  });
+
+  it('有有限歧义时使用已启用的 DeepSeek 一次裁决并保存审计', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-production-adjudication-'));
+    const sourcePath = join(testRoot, '状态冲突订单.png');
+    await writeFile(
+      sourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    const request = vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.startsWith('https://api.deepseek.com/')) {
+        const body = JSON.parse(String(init?.body)) as {
+          messages?: Array<{ role?: string; content?: string }>;
+        };
+        const user = body.messages?.find(({ role }) => role === 'user');
+        const payload = JSON.parse(user?.content ?? '{}') as {
+          candidateSets?: Array<{
+            ambiguityId: string;
+            candidates: Array<{ candidateId: string; displayText: string }>;
+          }>;
+        };
+        const decisions = (payload.candidateSets ?? []).map((candidateSet) => ({
+          ambiguityId: candidateSet.ambiguityId,
+          resolution: 'selected',
+          candidateId: candidateSet.candidates.find(
+            ({ displayText }) => displayText === '已取消',
+          )?.candidateId,
+        }));
+        return new Response(JSON.stringify({
+          id: 'deepseek-adjudication-request',
+          choices: [{
+            message: { content: JSON.stringify({ decisions }) },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        output: {
+          choices: [{
+            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: [{
+                ocr_result: {
+                  words_info: [
+                    ...productionLocatedWords(),
+                    productionWord('交易已取消', 40, 245, 300, 280),
+                  ],
+                },
+              }],
+            },
+          }],
+        },
+        request_id: 'request-production-adjudication-ocr',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const deepseekStore = new MemoryApiKeyStore();
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      candidateVerificationApiKeyStores: {
+        deepseek: deepseekStore,
+        'aliyun-bailian': new MemoryApiKeyStore(),
+        'openai-compatible': new MemoryApiKeyStore(),
+      },
+      request,
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-production-adjudication',
+      region: 'cn-beijing',
+      apiKey: 'sk-production-ocr',
+    });
+    await session.saveCandidateVerificationSettings({
+      enabled: true,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-production-deepseek',
+    });
+    session.useDataDirectory(join(testRoot, '订单数据'));
+
+    await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+    const item = session.listRecognitionBatches()[0].items[0];
+    const draft = session.getDraft(item.draftId!);
+
+    expect(draft.platformTransactionStatus).toBe('cancelled');
+    const audits = session.getCandidateAdjudicationAudit(draft.id);
+    expect(audits).toMatchObject([{
+      id: expect.any(String),
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      status: 'succeeded',
+    }]);
+    expect(audits[0]).not.toHaveProperty('requestId');
+    expect(request).toHaveBeenCalledTimes(2);
+    const verifierCall = request.mock.calls.find(([url]) =>
+      url.startsWith('https://api.deepseek.com/')
+    );
+    expect(String(verifierCall?.[1]?.body)).not.toContain('data:image');
+    expect(new Headers(verifierCall?.[1]?.headers).get('authorization'))
+      .toBe('Bearer sk-production-deepseek');
+  });
 });
 
 async function eventually(assertion: () => void): Promise<void> {
@@ -252,14 +401,14 @@ async function eventually(assertion: () => void): Promise<void> {
   assertion();
 }
 
-function productionLocatedWords() {
-  const word = (
-    text: string,
-    left: number,
-    top: number,
-    right: number,
-    bottom: number,
-  ) => ({
+function productionWord(
+  text: string,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+) {
+  return {
     text,
     location: [left, top, right, top, right, bottom, left, bottom],
     rotate_rect: [
@@ -269,7 +418,17 @@ function productionLocatedWords() {
       bottom - top,
       0,
     ],
-  });
+  };
+}
+
+function productionLocatedWords() {
+  const word = (
+    text: string,
+    left: number,
+    top: number,
+    right: number,
+    bottom: number,
+  ) => productionWord(text, left, top, right, bottom);
   return [
     word('买家已付款，请尽快发货', 40, 180, 720, 235),
     word('真实收件人 13800000000 复制', 50, 330, 620, 365),

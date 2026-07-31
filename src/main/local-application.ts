@@ -26,6 +26,22 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import type {
+  CandidateAdjudicationAudit,
+  CandidateAdjudicationAuditView,
+  CandidateAdjudicationDecisionAudit,
+  CandidateAdjudicationDecisionOutcome,
+  CandidateAdjudicationRunStatus,
+} from '../core/candidate-adjudication-audit';
+import {
+  CANDIDATE_REGIONS,
+  CANDIDATE_VERIFICATION_LIMITS,
+  type Candidate,
+  type CandidateAdjudicationFailureCode,
+  type CandidateContextLine,
+  type CandidateModelProvider,
+  type CandidateRegion,
+} from '../core/candidate-verification';
 import {
   RECOGNITION_CONFLICT_FIELDS,
   RECOGNITION_CONFLICT_KINDS,
@@ -153,6 +169,7 @@ type PersistRecognitionDraftInput = {
   evidences: readonly RecognitionEvidence[];
   reviewIssues: readonly OrderReviewIssueCode[];
   recognitionConflicts: readonly RecognitionConflictDetail[];
+  candidateAdjudication?: CandidateAdjudicationAudit;
   intakeDecisionPending: boolean;
   createdAt: string;
 };
@@ -474,6 +491,7 @@ export class LocalApplication {
           evidences: [],
           reviewIssues: assessAutomaticImport(recognition),
           recognitionConflicts: [],
+          candidateAdjudication: undefined,
           intakeDecisionPending: false,
           createdAt: now,
         });
@@ -705,6 +723,7 @@ export class LocalApplication {
           evidences: attempt.evidences,
           reviewIssues,
           recognitionConflicts: attempt.recognitionConflicts ?? [],
+          candidateAdjudication: attempt.candidateAdjudication,
           intakeDecisionPending: true,
           createdAt: now,
         });
@@ -3381,6 +3400,56 @@ export class LocalApplication {
     };
   }
 
+  public getCandidateAdjudicationAudit(
+    draftId: string,
+  ): CandidateAdjudicationAuditView[] {
+    const workspace = this.requireWorkspace();
+    const runRows = workspace.database.prepare(`
+      SELECT
+        id, provider, model, status,
+        failure_code, failure_message, created_at
+      FROM candidate_adjudication_runs
+      WHERE draft_id = ?
+      ORDER BY created_at, id
+    `).all(draftId) as unknown as SqlRow[];
+    const decisionsByRun = new Map<string, CandidateAdjudicationDecisionAudit[]>();
+    if (runRows.length > 0) {
+      const decisionRows = workspace.database.prepare(`
+        SELECT
+          decisions.run_id, decisions.ambiguity_id, decisions.region,
+          decisions.field, decisions.item_index, decisions.candidates_json,
+          decisions.selected_candidate_id, decisions.context_lines_json,
+          decisions.outcome, decisions.failure_code
+        FROM candidate_adjudication_decisions AS decisions
+        JOIN candidate_adjudication_runs AS runs ON runs.id = decisions.run_id
+        WHERE runs.draft_id = ?
+        ORDER BY decisions.run_id, decisions.position
+      `).all(draftId) as unknown as SqlRow[];
+      for (const row of decisionRows) {
+        const runId = asString(row.run_id);
+        const decisions = decisionsByRun.get(runId) ?? [];
+        decisions.push(parseCandidateAdjudicationDecisionRow(row));
+        decisionsByRun.set(runId, decisions);
+      }
+    }
+    return runRows.map((row) => {
+      const id = asString(row.id);
+      const failureCode = optionalCandidateAdjudicationFailureCode(row.failure_code);
+      return {
+        id,
+        provider: asCandidateModelProvider(row.provider),
+        model: asString(row.model),
+        status: asCandidateAdjudicationRunStatus(row.status),
+        ...(failureCode === undefined ? {} : { failureCode }),
+        ...(row.failure_message === null
+          ? {}
+          : { failureMessage: asString(row.failure_message) }),
+        createdAt: asString(row.created_at),
+        decisions: decisionsByRun.get(id) ?? [],
+      };
+    });
+  }
+
   public async readSourceScreenshot(screenshotId: string): Promise<{
     bytes: Uint8Array;
     mimeType: string;
@@ -3548,6 +3617,21 @@ export class LocalApplication {
         new Date(Date.parse(input.createdAt) + index).toISOString(),
       );
     });
+
+    if (input.candidateAdjudication) {
+      const validatedAudit = optionalValidatedCandidateAdjudicationAudit(
+        input.candidateAdjudication,
+      );
+      if (validatedAudit) {
+        persistCandidateAdjudicationAudit(
+          workspace,
+          input.screenshotId,
+          input.draftId,
+          input.createdAt,
+          validatedAudit,
+        );
+      }
+    }
   }
 
   private getCustomFieldDefinition(definitionId: string): CustomFieldDefinition {
@@ -4359,6 +4443,388 @@ function asRecognitionBatchItemResolution(
   ) {
     throw new Error('数据库来源截图处理结果格式错误');
   }
+  return value;
+}
+
+function persistCandidateAdjudicationAudit(
+  workspace: Workspace,
+  screenshotId: string,
+  draftId: string,
+  createdAt: string,
+  validated: CandidateAdjudicationAudit,
+): void {
+  const runId = randomUUID();
+  workspace.database.prepare(`
+    INSERT INTO candidate_adjudication_runs (
+      id, screenshot_id, draft_id, provider, model,
+      status, failure_code, failure_message, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    runId,
+    screenshotId,
+    draftId,
+    validated.provider,
+    validated.model,
+    validated.status,
+    validated.failureCode ?? null,
+    validated.failureMessage ?? null,
+    createdAt,
+  );
+  const insertDecision = workspace.database.prepare(`
+    INSERT INTO candidate_adjudication_decisions (
+      run_id, position, ambiguity_id, region, field, item_index,
+      candidates_json, selected_candidate_id, context_lines_json,
+      outcome, failure_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  validated.decisions.forEach((decision, position) => {
+    insertDecision.run(
+      runId,
+      position,
+      decision.ambiguityId,
+      decision.region,
+      decision.field,
+      decision.itemIndex ?? null,
+      JSON.stringify(decision.candidates),
+      decision.selectedCandidateId ?? null,
+      JSON.stringify(decision.contextLines),
+      decision.outcome,
+      decision.failureCode ?? null,
+    );
+  });
+}
+
+function optionalValidatedCandidateAdjudicationAudit(
+  audit: CandidateAdjudicationAudit,
+): CandidateAdjudicationAudit | undefined {
+  try {
+    return validateCandidateAdjudicationAudit(audit);
+  } catch {
+    // Candidate adjudication is optional. Preserve a bounded rejection record
+    // when possible, but never let malformed adapter output roll back OCR.
+    try {
+      return validateCandidateAdjudicationAudit({
+        provider: audit.provider,
+        model: audit.model,
+        status: 'rejected',
+        failureCode: 'invalid_response',
+        failureMessage: '候选裁决记录不符合安全边界，已拒绝应用',
+        decisions: [],
+      });
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function validateCandidateAdjudicationAudit(
+  audit: CandidateAdjudicationAudit,
+): CandidateAdjudicationAudit {
+  const provider = asCandidateModelProvider(audit.provider);
+  const model = boundedNonEmptyText(audit.model, 200, '候选裁决模型名称无效');
+  const status = asCandidateAdjudicationRunStatus(audit.status);
+  const failureCode = optionalCandidateAdjudicationFailureCode(
+    audit.failureCode ?? null,
+  );
+  const failureMessage = audit.failureMessage === undefined
+    ? undefined
+    : boundedNonEmptyText(audit.failureMessage, 2_000, '候选裁决失败原因无效');
+  if (status === 'succeeded' && (failureCode || failureMessage)) {
+    throw new Error('成功的候选裁决不能包含失败原因');
+  }
+  if (
+    !Array.isArray(audit.decisions) ||
+    audit.decisions.length >
+      CANDIDATE_VERIFICATION_LIMITS.auditAmbiguitiesPerScreenshot
+  ) {
+    throw new Error('候选裁决逐项记录数量无效');
+  }
+  const ambiguityIds = new Set<string>();
+  const decisions = audit.decisions.map((decision) => {
+    const validated = validateCandidateAdjudicationDecision(decision);
+    if (ambiguityIds.has(validated.ambiguityId)) {
+      throw new Error('候选裁决包含重复歧义标识');
+    }
+    ambiguityIds.add(validated.ambiguityId);
+    return validated;
+  });
+  return {
+    provider,
+    model,
+    status,
+    ...(failureCode === undefined ? {} : { failureCode }),
+    ...(failureMessage === undefined ? {} : { failureMessage }),
+    decisions,
+  };
+}
+
+function validateCandidateAdjudicationDecision(
+  decision: CandidateAdjudicationDecisionAudit,
+): CandidateAdjudicationDecisionAudit {
+  const ambiguityId = boundedNonEmptyText(
+    decision.ambiguityId,
+    CANDIDATE_VERIFICATION_LIMITS.identifierLength,
+    '候选裁决歧义标识无效',
+  );
+  const region = asCandidateRegion(decision.region);
+  const field = boundedNonEmptyText(
+    decision.field,
+    CANDIDATE_VERIFICATION_LIMITS.fieldLength,
+    '候选裁决字段无效',
+  );
+  const itemIndex = decision.itemIndex;
+  if (
+    itemIndex !== undefined &&
+    (!Number.isSafeInteger(itemIndex) || itemIndex < 0)
+  ) {
+    throw new Error('候选裁决商品位置无效');
+  }
+  if (
+    !Array.isArray(decision.candidates) ||
+    decision.candidates.length < 2 ||
+    decision.candidates.length > CANDIDATE_VERIFICATION_LIMITS.candidatesPerAmbiguity
+  ) {
+    throw new Error('候选裁决候选数量无效');
+  }
+  if (
+    !Array.isArray(decision.contextLines) ||
+    decision.contextLines.length === 0 ||
+    decision.contextLines.length > CANDIDATE_VERIFICATION_LIMITS.contextLinesPerAmbiguity
+  ) {
+    throw new Error('候选裁决原文行数量无效');
+  }
+  const contextLines = decision.contextLines.map(validateCandidateContextLine);
+  const lineIds = new Set(contextLines.map(({ lineId }) => lineId));
+  if (lineIds.size !== contextLines.length) {
+    throw new Error('候选裁决包含重复原文行标识');
+  }
+  const candidates = decision.candidates.map((candidate) =>
+    validateCandidate(candidate, lineIds)
+  );
+  const candidateIds = new Set(candidates.map(({ candidateId }) => candidateId));
+  if (candidateIds.size !== candidates.length) {
+    throw new Error('候选裁决包含重复候选标识');
+  }
+  const outcome = asCandidateAdjudicationDecisionOutcome(decision.outcome);
+  const selectedCandidateId = decision.selectedCandidateId;
+  if (
+    outcome === 'selected' &&
+    (
+      typeof selectedCandidateId !== 'string' ||
+      !candidateIds.has(selectedCandidateId)
+    )
+  ) {
+    throw new Error('候选裁决选择了未知候选');
+  }
+  if (outcome !== 'selected' && selectedCandidateId !== undefined) {
+    throw new Error('未选择的候选裁决不能包含候选标识');
+  }
+  const failureCode = optionalCandidateAdjudicationFailureCode(
+    decision.failureCode ?? null,
+  );
+  return {
+    ambiguityId,
+    region,
+    field,
+    ...(itemIndex === undefined ? {} : { itemIndex }),
+    candidates,
+    contextLines,
+    ...(selectedCandidateId === undefined ? {} : { selectedCandidateId }),
+    outcome,
+    ...(failureCode === undefined ? {} : { failureCode }),
+  };
+}
+
+function validateCandidate(
+  candidate: Candidate,
+  lineIds: ReadonlySet<string>,
+): Candidate {
+  const candidateId = boundedNonEmptyText(
+    candidate.candidateId,
+    CANDIDATE_VERIFICATION_LIMITS.identifierLength,
+    '候选裁决候选标识无效',
+  );
+  const displayText = boundedNonEmptyText(
+    candidate.displayText,
+    CANDIDATE_VERIFICATION_LIMITS.candidateDisplayTextLength,
+    '候选裁决候选说明无效',
+  );
+  if (
+    !Array.isArray(candidate.evidenceRefs) ||
+    candidate.evidenceRefs.length === 0 ||
+    candidate.evidenceRefs.length > CANDIDATE_VERIFICATION_LIMITS.evidenceRefsPerCandidate
+  ) {
+    throw new Error('候选裁决候选依据无效');
+  }
+  const evidenceRefs = candidate.evidenceRefs.map((reference) => {
+    const lineId = boundedNonEmptyText(
+      reference.lineId,
+      CANDIDATE_VERIFICATION_LIMITS.identifierLength,
+      '候选裁决原文行标识无效',
+    );
+    if (!lineIds.has(lineId)) throw new Error('候选裁决引用了未知原文行');
+    const startOffset = optionalSafeOffset(reference.startOffset);
+    const endOffset = optionalSafeOffset(reference.endOffset);
+    if (
+      startOffset !== undefined &&
+      endOffset !== undefined &&
+      endOffset < startOffset
+    ) {
+      throw new Error('候选裁决原文范围无效');
+    }
+    return {
+      lineId,
+      ...(startOffset === undefined ? {} : { startOffset }),
+      ...(endOffset === undefined ? {} : { endOffset }),
+    };
+  });
+  return { candidateId, displayText, evidenceRefs };
+}
+
+function validateCandidateContextLine(line: CandidateContextLine): CandidateContextLine {
+  const lineId = boundedNonEmptyText(
+    line.lineId,
+    CANDIDATE_VERIFICATION_LIMITS.identifierLength,
+    '候选裁决原文行标识无效',
+  );
+  const text = boundedNonEmptyText(
+    line.text,
+    CANDIDATE_VERIFICATION_LIMITS.contextLineTextLength,
+    '候选裁决原文行无效',
+  );
+  const coordinates = [line.left, line.top, line.right, line.bottom];
+  if (!coordinates.every((value) => Number.isFinite(value))) {
+    throw new Error('候选裁决原文坐标无效');
+  }
+  if (line.right < line.left || line.bottom < line.top) {
+    throw new Error('候选裁决原文坐标无效');
+  }
+  return { lineId, text, left: line.left, top: line.top, right: line.right, bottom: line.bottom };
+}
+
+function parseCandidateAdjudicationDecisionRow(
+  row: SqlRow,
+): CandidateAdjudicationDecisionAudit {
+  const candidates = parseCandidateAuditJson(
+    asString(row.candidates_json),
+    '数据库候选裁决候选格式错误',
+  );
+  const contextLines = parseCandidateAuditJson(
+    asString(row.context_lines_json),
+    '数据库候选裁决原文依据格式错误',
+  );
+  const candidateDecision = {
+    ambiguityId: asString(row.ambiguity_id),
+    region: asCandidateRegion(row.region),
+    field: asString(row.field),
+    ...(row.item_index === null ? {} : { itemIndex: asNumber(row.item_index) }),
+    candidates,
+    contextLines,
+    ...(row.selected_candidate_id === null
+      ? {}
+      : { selectedCandidateId: asString(row.selected_candidate_id) }),
+    outcome: asCandidateAdjudicationDecisionOutcome(row.outcome),
+    ...(row.failure_code === null
+      ? {}
+      : { failureCode: optionalCandidateAdjudicationFailureCode(row.failure_code) }),
+  } as CandidateAdjudicationDecisionAudit;
+  return validateCandidateAdjudicationDecision(candidateDecision);
+}
+
+function parseCandidateAuditJson(value: string, message: string): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(message, { cause: error });
+  }
+  if (!Array.isArray(parsed)) throw new Error(message);
+  return parsed;
+}
+
+function asCandidateModelProvider(value: unknown): CandidateModelProvider {
+  if (
+    value === 'deepseek' ||
+    value === 'aliyun-bailian' ||
+    value === 'openai-compatible'
+  ) return value;
+  throw new Error('数据库候选裁决服务商格式错误');
+}
+
+function asCandidateRegion(value: unknown): CandidateRegion {
+  if (typeof value === 'string' && CANDIDATE_REGIONS.includes(value as CandidateRegion)) {
+    return value as CandidateRegion;
+  }
+  throw new Error('数据库候选裁决区域格式错误');
+}
+
+function asCandidateAdjudicationRunStatus(
+  value: unknown,
+): CandidateAdjudicationRunStatus {
+  if (
+    value === 'succeeded' ||
+    value === 'partial' ||
+    value === 'failed' ||
+    value === 'rejected'
+  ) return value;
+  throw new Error('数据库候选裁决状态格式错误');
+}
+
+function asCandidateAdjudicationDecisionOutcome(
+  value: unknown,
+): CandidateAdjudicationDecisionOutcome {
+  if (value === 'selected' || value === 'unresolved' || value === 'invalid') {
+    return value;
+  }
+  throw new Error('数据库候选裁决结果格式错误');
+}
+
+const CANDIDATE_ADJUDICATION_FAILURE_CODES = new Set<
+  CandidateAdjudicationFailureCode
+>([
+  'invalid_request',
+  'timeout',
+  'authentication',
+  'rate_limited',
+  'network',
+  'remote_error',
+  'response_too_large',
+  'unsafe_response',
+  'invalid_response',
+]);
+
+function optionalCandidateAdjudicationFailureCode(
+  value: unknown,
+): CandidateAdjudicationFailureCode | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (
+    typeof value === 'string' &&
+    CANDIDATE_ADJUDICATION_FAILURE_CODES.has(value as CandidateAdjudicationFailureCode)
+  ) return value as CandidateAdjudicationFailureCode;
+  throw new Error('数据库候选裁决失败代码格式错误');
+}
+
+function optionalSafeOffset(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error('候选裁决原文范围无效');
+  }
+  return value as number;
+}
+
+function boundedNonEmptyText(
+  value: unknown,
+  maximumLength: number,
+  message: string,
+): string {
+  if (typeof value !== 'string') throw new Error(message);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximumLength) throw new Error(message);
+  return normalized;
+}
+
+function boundedText(value: unknown, maximumLength: number, message: string): string {
+  if (typeof value !== 'string' || value.length > maximumLength) throw new Error(message);
   return value;
 }
 
