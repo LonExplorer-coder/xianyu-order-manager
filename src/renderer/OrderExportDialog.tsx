@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { OrderSummary } from '../core/contracts';
 import type {
@@ -37,6 +38,7 @@ export type OrderExportDialogProps = {
   customFieldDefinitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];
   templates: TableTemplate[];
+  initialOrderTemplateId: string | null;
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
   onSaved: (result: Extract<OrderExportResult, { kind: 'saved' }>) => void;
   onClose: () => void;
@@ -48,6 +50,7 @@ export function OrderExportDialog({
   customFieldDefinitions,
   customFieldValues,
   templates,
+  initialOrderTemplateId,
   onExport,
   onSaved,
   onClose,
@@ -56,7 +59,11 @@ export function OrderExportDialog({
   const descriptionId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLSelectElement>(null);
-  const [orderTemplateId, setOrderTemplateId] = useState('');
+  const [orderTemplateId, setOrderTemplateId] = useState(() => (
+    templates.some(({ id, granularity }) => (
+      id === initialOrderTemplateId && granularity === 'order'
+    )) ? initialOrderTemplateId ?? '' : ''
+  ));
   const [orderItemTemplateId, setOrderItemTemplateId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -168,7 +175,7 @@ export function OrderExportDialog({
     orders,
   ]);
 
-  return (
+  return createPortal(
     <div
       ref={dialogRef}
       className="order-export-backdrop"
@@ -297,7 +304,8 @@ export function OrderExportDialog({
           </button>
         </footer>
       </form>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

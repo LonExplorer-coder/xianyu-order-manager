@@ -761,7 +761,8 @@ select:focus-visible {
 
 .workspace {
   min-width: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--surface);
 }
 
@@ -1252,7 +1253,9 @@ select:focus-visible {
   z-index: 50;
   inset: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   padding: 24px;
+  overflow-x: hidden;
   overflow-y: auto;
   place-items: center;
   background: rgb(11 20 31 / 42%);
@@ -1261,6 +1264,7 @@ select:focus-visible {
 
 .order-export-dialog {
   width: min(580px, 100%);
+  min-width: 0;
   padding: 27px;
   border: 1px solid var(--line-soft);
   border-radius: 12px;
@@ -1472,6 +1476,7 @@ select:focus-visible {
 
 .table-frame th {
   height: 43px;
+  padding: 0 18px 0 0;
   color: #808893;
   font-size: 9px;
   font-weight: 700;

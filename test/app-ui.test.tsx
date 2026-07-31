@@ -3858,6 +3858,7 @@ describe('订单管理工作台', () => {
         definitionIds.includes(definitionId)
       )),
     }));
+    const exportOrders = vi.fn().mockResolvedValue({ kind: 'cancelled' as const });
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -3868,6 +3869,7 @@ describe('订单管理工作台', () => {
       queryOrders,
       listCustomFieldDefinitions: vi.fn().mockResolvedValue([fieldA, fieldB]),
       listTableTemplates: vi.fn().mockResolvedValue([templateA, templateB]),
+      exportOrders,
     });
 
     render(<App api={api} />);
@@ -3880,11 +3882,32 @@ describe('订单管理工作台', () => {
     ));
     await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    const orderTemplateSelect = within(dialog).getByRole('combobox', {
+      name: '订单总表模板',
+    });
+    expect(orderTemplateSelect).toHaveValue(templateA.id);
+    const initialPreview = within(dialog).getByRole('table', {
+      name: '订单总表导出预览',
+    });
+    const initialHeaders = within(initialPreview).getAllByRole('columnheader')
+      .map(({ textContent }) => textContent);
+    expect(initialHeaders).toEqual(['订单号', 'A 跟单']);
+    expect(initialHeaders).not.toContain('备注');
+    await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
+    await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({
+      scope: { kind: 'current_result', orderIds: [summary.id] },
+      orderTemplateId: templateA.id,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }));
+
+    await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
+    const reopenedDialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
     await user.selectOptions(
-      within(dialog).getByRole('combobox', { name: '订单总表模板' }),
+      within(reopenedDialog).getByRole('combobox', { name: '订单总表模板' }),
       templateB.id,
     );
-    const preview = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    const preview = within(reopenedDialog).getByRole('table', { name: '订单总表导出预览' });
     expect(within(preview).getAllByRole('columnheader').map(({ textContent }) => textContent))
       .toEqual(['B 跟单', 'A 备用']);
     expect(within(preview).getByText('B 值')).toBeVisible();
@@ -4053,7 +4076,9 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
     await user.selectOptions(screen.getByRole('combobox', { name: '排序方式' }), 'amount:asc');
     expect(screen.getByText('筛选或排序已修改')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '保存当前筛选排序' }));
@@ -4335,6 +4360,8 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '导出当前结果 2 笔' }));
 
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(dialog.parentElement).toBe(document.body);
+    expect(dialog.closest('.workspace-enter')).toBeNull();
     expect(within(dialog).getByText('2 笔订单')).toBeVisible();
     expect(within(dialog).getByText('3 条商品明细')).toBeVisible();
     expect(within(dialog).getByText('收件人仅保留姓氏')).toBeVisible();

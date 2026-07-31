@@ -2060,6 +2060,7 @@ function OrdersWorkspace({
           customFieldDefinitions={customFieldDefinitions}
           customFieldValues={customFieldValues}
           templates={tableTemplates}
+          initialOrderTemplateId={orderTemplate?.id ?? null}
           onExport={onExport}
           onClose={() => setExportPreview(null)}
           onSaved={(result) => {
