@@ -22,9 +22,9 @@ import type {
 } from '../../main/ocr-settings';
 import {
   planXianyuSemanticRegions,
-  xianyuSemanticRegionPrompt,
   type XianyuSemanticRegionLayout,
 } from './xianyu-semantic-regions';
+import { CROPPED_ORDER_RESULT_SCHEMA } from './xianyu-kie-schema';
 import { processXianyuSixRegionExtraction } from './xianyu-six-region-extraction';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -194,36 +194,6 @@ const ORDER_RESULT_SCHEMA = {
   ...PAGE_CONTEXT_MODULE_SCHEMA,
 } as const;
 
-const CROPPED_ORDER_RESULT_SCHEMA = {
-  platform_status: {
-    top_status_text:
-      '只原样复制区域 1 中的顶部平台交易状态标题，看不到时返回 null',
-  },
-  ...SHIPPING_INFORMATION_MODULE_SCHEMA,
-  ...PURCHASED_ITEMS_MODULE_SCHEMA,
-  amount_summary: {
-    product_total: '只提取区域 4 中“商品总价”对应的金额，看不到时返回 null',
-    shipping_fee: '只提取区域 4 中“运费”对应的金额，看不到时返回 null',
-    amount: '只提取区域 4 中“成交价”或“实付金额”对应的金额，看不到时返回 null',
-  },
-  order_details: {
-    detail_state:
-      '区域 5 只显示订单编号时返回 collapsed；还显示支付宝交易号、买家昵称或时间等详情时返回 expanded；无法判断返回 unknown',
-    order_number: '只提取区域 5 中明确标注“订单编号”或“订单号”的完整字符串',
-    alipay_transaction_number:
-      '只提取区域 5 中明确标注“支付宝交易号”的完整字符串，看不到时返回 null',
-    buyer_nickname_label:
-      '区域 5 中明确看到“买家昵称”标签时返回“买家昵称”，否则返回 null',
-    buyer_nickname:
-      '只提取区域 5 中“买家昵称”标签对应的值，不能使用区域 2 的收件人，看不到标签时返回 null',
-    order_time: '只提取区域 5 中“下单时间”或“订单时间”的原文，看不到时返回 null',
-    payment_time: '只提取区域 5 中“付款时间”或“支付时间”的原文，看不到时返回 null',
-    controls: [
-      '只列区域 5 内可点击的按钮或链接，例如“复制”“交易快照”“展开”“收起”',
-    ],
-  },
-} as const;
-
 const SHIPPING_REVIEW_SCHEMA = {
   shipping_contact: {
     recipient:
@@ -287,7 +257,7 @@ type OcrTaskInput = {
   | {
       task: 'key_information_extraction';
       resultSchema: Record<string, unknown>;
-      userPrompt: string;
+      userPrompt?: string;
     }
 );
 
@@ -469,9 +439,30 @@ export class BailianOcrClient implements BailianConnectionTester {
     }
 
     const layout = planXianyuSemanticRegions(advanced.wordsInfo);
+    const retainLocatedResultForReview = (
+      semanticLayout: XianyuSemanticRegionLayout,
+    ): RecognitionAttempt => {
+      const result = normalizeOrderResult(
+        sanitizeOrderExtraction(
+          flattenSixRegionExtraction({}, semanticLayout).extracted,
+        ),
+        input.sellerAccount,
+      );
+      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
+      if (semanticScreenshotContentIsIncomplete(result)) {
+        reviewIssues.push('screenshot_content_incomplete');
+      }
+      return {
+        result,
+        evidences: [advanced.evidence],
+        reviewIssues,
+      };
+    };
     let extractionImageDataUrl = imageDataUrl;
-    let semanticImageCropFailed = false;
-    if (layout && this.semanticRegionImageCropper) {
+    if (layout) {
+      if (!this.semanticRegionImageCropper) {
+        return retainLocatedResultForReview(layout);
+      }
       try {
         const cropped = await this.semanticRegionImageCropper({
           source: input.source,
@@ -487,7 +478,7 @@ export class BailianOcrClient implements BailianConnectionTester {
         }
         extractionImageDataUrl = croppedImageDataUrl;
       } catch {
-        semanticImageCropFailed = true;
+        return retainLocatedResultForReview(layout);
       }
     }
     let extraction: KieResponse;
@@ -497,29 +488,11 @@ export class BailianOcrClient implements BailianConnectionTester {
         apiKey: input.apiKey,
         imageDataUrl: extractionImageDataUrl,
         resultSchema: layout ? CROPPED_ORDER_RESULT_SCHEMA : ORDER_RESULT_SCHEMA,
-        userPrompt: layout
-          ? xianyuSemanticRegionPrompt(layout, {
-              imageWasCropped: extractionImageDataUrl !== imageDataUrl,
-            })
-          : ORDER_EXTRACTION_USER_PROMPT,
+        ...(layout ? {} : { userPrompt: ORDER_EXTRACTION_USER_PROMPT }),
       });
     } catch (error) {
       if (!layout) throw error;
-      const result = normalizeOrderResult(
-        sanitizeOrderExtraction(
-          flattenSixRegionExtraction({}, layout).extracted,
-        ),
-        input.sellerAccount,
-      );
-      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
-      if (semanticScreenshotContentIsIncomplete(result)) {
-        reviewIssues.push('screenshot_content_incomplete');
-      }
-      return {
-        result,
-        evidences: [advanced.evidence],
-        reviewIssues,
-      };
+      return retainLocatedResultForReview(layout);
     }
     const sixRegionExtraction = layout
       ? flattenSixRegionExtraction(extraction.extracted, layout)
@@ -533,7 +506,6 @@ export class BailianOcrClient implements BailianConnectionTester {
       input.sellerAccount,
     );
     const reviewIssues: OrderReviewIssueCode[] = [];
-    if (semanticImageCropFailed) reviewIssues.push('targeted_review_failed');
     if (criticalConflict) reviewIssues.push('targeted_review_conflict');
     if (!layout || semanticScreenshotContentIsIncomplete(result)) {
       reviewIssues.push('screenshot_content_incomplete');
@@ -566,7 +538,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     apiKey: string;
     imageDataUrl: string;
     resultSchema: Record<string, unknown>;
-    userPrompt: string;
+    userPrompt?: string;
   }): Promise<KieResponse> {
     const response = await this.requestOcrTask({
       ...input,
@@ -591,7 +563,10 @@ export class BailianOcrClient implements BailianConnectionTester {
       max_pixels: 32 * 32 * 8192,
       enable_rotate: false,
     }];
-    if (input.task === 'key_information_extraction') {
+    if (
+      input.task === 'key_information_extraction' &&
+      input.userPrompt?.trim()
+    ) {
       content.push({ text: input.userPrompt });
     }
     const ocrOptions = input.task === 'key_information_extraction'

@@ -169,37 +169,6 @@ export function planXianyuSemanticRegions(
   };
 }
 
-export function xianyuSemanticRegionPrompt(
-  layout: XianyuSemanticRegionLayout,
-  options: { imageWasCropped?: boolean } = {},
-): string {
-  const orderContentRegionIds = XIANYU_SEMANTIC_REGION_IDS.filter(
-    (id) => id !== 'fulfillment_signals',
-  );
-  const coordinates = orderContentRegionIds
-    .map((id, index) => {
-      const region = layout.regions[id];
-      return `${index + 1}. ${id}: y=${rounded(region.startY)}..${rounded(region.endY)}`;
-    })
-    .join('\n');
-  const excluded = layout.excludedPromotion;
-  return [
-    options.imageWasCropped
-      ? `当前图片只保留原图顶部至 y=${rounded(excluded.startY)}；推广与底部操作区已从图片像素中裁掉。`
-      : '本次图片未完成物理裁剪，只允许读取下列五个订单内容区域；不得读取订单详情之后的任何文字。',
-    '请严格按下列原图纵向坐标边界提取闲鱼订单。每个字段只能来自所属区域，不得跨区补写或猜测。',
-    coordinates,
-    `原图 y>=${rounded(excluded.startY)} 的内容不属于本次提取范围；广告、推荐内容和底部按钮绝不能写入任何返回字段。`,
-    'platform_status 只返回顶部平台交易状态原文。',
-    'shipping_information 只返回收件人、手机号、地址及该卡片内按钮；姓名、手机号、按钮必须分别填写。',
-    'purchased_items 只返回已购买商品卡；每个商品分别返回标题、款式/规格、单价和明确数量。无数量标记时 quantity 返回 null。',
-    'amount_summary 只返回成交价、商品总价和运费。',
-    'order_details 只返回订单编号及截图中实际展开显示的交易详情；看不到买家昵称标签时 buyer_nickname 必须为 null。',
-    '底部履约按钮由第一次定位结果单独处理，本次不得返回或猜测。',
-    '无法确认的字段返回 null。输出前再次检查：裁剪边界以下的内容没有进入任何业务字段。',
-  ].join('\n');
-}
-
 export function semanticRegionContainsText(
   layout: XianyuSemanticRegionLayout,
   regionId: XianyuSemanticRegionId,
@@ -385,9 +354,6 @@ function midpoint(left: number, right: number): number {
   return left + Math.max(0, right - left) / 2;
 }
 
-function rounded(value: number): number {
-  return Math.round(value * 10) / 10;
-}
 
 function median(values: number[]): number {
   if (values.length === 0) return 0;

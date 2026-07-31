@@ -12,6 +12,9 @@ import {
   type XianyuSemanticRegionId,
   type XianyuSemanticRegionLayout,
 } from './xianyu-semantic-regions';
+import {
+  looksLikeXianyuKieInstructionEcho as looksLikeInstructionEcho,
+} from './xianyu-kie-schema';
 
 type ExtractionModule = Record<string, unknown>;
 
@@ -149,6 +152,10 @@ function constrainSemanticOrderDetails(
   const expected = expectedSemanticOrderDetails(lines);
   const constrained: Record<string, unknown> = {
     ...source,
+    detail_state: supportedDetailState(
+      source.detail_state,
+      expected.detail_state,
+    ),
     order_number: supportedLabeledText(
       source.order_number,
       expected.order_number,
@@ -208,6 +215,7 @@ function constrainSemanticAmounts(
 }
 
 type SemanticExpectedOrderDetails = {
+  detail_state: 'collapsed' | 'expanded' | 'unknown';
   order_number?: string;
   alipay_transaction_number?: string;
   buyer_nickname_label?: string;
@@ -225,7 +233,14 @@ type SemanticExpectedAmounts = {
 function expectedSemanticOrderDetails(
   lines: string[],
 ): SemanticExpectedOrderDetails {
+  const expanded = lines.some((line) =>
+    /(?:支付宝交易号|买家昵称|下单时间|付款时间|订单时间|支付时间)/u.test(line)
+  );
+  const collapsed = lines.some((line) =>
+    /(?:展开|查看更多|显示全部)/u.test(line)
+  );
   return {
+    detail_state: expanded ? 'expanded' : collapsed ? 'collapsed' : 'unknown',
     order_number: semanticIdentifierAfterLabel(lines, /(?:订单编号|订单号)/u),
     alipay_transaction_number: semanticIdentifierAfterLabel(
       lines,
@@ -252,6 +267,17 @@ function supportedLabeledText(value: unknown, expected?: string): unknown {
   if (isMissingExtractedValue(value)) return value;
   if (typeof value !== 'string' || !expected) return null;
   return comparableText(value) === comparableText(expected) ? value : null;
+}
+
+function supportedDetailState(
+  value: unknown,
+  expected: SemanticExpectedOrderDetails['detail_state'],
+): unknown {
+  if (isMissingExtractedValue(value)) return value;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (!['collapsed', 'expanded', 'unknown'].includes(normalized)) return null;
+  return expected === 'unknown' || normalized === expected ? normalized : null;
 }
 
 function supportedLabeledMoney(value: unknown, expected?: string): unknown {
@@ -438,7 +464,7 @@ function sixRegionExtractionConflicts(
   layout: XianyuSemanticRegionLayout,
   processedOrderNumber: string,
 ): RecognitionConflictDetail[] {
-  const conflicts: RecognitionConflictDetail[] = [];
+  const conflicts = moduleStructureConflicts(extracted);
   const platformLines = semanticRegionRows(layout, 'platform_status');
   const platformStatuses = semanticPlatformStatuses(platformLines);
   const platformModule = recordOrEmpty(extracted.platform_status);
@@ -507,6 +533,9 @@ function sixRegionExtractionConflicts(
         },
         { key: 'phone', field: 'phone', retainedValue: locatedShipping.phone },
         { key: 'address', field: 'address', retainedValue: locatedShipping.address },
+        { key: 'province', field: 'province', retainedValue: locatedShipping.province },
+        { key: 'city', field: 'city', retainedValue: locatedShipping.city },
+        { key: 'district', field: 'district', retainedValue: locatedShipping.district },
       ],
     },
   ];
@@ -533,7 +562,106 @@ function sixRegionExtractionConflicts(
       }));
     }
   }
+  conflicts.push(...regionControlConflicts({
+    value: shippingModule.controls,
+    layout,
+    region: 'shipping_information',
+    field: 'shipping_controls',
+    knownControls: ['复制', '去发货'],
+  }));
+  const purchasedModule = recordOrEmpty(extracted.purchased_items);
+  conflicts.push(...regionControlConflicts({
+    value: purchasedModule.controls,
+    layout,
+    region: 'purchased_items',
+    field: 'item_controls',
+    knownControls: [],
+  }));
+  const orderDetailsModule = recordOrEmpty(extracted.order_details);
+  conflicts.push(...regionControlConflicts({
+    value: orderDetailsModule.controls,
+    layout,
+    region: 'order_details',
+    field: 'order_detail_controls',
+    knownControls: ['复制', '交易快照', '展开', '收起'],
+  }));
   return conflicts.slice(0, RECOGNITION_CONFLICT_LIMITS.details);
+}
+
+function moduleStructureConflicts(
+  extracted: Record<string, unknown>,
+): RecognitionConflictDetail[] {
+  const modules: Array<[
+    string,
+    RecognitionConflictDetail['region'],
+  ]> = [
+    ['platform_status', 'platform_status'],
+    ['shipping_information', 'shipping_information'],
+    ['purchased_items', 'purchased_items'],
+    ['amount_summary', 'amount_summary'],
+    ['order_details', 'order_details'],
+  ];
+  const conflicts = modules.flatMap(([key, region]) => {
+    const value = extracted[key];
+    if (isMissingExtractedValue(value) || isRecord(value)) return [];
+    return [createConflictDetail({
+      region,
+      field: 'module_structure',
+      kind: containsInstructionEcho(value)
+        ? 'instruction_echo'
+        : 'unsupported_value',
+      locatedValues: [],
+      extractedValues: conflictValues(value),
+      retainedValue: null,
+    })];
+  });
+  const purchasedItems = recordOrEmpty(extracted.purchased_items).items;
+  if (!isMissingExtractedValue(purchasedItems) && !Array.isArray(purchasedItems)) {
+    conflicts.push(createConflictDetail({
+      region: 'purchased_items',
+      field: 'module_structure',
+      kind: containsInstructionEcho(purchasedItems)
+        ? 'instruction_echo'
+        : 'unsupported_value',
+      locatedValues: [],
+      extractedValues: conflictValues(purchasedItems),
+      retainedValue: null,
+    }));
+  }
+  return conflicts;
+}
+
+function regionControlConflicts(input: {
+  value: unknown;
+  layout: XianyuSemanticRegionLayout;
+  region: RecognitionConflictDetail['region'];
+  field: RecognitionConflictField;
+  knownControls: string[];
+}): RecognitionConflictDetail[] {
+  if (isMissingExtractedValue(input.value)) return [];
+  const controls = stringList(input.value);
+  const unsupported = controls.filter((control) =>
+    !semanticRegionContainsText(input.layout, input.region, control)
+  );
+  const malformed = !Array.isArray(input.value);
+  if (!malformed && unsupported.length === 0) return [];
+  const extractedValues = malformed
+    ? conflictValues(input.value)
+    : unsupported;
+  const locatedValues = controlsFromSemanticLines(
+    semanticRegionRows(input.layout, input.region),
+    input.knownControls,
+  );
+  return [createConflictDetail({
+    region: input.region,
+    field: input.field,
+    kind: containsInstructionEcho(input.value)
+      ? 'instruction_echo'
+      : 'unsupported_value',
+    locatedValues,
+    extractedValues,
+    retainedValue: conflictValue(locatedValues.join('、')),
+  })];
 }
 
 function amountSummaryConflicts(
@@ -582,6 +710,7 @@ function orderDetailsConflicts(
     semanticRegionRows(layout, 'order_details'),
   );
   const fields: Array<[string, RecognitionConflictField, string | undefined]> = [
+    ['detail_state', 'detail_state', expected.detail_state],
     ['order_number', 'order_number', expected.order_number],
     [
       'alipay_transaction_number',
@@ -598,7 +727,9 @@ function orderDetailsConflicts(
     const value = source[key];
     if (
       isMissingExtractedValue(value) ||
-      supportedLabeledText(value, expectedValue) !== null
+      (key === 'detail_state'
+        ? supportedDetailState(value, expected.detail_state)
+        : supportedLabeledText(value, expectedValue)) !== null
     ) {
       return [];
     }
@@ -640,6 +771,7 @@ function purchasedItemsConflicts(
       title && comparableText(candidate.lines.join('')).includes(title)
     );
     if (!section) {
+      const retainedTitle = sections[itemIndex]?.title;
       conflicts.push(createConflictDetail({
         region: 'purchased_items',
         field: 'item_title',
@@ -647,9 +779,9 @@ function purchasedItemsConflicts(
           ? 'instruction_echo'
           : 'outside_region',
         itemIndex,
-        locatedValues: [],
+        locatedValues: conflictValues(retainedTitle),
         extractedValues: conflictValues(item.title),
-        retainedValue: null,
+        retainedValue: conflictValue(retainedTitle),
       }));
       return;
     }
@@ -761,11 +893,11 @@ function conflictValue(value: unknown): string | null {
   return null;
 }
 
-function looksLikeInstructionEcho(value: unknown): boolean {
-  if (typeof value !== 'string') return false;
-  const normalized = value.normalize('NFKC').replace(/\s+/gu, '');
-  return /(?:返回|提取|列出|填写)/u.test(normalized) &&
-    /(?:看不到|无法|例如|null|字段|区域)/iu.test(normalized);
+function containsInstructionEcho(value: unknown): boolean {
+  if (looksLikeInstructionEcho(value)) return true;
+  if (Array.isArray(value)) return value.some(containsInstructionEcho);
+  if (!isRecord(value)) return false;
+  return Object.values(value).some(containsInstructionEcho);
 }
 
 type SixRegionModules = {
@@ -978,6 +1110,7 @@ function recoverSemanticOrderDetails(
   lines: string[],
 ): Record<string, unknown> {
   const details = { ...source };
+  const expected = expectedSemanticOrderDetails(lines);
   fillMissingScalar(
     details,
     { order_number: semanticIdentifierAfterLabel(
@@ -1013,11 +1146,7 @@ function recoverSemanticOrderDetails(
     isMissingExtractedValue(details.detail_state) ||
     details.detail_state === 'unknown'
   ) {
-    details.detail_state = lines.some((line) =>
-      /(?:支付宝交易号|买家昵称|下单时间|付款时间|订单时间|支付时间)/u.test(line)
-    )
-      ? 'expanded'
-      : 'collapsed';
+    details.detail_state = expected.detail_state;
   }
   details.controls = mergeSemanticControls(
     details.controls,
@@ -1176,9 +1305,11 @@ function validatedOrderNumber(value: unknown): string {
 }
 
 function recordOrEmpty(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+  return isRecord(value) ? value : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function stringList(value: unknown): string[] {

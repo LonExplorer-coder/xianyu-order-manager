@@ -81,6 +81,23 @@ function recognitionInput() {
   };
 }
 
+const SYNTHETIC_CROPPED_BYTES = Uint8Array.from(Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+));
+
+function semanticClient(
+  request: ConstructorParameters<typeof BailianOcrClient>[0],
+): BailianOcrClient {
+  return new BailianOcrClient(request, {
+    semanticRegionsEnabled: true,
+    semanticRegionImageCropper: async () => ({
+      mimeType: 'image/png',
+      bytes: SYNTHETIC_CROPPED_BYTES,
+    }),
+  });
+}
+
 function completeLocatedWords(): LocatedWord[] {
   return [
     locatedWord('买家已付款，请尽快发货', 40, 180, 720, 235),
@@ -178,7 +195,9 @@ describe('闲鱼订单六区识别', () => {
         message: { role: 'assistant', content: 'OK' },
       }],
     }), { status: 200 }));
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = new BailianOcrClient(request, {
+      semanticRegionsEnabled: true,
+    });
 
     await expect(client.testConnection({
       workspaceId: 'ws-test123',
@@ -199,10 +218,7 @@ describe('闲鱼订单六区识别', () => {
   it('第二次只发送订单内容裁剪图并由首次定位补回履约状态', async () => {
     const words = completeLocatedWords();
     const input = recognitionInput();
-    const croppedBytes = Uint8Array.from(Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-      'base64',
-    ));
+    const croppedBytes = SYNTHETIC_CROPPED_BYTES;
     const cropper: SemanticRegionImageCropper = vi.fn(async ({
       source,
       maximumY,
@@ -299,13 +315,18 @@ describe('闲鱼订单六区识别', () => {
       'amount_summary',
       'order_details',
     ]);
-    expect(secondBody.input?.messages?.[0]?.content?.[1]?.text)
-      .toContain('推广与底部操作区已从图片像素中裁掉');
-    expect(secondBody.input?.messages?.[0]?.content?.[1]?.text)
-      .not.toContain('fulfillment_signals');
+    expect(secondBody.input?.messages?.[0]?.content).toHaveLength(1);
+    expect(secondBody.input?.messages?.[0]?.content?.some((entry) =>
+      typeof entry.text === 'string'
+    )).toBe(false);
+    expect(JSON.stringify(
+      secondBody.parameters?.ocr_options?.task_config?.result_schema ?? {},
+    )).not.toMatch(
+      /(?:原样复制|只提取|只列|返回\s*null|看不到|不要|不得|必须|绝不是|无法判断|例如)/u,
+    );
   });
 
-  it('本机裁剪失败时回退完整图并明确标记复核失败且不增加调用', async () => {
+  it('本机裁剪失败时不把完整图发送给二次提取并明确标记复核失败', async () => {
     const cropper: SemanticRegionImageCropper = vi.fn(async () => {
       throw new Error('测试裁剪失败');
     });
@@ -326,31 +347,46 @@ describe('闲鱼订单六区识别', () => {
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
-    expect(request).toHaveBeenCalledTimes(2);
-    const images = request.mock.calls.map(([, init]) => {
-      const body = JSON.parse(String(init?.body)) as {
-        input?: { messages?: Array<{ content?: Array<{ image?: string }> }> };
-      };
-      return body.input?.messages?.[0]?.content?.[0]?.image;
-    });
-    expect(images[1]).toBe(images[0]);
+    expect(request).toHaveBeenCalledOnce();
     expect(cropper).toHaveBeenCalledOnce();
-    expect(attempt.evidences).toHaveLength(2);
+    expect(attempt.evidences).toHaveLength(1);
     expect(attempt.reviewIssues).toContain('targeted_review_failed');
     expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
+  });
+
+  it('未配置裁剪器时不把完整图发送给二次提取', async () => {
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(completeSixRegionResult());
+    });
+    const client = new BailianOcrClient(request, {
+      semanticRegionsEnabled: true,
+    });
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(attempt.evidences).toHaveLength(1);
+    expect(attempt.reviewIssues).toContain('targeted_review_failed');
+    expect(attempt.result.orderNumber).toBe('XY-SYNTH-SIX-0001');
   });
 
   it('把字段说明回显、推广越区和订单详情错位记录为逐字段冲突', async () => {
     const result = completeSixRegionResult();
     result.shipping_information = {
       recipient: '只返回收件人手机号，看不到时返回 null',
-      recipient_phone_line_text: '只返回收件人手机号，看不到时返回 null',
+      recipient_phone_line_text:
+        '原样复制顶部收货信息卡中从联系人姓名开始、到完整手机号结束的文字，并在手机号结束处停止；不要包含“复制”“去发货”等按钮',
       phone: null,
       address: '只返回收货地址，看不到时返回 null',
-      province: null,
-      city: null,
-      district: null,
-      controls: [],
+      province: '从完整收货地址拆分省级行政区，无法判断时返回 null',
+      city: '市级行政区名称',
+      district: '区县级行政区名称',
+      controls: ['原样列出仅位于收货信息卡内的可点击按钮或链接'],
     };
     result.amount_summary = {
       product_total: '12.00',
@@ -372,18 +408,21 @@ describe('闲鱼订单六区识别', () => {
           quantity: null,
         },
       ],
-      controls: [],
+      controls: ['商品信息区按钮文字'],
     };
     result.order_details = {
-      detail_state: 'expanded',
+      detail_state:
+        '区域 5 只显示订单编号时返回 collapsed；还显示其他详情时返回 expanded；无法判断返回 unknown',
       order_number: 'XY-SYNTH-SIX-0001',
       alipay_transaction_number: 'XY-SYNTH-SIX-0001',
       buyer_nickname_label: '合成收件人',
       buyer_nickname: '13900000001',
       order_time: '2026-07-31 13:02:00',
       payment_time: '2026-07-31 13:02:08',
-      controls: [],
+      controls: ['订单详情区按钮文字'],
     };
+    (result as Record<string, unknown>).platform_status =
+      '只原样复制区域 1 中的顶部平台交易状态标题，看不到时返回 null';
     const request = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as {
         parameters?: { ocr_options?: { task?: string } };
@@ -392,12 +431,17 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(result);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
     expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'platform_status',
+        field: 'module_structure',
+        kind: 'instruction_echo',
+      }),
       expect.objectContaining({
         region: 'shipping_information',
         field: 'recipient',
@@ -408,9 +452,36 @@ describe('闲鱼订单六区识别', () => {
       }),
       expect.objectContaining({
         region: 'shipping_information',
+        field: 'recipient_phone_line_text',
+        kind: 'instruction_echo',
+        retainedValue: '合成收件人 13900000001',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
         field: 'address',
         kind: 'instruction_echo',
         retainedValue: '测试省测试市示例区安全路1号',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'province',
+        kind: 'instruction_echo',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'city',
+        kind: 'instruction_echo',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'district',
+        kind: 'instruction_echo',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'shipping_controls',
+        kind: 'instruction_echo',
+        retainedValue: '复制',
       }),
       expect.objectContaining({
         region: 'purchased_items',
@@ -418,7 +489,7 @@ describe('闲鱼订单六区识别', () => {
         kind: 'instruction_echo',
         itemIndex: 0,
         extractedValues: ['只返回订单商品标题，看不到时返回 null'],
-        retainedValue: null,
+        retainedValue: '合成真实商品',
       }),
       expect.objectContaining({
         region: 'purchased_items',
@@ -429,11 +500,28 @@ describe('闲鱼订单六区识别', () => {
         retainedValue: null,
       }),
       expect.objectContaining({
+        region: 'purchased_items',
+        field: 'item_controls',
+        kind: 'instruction_echo',
+      }),
+      expect.objectContaining({
         region: 'amount_summary',
         field: 'amount',
         kind: 'instruction_echo',
         extractedValues: ['只返回成交价，看不到时返回 null'],
         retainedValue: '12.00',
+      }),
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'detail_state',
+        kind: 'instruction_echo',
+        retainedValue: 'expanded',
+      }),
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'order_detail_controls',
+        kind: 'instruction_echo',
+        retainedValue: '复制、交易快照',
       }),
       expect.objectContaining({
         region: 'order_details',
@@ -452,6 +540,74 @@ describe('闲鱼订单六区识别', () => {
         retainedValue: '合***家',
       }),
     ]));
+  });
+
+  it('首次定位未看到展开或折叠证据时不否决二次返回的合法详情状态', async () => {
+    const words = completeLocatedWords().filter((word) =>
+      !/(?:交易快照|支付宝交易号|买家昵称|下单时间|付款时间)/u.test(word.text)
+    );
+    const result = completeSixRegionResult();
+    result.order_details = {
+      detail_state: 'expanded',
+      order_number: 'XY-SYNTH-SIX-0001',
+      alipay_transaction_number: null,
+      buyer_nickname_label: null,
+      buyer_nickname: null,
+      order_time: null,
+      payment_time: null,
+      controls: ['复制'],
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(words)
+        : keyInformationResponse(result);
+    });
+    const client = semanticClient(request);
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.recognitionConflicts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'detail_state',
+      }),
+    ]));
+    expect(attempt.reviewIssues).not.toContain('targeted_review_conflict');
+  });
+
+  it('把商品明细 items 子结构回显记录为模块结构冲突并保留首次商品', async () => {
+    const result = completeSixRegionResult();
+    result.purchased_items = {
+      items: '订单商品标题',
+      controls: [],
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(result);
+    });
+    const client = semanticClient(request);
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'purchased_items',
+        field: 'module_structure',
+        kind: 'instruction_echo',
+        extractedValues: ['订单商品标题'],
+      }),
+    ]));
+    expect(attempt.result.items).toEqual([
+      expect.objectContaining({ sourceTitle: '合成真实商品' }),
+    ]);
+    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
   });
 
   it('限制过长或过多的冲突诊断，不让异常 OCR 内容导致整张订单落库失败', async () => {
@@ -473,7 +629,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(result);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -507,7 +663,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(result);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -567,7 +723,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(sparseResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -633,7 +789,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(collapsedLocatedWords())
         : keyInformationResponse(foldedResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -683,7 +839,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(selectedPhoneResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -737,7 +893,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(conflictingResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -791,7 +947,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : keyInformationResponse(result);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -836,7 +992,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(result);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -895,7 +1051,7 @@ describe('闲鱼订单六区识别', () => {
       );
       return keyInformationResponse(legacyResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -949,7 +1105,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(sparseResult, processedText);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -975,7 +1131,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(completeLocatedWords())
         : new Response('upstream unavailable', { status: 503 });
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -1043,7 +1199,7 @@ describe('闲鱼订单六区识别', () => {
       if (call === 1) throw new Error('synthetic layout failure');
       return keyInformationResponse(fallbackResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -1112,7 +1268,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(sparseResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -1149,7 +1305,7 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(completeSixRegionResult());
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 
@@ -1228,7 +1384,7 @@ describe('闲鱼订单六区识别', () => {
       );
       return keyInformationResponse({});
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(recognitionInput());
 

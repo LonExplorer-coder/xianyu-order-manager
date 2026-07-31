@@ -76,24 +76,32 @@ export type RecognitionConflictRegion =
   (typeof RECOGNITION_CONFLICT_REGIONS)[number];
 
 export const RECOGNITION_CONFLICT_FIELDS = [
+  'module_structure',
   'platform_status',
   'recipient',
   'recipient_phone_line_text',
   'phone',
   'address',
+  'province',
+  'city',
+  'district',
+  'shipping_controls',
   'item_title',
   'item_spec',
   'item_unit_price',
   'item_quantity',
+  'item_controls',
   'product_total',
   'shipping_fee',
   'amount',
+  'detail_state',
   'order_number',
   'alipay_transaction_number',
   'buyer_nickname_label',
   'buyer_nickname',
   'order_time',
   'payment_time',
+  'order_detail_controls',
 ] as const;
 
 export type RecognitionConflictField =

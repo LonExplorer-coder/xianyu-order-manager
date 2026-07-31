@@ -2609,24 +2609,32 @@ const RECOGNITION_CONFLICT_REGION_LABELS: Record<RecognitionConflictDetail['regi
 };
 
 const RECOGNITION_CONFLICT_FIELD_LABELS: Record<RecognitionConflictDetail['field'], string> = {
+  module_structure: '模块结构',
   platform_status: '平台交易状态',
   recipient: '收件人',
   recipient_phone_line_text: '收件人与手机号原行',
   phone: '手机号',
   address: '收货地址',
+  province: '省',
+  city: '市',
+  district: '区县',
+  shipping_controls: '收货信息区按钮',
   item_title: '商品标题',
   item_spec: '商品规格',
   item_unit_price: '商品单价',
   item_quantity: '商品数量',
+  item_controls: '商品信息区按钮',
   product_total: '商品总额',
   shipping_fee: '运费',
   amount: '成交金额',
+  detail_state: '订单详情展开状态',
   order_number: '订单号',
   alipay_transaction_number: '支付宝交易号',
   buyer_nickname_label: '买家昵称标签',
   buyer_nickname: '买家昵称',
   order_time: '下单时间',
   payment_time: '付款时间',
+  order_detail_controls: '订单详情区按钮',
 };
 
 const RECOGNITION_CONFLICT_KIND_LABELS: Record<RecognitionConflictDetail['kind'], string> = {
