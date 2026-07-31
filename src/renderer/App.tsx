@@ -2796,12 +2796,15 @@ function RecognitionConflictDetails({
                         <span>{RECOGNITION_CONFLICT_KIND_LABELS[detail.kind]}</span>
                       </div>
                       <dl>
-                        <ConflictValueRow label="首次定位值" values={detail.locatedValues} />
+                        <ConflictValueRow
+                          label={isAddressPartConflict(detail) ? '地址拆分值' : '首次定位值'}
+                          values={detail.locatedValues}
+                        />
                         <ConflictValueRow label="二次提取值" values={detail.extractedValues} />
                         <ConflictValueRow
-                          label="当前保留值"
+                          label={isAddressPartConflict(detail) ? '当前采用值' : '当前保留值'}
                           values={detail.retainedValue === null ? [] : [detail.retainedValue]}
-                          emptyLabel="未保留"
+                          emptyLabel={isAddressPartConflict(detail) ? '未采用' : '未保留'}
                         />
                       </dl>
                     </li>
@@ -2815,6 +2818,11 @@ function RecognitionConflictDetails({
       )}
     </>
   );
+}
+
+function isAddressPartConflict(detail: RecognitionConflictDetail): boolean {
+  return detail.region === 'shipping_information' &&
+    ['province', 'city', 'district'].includes(detail.field);
 }
 
 function ConflictValueRow({

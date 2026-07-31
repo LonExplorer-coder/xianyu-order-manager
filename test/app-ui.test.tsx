@@ -2578,6 +2578,14 @@ describe('订单管理工作台', () => {
         retainedValue: '13800000000',
       },
       {
+        region: 'shipping_information',
+        field: 'district',
+        kind: 'value_mismatch',
+        locatedValues: ['锦江区'],
+        extractedValues: ['江城区'],
+        retainedValue: '锦江区',
+      },
+      {
         region: 'amount_summary',
         field: 'amount',
         kind: 'unsupported_value',
@@ -2645,6 +2653,13 @@ describe('订单管理工作台', () => {
     expect(dialog).toHaveTextContent('首次定位值张三李四');
     expect(dialog).toHaveTextContent('二次提取值李四');
     expect(dialog).toHaveTextContent('当前保留值李四');
+    const districtItem = within(dialog).getByText('区县').closest('li');
+    if (!districtItem) throw new Error('未找到区县冲突详情');
+    expect(districtItem).toHaveTextContent('地址拆分值锦江区');
+    expect(districtItem).toHaveTextContent('二次提取值江城区');
+    expect(districtItem).toHaveTextContent('当前采用值锦江区');
+    expect(districtItem).not.toHaveTextContent('未返回');
+    expect(districtItem).not.toHaveTextContent('未保留');
 
     fireEvent.focusIn(triggers[1]);
     expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();

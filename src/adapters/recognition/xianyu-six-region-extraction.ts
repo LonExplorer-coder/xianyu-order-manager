@@ -6,6 +6,10 @@ import type {
 } from '../../core/contracts';
 import { RECOGNITION_CONFLICT_LIMITS } from '../../core/contracts';
 import {
+  deriveAddressParts,
+  normalizeAddress,
+} from '../../core/order-normalization';
+import {
   semanticExcludedLines,
   semanticRegionContainsText,
   semanticRegionRows,
@@ -542,9 +546,16 @@ function sixRegionExtractionConflicts(
   for (const { module, regionId, fields } of checks) {
     for (const { key, field, retainedValue } of fields) {
       const value = module[key];
+      const retainedConflictValue = conflictValue(retainedValue);
+      const usesAddressHierarchy = regionId === 'shipping_information' &&
+        ['province', 'city', 'district'].includes(field) &&
+        retainedConflictValue !== null;
+      const isSupported = usesAddressHierarchy
+        ? comparableText(value) === comparableText(retainedConflictValue)
+        : supportedRegionValue(value, layout, regionId) !== null;
       if (
         isMissingExtractedValue(value) ||
-        supportedRegionValue(value, layout, regionId) !== null
+        isSupported
       ) {
         continue;
       }
@@ -553,7 +564,7 @@ function sixRegionExtractionConflicts(
         field,
         kind: looksLikeInstructionEcho(value)
           ? 'instruction_echo'
-          : conflictValue(retainedValue) === null
+          : retainedConflictValue === null
             ? 'unsupported_value'
             : 'value_mismatch',
         locatedValues: conflictValues(retainedValue),
@@ -1023,6 +1034,19 @@ function recoverSemanticShipping(
         .trim();
       if (address.length >= 6) shipping.address = address;
     }
+  }
+  const normalizedAddress = typeof shipping.address === 'string'
+    ? normalizeAddress(shipping.address)
+    : '';
+  if (normalizedAddress) {
+    const addressParts = deriveAddressParts(normalizedAddress, {
+      province: typeof shipping.province === 'string' ? shipping.province : '',
+      city: typeof shipping.city === 'string' ? shipping.city : '',
+      district: typeof shipping.district === 'string' ? shipping.district : '',
+    });
+    if (addressParts.province) shipping.province = addressParts.province;
+    if (addressParts.city) shipping.city = addressParts.city;
+    if (addressParts.district) shipping.district = addressParts.district;
   }
   shipping.controls = mergeSemanticControls(
     shipping.controls,

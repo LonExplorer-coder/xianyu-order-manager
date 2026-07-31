@@ -326,6 +326,91 @@ describe('闲鱼订单六区识别', () => {
     );
   });
 
+  it('二次区县与完整地址矛盾时采用地址拆分值并记录可解释冲突', async () => {
+    const address = '四川省成都市锦江区狮子山街道安全路1号滨江樾城10栋';
+    const words = completeLocatedWords().map((word) =>
+      word.text === '测试省测试市示例区安全路1号'
+        ? { ...word, text: address }
+        : word
+    );
+    const result = completeSixRegionResult();
+    result.shipping_information = {
+      ...(result.shipping_information as Record<string, unknown>),
+      address,
+      province: '四川省',
+      city: '成都市',
+      district: '江城区',
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(words)
+        : keyInformationResponse(result);
+    });
+    const client = semanticClient(request);
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      province: '四川省',
+      city: '成都市',
+      district: '锦江区',
+    });
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'shipping_information',
+      field: 'district',
+      kind: 'value_mismatch',
+      locatedValues: ['锦江区'],
+      extractedValues: ['江城区'],
+      retainedValue: '锦江区',
+    }));
+    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+  });
+
+  it('地址省略省份且错误区县出现在楼盘名中时仍采用地址层级拆分值', async () => {
+    const address = '成都市锦江区狮子山街道安全路1号江城区广场';
+    const words = completeLocatedWords().map((word) =>
+      word.text === '测试省测试市示例区安全路1号'
+        ? { ...word, text: address }
+        : word
+    );
+    const result = completeSixRegionResult();
+    result.shipping_information = {
+      ...(result.shipping_information as Record<string, unknown>),
+      address,
+      province: null,
+      city: '成都市',
+      district: '江城区',
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(words)
+        : keyInformationResponse(result);
+    });
+    const client = semanticClient(request);
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      province: '',
+      city: '成都市',
+      district: '锦江区',
+    });
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'shipping_information',
+      field: 'district',
+      kind: 'value_mismatch',
+      locatedValues: ['锦江区'],
+      extractedValues: ['江城区'],
+      retainedValue: '锦江区',
+    }));
+  });
+
   it('本机裁剪失败时不把完整图发送给二次提取并明确标记复核失败', async () => {
     const cropper: SemanticRegionImageCropper = vi.fn(async () => {
       throw new Error('测试裁剪失败');
