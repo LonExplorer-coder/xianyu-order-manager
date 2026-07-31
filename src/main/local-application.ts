@@ -82,7 +82,6 @@ import {
   type QuantitySource,
 } from '../core/quantity-source';
 import {
-  DEFAULT_ORDER_EXPORT_COLUMNS,
   DEFAULT_ORDER_ITEM_EXPORT_COLUMNS,
   normalizeOrderExportInput,
   normalizeOrderExportOrderIds,
@@ -97,6 +96,7 @@ import type {
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import {
+  DEFAULT_ORDER_TABLE_COLUMNS,
   normalizeCreateTableTemplateInput,
   normalizeStoredTableTemplateInput,
   normalizeUpdateTableTemplateInput,
@@ -1525,7 +1525,7 @@ export class LocalApplication {
     if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
       throw new Error('商品明细表必须使用商品明细粒度模板');
     }
-    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS;
+    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS;
     const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
     const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
     const orderItemCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderItemColumns);

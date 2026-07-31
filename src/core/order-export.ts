@@ -1,9 +1,7 @@
 import {
-  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   type TableCellValue,
   type TableTemplateColumn,
-  type TableTemplateLayoutItem,
 } from './table-templates';
 import type { RecognitionBatchItemStatus } from './contracts';
 
@@ -37,26 +35,6 @@ export type OrderExportAddressRegion = {
   city: string;
   district: string;
 };
-
-export const DEFAULT_ORDER_EXPORT_COLUMNS: TableTemplateLayoutItem[] = [
-  { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
-  { field: { kind: 'builtin', key: 'alipay_transaction_number' }, displayName: '支付宝交易号' },
-  { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
-  { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
-  { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
-  { field: { kind: 'builtin', key: 'note' }, displayName: '备注' },
-  { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
-  { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
-  { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
-  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
-  { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '商品总数量' },
-  { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
-  { field: { kind: 'builtin', key: 'platform_transaction_status' }, displayName: '平台交易状态' },
-  { field: { kind: 'builtin', key: 'fulfillment_status' }, displayName: '履约状态' },
-  { field: { kind: 'builtin', key: 'ordered_at' }, displayName: '下单时间' },
-  { field: { kind: 'builtin', key: 'paid_at' }, displayName: '付款时间' },
-  { field: { kind: 'builtin', key: 'created_at' }, displayName: '入库时间' },
-];
 
 export const DEFAULT_ORDER_ITEM_EXPORT_COLUMNS: TableTemplateColumn[] = [
   ...DEFAULT_ORDER_ITEM_TABLE_COLUMNS,

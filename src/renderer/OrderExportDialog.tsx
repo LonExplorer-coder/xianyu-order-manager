@@ -15,7 +15,6 @@ import type {
   CustomFieldValueRecord,
 } from '../core/custom-fields';
 import {
-  DEFAULT_ORDER_EXPORT_COLUMNS,
   defaultMaskedOrderCell,
   orderExportBuiltinTextLabel,
   type OrderExportInput,
@@ -24,6 +23,7 @@ import {
 import {
   createCustomFieldValueIndex,
   createOrderTableProjectionPlan,
+  DEFAULT_ORDER_TABLE_COLUMNS,
   projectOrderTableProjectionRow,
   type OrderTableProjectionColumn,
   type TableCellValue,
@@ -152,7 +152,7 @@ export function OrderExportDialog({
     const template = orderTemplates.find(({ id }) => id === orderTemplateId);
     try {
       const plan = createOrderTableProjectionPlan(
-        template?.columns ?? DEFAULT_ORDER_EXPORT_COLUMNS,
+        template?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS,
         orders,
         customFieldDefinitions,
       );

@@ -67,8 +67,8 @@ import {
   availableTableFields,
   createCustomFieldValueIndex,
   createOrderTableProjectionPlan,
-  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
+  DEFAULT_ORDER_TABLE_COLUMNS,
   fieldReferenceKey,
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
@@ -79,7 +79,6 @@ import {
   type TableFieldReference,
   type TableTemplate,
   type TableTemplateColumn,
-  type TableTemplateLayoutItem,
   type UpdateTableTemplateInput,
 } from '../core/table-templates';
 import { CustomFieldInput } from './CustomFieldInput';
@@ -103,23 +102,6 @@ const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
   sortField: 'created_at',
   sortDirection: 'desc',
 };
-const DEFAULT_ORDER_COLUMNS: TableTemplateLayoutItem[] = [
-  { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
-  { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
-  { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
-  { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
-  { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
-  { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
-  { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
-  DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
-  { field: { kind: 'computed', key: 'item_quantity_total' }, displayName: '商品总数量' },
-  { field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' },
-  { field: { kind: 'builtin', key: 'initial_source_recognition_status' }, displayName: '初始来源识别状态' },
-  { field: { kind: 'builtin', key: 'platform_transaction_status' }, displayName: '平台交易状态' },
-  { field: { kind: 'builtin', key: 'fulfillment_status' }, displayName: '履约状态' },
-  { field: { kind: 'builtin', key: 'lifecycle_status' }, displayName: '生命周期状态' },
-  { field: { kind: 'builtin', key: 'ordered_at' }, displayName: '下单时间' },
-];
 export function App({ api }: AppProps) {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [draft, setDraft] = useState<OrderDraft | null>(null);
@@ -1476,7 +1458,7 @@ function OrdersWorkspace({
   const orderTemplate = activeTableTemplate?.granularity === 'order'
     ? activeTableTemplate
     : null;
-  const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_COLUMNS;
+  const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS;
   const customFieldValueIndex = useMemo(
     () => createCustomFieldValueIndex(customFieldValues),
     [customFieldValues],

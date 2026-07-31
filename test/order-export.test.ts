@@ -200,8 +200,18 @@ describe('默认脱敏的两表工作簿导出', () => {
       '商品3', '款式或规格3', '数量3',
       '商品4', '款式或规格4', '数量4',
     ]);
-    expect(rowValues(orders, 1)).not.toContain('商品');
-    expect(cellByHeader(orders, 2, '备注').value).toBeNull();
+    expect(defaultOrderHeaders).toEqual([
+      '订单号', '平台', '卖家账号', '买家', '收件人', '手机号', '收货地址',
+      '商品1', '款式或规格1', '数量1',
+      '商品2', '款式或规格2', '数量2',
+      '商品3', '款式或规格3', '数量3',
+      '商品4', '款式或规格4', '数量4',
+      '商品总数量', '成交金额', '初始来源识别状态', '平台交易状态',
+      '履约状态', '生命周期状态', '下单时间',
+    ]);
+    expect(defaultOrderHeaders).not.toContain('商品');
+    expect(defaultOrderHeaders).not.toContain('备注');
+    expect(defaultOrderHeaders).not.toContain('支付宝交易号');
     expect(cellByHeader(orders, 2, '商品1')).toMatchObject({
       value: '夏日海棠杯',
       type: ExcelJS.ValueType.String,
@@ -245,10 +255,6 @@ describe('默认脱敏的两表工作簿导出', () => {
     });
     expect(cellByHeader(orders, 2, '订单号')).toMatchObject({
       value: 'XY-EXPORT-001',
-      type: ExcelJS.ValueType.String,
-    });
-    expect(cellByHeader(orders, 2, '支付宝交易号')).toMatchObject({
-      value: 'ALI-XY-EXPORT-001',
       type: ExcelJS.ValueType.String,
     });
     expect(cellByHeader(orders, 2, '成交金额')).toMatchObject({
@@ -337,7 +343,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(archiveText).not.toContain('/comments');
   });
 
-  it('人工修改后默认与自定义模板都导出当前备注和当前商品明细', async () => {
+  it('人工修改后默认导出跟随当前视图，自定义模板仍可导出备注', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({
         orderNumber: 'XY-MANUAL-EXPORT-001',
@@ -423,7 +429,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     const defaultOrders = defaultWorkbook.getWorksheet('订单总表');
     const defaultItems = defaultWorkbook.getWorksheet('商品明细');
     if (!defaultOrders || !defaultItems) throw new Error('缺少默认导出工作表');
-    expect(cellByHeader(defaultOrders, 2, '备注').value).toBe('人工修改后的导出备注');
+    expect(rowValues(defaultOrders, 1)).not.toContain('备注');
     expect(cellByHeader(defaultOrders, 2, '商品1').value).toBe('人工商品一');
     expect(cellByHeader(defaultOrders, 2, '款式或规格1').value).toBe('人工规格一');
     expect(cellByHeader(defaultOrders, 2, '数量1').value).toBe(3);

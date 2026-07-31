@@ -910,6 +910,7 @@ describe('订单管理工作台', () => {
   });
 
   it('系统订单总表按当前结果完整展开有序商品列组并让短订单尾列留空', async () => {
+    const user = userEvent.setup();
     const multiItem = orderSummary(confirmedOrder, {
       id: 'order-multi-item',
       orderNumber: 'XY-MULTI-ITEM',
@@ -954,6 +955,15 @@ describe('订单管理工作台', () => {
     expect(singleRow).not.toBeNull();
     const singleCells = within(singleRow as HTMLTableRowElement).getAllByRole('cell');
     expect(singleCells.slice(11, 14).map((cell) => cell.textContent)).toEqual(['', '', '']);
+
+    await user.click(screen.getByRole('button', { name: '导出当前结果 2 笔' }));
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(within(dialog).getByRole('combobox', { name: '订单总表模板' })).toHaveValue('');
+    const preview = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    const previewHeaders = within(preview).getAllByRole('columnheader')
+      .map((cell) => cell.textContent);
+    expect(previewHeaders).toEqual(headers.slice(1, -1));
+    expect(previewHeaders).not.toContain('备注');
   });
 
   it('应用后动态表头与其他列冲突时在页面给出改名提示', async () => {
