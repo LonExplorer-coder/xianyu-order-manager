@@ -42,14 +42,14 @@ export type XianyuSemanticRegionLayout = {
 };
 
 const PLATFORM_STATUS_PATTERN =
-  /(?:买家已付款|交易成功|交易已取消|订单已取消|交易已关闭|订单已关闭|退款成功|退款完成|已退款)/u;
+  /(?:买家已付款|(?:卖家|商家)?已发货|等待买家(?:确认)?收货|交易成功|交易已取消|订单已取消|交易已关闭|订单已关闭|退款成功|退款完成|已退款)/u;
 const AMOUNT_LABEL_PATTERN = /(?:成交价|实付金额|商品总价)/u;
 const ORDER_NUMBER_LABEL_PATTERN = /(?:订单编号|订单号)/u;
 const DETAIL_LABEL_PATTERN =
   /(?:订单编号|订单号|交易快照|支付宝交易号|买家昵称|下单时间|付款时间|订单时间|支付时间)/u;
 const ITEM_CUE_PATTERN = /(?:[¥￥]\s*\d|款式|规格|[x×]\s*\d|数量\s*[:：]?\s*\d|共\s*\d+\s*件)/iu;
 const FULFILLMENT_CONTROL_PATTERN =
-  /(?:联系买家|联系卖家|联系对方|取消订单|去发货)/u;
+  /(?:联系买家|联系卖家|联系对方|取消订单|去发货|查看物流|提醒收货)/u;
 
 export function planXianyuSemanticRegions(
   wordsInfo: unknown,

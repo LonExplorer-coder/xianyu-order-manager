@@ -1,8 +1,11 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0006-use-raw-ocr-evidence-for-deterministic-order-parsing
 ---
 
 # 对第二次 OCR 使用物理裁剪的订单图
+
+本决策已由 ADR 0006 取代。以下内容仅保留为历史设计记录，不再描述当前生产识别流程。
 
 百炼 qwen3.5-ocr 的关键字段提取接口可以接收字段结构和文字提示，但当前公开参数没有输入 ROI、遮罩或边界框。把六个区域的纵坐标写进提示词只能形成软约束，模型仍能看到整张截图，并可能把订单详情下方的推广商品误写入订单字段。
 

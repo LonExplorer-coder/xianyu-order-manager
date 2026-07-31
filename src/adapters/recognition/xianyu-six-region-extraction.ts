@@ -336,6 +336,7 @@ function constrainPurchasedItems(
 type SemanticItemSection = {
   lines: string[];
   title: string;
+  titleAmbiguous: boolean;
   unitPrice: string;
   specification?: string;
   quantity?: { value: number; raw: string };
@@ -343,26 +344,64 @@ type SemanticItemSection = {
 
 function semanticItemSections(lines: string[]): SemanticItemSection[] {
   const sections: SemanticItemSection[] = [];
+  let pendingTitleLines: string[] = [];
+  let pendingTitleIsAmbiguous = false;
   for (const line of lines) {
     const price = semanticPrice(line);
     if (price) {
+      const titleOnPriceLine = line
+        .slice(0, price.index)
+        .replace(/(?:单价|价格)\s*[:：]?\s*$/u, '')
+        .trim();
       sections.push({
-        lines: [line],
-        title: line
-          .slice(0, price.index)
-          .replace(/(?:单价|价格)\s*[:：]?\s*$/u, '')
-          .trim(),
+        lines: [...pendingTitleLines, line],
+        title: pendingTitleIsAmbiguous
+          ? ''
+          : [...pendingTitleLines, titleOnPriceLine]
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .join(''),
+        titleAmbiguous: pendingTitleIsAmbiguous,
         unitPrice: price.value,
       });
+      pendingTitleLines = [];
+      pendingTitleIsAmbiguous = false;
       continue;
     }
-    sections.at(-1)?.lines.push(line);
+    if (semanticItemMetadataLine(line)) {
+      if (pendingTitleLines.length > 0) {
+        sections.at(-1)?.lines.push(...pendingTitleLines);
+        pendingTitleLines = [];
+      }
+      pendingTitleIsAmbiguous = false;
+      sections.at(-1)?.lines.push(line);
+      continue;
+    }
+    pendingTitleLines.push(line);
+    if (semanticUnknownLabeledItemLine(line)) {
+      pendingTitleIsAmbiguous = true;
+    }
+  }
+  if (pendingTitleLines.length > 0) {
+    sections.at(-1)?.lines.push(...pendingTitleLines);
   }
   return sections.map((section) => ({
     ...section,
     specification: semanticSpecification(section.lines),
     quantity: semanticExplicitQuantity(section.lines),
   }));
+}
+
+function semanticItemMetadataLine(line: string): boolean {
+  const normalized = line.normalize('NFKC').replace(/\s+/gu, '');
+  return /^(?:款式|规格|颜色|色号|尺码|尺寸|型号|款号|套餐|版本|容量|口味|材质|样式|类型)[:：]?/iu.test(
+    normalized,
+  ) || /(?:[x×]\d+|数量[:：]?\d+|共\d+件)/iu.test(normalized);
+}
+
+function semanticUnknownLabeledItemLine(line: string): boolean {
+  const normalized = line.normalize('NFKC').replace(/\s+/gu, '');
+  return /^[\p{L}\p{N}]{1,12}[:：].+/u.test(normalized);
 }
 
 function semanticSectionForItem(
@@ -971,7 +1010,15 @@ function recoverSixRegionModules(
     fulfillment.global_controls,
     controlsFromSemanticLines(
       semanticRegionRows(layout, 'fulfillment_signals'),
-      ['联系买家', '联系卖家', '联系对方', '取消订单', '去发货'],
+      [
+        '联系买家',
+        '联系卖家',
+        '联系对方',
+        '取消订单',
+        '去发货',
+        '查看物流',
+        '提醒收货',
+      ],
     ),
   );
   return {
@@ -1071,7 +1118,7 @@ function semanticPlatformStatuses(
     if (/(?:交易已取消|订单已取消|交易已关闭|订单已关闭|交易关闭)/u.test(normalized)) {
       statuses.push('cancelled');
     }
-    if (/(?:买家已付款|交易成功)/u.test(normalized)) {
+    if (/(?:买家已付款|(?:卖家|商家)?已发货|等待买家(?:确认)?收货|交易成功)/u.test(normalized)) {
       statuses.push('paid');
     }
   }
@@ -1092,7 +1139,7 @@ function recoverSemanticItems(
     return purchasedItems;
   }
   purchasedItems.items = sections
-    .filter((section) => section.title.length >= 2)
+    .filter((section) => section.titleAmbiguous || section.title.length >= 2)
     .map((section, index) => {
       const existing = items.find((item) => {
         const title = typeof item.title === 'string' ? comparableText(item.title) : '';
@@ -1100,9 +1147,11 @@ function recoverSemanticItems(
       }) ?? items[index] ?? {};
       const recovered: Record<string, unknown> = {
         ...existing,
-        title: isMissingExtractedValue(existing.title)
-          ? section.title
-          : existing.title,
+        title: section.titleAmbiguous
+          ? null
+          : isMissingExtractedValue(existing.title)
+            ? section.title
+            : existing.title,
       };
       fillMissingScalar(
         recovered,

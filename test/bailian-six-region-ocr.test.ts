@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  BailianOcrClient,
-  type SemanticRegionImageCropper,
-} from '../src/adapters/recognition/bailian-ocr-client';
+import { BailianOcrClient } from '../src/adapters/recognition/bailian-ocr-client';
 
 type LocatedWord = {
   text: string;
@@ -31,35 +28,23 @@ function locatedWord(
   };
 }
 
-function advancedRecognitionResponse(wordsInfo: LocatedWord[]): Response {
-  return successfulOcrResponse({ words_info: wordsInfo }, 'request-six-region-layout');
-}
-
-function keyInformationResponse(
-  kvResult: Record<string, unknown>,
-  processedText?: string,
-): Response {
-  return successfulOcrResponse({
-    kv_result: kvResult,
-    ...(processedText === undefined ? {} : { processed_text: processedText }),
-  }, 'request-six-region-kie');
-}
-
 function successfulOcrResponse(
   ocrResult: Record<string, unknown>,
-  requestId: string,
+  requestId = 'request-six-region-layout',
 ): Response {
   return new Response(JSON.stringify({
     output: {
       choices: [{
         finish_reason: 'stop',
-        message: {
-          content: [{ ocr_result: ocrResult }],
-        },
+        message: { content: [{ ocr_result: ocrResult }] },
       }],
     },
     request_id: requestId,
   }), { status: 200 });
+}
+
+function advancedRecognitionResponse(wordsInfo: LocatedWord[]): Response {
+  return successfulOcrResponse({ words_info: wordsInfo });
 }
 
 function recognitionInput() {
@@ -81,20 +66,25 @@ function recognitionInput() {
   };
 }
 
-const SYNTHETIC_CROPPED_BYTES = Uint8Array.from(Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-  'base64',
-));
-
 function semanticClient(
   request: ConstructorParameters<typeof BailianOcrClient>[0],
 ): BailianOcrClient {
-  return new BailianOcrClient(request, {
-    semanticRegionsEnabled: true,
-    semanticRegionImageCropper: async () => ({
-      mimeType: 'image/png',
-      bytes: SYNTHETIC_CROPPED_BYTES,
-    }),
+  return new BailianOcrClient(request);
+}
+
+function ocrTask(init?: RequestInit): string | undefined {
+  const body = JSON.parse(String(init?.body)) as {
+    parameters?: { ocr_options?: { task?: string } };
+  };
+  return body.parameters?.ocr_options?.task;
+}
+
+function rawOnlyRequest(words: LocatedWord[]) {
+  return vi.fn(async (_url: string, init?: RequestInit) => {
+    if (ocrTask(init) !== 'advanced_recognition') {
+      throw new Error('生产六区不得调用结构化 KIE');
+    }
+    return advancedRecognitionResponse(words);
   });
 }
 
@@ -141,52 +131,6 @@ function collapsedLocatedWords(): LocatedWord[] {
   ];
 }
 
-function completeSixRegionResult(): Record<string, unknown> {
-  return {
-    platform_status: {
-      top_status_text: '买家已付款，请尽快发货',
-    },
-    shipping_information: {
-      recipient: '合成收件人',
-      recipient_phone_line_text: '合成收件人 13900000001',
-      phone: '13900000001',
-      address: '测试省测试市示例区安全路1号',
-      province: '测试省',
-      city: '测试市',
-      district: '示例区',
-      controls: ['复制'],
-    },
-    purchased_items: {
-      items: [{
-        title: '合成真实商品',
-        spec: '白色',
-        unit_price: '6.00',
-        quantity: 2,
-        quantity_text: '×2',
-      }],
-      controls: [],
-    },
-    amount_summary: {
-      product_total: '12.00',
-      shipping_fee: '0.00',
-      amount: '12.00',
-    },
-    order_details: {
-      detail_state: 'expanded',
-      order_number: 'XY-SYNTH-SIX-0001',
-      alipay_transaction_number: 'ALI-SYNTH-SIX-0001',
-      buyer_nickname_label: '买家昵称',
-      buyer_nickname: '合***家',
-      order_time: '2026-07-31 13:02:00',
-      payment_time: '2026-07-31 13:02:08',
-      controls: ['复制', '交易快照'],
-    },
-    fulfillment_signals: {
-      global_controls: ['联系买家', '取消订单', '去发货'],
-    },
-  };
-}
-
 describe('闲鱼订单六区识别', () => {
   it('启用六区后百炼连接测试仍只调用一次固定测试图片', async () => {
     const request = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
@@ -195,9 +139,7 @@ describe('闲鱼订单六区识别', () => {
         message: { role: 'assistant', content: 'OK' },
       }],
     }), { status: 200 }));
-    const client = new BailianOcrClient(request, {
-      semanticRegionsEnabled: true,
-    });
+    const client = semanticClient(request);
 
     await expect(client.testConnection({
       workspaceId: 'ws-test123',
@@ -215,602 +157,12 @@ describe('闲鱼订单六区识别', () => {
     expect(body.parameters).toBeUndefined();
   });
 
-  it('第二次只发送订单内容裁剪图并由首次定位补回履约状态', async () => {
-    const words = completeLocatedWords();
+  it('生产六区只用一次识别原文恢复完整订单', async () => {
     const input = recognitionInput();
-    const croppedBytes = SYNTHETIC_CROPPED_BYTES;
-    const cropper: SemanticRegionImageCropper = vi.fn(async ({
-      source,
-      maximumY,
-    }) => {
-      expect(source).toBe(input.source);
-      expect(maximumY).toBeGreaterThan(1_295);
-      expect(maximumY).toBeLessThan(1_390);
-      return { mimeType: 'image/png' as const, bytes: croppedBytes };
-    });
-
-    const sixRegionResult = {
-      ...completeSixRegionResult(),
-      purchased_items: {
-        items: [
-          {
-            title: '合成真实商品',
-            spec: '白色',
-            unit_price: '6.00',
-            quantity: 2,
-            quantity_text: '×2',
-          },
-        ],
-        controls: [],
-      },
-    };
-    delete (sixRegionResult as Record<string, unknown>).fulfillment_signals;
-
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(sixRegionResult);
-    });
-    const client = new BailianOcrClient(request, {
-      semanticRegionsEnabled: true,
-      semanticRegionImageCropper: cropper,
-    });
+    const request = rawOnlyRequest(completeLocatedWords());
+    const client = semanticClient(request);
 
     const attempt = await client.recognizeOrder(input);
-
-    expect(attempt.result).toMatchObject({
-      orderNumber: 'XY-SYNTH-SIX-0001',
-      alipayTransactionNumber: 'ALI-SYNTH-SIX-0001',
-      recipient: '合成收件人',
-      phone: '13900000001',
-      addressOriginal: '测试省测试市示例区安全路1号',
-      amountCents: 1_200,
-      productTotalCents: 1_200,
-      shippingFeeCents: 0,
-      platformTransactionStatus: 'paid',
-      fulfillmentStatus: 'pending_shipment',
-      items: [{
-        sourceTitle: '合成真实商品',
-        sourceSpec: '白色',
-        unitPriceCents: 600,
-        quantity: 2,
-        quantityInferred: false,
-      }],
-    });
-    expect(attempt.evidences).toHaveLength(2);
-    expect(attempt.reviewIssues).toEqual([]);
-    expect(attempt.recognitionConflicts).toEqual([]);
-    expect(request).toHaveBeenCalledTimes(2);
-    const requestBodies = request.mock.calls.map(([, init]) => JSON.parse(
-      String(init?.body),
-    ) as {
-      input?: {
-        messages?: Array<{
-          content?: Array<{ image?: string; text?: string }>;
-        }>;
-      };
-      parameters?: {
-        ocr_options?: {
-          task_config?: { result_schema?: Record<string, unknown> };
-        };
-      };
-    });
-    const [firstBody, secondBody] = requestBodies;
-    expect(firstBody?.input?.messages?.[0]?.content?.[0]?.image)
-      .toBe(`data:image/png;base64,${Buffer.from(input.source.bytes).toString('base64')}`);
-    expect(secondBody?.input?.messages?.[0]?.content?.[0]?.image)
-      .toBe(`data:image/png;base64,${Buffer.from(croppedBytes).toString('base64')}`);
-    expect(secondBody?.input?.messages?.[0]?.content?.[0]?.image)
-      .not.toBe(firstBody?.input?.messages?.[0]?.content?.[0]?.image);
-    expect(cropper).toHaveBeenCalledOnce();
-    expect(Object.keys(
-      secondBody.parameters?.ocr_options?.task_config?.result_schema ?? {},
-    )).toEqual([
-      'platform_status',
-      'shipping_information',
-      'purchased_items',
-      'amount_summary',
-      'order_details',
-    ]);
-    expect(secondBody.input?.messages?.[0]?.content).toHaveLength(1);
-    expect(secondBody.input?.messages?.[0]?.content?.some((entry) =>
-      typeof entry.text === 'string'
-    )).toBe(false);
-    expect(JSON.stringify(
-      secondBody.parameters?.ocr_options?.task_config?.result_schema ?? {},
-    )).not.toMatch(
-      /(?:原样复制|只提取|只列|返回\s*null|看不到|不要|不得|必须|绝不是|无法判断|例如)/u,
-    );
-  });
-
-  it('二次区县与完整地址矛盾时采用地址拆分值并记录可解释冲突', async () => {
-    const address = '四川省成都市锦江区狮子山街道安全路1号滨江樾城10栋';
-    const words = completeLocatedWords().map((word) =>
-      word.text === '测试省测试市示例区安全路1号'
-        ? { ...word, text: address }
-        : word
-    );
-    const result = completeSixRegionResult();
-    result.shipping_information = {
-      ...(result.shipping_information as Record<string, unknown>),
-      address,
-      province: '四川省',
-      city: '成都市',
-      district: '江城区',
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result).toMatchObject({
-      province: '四川省',
-      city: '成都市',
-      district: '锦江区',
-    });
-    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
-      region: 'shipping_information',
-      field: 'district',
-      kind: 'value_mismatch',
-      locatedValues: ['锦江区'],
-      extractedValues: ['江城区'],
-      retainedValue: '锦江区',
-    }));
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-  });
-
-  it('地址省略省份且错误区县出现在楼盘名中时仍采用地址层级拆分值', async () => {
-    const address = '成都市锦江区狮子山街道安全路1号江城区广场';
-    const words = completeLocatedWords().map((word) =>
-      word.text === '测试省测试市示例区安全路1号'
-        ? { ...word, text: address }
-        : word
-    );
-    const result = completeSixRegionResult();
-    result.shipping_information = {
-      ...(result.shipping_information as Record<string, unknown>),
-      address,
-      province: null,
-      city: '成都市',
-      district: '江城区',
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result).toMatchObject({
-      province: '',
-      city: '成都市',
-      district: '锦江区',
-    });
-    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
-      region: 'shipping_information',
-      field: 'district',
-      kind: 'value_mismatch',
-      locatedValues: ['锦江区'],
-      extractedValues: ['江城区'],
-      retainedValue: '锦江区',
-    }));
-  });
-
-  it('本机裁剪失败时不把完整图发送给二次提取并明确标记复核失败', async () => {
-    const cropper: SemanticRegionImageCropper = vi.fn(async () => {
-      throw new Error('测试裁剪失败');
-    });
-    const kieResult = completeSixRegionResult();
-    delete kieResult.fulfillment_signals;
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(kieResult);
-    });
-    const client = new BailianOcrClient(request, {
-      semanticRegionsEnabled: true,
-      semanticRegionImageCropper: cropper,
-    });
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(request).toHaveBeenCalledOnce();
-    expect(cropper).toHaveBeenCalledOnce();
-    expect(attempt.evidences).toHaveLength(1);
-    expect(attempt.reviewIssues).toContain('targeted_review_failed');
-    expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
-  });
-
-  it('未配置裁剪器时不把完整图发送给二次提取', async () => {
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(completeSixRegionResult());
-    });
-    const client = new BailianOcrClient(request, {
-      semanticRegionsEnabled: true,
-    });
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(request).toHaveBeenCalledOnce();
-    expect(attempt.evidences).toHaveLength(1);
-    expect(attempt.reviewIssues).toContain('targeted_review_failed');
-    expect(attempt.result.orderNumber).toBe('XY-SYNTH-SIX-0001');
-  });
-
-  it('把字段说明回显、推广越区和订单详情错位记录为逐字段冲突', async () => {
-    const result = completeSixRegionResult();
-    result.shipping_information = {
-      recipient: '只返回收件人手机号，看不到时返回 null',
-      recipient_phone_line_text:
-        '原样复制顶部收货信息卡中从联系人姓名开始、到完整手机号结束的文字，并在手机号结束处停止；不要包含“复制”“去发货”等按钮',
-      phone: null,
-      address: '只返回收货地址，看不到时返回 null',
-      province: '从完整收货地址拆分省级行政区，无法判断时返回 null',
-      city: '市级行政区名称',
-      district: '区县级行政区名称',
-      controls: ['原样列出仅位于收货信息卡内的可点击按钮或链接'],
-    };
-    result.amount_summary = {
-      product_total: '12.00',
-      shipping_fee: '0.00',
-      amount: '只返回成交价，看不到时返回 null',
-    };
-    result.purchased_items = {
-      items: [
-        {
-          title: '只返回订单商品标题，看不到时返回 null',
-          spec: null,
-          unit_price: null,
-          quantity: null,
-        },
-        {
-          title: '推广商品',
-          spec: '还能卖',
-          unit_price: '265.67',
-          quantity: null,
-        },
-      ],
-      controls: ['商品信息区按钮文字'],
-    };
-    result.order_details = {
-      detail_state:
-        '区域 5 只显示订单编号时返回 collapsed；还显示其他详情时返回 expanded；无法判断返回 unknown',
-      order_number: 'XY-SYNTH-SIX-0001',
-      alipay_transaction_number: 'XY-SYNTH-SIX-0001',
-      buyer_nickname_label: '合成收件人',
-      buyer_nickname: '13900000001',
-      order_time: '2026-07-31 13:02:00',
-      payment_time: '2026-07-31 13:02:08',
-      controls: ['订单详情区按钮文字'],
-    };
-    (result as Record<string, unknown>).platform_status =
-      '只原样复制区域 1 中的顶部平台交易状态标题，看不到时返回 null';
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        region: 'platform_status',
-        field: 'module_structure',
-        kind: 'instruction_echo',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'recipient',
-        kind: 'instruction_echo',
-        locatedValues: ['合成收件人'],
-        extractedValues: ['只返回收件人手机号，看不到时返回 null'],
-        retainedValue: '合成收件人',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'recipient_phone_line_text',
-        kind: 'instruction_echo',
-        retainedValue: '合成收件人 13900000001',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'address',
-        kind: 'instruction_echo',
-        retainedValue: '测试省测试市示例区安全路1号',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'province',
-        kind: 'instruction_echo',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'city',
-        kind: 'instruction_echo',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'district',
-        kind: 'instruction_echo',
-      }),
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'shipping_controls',
-        kind: 'instruction_echo',
-        retainedValue: '复制',
-      }),
-      expect.objectContaining({
-        region: 'purchased_items',
-        field: 'item_title',
-        kind: 'instruction_echo',
-        itemIndex: 0,
-        extractedValues: ['只返回订单商品标题，看不到时返回 null'],
-        retainedValue: '合成真实商品',
-      }),
-      expect.objectContaining({
-        region: 'purchased_items',
-        field: 'item_title',
-        kind: 'outside_region',
-        itemIndex: 1,
-        extractedValues: ['推广商品'],
-        retainedValue: null,
-      }),
-      expect.objectContaining({
-        region: 'purchased_items',
-        field: 'item_controls',
-        kind: 'instruction_echo',
-      }),
-      expect.objectContaining({
-        region: 'amount_summary',
-        field: 'amount',
-        kind: 'instruction_echo',
-        extractedValues: ['只返回成交价，看不到时返回 null'],
-        retainedValue: '12.00',
-      }),
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'detail_state',
-        kind: 'instruction_echo',
-        retainedValue: 'expanded',
-      }),
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'order_detail_controls',
-        kind: 'instruction_echo',
-        retainedValue: '复制、交易快照',
-      }),
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'alipay_transaction_number',
-        kind: 'value_mismatch',
-        locatedValues: ['ALI-SYNTH-SIX-0001'],
-        extractedValues: ['XY-SYNTH-SIX-0001'],
-        retainedValue: 'ALI-SYNTH-SIX-0001',
-      }),
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'buyer_nickname',
-        kind: 'value_mismatch',
-        locatedValues: ['合***家'],
-        extractedValues: ['13900000001'],
-        retainedValue: '合***家',
-      }),
-    ]));
-  });
-
-  it('首次定位未看到展开或折叠证据时不否决二次返回的合法详情状态', async () => {
-    const words = completeLocatedWords().filter((word) =>
-      !/(?:交易快照|支付宝交易号|买家昵称|下单时间|付款时间)/u.test(word.text)
-    );
-    const result = completeSixRegionResult();
-    result.order_details = {
-      detail_state: 'expanded',
-      order_number: 'XY-SYNTH-SIX-0001',
-      alipay_transaction_number: null,
-      buyer_nickname_label: null,
-      buyer_nickname: null,
-      order_time: null,
-      payment_time: null,
-      controls: ['复制'],
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.recognitionConflicts).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'detail_state',
-      }),
-    ]));
-    expect(attempt.reviewIssues).not.toContain('targeted_review_conflict');
-  });
-
-  it('把商品明细 items 子结构回显记录为模块结构冲突并保留首次商品', async () => {
-    const result = completeSixRegionResult();
-    result.purchased_items = {
-      items: '订单商品标题',
-      controls: [],
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        region: 'purchased_items',
-        field: 'module_structure',
-        kind: 'instruction_echo',
-        extractedValues: ['订单商品标题'],
-      }),
-    ]));
-    expect(attempt.result.items).toEqual([
-      expect.objectContaining({ sourceTitle: '合成真实商品' }),
-    ]);
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-  });
-
-  it('限制过长或过多的冲突诊断，不让异常 OCR 内容导致整张订单落库失败', async () => {
-    const result = completeSixRegionResult();
-    result.purchased_items = {
-      items: Array.from({ length: 101 }, (_, index) => ({
-        title: `推广商品-${index}-${'长'.repeat(1_100)}`,
-        spec: null,
-        unit_price: null,
-        quantity: null,
-      })),
-      controls: [],
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.recognitionConflicts).toHaveLength(100);
-    expect(attempt.recognitionConflicts?.every((detail) => (
-      detail.locatedValues.length <= 20 &&
-      detail.extractedValues.length <= 20 &&
-      [...detail.locatedValues, ...detail.extractedValues]
-        .every((value) => value.length <= 1_000) &&
-      (detail.retainedValue === null || detail.retainedValue.length <= 1_000)
-    ))).toBe(true);
-  });
-
-  it('将 KIE 返回的异常字段类型安全记录到冲突详情', async () => {
-    const result = completeSixRegionResult();
-    result.shipping_information = {
-      recipient: '合成收件人',
-      recipient_phone_line_text: '合成收件人 13900000001',
-      phone: { unexpected: '13900000001' },
-      address: '测试省测试市示例区安全路1号',
-      province: '测试省',
-      city: '测试市',
-      district: '示例区',
-      controls: ['复制'],
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
-      region: 'shipping_information',
-      field: 'phone',
-      extractedValues: ['{"unexpected":"13900000001"}'],
-      retainedValue: '13900000001',
-    }));
-  });
-
-  it('用各区域的定位文字补回 KIE 漏掉的关键字段', async () => {
-    const sparseResult = {
-      platform_status: { top_status_text: null },
-      shipping_information: {
-        recipient: null,
-        recipient_phone_line_text: null,
-        phone: null,
-        address: null,
-        province: null,
-        city: null,
-        district: null,
-        controls: [],
-      },
-      purchased_items: {
-        items: [{
-          title: '合成真实商品',
-          spec: null,
-          unit_price: null,
-          quantity: null,
-          quantity_text: null,
-        }],
-        controls: [],
-      },
-      amount_summary: {
-        product_total: null,
-        shipping_fee: null,
-        amount: null,
-      },
-      order_details: {
-        detail_state: 'expanded',
-        order_number: null,
-        alipay_transaction_number: null,
-        buyer_nickname_label: null,
-        buyer_nickname: null,
-        order_time: null,
-        payment_time: null,
-        controls: [],
-      },
-      fulfillment_signals: { global_controls: [] },
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(sparseResult);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
 
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-SIX-0001',
@@ -819,9 +171,9 @@ describe('闲鱼订单六区识别', () => {
       recipient: '合成收件人',
       phone: '13900000001',
       addressOriginal: '测试省测试市示例区安全路1号',
+      amountCents: 1_200,
       productTotalCents: 1_200,
       shippingFeeCents: 0,
-      amountCents: 1_200,
       platformTransactionStatus: 'paid',
       fulfillmentStatus: 'pending_shipment',
       items: [{
@@ -832,51 +184,66 @@ describe('闲鱼订单六区识别', () => {
         quantityInferred: false,
       }],
     });
+    expect(attempt.evidences).toHaveLength(1);
+    expect(attempt.evidences[0].rawResponse).toContain('words_info');
     expect(attempt.reviewIssues).toEqual([]);
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.recognitionConflicts).toEqual([]);
+    expect(request).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(request.mock.calls[0]?.[1]?.body)) as {
+      input?: { messages?: Array<{ content?: Array<{ image?: string }> }> };
+      parameters?: { ocr_options?: { task?: string; task_config?: unknown } };
+    };
+    expect(body.input?.messages?.[0]?.content?.[0]?.image)
+      .toBe(`data:image/png;base64,${Buffer.from(input.source.bytes).toString('base64')}`);
+    expect(body.parameters?.ocr_options).toEqual({ task: 'advanced_recognition' });
   });
 
-  it('折叠详情只保留订单号，不从后续推广伪造买家昵称或商品', async () => {
-    const foldedResult = {
-      platform_status: { top_status_text: '买家已付款，请尽快发货' },
-      shipping_information: {
-        recipient: '折叠收件人13800000000复制去发货',
-        recipient_phone_line_text: null,
-        phone: null,
-        address: '广东省深圳市南山区安全路2号',
-        controls: ['复制', '去发货'],
-      },
-      purchased_items: {
-        items: [
-          { title: '折叠真实商品', spec: '黑色', unit_price: '8.00', quantity: null },
-          { title: '推广商品', spec: '还能卖', unit_price: '199.00', quantity: 1 },
-        ],
-        controls: [],
-      },
-      amount_summary: { product_total: '8.00', shipping_fee: '0.00', amount: '8.00' },
-      order_details: {
-        detail_state: 'collapsed',
-        order_number: 'XY-COLLAPSED-0001',
-        alipay_transaction_number: null,
-        buyer_nickname_label: '买家昵称',
-        buyer_nickname: '推***广',
-        order_time: null,
-        payment_time: null,
-        controls: ['复制'],
-      },
-      fulfillment_signals: { global_controls: ['联系买家', '取消订单', '去发货'] },
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(collapsedLocatedWords())
-        : keyInformationResponse(foldedResult);
-    });
-    const client = semanticClient(request);
+  it('行政区划只从识别原文中的完整地址拆分，不会生成楼盘名称中的江城区', async () => {
+    const address = '四川省成都市锦江区狮子山街道安全路1号滨江樾城10栋';
+    const words = completeLocatedWords().flatMap((word) =>
+      word.text === '测试省测试市示例区安全路1号'
+        ? [
+            locatedWord('四川省成都市锦江区狮子山街道安全路1号滨', 50, 380, 720, 410),
+            locatedWord('江樾城10栋', 50, 415, 320, 445),
+          ]
+        : [word]
+    );
+    const request = rawOnlyRequest(words);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(request).recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      addressOriginal: address,
+      province: '四川省',
+      city: '成都市',
+      district: '锦江区',
+    });
+    expect(JSON.stringify(attempt.result)).not.toContain('江城区');
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('地址省略省份时只保留识别原文可确定的市和区县', async () => {
+    const address = '成都市锦江区狮子山街道安全路1号江城区广场';
+    const words = completeLocatedWords().map((word) =>
+      word.text === '测试省测试市示例区安全路1号'
+        ? { ...word, text: address }
+        : word
+    );
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      province: '',
+      city: '成都市',
+      district: '锦江区',
+    });
+  });
+
+  it('折叠详情不把推广内容识别成买家昵称或商品', async () => {
+    const request = rawOnlyRequest(collapsedLocatedWords());
+
+    const attempt = await semanticClient(request).recognizeOrder(recognitionInput());
 
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-COLLAPSED-0001',
@@ -895,7 +262,9 @@ describe('闲鱼订单六区识别', () => {
         quantityInferred: true,
       }],
     });
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.result.items).toHaveLength(1);
+    expect(JSON.stringify(attempt.result)).not.toContain('推广');
+    expect(request).toHaveBeenCalledOnce();
   });
 
   it('收货区出现多个不同手机号时不猜测联系人或手机号', async () => {
@@ -903,404 +272,51 @@ describe('闲鱼订单六区识别', () => {
       ...completeLocatedWords(),
       locatedWord('备用联系人 13700000002', 50, 350, 620, 375),
     ];
-    const selectedPhoneResult = {
-      ...completeSixRegionResult(),
-      shipping_information: {
-        recipient: '合成收件人',
-        recipient_phone_line_text: '合成收件人 13900000001',
-        phone: '13900000001',
-        address: '测试省测试市示例区安全路1号',
-        province: '测试省',
-        city: '测试市',
-        district: '示例区',
-        controls: ['复制'],
-      },
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(selectedPhoneResult);
-    });
-    const client = semanticClient(request);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
 
     expect(attempt.result.recipient).toBe('');
     expect(attempt.result.phone).toBe('');
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
     expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
       region: 'shipping_information',
       field: 'phone',
       kind: 'multiple_candidates',
       locatedValues: expect.arrayContaining(['13900000001', '13700000002']),
-      extractedValues: ['13900000001'],
+      extractedValues: [],
       retainedValue: null,
     }));
-    expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it('定位证据与关键结构化值冲突时采用区内证据并阻止静默入库', async () => {
-    const conflictingResult = {
-      platform_status: { top_status_text: '买家已付款，请尽快发货' },
-      shipping_information: {
-        recipient: '合成收件人',
-        recipient_phone_line_text: '合成收件人 13800000009',
-        phone: '13800000009',
-        address: '测试省测试市示例区安全路1号',
-        controls: ['复制'],
-      },
-      purchased_items: {
-        items: [{ title: '合成真实商品', spec: '白色', unit_price: '6.00', quantity: 2 }],
-        controls: [],
-      },
-      amount_summary: { product_total: '12.00', shipping_fee: '0.00', amount: '99.00' },
-      order_details: {
-        detail_state: 'expanded',
-        order_number: 'XY-CONFLICT-9999',
-        alipay_transaction_number: 'ALI-SYNTH-SIX-0001',
-        buyer_nickname_label: '买家昵称',
-        buyer_nickname: '合***家',
-        order_time: '2026-07-31 13:02:00',
-        payment_time: '2026-07-31 13:02:08',
-        controls: ['复制', '交易快照'],
-      },
-      fulfillment_signals: { global_controls: ['联系买家', '取消订单', '去发货'] },
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(conflictingResult);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result).toMatchObject({
-      orderNumber: 'XY-SYNTH-SIX-0001',
-      phone: '13900000001',
-      amountCents: 1_200,
-    });
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        region: 'shipping_information',
-        field: 'phone',
-        kind: 'value_mismatch',
-        locatedValues: ['13900000001'],
-        extractedValues: ['13800000009'],
-        retainedValue: '13900000001',
-      }),
-      expect.objectContaining({
-        region: 'amount_summary',
-        field: 'amount',
-        kind: 'value_mismatch',
-        locatedValues: ['12.00'],
-        extractedValues: ['99.00'],
-        retainedValue: '12.00',
-      }),
-      expect.objectContaining({
-        region: 'order_details',
-        field: 'order_number',
-        kind: 'value_mismatch',
-        locatedValues: ['XY-SYNTH-SIX-0001'],
-        extractedValues: ['XY-CONFLICT-9999'],
-        retainedValue: 'XY-SYNTH-SIX-0001',
-      }),
-    ]));
-    expect(request).toHaveBeenCalledTimes(2);
-  });
-
-  it('订单号与支付宝交易号被 KIE 对调时按各自标签纠正并待确认', async () => {
-    const result = completeSixRegionResult();
-    result.order_details = {
-      ...(result.order_details as Record<string, unknown>),
-      order_number: 'ALI-SYNTH-SIX-0001',
-      alipay_transaction_number: 'XY-SYNTH-SIX-0001',
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result.orderNumber).toBe('XY-SYNTH-SIX-0001');
-    expect(attempt.result.alipayTransactionNumber).toBe('ALI-SYNTH-SIX-0001');
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-  });
-
-  it('区域金额被 KIE 对调时按成交价、商品总价和运费标签纠正并待确认', async () => {
-    const words = completeLocatedWords().map((word) => {
-      if (word.text === '合成真实商品 ¥6.00') {
-        return { ...word, text: '合成真实商品 ¥5.00' };
-      }
-      if (word.text === '成交价 ¥12.00') return word;
-      if (word.text === '商品总价 ¥12.00') {
-        return { ...word, text: '商品总价 ¥10.00' };
-      }
-      if (word.text === '运费 ¥0.00') return { ...word, text: '运费 ¥2.00' };
-      return word;
-    });
-    const result = completeSixRegionResult();
-    result.purchased_items = {
-      items: [{
-        title: '合成真实商品',
-        spec: '白色',
-        unit_price: '5.00',
-        quantity: 2,
-        quantity_text: '×2',
-      }],
-      controls: [],
-    };
-    result.amount_summary = {
-      product_total: '10.00',
-      shipping_fee: '12.00',
-      amount: '2.00',
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(result);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result.productTotalCents).toBe(1_000);
-    expect(attempt.result.shippingFeeCents).toBe(200);
-    expect(attempt.result.amountCents).toBe(1_200);
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-  });
-
-  it('缺少区域锚点时第二次回退整图提取并强制人工确认', async () => {
-    const incompleteWords = completeLocatedWords().filter((word) =>
+  it('缺少六区锚点时只保留识别原文并进入待确认', async () => {
+    const words = completeLocatedWords().filter((word) =>
       !['联系买家', '取消订单', '去发货'].includes(word.text)
     );
-    const legacyResult = {
-      order_number: 'XY-SYNTH-SIX-0001',
-      alipay_transaction_number: 'ALI-SYNTH-SIX-0001',
-      buyer_nickname_label: '买家昵称',
-      buyer_nickname: '合***家',
-      recipient: '合成收件人',
-      recipient_phone_line_text: '合成收件人 13900000001',
-      phone: '13900000001',
-      address: '测试省测试市示例区安全路1号',
-      province: '测试省',
-      city: '测试市',
-      district: '示例区',
-      order_time: '2026-07-31 13:02:00',
-      payment_time: '2026-07-31 13:02:08',
-      product_total: '12.00',
-      shipping_fee: '0.00',
-      amount: '12.00',
-      platform_transaction_status: 'paid',
-      fulfillment_status: 'pending_shipment',
-      items: [{
-        title: '合成真实商品',
-        spec: '白色',
-        unit_price: '6.00',
-        quantity: 2,
-      }],
-    };
-    const requestedSchemas: Array<Record<string, unknown>> = [];
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: {
-          ocr_options?: {
-            task?: string;
-            task_config?: { result_schema?: Record<string, unknown> };
-          };
-        };
-      };
-      const task = body.parameters?.ocr_options?.task;
-      if (task === 'advanced_recognition') {
-        return advancedRecognitionResponse(incompleteWords);
-      }
-      requestedSchemas.push(
-        body.parameters?.ocr_options?.task_config?.result_schema ?? {},
-      );
-      return keyInformationResponse(legacyResult);
-    });
-    const client = semanticClient(request);
+    const request = rawOnlyRequest(words);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(request).recognizeOrder(recognitionInput());
 
-    expect(attempt.result.orderNumber).toBe('XY-SYNTH-SIX-0001');
-    expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(requestedSchemas[0]).toHaveProperty('transaction_information');
-    expect(requestedSchemas[0]).not.toHaveProperty('amount_summary');
-  });
-
-  it('六区 KIE 正文字段漏单号时可从同模块 processed_text 补回', async () => {
-    const words = completeLocatedWords().map((word) =>
-      word.text.startsWith('订单编号')
-        ? locatedWord('订单编号 复制', 50, 950, 740, 990)
-        : word
-    );
-    const sparseResult = {
-      platform_status: { top_status_text: null },
-      shipping_information: {
-        recipient: null,
-        recipient_phone_line_text: null,
-        phone: null,
-        address: null,
-        controls: [],
-      },
-      purchased_items: {
-        items: [{ title: '合成真实商品', spec: null, unit_price: null, quantity: null }],
-        controls: [],
-      },
-      amount_summary: { product_total: null, shipping_fee: null, amount: null },
-      order_details: {
-        detail_state: 'expanded',
-        order_number: null,
-        alipay_transaction_number: null,
-        buyer_nickname_label: null,
-        buyer_nickname: null,
-        order_time: null,
-        payment_time: null,
-        controls: [],
-      },
-      fulfillment_signals: { global_controls: [] },
-    };
-    const processedText = '```json\n' + JSON.stringify({
-      order_details: { order_number: 'XY-PROCESSED-0001' },
-    }) + '\n```';
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(sparseResult, processedText);
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result.orderNumber).toBe('XY-PROCESSED-0001');
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
-      region: 'order_details',
-      field: 'order_number',
-      kind: 'unsupported_value',
-      locatedValues: [],
-      extractedValues: ['XY-PROCESSED-0001'],
-      retainedValue: 'XY-PROCESSED-0001',
-    }));
-    expect(request).toHaveBeenCalledTimes(2);
-  });
-
-  it('六区 KIE 请求失败时保留定位结果供人工校对且不发起第三次请求', async () => {
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(completeLocatedWords())
-        : new Response('upstream unavailable', { status: 503 });
-    });
-    const client = semanticClient(request);
-
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result).toMatchObject({
-      orderNumber: 'XY-SYNTH-SIX-0001',
-      recipient: '合成收件人',
-      phone: '13900000001',
-      amountCents: 1_200,
-      items: [{
-        sourceTitle: '合成真实商品',
-        sourceSpec: '白色',
-        unitPriceCents: 600,
-        quantity: 2,
-        quantityInferred: false,
-      }],
-    });
+    expect(attempt.result.orderNumber).toBe('');
+    expect(attempt.result.items).toEqual([]);
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
     expect(attempt.evidences).toHaveLength(1);
-    expect(attempt.reviewIssues).toContain('targeted_review_failed');
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(attempt.evidences[0].rawResponse).toContain('XY-SYNTH-SIX-0001');
+    expect(request).toHaveBeenCalledOnce();
   });
 
-  it('坐标定位请求失败时只回退一次整图提取并强制人工确认', async () => {
-    const fallbackResult = {
-      purchased_items: {
-        items: [{
-          title: '合成真实商品',
-          spec: '白色',
-          unit_price: '6.00',
-          quantity: 2,
-        }],
-        controls: [],
-      },
-      shipping_information: {
-        recipient: '合成收件人',
-        recipient_phone_line_text: '合成收件人 13900000001',
-        phone: '13900000001',
-        address: '测试省测试市示例区安全路1号',
-        province: '测试省',
-        city: '测试市',
-        district: '示例区',
-        controls: ['复制'],
-      },
-      transaction_information: {
-        detail_state: 'expanded',
-        order_number: 'XY-SYNTH-SIX-0001',
-        alipay_transaction_number: 'ALI-SYNTH-SIX-0001',
-        product_total: '12.00',
-        shipping_fee: '0.00',
-        amount: '12.00',
-        buyer_nickname_label: '买家昵称',
-        buyer_nickname: '合***家',
-        order_time: '2026-07-31 13:02:00',
-        payment_time: '2026-07-31 13:02:08',
-        controls: ['复制', '交易快照'],
-      },
-      page_context: {
-        top_status_text: '买家已付款，请尽快发货',
-        global_controls: ['联系买家', '取消订单', '去发货'],
-        excluded_regions: [],
-      },
-    };
-    let call = 0;
+  it('获取识别原文失败时不回退结构化 KIE', async () => {
     const request = vi.fn(async () => {
-      call += 1;
-      if (call === 1) throw new Error('synthetic layout failure');
-      return keyInformationResponse(fallbackResult);
+      throw new Error('synthetic advanced recognition failure');
     });
-    const client = semanticClient(request);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
-
-    expect(attempt.result).toMatchObject({
-      orderNumber: 'XY-SYNTH-SIX-0001',
-      recipient: '合成收件人',
-      phone: '13900000001',
-      platformTransactionStatus: 'paid',
-      fulfillmentStatus: 'pending_shipment',
-    });
-    expect(attempt.evidences).toHaveLength(1);
-    expect(attempt.reviewIssues).toContain('targeted_review_failed');
-    expect(request).toHaveBeenCalledTimes(2);
+    await expect(
+      semanticClient(request).recognizeOrder(recognitionInput()),
+    ).rejects.toThrow('无法连接百炼服务，请检查网络后重试');
+    expect(request).toHaveBeenCalledOnce();
   });
 
-  it('多商品按商品区顺序分别补回款式、单价和显式数量', async () => {
+  it('多商品按商品区顺序恢复款式、单价和显式数量', async () => {
     const words = [
       locatedWord('买家已付款，请尽快发货', 40, 180, 720, 235),
       locatedWord('多品收件人 13600000003 复制', 50, 330, 620, 365),
@@ -1316,46 +332,9 @@ describe('闲鱼订单六区识别', () => {
       locatedWord('取消订单', 340, 1_520, 520, 1_570),
       locatedWord('去发货', 620, 1_520, 760, 1_570),
     ];
-    const sparseResult = {
-      platform_status: { top_status_text: null },
-      shipping_information: {
-        recipient: null,
-        recipient_phone_line_text: null,
-        phone: null,
-        address: null,
-        controls: [],
-      },
-      purchased_items: {
-        items: [
-          { title: '商品甲', spec: null, unit_price: null, quantity: 4 },
-          { title: '商品乙', spec: null, unit_price: null, quantity: null },
-        ],
-        controls: [],
-      },
-      amount_summary: { product_total: null, shipping_fee: null, amount: null },
-      order_details: {
-        detail_state: 'collapsed',
-        order_number: null,
-        alipay_transaction_number: null,
-        buyer_nickname_label: null,
-        buyer_nickname: null,
-        order_time: null,
-        payment_time: null,
-        controls: [],
-      },
-      fulfillment_signals: { global_controls: [] },
-    };
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(sparseResult);
-    });
-    const client = semanticClient(request);
+    const request = rawOnlyRequest(words);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(request).recognizeOrder(recognitionInput());
 
     expect(attempt.result.items).toEqual([
       {
@@ -1374,30 +353,134 @@ describe('闲鱼订单六区识别', () => {
       },
     ]);
     expect(attempt.result.productTotalCents).toBe(3_600);
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.reviewIssues).toEqual([]);
+    expect(request).toHaveBeenCalledOnce();
   });
 
-  it('平台状态证据冲突时不根据去发货反推已付款', async () => {
+  it('商品标题换行且价格位于下一行时保留完整标题', async () => {
+    const words = completeLocatedWords().flatMap((word) => {
+      if (word.text === '合成真实商品 ¥6.00') {
+        return [
+          locatedWord('超长商品标题第一段', 250, 515, 650, 550),
+          locatedWord('第二段 ¥6.00', 250, 555, 740, 590),
+          locatedWord('颜色：红色', 250, 638, 500, 655),
+          locatedWord('第二件商品 ¥10.00', 250, 660, 740, 700),
+        ];
+      }
+      if (word.text === '成交价 ¥12.00') {
+        return [{ ...word, text: '成交价 ¥22.00' }];
+      }
+      if (word.text === '商品总价 ¥12.00') {
+        return [{ ...word, text: '商品总价 ¥22.00' }];
+      }
+      return [word];
+    });
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.items).toEqual([
+      {
+        sourceTitle: '超长商品标题第一段第二段',
+        sourceSpec: '白色',
+        unitPriceCents: 600,
+        quantity: 2,
+        quantityInferred: false,
+      },
+      {
+        sourceTitle: '第二件商品',
+        sourceSpec: '',
+        unitPriceCents: 1_000,
+        quantity: 1,
+        quantityInferred: true,
+      },
+    ]);
+    expect(attempt.reviewIssues).toEqual([]);
+  });
+
+  it('未知键值式文字可能是跨行标题时不静默截断商品名', async () => {
+    const words = completeLocatedWords().flatMap((word) => {
+      if (word.text === '合成真实商品 ¥6.00') {
+        return [
+          locatedWord('商品甲 ¥6.00', 250, 520, 740, 560),
+          locatedWord('苹果：iPhone 15', 250, 660, 650, 695),
+          locatedWord('Pro ¥10.00', 250, 700, 740, 735),
+        ];
+      }
+      if (word.text === '成交价 ¥12.00') {
+        return [{ ...word, text: '成交价 ¥22.00' }];
+      }
+      if (word.text === '商品总价 ¥12.00') {
+        return [{ ...word, text: '商品总价 ¥22.00' }];
+      }
+      return [word];
+    });
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.items).toEqual([
+      expect.objectContaining({ sourceTitle: '商品甲' }),
+      expect.objectContaining({ sourceTitle: '' }),
+    ]);
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
+  });
+
+  it('识别原文中的已发货文字恢复平台已付款和履约已发货', async () => {
+    const words = completeLocatedWords().map((word) => {
+      if (word.text === '买家已付款，请尽快发货') {
+        return { ...word, text: '卖家已发货，等待买家确认收货' };
+      }
+      if (word.text === '去发货') return { ...word, text: '查看物流' };
+      return word;
+    });
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.platformTransactionStatus).toBe('paid');
+    expect(attempt.result.fulfillmentStatus).toBe('shipped');
+    expect(attempt.reviewIssues).toEqual([]);
+  });
+
+  it('已付款但没有待发货或已发货依据时进入待确认', async () => {
+    const words = completeLocatedWords().filter((word) => word.text !== '去发货');
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.platformTransactionStatus).toBe('paid');
+    expect(attempt.result.fulfillmentStatus).toBe('unknown');
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
+  });
+
+  it('退款订单没有履约依据时不因履约未知重复进入待确认', async () => {
+    const words = completeLocatedWords()
+      .filter((word) => word.text !== '去发货')
+      .map((word) => word.text === '买家已付款，请尽快发货'
+        ? { ...word, text: '退款成功' }
+        : word);
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.platformTransactionStatus).toBe('refunded');
+    expect(attempt.result.fulfillmentStatus).toBe('unknown');
+    expect(attempt.reviewIssues).toEqual([]);
+  });
+
+  it('识别原文中的平台状态存在冲突时不根据去发货反推已付款', async () => {
     const words = [
       ...completeLocatedWords(),
       locatedWord('交易已取消', 40, 245, 300, 280),
     ];
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: { ocr_options?: { task?: string } };
-      };
-      return body.parameters?.ocr_options?.task === 'advanced_recognition'
-        ? advancedRecognitionResponse(words)
-        : keyInformationResponse(completeSixRegionResult());
-    });
-    const client = semanticClient(request);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
 
     expect(attempt.result.platformTransactionStatus).toBe('unknown');
     expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
     expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
       region: 'platform_status',
       field: 'platform_status',
@@ -1406,13 +489,12 @@ describe('闲鱼订单六区识别', () => {
         '买家已付款，请尽快发货',
         '交易已取消',
       ]),
-      extractedValues: ['买家已付款，请尽快发货'],
+      extractedValues: [],
       retainedValue: null,
     }));
-    expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it('定位文字被拆成同一行多个词块时仍能划分六区', async () => {
+  it('识别原文同一行被拆成多个词块时仍能划分六区', async () => {
     const words = [
       locatedWord('买家已', 40, 180, 190, 235),
       locatedWord('付款，请尽快发货', 200, 180, 720, 235),
@@ -1451,31 +533,10 @@ describe('闲鱼订单六区识别', () => {
       locatedWord('取消订单', 340, 1_820, 520, 1_870),
       locatedWord('去发货', 620, 1_820, 760, 1_870),
     ];
-    const requestedSchemas: Array<Record<string, unknown>> = [];
-    const request = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        parameters?: {
-          ocr_options?: {
-            task?: string;
-            task_config?: { result_schema?: Record<string, unknown> };
-          };
-        };
-      };
-      if (body.parameters?.ocr_options?.task === 'advanced_recognition') {
-        return advancedRecognitionResponse(words);
-      }
-      requestedSchemas.push(
-        body.parameters?.ocr_options?.task_config?.result_schema ?? {},
-      );
-      return keyInformationResponse({});
-    });
-    const client = semanticClient(request);
+    const request = rawOnlyRequest(words);
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await semanticClient(request).recognizeOrder(recognitionInput());
 
-    expect(requestedSchemas[0]).toHaveProperty('amount_summary');
-    expect(requestedSchemas[0]).not.toHaveProperty('fulfillment_signals');
-    expect(requestedSchemas[0]).not.toHaveProperty('transaction_information');
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-SIX-0001',
       alipayTransactionNumber: 'ALI-SYNTH-SIX-0001',
@@ -1496,5 +557,6 @@ describe('闲鱼订单六区识别', () => {
       }],
     });
     expect(attempt.reviewIssues).toEqual([]);
+    expect(request).toHaveBeenCalledOnce();
   });
 });

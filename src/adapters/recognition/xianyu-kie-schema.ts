@@ -16,9 +16,6 @@ export const CROPPED_ORDER_RESULT_SCHEMA = {
     recipient_phone_line_text: '姓名与手机号原行',
     phone: '收件人手机号',
     address: '完整收货地址',
-    province: '省级行政区名称',
-    city: '市级行政区名称',
-    district: '区县级行政区名称',
     controls: ['收货信息区按钮文字'],
   },
   purchased_items: {

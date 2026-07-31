@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { BailianOcrClient } from '../src/adapters/recognition/bailian-ocr-client';
 import { assessAutomaticImport } from '../src/core/order-intake';
 
+function legacyKieClient(
+  request: ConstructorParameters<typeof BailianOcrClient>[0],
+  options: ConstructorParameters<typeof BailianOcrClient>[1] = {},
+): BailianOcrClient {
+  return new BailianOcrClient(request, {
+    ...(options ?? {}),
+    legacyKieCompatibility: true,
+  });
+}
+
 function successfulKieResponse(
   kvResult: Record<string, unknown>,
   requestId: string,
@@ -220,7 +230,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         headers: { 'content-type': 'application/json' },
       });
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -342,6 +352,15 @@ describe('阿里云百炼 OCR 请求契约', () => {
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
       'shipping_information.recipient_phone_line_text',
     );
+    expect(body.parameters.ocr_options.task_config.result_schema).not.toHaveProperty(
+      'shipping_information.province',
+    );
+    expect(body.parameters.ocr_options.task_config.result_schema).not.toHaveProperty(
+      'shipping_information.city',
+    );
+    expect(body.parameters.ocr_options.task_config.result_schema).not.toHaveProperty(
+      'shipping_information.district',
+    );
     expect(body.parameters.ocr_options.task_config.result_schema).toHaveProperty(
       'transaction_information.buyer_nickname',
     );
@@ -394,7 +413,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: '1',
       }],
     }, 'request-pending-shipment-text'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -440,7 +459,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: '1',
       }],
     }, 'request-flat-complete-shipping'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -506,7 +525,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
           },
       'request-flat-fulfillment-status-' + request.mock.calls.length,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('flat-fulfillment-status-only'),
@@ -570,7 +589,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
           },
       'request-flat-both-statuses-' + request.mock.calls.length,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('flat-both-statuses-only'),
@@ -629,7 +648,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-status-shipping-control-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('shipping-control-review-null'),
@@ -680,7 +699,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, `request-explicit-${reviewedStatus}-review`);
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`explicit-${reviewedStatus}-review`),
@@ -705,7 +724,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         : { page_header_status_text: '退款成功' },
       `request-conflicting-top-status-${request.mock.calls.length}`,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('conflicting-top-status'),
@@ -757,7 +776,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-explicit-shipped-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('explicit-shipped-review'),
@@ -776,7 +795,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       extraction,
       `request-status-global-control-${request.mock.calls.length}`,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('global-label-control'),
@@ -824,7 +843,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-shipping-page-context-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('shipping-page-context-review'),
@@ -895,7 +914,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
           },
         }, 'request-terminal-page-context-' + expectedStatus + '-review');
       });
-      const client = new BailianOcrClient(request);
+      const client = legacyKieClient(request);
 
       const attempt = await client.recognizeOrder(
         syntheticStatusRecognitionInput(
@@ -948,7 +967,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
             request.mock.calls.length,
         )
       );
-      const client = new BailianOcrClient(request);
+      const client = legacyKieClient(request);
 
       const attempt = await client.recognizeOrder(
         syntheticStatusRecognitionInput('terminal-go-ship-' + expectedStatus),
@@ -978,7 +997,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         : { page_header_status_text: '买家已付款，请尽快发货' },
       `request-page-header-status-review-${request.mock.calls.length}`,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('page-header-status-review'),
@@ -1033,7 +1052,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }),
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`processed-fallback-${topStatusCase}`),
@@ -1059,7 +1078,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         advertisement_text: '退款成功',
       }),
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('conflicting-processed-status'),
@@ -1085,7 +1104,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       `request-lower-processed-status-${request.mock.calls.length}`,
       processedText,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('lower-processed-status'),
@@ -1106,7 +1125,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       extraction,
       'request-explicit-shipped-precedence',
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('explicit-shipped-precedence'),
@@ -1145,7 +1164,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       extraction,
       `request-status-unrelated-control-${controlArea}-${request.mock.calls.length}`,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`unrelated-control-${controlArea}`),
@@ -1171,7 +1190,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       extraction,
       `request-top-platform-status-${expectedStatus}-${request.mock.calls.length}`,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`top-platform-${expectedStatus}`),
@@ -1195,7 +1214,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       `request-processed-phone-positive-${request.mock.calls.length}`,
       processedText,
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('processed-phone-positive'),
@@ -1236,7 +1255,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }),
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`processed-phone-mismatch-${mismatch}`),
@@ -1259,7 +1278,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }),
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('processed-phone-conflict'),
@@ -1283,7 +1302,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }),
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('processed-phone-preserve-kv'),
@@ -1339,7 +1358,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: ['合成广告横幅', '合成推荐商品'],
       },
     }, 'request-moduled-collapsed-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1459,7 +1478,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-recipient-phone-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1526,7 +1545,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-recipient-country-code-phone-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1593,7 +1612,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-recipient-unicode-dash-phone-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1667,7 +1686,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-recipient-contact-line-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1751,7 +1770,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-phone-boundary-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1851,7 +1870,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         shipping_information: primary.shipping_information,
       }, 'request-phone-conflict-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -1943,7 +1962,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         shipping_information: primary.shipping_information,
       }, 'request-primary-contact-conflict-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('primary-contact-conflict-review'),
@@ -2065,7 +2084,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, `request-missing-contact-${caseId}-review`);
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput(`missing-contact-${caseId}-review`),
@@ -2144,7 +2163,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-phone-conflict-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2240,7 +2259,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-phone-only-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2320,7 +2339,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-recipient-name-digit-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2404,7 +2423,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-control-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2502,7 +2521,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-contaminated-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2596,7 +2615,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-trusted-recipient-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2690,7 +2709,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-fuller-recipient-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2808,7 +2827,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-safe-recipient-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2907,7 +2926,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-recipient-local-recovery-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -2986,7 +3005,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, `request-object-control-${request.mock.calls.length}`));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3071,7 +3090,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-ambiguous-contact-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3152,7 +3171,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-product-only-repair-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3263,7 +3282,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-missing-quantity-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3346,7 +3365,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-null-quantity-primary'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3428,7 +3447,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-modular-shipping-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3528,7 +3547,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-isolated-shipping-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3642,7 +3661,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-shipping-transaction-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3733,7 +3752,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-modular-transaction-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3842,7 +3861,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-expanded-null-order-number-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -3938,7 +3957,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-expanded-missing-buyer-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4036,7 +4055,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-collapsed-null-order-number-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4124,7 +4143,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         order_number: '8800123456789012345',
       },
     })));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4235,7 +4254,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       JSON.stringify(responses.shift()),
       { status: 200 },
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4354,7 +4373,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-folded-targeted-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4476,7 +4495,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       }, 'request-flat-all-modules-review');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4607,7 +4626,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       JSON.stringify(responses.shift()),
       { status: 200 },
     ));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4677,7 +4696,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       _input: string,
       _init?: RequestInit,
     ): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4739,7 +4758,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-unverified-contact-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4785,7 +4804,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: null,
       }],
     }, 'request-no-buyer-label'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4831,7 +4850,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: null,
       }],
     }, 'request-ui-control-recipient'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4877,7 +4896,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: null,
       }],
     }, 'request-classified-ui-control'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4937,7 +4956,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-false-control-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -4995,7 +5014,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-ui-control-review-confirmation'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5057,7 +5076,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-unknown-action-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5101,7 +5120,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-country-code-action-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5139,7 +5158,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       fulfillment_status: 'pending_shipment',
       items: [{ title: '合成订单商品', unit_price: '8.00', quantity: null }],
     }, 'request-single-char-recipient'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5221,7 +5240,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       _input: string,
       _init?: RequestInit,
     ): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5291,7 +5310,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-missing-review-title-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5344,7 +5363,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity_text: null,
       }],
     }, 'request-primary-price-tag'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5400,7 +5419,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity_text: '×2',
       }],
     }, 'request-raw-item-fallback'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5474,7 +5493,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       },
       request_id: 'request-synthetic-repair',
     }), { status: 200 }));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5539,7 +5558,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-masked-recipient-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5594,7 +5613,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-normalized-identity-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5651,7 +5670,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-unverified-buyer-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5704,7 +5723,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-multi-merge-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5757,7 +5776,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-duplicate-title-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5809,7 +5828,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-malformed-items-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5871,7 +5890,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-malformed-amount-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -5920,7 +5939,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-item-cross-check-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('item-cross-check'),
@@ -5959,7 +5978,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }
       return new Response('{}', { status: 429 });
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6021,7 +6040,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-equivalent-contact-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6084,7 +6103,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       ),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder(
       syntheticStatusRecognitionInput('incomplete-module'),
@@ -6135,7 +6154,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       }, 'request-conservative-review'),
     ];
     const request = vi.fn(async (): Promise<Response> => responses.shift()!);
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6201,7 +6220,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
         request_id: `request-address-${index}`,
       }), { status: 200 }));
-      const client = new BailianOcrClient(request);
+      const client = legacyKieClient(request);
 
       const attempt = await client.recognizeOrder({
         workspaceId: 'ws-test123',
@@ -6258,7 +6277,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
           quantity: '1',
         }],
       }, `request-facility-address-${index}`));
-      const client = new BailianOcrClient(request);
+      const client = legacyKieClient(request);
 
       const attempt = await client.recognizeOrder({
         workspaceId: 'ws-test123',
@@ -6323,7 +6342,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         excluded_regions: [],
       },
     }, 'request-address-overfilled-province'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6347,7 +6366,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     });
   });
 
-  it('地址省略省级前缀时也能用独立城市字段清理省市粘连', async () => {
+  it('地址省略省级前缀时不接受模型补出的省份', async () => {
     const request = vi.fn(async (): Promise<Response> => successfulKieResponse({
       order_number: 'XY-SYNTH-ADDRESS-PARTIAL-HIERARCHY-0001',
       buyer_nickname_label: null,
@@ -6371,7 +6390,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         quantity: null,
       }],
     }, 'request-address-partial-hierarchy'));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6389,7 +6408,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
 
     expect(request).toHaveBeenCalledOnce();
     expect(attempt.result).toMatchObject({
-      province: '广东省',
+      province: '',
       city: '深圳市',
       district: '南山区',
     });
@@ -6419,7 +6438,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       },
       request_id: 'request-quantity-boundaries',
     }), { status: 200 }));
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6498,7 +6517,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         { status: 200 },
       );
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6577,7 +6596,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         unexpected_echo: sentinelApiKey,
       }), { status: 200 });
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     let failure: unknown;
     try {
@@ -6647,7 +6666,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         unexpected_echo: sentinelApiKey,
       }), { status: 200 });
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const attempt = await client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6674,7 +6693,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
       JSON.stringify({ output: { choices: [] }, padding: 'x'.repeat(2_048) }),
       { status: 200 },
     ));
-    const client = new BailianOcrClient(request, { maxResponseBytes: 1_024 });
+    const client = legacyKieClient(request, { maxResponseBytes: 1_024 });
 
     await expect(client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6697,7 +6716,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
       });
     });
-    const client = new BailianOcrClient(request, { timeoutMilliseconds: 5 });
+    const client = legacyKieClient(request, { timeoutMilliseconds: 5 });
 
     await expect(client.recognizeOrder({
       workspaceId: 'ws-test123',
@@ -6743,7 +6762,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         },
       );
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     const result = await client.testConnection({
       workspaceId: 'ws-test123',
@@ -6788,7 +6807,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     const request = vi.fn(async (_input: string, _init?: RequestInit): Promise<Response> => {
       throw new Error('request must not be called');
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     await expect(
       client.testConnection({
@@ -6811,7 +6830,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         { status: 401 },
       );
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     let failure: unknown;
     try {
@@ -6837,7 +6856,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
     const request = vi.fn(async (_input: string, _init?: RequestInit): Promise<Response> => {
       throw new Error(`request failed with ${sentinelApiKey}`);
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     await expect(
       client.testConnection({
@@ -6856,7 +6875,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         headers: { 'content-type': 'application/json' },
       });
     });
-    const client = new BailianOcrClient(request);
+    const client = legacyKieClient(request);
 
     await expect(
       client.testConnection({
@@ -6876,7 +6895,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     });
-    const client = new BailianOcrClient(request, { maxResponseBytes: 1_024 });
+    const client = legacyKieClient(request, { maxResponseBytes: 1_024 });
 
     await expect(
       client.testConnection({
@@ -6893,7 +6912,7 @@ describe('阿里云百炼 OCR 请求契约', () => {
         init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
       });
     });
-    const client = new BailianOcrClient(request, { timeoutMilliseconds: 5 });
+    const client = legacyKieClient(request, { timeoutMilliseconds: 5 });
 
     await expect(
       client.testConnection({

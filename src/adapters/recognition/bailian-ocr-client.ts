@@ -25,7 +25,6 @@ import {
   planXianyuSemanticRegions,
   type XianyuSemanticRegionLayout,
 } from './xianyu-semantic-regions';
-import { CROPPED_ORDER_RESULT_SCHEMA } from './xianyu-kie-schema';
 import { processXianyuSixRegionExtraction } from './xianyu-six-region-extraction';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -136,9 +135,6 @@ const SHIPPING_INFORMATION_MODULE_SCHEMA = {
       '原样复制顶部收货信息卡中从联系人姓名开始、到完整手机号结束的文字，并在手机号结束处停止；不要包含“复制”“去发货”等按钮',
     phone: '顶部收货信息卡中与联系人姓名同一行的手机号，按截图原样返回，看不到时返回 null',
     address: '顶部收货信息卡中联系人和手机号下方的完整地址，看不到时返回 null',
-    province: '从完整收货地址拆分省级行政区，无法判断时返回 null',
-    city: '从完整收货地址拆分市级行政区，无法判断时返回 null',
-    district: '从完整收货地址拆分区县级行政区，无法判断时返回 null',
     controls: [
       '原样列出仅位于收货信息卡内的可点击按钮或链接，例如“复制”“去发货”；不要列入姓名、手机号或地址',
     ],
@@ -264,6 +260,7 @@ type OcrTaskInput = {
 
 type XianyuStatusSignals = {
   platformStatuses: PlatformTransactionStatus[];
+  fulfillmentStatuses: FulfillmentStatus[];
   shippingControls: string[];
   globalControls: string[];
 };
@@ -271,25 +268,14 @@ type XianyuStatusSignals = {
 export type BailianOcrClientOptions = {
   timeoutMilliseconds?: number;
   maxResponseBytes?: number;
-  semanticRegionsEnabled?: boolean;
-  semanticRegionImageCropper?: SemanticRegionImageCropper;
+  /** Keeps historical provider-contract tests readable; production must not enable it. */
+  legacyKieCompatibility?: boolean;
 };
-
-export type SemanticRegionImage = {
-  mimeType: 'image/png' | 'image/jpeg';
-  bytes: Uint8Array;
-};
-
-export type SemanticRegionImageCropper = (input: {
-  source: Pick<RecognizerSource, 'mimeType' | 'bytes'>;
-  maximumY: number;
-}) => Promise<SemanticRegionImage>;
 
 export class BailianOcrClient implements BailianConnectionTester {
   private readonly timeoutMilliseconds: number;
   private readonly maxResponseBytes: number;
-  private readonly semanticRegionsEnabled: boolean;
-  private readonly semanticRegionImageCropper?: SemanticRegionImageCropper;
+  private readonly legacyKieCompatibility: boolean;
 
   public constructor(
     private readonly request: FetchLike = globalThis.fetch,
@@ -297,8 +283,7 @@ export class BailianOcrClient implements BailianConnectionTester {
   ) {
     this.timeoutMilliseconds = Math.max(1, options.timeoutMilliseconds ?? 60_000);
     this.maxResponseBytes = Math.max(1, options.maxResponseBytes ?? 1_048_576);
-    this.semanticRegionsEnabled = options.semanticRegionsEnabled ?? false;
-    this.semanticRegionImageCropper = options.semanticRegionImageCropper;
+    this.legacyKieCompatibility = options.legacyKieCompatibility ?? false;
   }
 
   public async recognizeOrder(input: {
@@ -308,7 +293,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     sellerAccount: string;
     source: RecognizerSource;
   }): Promise<RecognitionAttempt> {
-    if (this.semanticRegionsEnabled) {
+    if (!this.legacyKieCompatibility) {
       return this.recognizeOrderWithSemanticRegions(input);
     }
     const endpoint = orderRecognitionEndpointFor(input.workspaceId, input.region);
@@ -409,113 +394,30 @@ export class BailianOcrClient implements BailianConnectionTester {
   }): Promise<RecognitionAttempt> {
     const endpoint = orderRecognitionEndpointFor(input.workspaceId, input.region);
     const imageDataUrl = toImageDataUrl(input.source);
-    let advanced: AdvancedRecognitionResponse | undefined;
-    try {
-      advanced = await this.requestAdvancedRecognition({
-        endpoint,
-        apiKey: input.apiKey,
-        imageDataUrl,
-      });
-    } catch {
-      const fallback = await this.requestKeyInformation({
-        endpoint,
-        apiKey: input.apiKey,
-        imageDataUrl,
-        resultSchema: ORDER_RESULT_SCHEMA,
-        userPrompt: ORDER_EXTRACTION_USER_PROMPT,
-      });
-      const result = normalizeOrderResult(
-        sanitizeOrderExtraction(flattenModularExtraction(fallback.extracted)),
-        input.sellerAccount,
-      );
-      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
-      if (semanticScreenshotContentIsIncomplete(result)) {
-        reviewIssues.push('screenshot_content_incomplete');
-      }
-      return {
-        result,
-        evidences: [fallback.evidence],
-        reviewIssues,
-      };
-    }
+    const advanced = await this.requestAdvancedRecognition({
+      endpoint,
+      apiKey: input.apiKey,
+      imageDataUrl,
+    });
 
     const layout = planXianyuSemanticRegions(advanced.wordsInfo);
-    const retainLocatedResultForReview = (
-      semanticLayout: XianyuSemanticRegionLayout,
-    ): RecognitionAttempt => {
-      const result = normalizeOrderResult(
-        sanitizeOrderExtraction(
-          flattenSixRegionExtraction({}, semanticLayout).extracted,
-        ),
-        input.sellerAccount,
-      );
-      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
-      if (semanticScreenshotContentIsIncomplete(result)) {
-        reviewIssues.push('screenshot_content_incomplete');
-      }
-      return {
-        result,
-        evidences: [advanced.evidence],
-        reviewIssues,
-      };
-    };
-    let extractionImageDataUrl = imageDataUrl;
-    if (layout) {
-      if (!this.semanticRegionImageCropper) {
-        return retainLocatedResultForReview(layout);
-      }
-      try {
-        const cropped = await this.semanticRegionImageCropper({
-          source: input.source,
-          maximumY: layout.excludedPromotion.startY,
-        });
-        const croppedImageDataUrl = toImageDataUrl({
-          ...input.source,
-          mimeType: cropped.mimeType,
-          bytes: cropped.bytes,
-        });
-        if (croppedImageDataUrl === imageDataUrl) {
-          throw new Error('裁剪后的图片与原图相同');
-        }
-        extractionImageDataUrl = croppedImageDataUrl;
-      } catch {
-        return retainLocatedResultForReview(layout);
-      }
-    }
-    let extraction: KieResponse;
-    try {
-      extraction = await this.requestKeyInformation({
-        endpoint,
-        apiKey: input.apiKey,
-        imageDataUrl: extractionImageDataUrl,
-        resultSchema: layout ? CROPPED_ORDER_RESULT_SCHEMA : ORDER_RESULT_SCHEMA,
-        ...(layout ? {} : { userPrompt: ORDER_EXTRACTION_USER_PROMPT }),
-      });
-    } catch (error) {
-      if (!layout) throw error;
-      return retainLocatedResultForReview(layout);
-    }
     const sixRegionExtraction = layout
-      ? flattenSixRegionExtraction(extraction.extracted, layout)
+      ? flattenSixRegionExtraction({}, layout)
       : undefined;
-    const criticalConflict = sixRegionExtraction?.hasCriticalConflict ?? false;
-    const recognitionConflicts = sixRegionExtraction?.recognitionConflicts ?? [];
-    const flattened = sixRegionExtraction?.extracted ??
-      flattenModularExtraction(extraction.extracted);
+    const flattened = sixRegionExtraction?.extracted ?? {};
     const result = normalizeOrderResult(
       sanitizeOrderExtraction(flattened),
       input.sellerAccount,
     );
-    const reviewIssues: OrderReviewIssueCode[] = [];
-    if (criticalConflict) reviewIssues.push('targeted_review_conflict');
-    if (!layout || semanticScreenshotContentIsIncomplete(result)) {
-      reviewIssues.push('screenshot_content_incomplete');
-    }
+    const reviewIssues: OrderReviewIssueCode[] =
+      !layout || semanticScreenshotContentIsIncomplete(result)
+        ? ['screenshot_content_incomplete']
+        : [];
     return {
       result,
-      evidences: [advanced.evidence, extraction.evidence],
+      evidences: [advanced.evidence],
       reviewIssues,
-      recognitionConflicts,
+      recognitionConflicts: sixRegionExtraction?.recognitionConflicts ?? [],
     };
   }
 
@@ -769,6 +671,7 @@ function enrichExtractionFromProcessedText(
     ...extracted,
     [XIANYU_STATUS_SIGNALS_KEY]: {
       platformStatuses: [],
+      fulfillmentStatuses: [],
       shippingControls: [],
       globalControls: [],
     } satisfies XianyuStatusSignals,
@@ -1473,6 +1376,7 @@ function modularScreenshotContentIsIncomplete(
   result: RecognitionResult,
 ): boolean {
   return result.items.length === 0 ||
+    result.items.some((item) => !item.sourceTitle || item.unitPriceCents === null) ||
     !result.recipient ||
     !result.phone ||
     !result.addressOriginal ||
@@ -1486,7 +1390,11 @@ function semanticScreenshotContentIsIncomplete(
   result: RecognitionResult,
 ): boolean {
   return modularScreenshotContentIsIncomplete(result) ||
-    result.platformTransactionStatus === 'unknown';
+    result.platformTransactionStatus === 'unknown' ||
+    (
+      result.platformTransactionStatus === 'paid' &&
+      result.fulfillmentStatus === 'unknown'
+    );
 }
 
 function flattenModularExtraction(
@@ -1506,10 +1414,14 @@ function flattenModularExtraction(
     ? extracted.page_header_status_text
     : pageContext.top_status_text;
   const topStatuses = platformStatusSignals(pageHeaderStatusText);
+  const topFulfillmentStatuses = fulfillmentStatusSignals(pageHeaderStatusText);
   const statusSignals: XianyuStatusSignals = {
     platformStatuses: topStatuses.length > 0
       ? topStatuses
       : inheritedStatusSignals.platformStatuses,
+    fulfillmentStatuses: topFulfillmentStatuses.length > 0
+      ? topFulfillmentStatuses
+      : inheritedStatusSignals.fulfillmentStatuses,
     shippingControls: stringList(shippingInformation.controls),
     globalControls: stringList(pageContext.global_controls),
   };
@@ -1625,8 +1537,15 @@ function readXianyuStatusSignals(
           status === 'paid' || status === 'cancelled' || status === 'refunded',
       )
     : [];
+  const fulfillmentStatuses = Array.isArray(raw.fulfillmentStatuses)
+    ? raw.fulfillmentStatuses.filter(
+        (status): status is FulfillmentStatus =>
+          status === 'pending_shipment' || status === 'shipped',
+      )
+    : [];
   return {
     platformStatuses: [...new Set(platformStatuses)],
+    fulfillmentStatuses: [...new Set(fulfillmentStatuses)],
     shippingControls: [...new Set(stringList(raw.shippingControls))],
     globalControls: [...new Set(stringList(raw.globalControls))],
   };
@@ -1637,6 +1556,9 @@ function mergeXianyuStatusSignals(
 ): XianyuStatusSignals {
   return {
     platformStatuses: [...new Set(signals.flatMap((entry) => entry.platformStatuses))],
+    fulfillmentStatuses: [
+      ...new Set(signals.flatMap((entry) => entry.fulfillmentStatuses)),
+    ],
     shippingControls: [...new Set(signals.flatMap((entry) => entry.shippingControls))],
     globalControls: [...new Set(signals.flatMap((entry) => entry.globalControls))],
   };
@@ -1688,9 +1610,11 @@ function resolvedFulfillmentStatus(
   }
   if (explicitStatus !== 'unknown') return explicitStatus;
   const signals = readXianyuStatusSignals(extracted);
-  return [...signals.shippingControls, ...signals.globalControls].some(isGoShipControl)
-    ? 'pending_shipment'
-    : 'unknown';
+  const inferredStatuses = new Set(signals.fulfillmentStatuses);
+  const controls = [...signals.shippingControls, ...signals.globalControls];
+  if (controls.some(isGoShipControl)) inferredStatuses.add('pending_shipment');
+  if (inferredStatuses.size !== 1) return 'unknown';
+  return inferredStatuses.values().next().value ?? 'unknown';
 }
 
 function platformStatusSignals(value: unknown): PlatformTransactionStatus[] {
@@ -1700,24 +1624,29 @@ function platformStatusSignals(value: unknown): PlatformTransactionStatus[] {
     .replace(/\s+/gu, '')
     .replace(/[,，。!！]/gu, '')
     .replace(/[>›»⌄∨▼▾﹀˅]+$/gu, '');
-  if (new Set([
-    '退款成功',
-    '退款完成',
-    '已退款',
-  ]).has(normalized)) return ['refunded'];
-  if (new Set([
-    '交易已取消',
-    '订单已取消',
-    '交易已关闭',
-    '订单已关闭',
-    '交易关闭',
-  ]).has(normalized)) return ['cancelled'];
-  if (new Set([
-    '买家已付款请尽快发货',
-    '买家已付款',
-    '交易成功',
-  ]).has(normalized)) return ['paid'];
-  return [];
+  const statuses: PlatformTransactionStatus[] = [];
+  if (/(?:退款成功|退款完成|已退款)/u.test(normalized)) {
+    statuses.push('refunded');
+  }
+  if (/(?:交易已取消|订单已取消|交易已关闭|订单已关闭|交易关闭)/u.test(normalized)) {
+    statuses.push('cancelled');
+  }
+  if (/(?:买家已付款|(?:卖家|商家)?已发货|等待买家(?:确认)?收货|交易成功)/u.test(normalized)) {
+    statuses.push('paid');
+  }
+  return [...new Set(statuses)];
+}
+
+function fulfillmentStatusSignals(value: unknown): FulfillmentStatus[] {
+  if (typeof value !== 'string') return [];
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/\s+/gu, '')
+    .replace(/[,，。!！]/gu, '')
+    .replace(/[>›»⌄∨▼▾﹀˅]+$/gu, '');
+  return /(?:(?:卖家|商家)?已发货|等待买家(?:确认)?收货)/u.test(normalized)
+    ? ['shipped']
+    : [];
 }
 
 function isGoShipControl(value: string): boolean {
@@ -2604,9 +2533,9 @@ function normalizeOrderResult(
   const phone = identifierText(recoveredContact.phone, '手机号');
   const phoneNormalized = normalizePhone(phone);
   const addressParts = deriveAddressParts(addressNormalized, {
-    province: optionalText(extracted.province),
-    city: optionalText(extracted.city),
-    district: optionalText(extracted.district),
+    province: '',
+    city: '',
+    district: '',
   });
   const buyerNickname = isBuyerNicknameLabel(extracted.buyer_nickname_label)
     ? optionalText(extracted.buyer_nickname)

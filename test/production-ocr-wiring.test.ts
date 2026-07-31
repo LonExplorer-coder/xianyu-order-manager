@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { SemanticRegionImageCropper } from '../src/adapters/recognition/bailian-ocr-client';
 import type { ApiKeyStore } from '../src/main/ocr-settings';
 import { createConfiguredDesktopSession } from '../src/main/production-session';
 import type { DesktopSession } from '../src/main/desktop-session';
@@ -29,10 +28,6 @@ class MemoryApiKeyStore implements ApiKeyStore {
 }
 
 const sessions: DesktopSession[] = [];
-const unusedSemanticRegionImageCropper: SemanticRegionImageCropper = async () => {
-  throw new Error('当前测试不应执行图片裁剪');
-};
-
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
 });
@@ -50,7 +45,6 @@ describe('正式 OCR 装配', () => {
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore: new MemoryApiKeyStore(),
       validateDataDirectory,
-      semanticRegionImageCropper: unusedSemanticRegionImageCropper,
     });
     sessions.push(session);
 
@@ -151,19 +145,10 @@ describe('正式 OCR 装配', () => {
       );
     });
     const apiKeyStore = new MemoryApiKeyStore();
-    const croppedBytes = Uint8Array.from(Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-      'base64',
-    ));
-    const semanticRegionImageCropper = vi.fn(async () => ({
-      mimeType: 'image/png' as const,
-      bytes: croppedBytes,
-    }));
     const session = createConfiguredDesktopSession({
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore,
       request,
-      semanticRegionImageCropper,
     });
     sessions.push(session);
 
@@ -196,7 +181,7 @@ describe('正式 OCR 装配', () => {
       ],
     });
     expect(draft.orderNumber).not.toContain('DEMO');
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledOnce();
     const [url, firstInit] = request.mock.calls[0];
     expect(url).toContain('ws-production-test.cn-beijing.maas.aliyuncs.com');
     expect(new Headers(firstInit?.headers).get('authorization')).toBe(
@@ -211,7 +196,7 @@ describe('正式 OCR 装配', () => {
       };
       return body.parameters?.ocr_options?.task;
     });
-    expect(tasks).toEqual(['advanced_recognition', 'key_information_extraction']);
+    expect(tasks).toEqual(['advanced_recognition']);
     const images = request.mock.calls.map(([, requestInit]) => {
       const body = JSON.parse(String(requestInit?.body)) as {
         input?: {
@@ -220,11 +205,7 @@ describe('正式 OCR 装配', () => {
       };
       return body.input?.messages?.[0]?.content?.[0]?.image;
     });
-    expect(images[0]).not.toBe(images[1]);
-    expect(images[1]).toBe(
-      `data:image/png;base64,${Buffer.from(croppedBytes).toString('base64')}`,
-    );
-    expect(semanticRegionImageCropper).toHaveBeenCalledOnce();
+    expect(images[0]).toMatch(/^data:image\/png;base64,/u);
   });
 
   it('没有保存 OCR 配置时在付费请求前明确阻止上传识别', async () => {
@@ -244,7 +225,6 @@ describe('正式 OCR 装配', () => {
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore: new MemoryApiKeyStore(),
       request,
-      semanticRegionImageCropper: unusedSemanticRegionImageCropper,
     });
     sessions.push(session);
     session.useDataDirectory(join(testRoot, '订单数据'));
