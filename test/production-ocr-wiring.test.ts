@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { SemanticRegionImageCropper } from '../src/adapters/recognition/bailian-ocr-client';
 import type { ApiKeyStore } from '../src/main/ocr-settings';
 import { createConfiguredDesktopSession } from '../src/main/production-session';
 import type { DesktopSession } from '../src/main/desktop-session';
@@ -28,6 +29,9 @@ class MemoryApiKeyStore implements ApiKeyStore {
 }
 
 const sessions: DesktopSession[] = [];
+const unusedSemanticRegionImageCropper: SemanticRegionImageCropper = async () => {
+  throw new Error('当前测试不应执行图片裁剪');
+};
 
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
@@ -46,6 +50,7 @@ describe('正式 OCR 装配', () => {
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore: new MemoryApiKeyStore(),
       validateDataDirectory,
+      semanticRegionImageCropper: unusedSemanticRegionImageCropper,
     });
     sessions.push(session);
 
@@ -64,7 +69,7 @@ describe('正式 OCR 装配', () => {
     await writeFile(
       sourcePath,
       Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
         'base64',
       ),
     );
@@ -129,9 +134,6 @@ describe('正式 OCR 装配', () => {
                                   payment_time: '2026-07-29 09:01:03',
                                   controls: ['复制', '交易快照'],
                                 },
-                                fulfillment_signals: {
-                                  global_controls: ['联系买家', '取消订单', '去发货'],
-                                },
                               },
                             }),
                       },
@@ -149,10 +151,19 @@ describe('正式 OCR 装配', () => {
       );
     });
     const apiKeyStore = new MemoryApiKeyStore();
+    const croppedBytes = Uint8Array.from(Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    ));
+    const semanticRegionImageCropper = vi.fn(async () => ({
+      mimeType: 'image/png' as const,
+      bytes: croppedBytes,
+    }));
     const session = createConfiguredDesktopSession({
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore,
       request,
+      semanticRegionImageCropper,
     });
     sessions.push(session);
 
@@ -175,6 +186,7 @@ describe('正式 OCR 装配', () => {
       orderNumber: 'REAL-OCR-20260729-001',
       alipayTransactionNumber: '2026072900000000000001',
       amountCents: 800,
+      fulfillmentStatus: 'pending_shipment',
       items: [
         expect.objectContaining({
           sourceTitle: '真实识别商品',
@@ -192,11 +204,27 @@ describe('正式 OCR 装配', () => {
     );
     const tasks = request.mock.calls.map(([, requestInit]) => {
       const body = JSON.parse(String(requestInit?.body)) as {
+        input?: {
+          messages?: Array<{ content?: Array<{ image?: string }> }>;
+        };
         parameters?: { ocr_options?: { task?: string } };
       };
       return body.parameters?.ocr_options?.task;
     });
     expect(tasks).toEqual(['advanced_recognition', 'key_information_extraction']);
+    const images = request.mock.calls.map(([, requestInit]) => {
+      const body = JSON.parse(String(requestInit?.body)) as {
+        input?: {
+          messages?: Array<{ content?: Array<{ image?: string }> }>;
+        };
+      };
+      return body.input?.messages?.[0]?.content?.[0]?.image;
+    });
+    expect(images[0]).not.toBe(images[1]);
+    expect(images[1]).toBe(
+      `data:image/png;base64,${Buffer.from(croppedBytes).toString('base64')}`,
+    );
+    expect(semanticRegionImageCropper).toHaveBeenCalledOnce();
   });
 
   it('没有保存 OCR 配置时在付费请求前明确阻止上传识别', async () => {
@@ -216,6 +244,7 @@ describe('正式 OCR 装配', () => {
       configDirectory: join(testRoot, '应用配置'),
       apiKeyStore: new MemoryApiKeyStore(),
       request,
+      semanticRegionImageCropper: unusedSemanticRegionImageCropper,
     });
     sessions.push(session);
     session.useDataDirectory(join(testRoot, '订单数据'));

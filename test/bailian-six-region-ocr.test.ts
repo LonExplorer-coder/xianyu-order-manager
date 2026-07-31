@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { BailianOcrClient } from '../src/adapters/recognition/bailian-ocr-client';
+import {
+  BailianOcrClient,
+  type SemanticRegionImageCropper,
+} from '../src/adapters/recognition/bailian-ocr-client';
 
 type LocatedWord = {
   text: string;
@@ -70,7 +73,10 @@ function recognitionInput() {
       originalName: '合成六区订单.png',
       mimeType: 'image/png',
       sha256: 'synthetic-six-region',
-      bytes: Uint8Array.from([137, 80, 78, 71]),
+      bytes: Uint8Array.from(Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      )),
     },
   };
 }
@@ -190,8 +196,22 @@ describe('闲鱼订单六区识别', () => {
     expect(body.parameters).toBeUndefined();
   });
 
-  it('只保留商品区的已购商品并排除订单详情后的推广', async () => {
+  it('第二次只发送订单内容裁剪图并由首次定位补回履约状态', async () => {
     const words = completeLocatedWords();
+    const input = recognitionInput();
+    const croppedBytes = Uint8Array.from(Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    ));
+    const cropper: SemanticRegionImageCropper = vi.fn(async ({
+      source,
+      maximumY,
+    }) => {
+      expect(source).toBe(input.source);
+      expect(maximumY).toBeGreaterThan(1_295);
+      expect(maximumY).toBeLessThan(1_390);
+      return { mimeType: 'image/png' as const, bytes: croppedBytes };
+    });
 
     const sixRegionResult = {
       ...completeSixRegionResult(),
@@ -204,16 +224,11 @@ describe('闲鱼订单六区识别', () => {
             quantity: 2,
             quantity_text: '×2',
           },
-          {
-            title: '推广商品',
-            spec: '还能卖',
-            unit_price: '265.67',
-            quantity: 1,
-          },
         ],
         controls: [],
       },
     };
+    delete (sixRegionResult as Record<string, unknown>).fulfillment_signals;
 
     const request = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as {
@@ -223,9 +238,12 @@ describe('闲鱼订单六区识别', () => {
         ? advancedRecognitionResponse(words)
         : keyInformationResponse(sixRegionResult);
     });
-    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+    const client = new BailianOcrClient(request, {
+      semanticRegionsEnabled: true,
+      semanticRegionImageCropper: cropper,
+    });
 
-    const attempt = await client.recognizeOrder(recognitionInput());
+    const attempt = await client.recognizeOrder(input);
 
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-SIX-0001',
@@ -247,27 +265,31 @@ describe('闲鱼订单六区识别', () => {
       }],
     });
     expect(attempt.evidences).toHaveLength(2);
-    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
-    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        region: 'purchased_items',
-        field: 'item_title',
-        kind: 'outside_region',
-        itemIndex: 1,
-        locatedValues: [],
-        extractedValues: ['推广商品'],
-        retainedValue: null,
-      }),
-    ]));
+    expect(attempt.reviewIssues).toEqual([]);
+    expect(attempt.recognitionConflicts).toEqual([]);
     expect(request).toHaveBeenCalledTimes(2);
-    const secondBody = JSON.parse(String(request.mock.calls[1]?.[1]?.body)) as {
-      input?: { messages?: Array<{ content?: Array<{ text?: string }> }> };
+    const requestBodies = request.mock.calls.map(([, init]) => JSON.parse(
+      String(init?.body),
+    ) as {
+      input?: {
+        messages?: Array<{
+          content?: Array<{ image?: string; text?: string }>;
+        }>;
+      };
       parameters?: {
         ocr_options?: {
           task_config?: { result_schema?: Record<string, unknown> };
         };
       };
-    };
+    });
+    const [firstBody, secondBody] = requestBodies;
+    expect(firstBody?.input?.messages?.[0]?.content?.[0]?.image)
+      .toBe(`data:image/png;base64,${Buffer.from(input.source.bytes).toString('base64')}`);
+    expect(secondBody?.input?.messages?.[0]?.content?.[0]?.image)
+      .toBe(`data:image/png;base64,${Buffer.from(croppedBytes).toString('base64')}`);
+    expect(secondBody?.input?.messages?.[0]?.content?.[0]?.image)
+      .not.toBe(firstBody?.input?.messages?.[0]?.content?.[0]?.image);
+    expect(cropper).toHaveBeenCalledOnce();
     expect(Object.keys(
       secondBody.parameters?.ocr_options?.task_config?.result_schema ?? {},
     )).toEqual([
@@ -276,10 +298,46 @@ describe('闲鱼订单六区识别', () => {
       'purchased_items',
       'amount_summary',
       'order_details',
-      'fulfillment_signals',
     ]);
     expect(secondBody.input?.messages?.[0]?.content?.[1]?.text)
-      .toContain('排除区（订单详情之后、底部履约按钮之前）: y=');
+      .toContain('推广与底部操作区已从图片像素中裁掉');
+    expect(secondBody.input?.messages?.[0]?.content?.[1]?.text)
+      .not.toContain('fulfillment_signals');
+  });
+
+  it('本机裁剪失败时回退完整图并明确标记复核失败且不增加调用', async () => {
+    const cropper: SemanticRegionImageCropper = vi.fn(async () => {
+      throw new Error('测试裁剪失败');
+    });
+    const kieResult = completeSixRegionResult();
+    delete kieResult.fulfillment_signals;
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(kieResult);
+    });
+    const client = new BailianOcrClient(request, {
+      semanticRegionsEnabled: true,
+      semanticRegionImageCropper: cropper,
+    });
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(request).toHaveBeenCalledTimes(2);
+    const images = request.mock.calls.map(([, init]) => {
+      const body = JSON.parse(String(init?.body)) as {
+        input?: { messages?: Array<{ content?: Array<{ image?: string }> }> };
+      };
+      return body.input?.messages?.[0]?.content?.[0]?.image;
+    });
+    expect(images[1]).toBe(images[0]);
+    expect(cropper).toHaveBeenCalledOnce();
+    expect(attempt.evidences).toHaveLength(2);
+    expect(attempt.reviewIssues).toContain('targeted_review_failed');
+    expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
   });
 
   it('把字段说明回显、推广越区和订单详情错位记录为逐字段冲突', async () => {
@@ -1175,7 +1233,7 @@ describe('闲鱼订单六区识别', () => {
     const attempt = await client.recognizeOrder(recognitionInput());
 
     expect(requestedSchemas[0]).toHaveProperty('amount_summary');
-    expect(requestedSchemas[0]).toHaveProperty('fulfillment_signals');
+    expect(requestedSchemas[0]).not.toHaveProperty('fulfillment_signals');
     expect(requestedSchemas[0]).not.toHaveProperty('transaction_information');
     expect(attempt.result).toMatchObject({
       orderNumber: 'XY-SYNTH-SIX-0001',

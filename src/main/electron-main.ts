@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import { basename, extname, join } from 'node:path';
 
 import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
@@ -29,6 +29,7 @@ import {
   type TableTemplateGranularity,
 } from '../core/table-templates';
 import { DesktopSession } from './desktop-session';
+import { createElectronSemanticRegionImageCropper } from './electron-semantic-region-image-cropper';
 import { assertDataDirectoryOutsideProgram } from './portable-data-directory';
 import { runPortableReleaseDataSmoke } from './portable-release-smoke';
 import { createConfiguredDesktopSession } from './production-session';
@@ -829,6 +830,9 @@ void app.whenReady().then(async () => {
     configDirectory,
     apiKeyStore: new SystemApiKeyStore(),
     validateDataDirectory,
+    semanticRegionImageCropper: createElectronSemanticRegionImageCropper(
+      nativeImage,
+    ),
   });
   session.restore();
   registerIpcHandlers(session);

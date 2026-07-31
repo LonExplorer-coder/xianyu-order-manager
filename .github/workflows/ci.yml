@@ -29,6 +29,7 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test:native-image-crop
       - run: pnpm test:credential-store
       - name: Build macOS portable ZIP
         if: runner.os == 'macOS'

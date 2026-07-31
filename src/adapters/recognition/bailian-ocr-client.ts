@@ -194,7 +194,7 @@ const ORDER_RESULT_SCHEMA = {
   ...PAGE_CONTEXT_MODULE_SCHEMA,
 } as const;
 
-const SIX_REGION_RESULT_SCHEMA = {
+const CROPPED_ORDER_RESULT_SCHEMA = {
   platform_status: {
     top_status_text:
       '只原样复制区域 1 中的顶部平台交易状态标题，看不到时返回 null',
@@ -220,11 +220,6 @@ const SIX_REGION_RESULT_SCHEMA = {
     payment_time: '只提取区域 5 中“付款时间”或“支付时间”的原文，看不到时返回 null',
     controls: [
       '只列区域 5 内可点击的按钮或链接，例如“复制”“交易快照”“展开”“收起”',
-    ],
-  },
-  fulfillment_signals: {
-    global_controls: [
-      '只原样列出区域 6 中的订单操作按钮，例如“联系买家”“取消订单”“去发货”；不得列广告区的“一键转卖”',
     ],
   },
 } as const;
@@ -306,12 +301,24 @@ export type BailianOcrClientOptions = {
   timeoutMilliseconds?: number;
   maxResponseBytes?: number;
   semanticRegionsEnabled?: boolean;
+  semanticRegionImageCropper?: SemanticRegionImageCropper;
 };
+
+export type SemanticRegionImage = {
+  mimeType: 'image/png' | 'image/jpeg';
+  bytes: Uint8Array;
+};
+
+export type SemanticRegionImageCropper = (input: {
+  source: Pick<RecognizerSource, 'mimeType' | 'bytes'>;
+  maximumY: number;
+}) => Promise<SemanticRegionImage>;
 
 export class BailianOcrClient implements BailianConnectionTester {
   private readonly timeoutMilliseconds: number;
   private readonly maxResponseBytes: number;
   private readonly semanticRegionsEnabled: boolean;
+  private readonly semanticRegionImageCropper?: SemanticRegionImageCropper;
 
   public constructor(
     private readonly request: FetchLike = globalThis.fetch,
@@ -320,6 +327,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     this.timeoutMilliseconds = Math.max(1, options.timeoutMilliseconds ?? 60_000);
     this.maxResponseBytes = Math.max(1, options.maxResponseBytes ?? 1_048_576);
     this.semanticRegionsEnabled = options.semanticRegionsEnabled ?? false;
+    this.semanticRegionImageCropper = options.semanticRegionImageCropper;
   }
 
   public async recognizeOrder(input: {
@@ -461,15 +469,38 @@ export class BailianOcrClient implements BailianConnectionTester {
     }
 
     const layout = planXianyuSemanticRegions(advanced.wordsInfo);
+    let extractionImageDataUrl = imageDataUrl;
+    let semanticImageCropFailed = false;
+    if (layout && this.semanticRegionImageCropper) {
+      try {
+        const cropped = await this.semanticRegionImageCropper({
+          source: input.source,
+          maximumY: layout.excludedPromotion.startY,
+        });
+        const croppedImageDataUrl = toImageDataUrl({
+          ...input.source,
+          mimeType: cropped.mimeType,
+          bytes: cropped.bytes,
+        });
+        if (croppedImageDataUrl === imageDataUrl) {
+          throw new Error('裁剪后的图片与原图相同');
+        }
+        extractionImageDataUrl = croppedImageDataUrl;
+      } catch {
+        semanticImageCropFailed = true;
+      }
+    }
     let extraction: KieResponse;
     try {
       extraction = await this.requestKeyInformation({
         endpoint,
         apiKey: input.apiKey,
-        imageDataUrl,
-        resultSchema: layout ? SIX_REGION_RESULT_SCHEMA : ORDER_RESULT_SCHEMA,
+        imageDataUrl: extractionImageDataUrl,
+        resultSchema: layout ? CROPPED_ORDER_RESULT_SCHEMA : ORDER_RESULT_SCHEMA,
         userPrompt: layout
-          ? xianyuSemanticRegionPrompt(layout)
+          ? xianyuSemanticRegionPrompt(layout, {
+              imageWasCropped: extractionImageDataUrl !== imageDataUrl,
+            })
           : ORDER_EXTRACTION_USER_PROMPT,
       });
     } catch (error) {
@@ -502,6 +533,7 @@ export class BailianOcrClient implements BailianConnectionTester {
       input.sellerAccount,
     );
     const reviewIssues: OrderReviewIssueCode[] = [];
+    if (semanticImageCropFailed) reviewIssues.push('targeted_review_failed');
     if (criticalConflict) reviewIssues.push('targeted_review_conflict');
     if (!layout || semanticScreenshotContentIsIncomplete(result)) {
       reviewIssues.push('screenshot_content_incomplete');

@@ -1,4 +1,8 @@
-import { BailianOcrClient, type FetchLike } from '../adapters/recognition/bailian-ocr-client';
+import {
+  BailianOcrClient,
+  type FetchLike,
+  type SemanticRegionImageCropper,
+} from '../adapters/recognition/bailian-ocr-client';
 import { ConfiguredBailianRecognizer } from '../adapters/recognition/configured-bailian-recognizer';
 import {
   DesktopSession,
@@ -13,9 +17,11 @@ export function createConfiguredDesktopSession(input: {
   apiKeyStore: ApiKeyStore;
   request?: FetchLike;
   validateDataDirectory?: DataDirectoryValidator;
+  semanticRegionImageCropper: SemanticRegionImageCropper;
 }): DesktopSession {
   const client = new BailianOcrClient(input.request, {
     semanticRegionsEnabled: true,
+    semanticRegionImageCropper: input.semanticRegionImageCropper,
   });
   const ocrSettings = new OcrSettingsService(
     new OcrSettingsFile(input.configDirectory),
