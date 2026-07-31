@@ -3757,6 +3757,118 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('heading', { name: '还没有订单' })).toBeVisible();
   });
 
+  it('设置页展示当前数据目录，并在用户确认前不打开系统目录选择器', async () => {
+    const user = userEvent.setup();
+    const selectDataDirectory = vi.fn().mockResolvedValue({
+      kind: 'ready' as const,
+      dataDirectory: '/Users/test/另一套订单数据',
+      orders: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      selectDataDirectory,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByRole('heading', { name: '数据存储位置' })).toBeVisible();
+    expect(screen.getByText('/Users/test/当前订单数据')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '更改数据目录' }));
+
+    expect(screen.getByRole('group', { name: '更改数据目录确认' })).toHaveTextContent(
+      '不会复制、合并、移动或删除原目录内容',
+    );
+    expect(selectDataDirectory).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '取消更改' }));
+
+    expect(screen.queryByRole('group', { name: '更改数据目录确认' }))
+      .not.toBeInTheDocument();
+    expect(selectDataDirectory).not.toHaveBeenCalled();
+  });
+
+  it('设置页确认选择不同数据目录后重载新目录工作区', async () => {
+    const user = userEvent.setup();
+    const selectDataDirectory = vi.fn().mockResolvedValue({
+      kind: 'ready' as const,
+      dataDirectory: '/Users/test/新订单数据',
+      orders: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/旧订单数据',
+        orders: [],
+      }),
+      selectDataDirectory,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(screen.getByRole('button', { name: '更改数据目录' }));
+    await user.click(screen.getByRole('button', { name: '继续选择目录' }));
+
+    expect(selectDataDirectory).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    expect(screen.getByText('/Users/test/新订单数据')).toBeVisible();
+  });
+
+  it('设置页切换目录失败时保留当前工作区并就地说明原因', async () => {
+    const user = userEvent.setup();
+    const selectDataDirectory = vi.fn().mockRejectedValue(
+      new Error('新数据目录不可用'),
+    );
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      selectDataDirectory,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(screen.getByRole('button', { name: '更改数据目录' }));
+    await user.click(screen.getByRole('button', { name: '继续选择目录' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('新数据目录不可用');
+    expect(screen.getByRole('heading', { name: '数据存储位置' })).toBeVisible();
+    expect(screen.getByText('/Users/test/当前订单数据')).toBeVisible();
+    expect(screen.getByRole('button', { name: '更改数据目录' })).toBeEnabled();
+  });
+
+  it('系统目录选择器取消后保持当前目录和设置页', async () => {
+    const user = userEvent.setup();
+    const currentState = {
+      kind: 'ready' as const,
+      dataDirectory: '/Users/test/当前订单数据',
+      orders: [],
+    };
+    const selectDataDirectory = vi.fn().mockResolvedValue(currentState);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue(currentState),
+      selectDataDirectory,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(screen.getByRole('button', { name: '更改数据目录' }));
+    await user.click(screen.getByRole('button', { name: '继续选择目录' }));
+
+    expect(selectDataDirectory).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: '数据存储位置' })).toBeVisible();
+    expect(screen.getByText('/Users/test/当前订单数据')).toBeVisible();
+    expect(screen.queryByRole('group', { name: '更改数据目录确认' }))
+      .not.toBeInTheDocument();
+  });
+
   it('设置页在 OCR 之前显示自动入库开关，切换后立即保存', async () => {
     const user = userEvent.setup();
     let finishSave!: (value: { automaticImportEnabled: boolean }) => void;
@@ -3781,8 +3893,12 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
     const settingsGroup = screen.getByRole('group', { name: '应用设置' });
-    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 2)
-      .map((heading) => heading.textContent)).toEqual(['自动入库', '百炼 OCR']);
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 3)
+      .map((heading) => heading.textContent)).toEqual([
+        '数据存储位置',
+        '自动入库',
+        '百炼 OCR',
+      ]);
     expect(automaticImport).toHaveAttribute('aria-checked', 'false');
 
     await user.click(automaticImport);

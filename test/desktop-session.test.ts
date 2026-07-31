@@ -98,6 +98,39 @@ describe('桌面启动状态', () => {
     });
   });
 
+  it('已连接时切换到不可用目录会保留当前工作区和启动指针', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-directory-switch-rollback-'));
+    const preferences = new Preferences(join(testRoot, '启动配置'));
+    const currentDataDirectory = join(testRoot, '当前订单数据');
+    const rejectedDataDirectory = join(testRoot, '不可用订单数据');
+    const session = new DesktopSession(
+      preferences,
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+      (dataDirectory) => {
+        if (dataDirectory === rejectedDataDirectory) {
+          throw new Error('新数据目录不可用');
+        }
+      },
+    );
+    sessions.push(session);
+    expect(session.useDataDirectory(currentDataDirectory)).toMatchObject({
+      kind: 'ready',
+      dataDirectory: currentDataDirectory,
+    });
+
+    expect(() => session.useDataDirectory(rejectedDataDirectory))
+      .toThrow('新数据目录不可用');
+
+    expect(session.getState()).toMatchObject({
+      kind: 'ready',
+      dataDirectory: currentDataDirectory,
+      orders: [],
+    });
+    expect(preferences.getLastDataDirectory()).toBe(currentDataDirectory);
+    expect(session.queryOrders({})).toMatchObject({ orders: [] });
+  });
+
   it('启动遇到短暂错误后可重新打开记住的数据目录', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-retry-'));
     const preferences = new Preferences(join(testRoot, '启动配置'));

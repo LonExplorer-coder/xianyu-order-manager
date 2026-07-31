@@ -84,12 +84,15 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
   ipcMain.handle('app:retry-data-directory', () => desktopSession.retryDataDirectory());
 
-  ipcMain.handle('app:select-data-directory', async () => {
-    const window = requireWindow();
+  ipcMain.handle('app:select-data-directory', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const currentState = desktopSession.getState();
     const selection = await dialog.showOpenDialog(window, {
       title: '选择闲鱼订单数据目录',
       buttonLabel: '使用此目录',
-      defaultPath: join(app.getPath('documents'), '闲鱼订单数据'),
+      defaultPath: currentState.kind === 'ready'
+        ? currentState.dataDirectory
+        : join(app.getPath('documents'), '闲鱼订单数据'),
       properties: process.platform === 'darwin'
         ? ['openDirectory', 'createDirectory']
         : ['openDirectory', 'promptToCreate'],

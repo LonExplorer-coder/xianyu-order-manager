@@ -937,6 +937,16 @@ export function App({ api }: AppProps) {
     }
   }
 
+  async function changeDataDirectory() {
+    setBusyAction('directory');
+    setOperationError('');
+    try {
+      setBootstrap(await api.selectDataDirectory());
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function retryBootstrap() {
     setBusyAction('retry');
     try {
@@ -1021,7 +1031,14 @@ export function App({ api }: AppProps) {
 
   let workspace: ReactNode;
   if (activePage === 'settings') {
-    workspace = <SettingsWorkspace api={api} />;
+    workspace = (
+      <SettingsWorkspace
+        api={api}
+        dataDirectory={bootstrap.dataDirectory}
+        changingDataDirectory={busyAction === 'directory'}
+        onChangeDataDirectory={changeDataDirectory}
+      />
+    );
   } else if (activePage === 'templates') {
     workspace = (
       <TableTemplatesWorkspace
@@ -3293,7 +3310,17 @@ const CANDIDATE_PROVIDER_PRESETS: Record<
   },
 };
 
-function SettingsWorkspace({ api }: { api: DesktopApi }) {
+function SettingsWorkspace({
+  api,
+  dataDirectory,
+  changingDataDirectory,
+  onChangeDataDirectory,
+}: {
+  api: DesktopApi;
+  dataDirectory: string;
+  changingDataDirectory: boolean;
+  onChangeDataDirectory: () => Promise<void>;
+}) {
   const [settings, setSettings] = useState<OcrSettingsView | null>(null);
   const [orderIntakeSettings, setOrderIntakeSettings] =
     useState<OrderIntakeSettingsView | null>(null);
@@ -3318,6 +3345,10 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
   const [candidateFeedback, setCandidateFeedback] = useState<SettingsFeedback>(null);
   const [showCandidatePaidCallConfirmation, setShowCandidatePaidCallConfirmation] =
     useState(false);
+  const [showDataDirectoryConfirmation, setShowDataDirectoryConfirmation] =
+    useState(false);
+  const [dataDirectoryFeedback, setDataDirectoryFeedback] =
+    useState<SettingsFeedback>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -3403,6 +3434,16 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
       setOrderIntakeFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setSavingOrderIntake(false);
+    }
+  }
+
+  async function confirmDataDirectoryChange() {
+    setShowDataDirectoryConfirmation(false);
+    setDataDirectoryFeedback(null);
+    try {
+      await onChangeDataDirectory();
+    } catch (error) {
+      setDataDirectoryFeedback({ kind: 'error', message: errorMessage(error) });
     }
   }
 
@@ -3538,12 +3579,83 @@ function SettingsWorkspace({ api }: { api: DesktopApi }) {
         <div>
           <span className="section-kicker">本机配置</span>
           <h1>设置</h1>
-          <p>管理订单接收方式、识别服务与本机凭据。</p>
+          <p>管理数据存储、订单接收方式、识别服务与本机凭据。</p>
         </div>
       </header>
 
       <div className="settings-body">
         <div className="settings-form" role="group" aria-label="应用设置">
+          <section
+            className="settings-section settings-section--data-directory"
+            aria-labelledby="data-directory-heading"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">本机数据</span>
+                <h2 id="data-directory-heading">数据存储位置</h2>
+                <p>订单、来源截图和识别记录保存在此目录。可连接已有数据，或在空目录建立一套新数据。</p>
+              </div>
+              <span className="service-state is-ready">
+                <i aria-hidden="true" />
+                已连接
+              </span>
+            </div>
+
+            <div className="data-directory-location">
+              <div>
+                <span>当前数据目录</span>
+                <code title={dataDirectory}>{dataDirectory}</code>
+              </div>
+              <button
+                className="button button--quiet"
+                type="button"
+                aria-busy={changingDataDirectory}
+                disabled={changingDataDirectory}
+                onClick={() => {
+                  setDataDirectoryFeedback(null);
+                  setShowDataDirectoryConfirmation(true);
+                }}
+              >
+                <Icon name="folder" />
+                {changingDataDirectory ? '正在打开…' : '更改数据目录'}
+              </button>
+            </div>
+
+            {showDataDirectoryConfirmation && (
+              <div
+                className="directory-switch-notice"
+                role="group"
+                aria-label="更改数据目录确认"
+              >
+                <div>
+                  <strong>切换后将重新加载订单工作区</strong>
+                  <p>
+                    切换不会复制、合并、移动或删除原目录内容；当前页面尚未保存的输入将不会保留。
+                  </p>
+                </div>
+                <div className="directory-switch-actions">
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    disabled={changingDataDirectory}
+                    onClick={() => setShowDataDirectoryConfirmation(false)}
+                  >
+                    取消更改
+                  </button>
+                  <button
+                    className="button button--primary"
+                    type="button"
+                    disabled={changingDataDirectory}
+                    onClick={() => void confirmDataDirectoryChange()}
+                  >
+                    继续选择目录
+                  </button>
+                </div>
+              </div>
+            )}
+            <SettingsNotice feedback={dataDirectoryFeedback} />
+          </section>
+
           {orderIntakeLoading && !orderIntakeSettings && (
             <div className="settings-loading" role="status">正在读取自动入库设置…</div>
           )}

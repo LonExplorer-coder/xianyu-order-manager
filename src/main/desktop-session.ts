@@ -519,12 +519,8 @@ export class DesktopSession {
       return this.getState();
     }
     const previousApplication = this.application;
-    this.application = undefined;
-    this.cancelRecognitionRetryTimers();
-    this.workspaceGeneration += 1;
-    this.recognitionBatches.splice(0);
-    this.seenSourceHashes.clear();
-    if (previousApplication) this.retireApplication(previousApplication);
+    const preserveCurrentWorkspace = this.state.kind === 'ready' &&
+      previousApplication !== undefined;
     const application = new LocalApplication(this.recognizer);
     try {
       this.validateDataDirectory(dataDirectory);
@@ -532,15 +528,23 @@ export class DesktopSession {
       application.openDataDirectory(dataDirectory);
       this.reconcilePendingOrderIntake(application);
       const recognitionBatches = application.restoreRecognitionBatches();
+      const orders = application.listOrders();
+      const pendingRecognitionItems = application.listPendingRecognitionQueueItems();
       if (remember) this.preferences.setLastDataDirectory(dataDirectory);
+
+      this.cancelRecognitionRetryTimers();
+      this.workspaceGeneration += 1;
+      this.recognitionBatches.splice(0);
+      this.seenSourceHashes.clear();
       this.application = application;
       this.recognitionBatches.push(...recognitionBatches);
       this.state = {
         kind: 'ready',
         dataDirectory,
-        orders: application.listOrders(),
+        orders,
       };
-      for (const item of application.listPendingRecognitionQueueItems()) {
+      if (previousApplication) this.retireApplication(previousApplication);
+      for (const item of pendingRecognitionItems) {
         const retryAt = item.nextRetryAt ? Date.parse(item.nextRetryAt) : Number.NaN;
         const delay = Number.isFinite(retryAt)
           ? Math.max(retryAt - Date.now(), 0)
@@ -566,6 +570,15 @@ export class DesktopSession {
       }
     } catch (error) {
       application.close();
+      if (preserveCurrentWorkspace) {
+        throw error instanceof Error ? error : new Error('无法打开数据目录');
+      }
+      this.application = undefined;
+      this.cancelRecognitionRetryTimers();
+      this.workspaceGeneration += 1;
+      this.recognitionBatches.splice(0);
+      this.seenSourceHashes.clear();
+      if (previousApplication) this.retireApplication(previousApplication);
       if (error instanceof WorkspaceInUseError) {
         this.state = {
           kind: 'locked',

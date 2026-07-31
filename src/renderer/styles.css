@@ -3523,6 +3523,78 @@ select:focus-visible {
   line-height: 1.65;
 }
 
+.data-directory-location {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 24px;
+  padding: 15px 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.data-directory-location > div {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.data-directory-location span {
+  color: #858d96;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.data-directory-location code {
+  overflow: hidden;
+  color: var(--navy-900);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.data-directory-location .button {
+  flex: 0 0 auto;
+}
+
+.directory-switch-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 18px;
+  padding: 17px 0 17px 17px;
+  border-left: 3px solid var(--yellow);
+  background: #fffdf0;
+  animation: paid-call-enter 180ms ease both;
+}
+
+.directory-switch-notice strong {
+  color: var(--navy-900);
+  font-size: 11px;
+}
+
+.directory-switch-notice p {
+  max-width: 520px;
+  margin: 6px 0 0;
+  color: #747d87;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.directory-switch-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding-right: 17px;
+}
+
 .settings-switch {
   display: inline-flex;
   min-width: 110px;
