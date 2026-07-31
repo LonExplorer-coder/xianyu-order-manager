@@ -248,6 +248,17 @@ describe('闲鱼订单六区识别', () => {
     });
     expect(attempt.evidences).toHaveLength(2);
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'purchased_items',
+        field: 'item_title',
+        kind: 'outside_region',
+        itemIndex: 1,
+        locatedValues: [],
+        extractedValues: ['推广商品'],
+        retainedValue: null,
+      }),
+    ]));
     expect(request).toHaveBeenCalledTimes(2);
     const secondBody = JSON.parse(String(request.mock.calls[1]?.[1]?.body)) as {
       input?: { messages?: Array<{ content?: Array<{ text?: string }> }> };
@@ -269,6 +280,185 @@ describe('闲鱼订单六区识别', () => {
     ]);
     expect(secondBody.input?.messages?.[0]?.content?.[1]?.text)
       .toContain('排除区（订单详情之后、底部履约按钮之前）: y=');
+  });
+
+  it('把字段说明回显、推广越区和订单详情错位记录为逐字段冲突', async () => {
+    const result = completeSixRegionResult();
+    result.shipping_information = {
+      recipient: '只返回收件人手机号，看不到时返回 null',
+      recipient_phone_line_text: '只返回收件人手机号，看不到时返回 null',
+      phone: null,
+      address: '只返回收货地址，看不到时返回 null',
+      province: null,
+      city: null,
+      district: null,
+      controls: [],
+    };
+    result.amount_summary = {
+      product_total: '12.00',
+      shipping_fee: '0.00',
+      amount: '只返回成交价，看不到时返回 null',
+    };
+    result.purchased_items = {
+      items: [
+        {
+          title: '只返回订单商品标题，看不到时返回 null',
+          spec: null,
+          unit_price: null,
+          quantity: null,
+        },
+        {
+          title: '推广商品',
+          spec: '还能卖',
+          unit_price: '265.67',
+          quantity: null,
+        },
+      ],
+      controls: [],
+    };
+    result.order_details = {
+      detail_state: 'expanded',
+      order_number: 'XY-SYNTH-SIX-0001',
+      alipay_transaction_number: 'XY-SYNTH-SIX-0001',
+      buyer_nickname_label: '合成收件人',
+      buyer_nickname: '13900000001',
+      order_time: '2026-07-31 13:02:00',
+      payment_time: '2026-07-31 13:02:08',
+      controls: [],
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(result);
+    });
+    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'recipient',
+        kind: 'instruction_echo',
+        locatedValues: ['合成收件人'],
+        extractedValues: ['只返回收件人手机号，看不到时返回 null'],
+        retainedValue: '合成收件人',
+      }),
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'address',
+        kind: 'instruction_echo',
+        retainedValue: '测试省测试市示例区安全路1号',
+      }),
+      expect.objectContaining({
+        region: 'purchased_items',
+        field: 'item_title',
+        kind: 'instruction_echo',
+        itemIndex: 0,
+        extractedValues: ['只返回订单商品标题，看不到时返回 null'],
+        retainedValue: null,
+      }),
+      expect.objectContaining({
+        region: 'purchased_items',
+        field: 'item_title',
+        kind: 'outside_region',
+        itemIndex: 1,
+        extractedValues: ['推广商品'],
+        retainedValue: null,
+      }),
+      expect.objectContaining({
+        region: 'amount_summary',
+        field: 'amount',
+        kind: 'instruction_echo',
+        extractedValues: ['只返回成交价，看不到时返回 null'],
+        retainedValue: '12.00',
+      }),
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'alipay_transaction_number',
+        kind: 'value_mismatch',
+        locatedValues: ['ALI-SYNTH-SIX-0001'],
+        extractedValues: ['XY-SYNTH-SIX-0001'],
+        retainedValue: 'ALI-SYNTH-SIX-0001',
+      }),
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'buyer_nickname',
+        kind: 'value_mismatch',
+        locatedValues: ['合***家'],
+        extractedValues: ['13900000001'],
+        retainedValue: '合***家',
+      }),
+    ]));
+  });
+
+  it('限制过长或过多的冲突诊断，不让异常 OCR 内容导致整张订单落库失败', async () => {
+    const result = completeSixRegionResult();
+    result.purchased_items = {
+      items: Array.from({ length: 101 }, (_, index) => ({
+        title: `推广商品-${index}-${'长'.repeat(1_100)}`,
+        spec: null,
+        unit_price: null,
+        quantity: null,
+      })),
+      controls: [],
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(result);
+    });
+    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.recognitionConflicts).toHaveLength(100);
+    expect(attempt.recognitionConflicts?.every((detail) => (
+      detail.locatedValues.length <= 20 &&
+      detail.extractedValues.length <= 20 &&
+      [...detail.locatedValues, ...detail.extractedValues]
+        .every((value) => value.length <= 1_000) &&
+      (detail.retainedValue === null || detail.retainedValue.length <= 1_000)
+    ))).toBe(true);
+  });
+
+  it('将 KIE 返回的异常字段类型安全记录到冲突详情', async () => {
+    const result = completeSixRegionResult();
+    result.shipping_information = {
+      recipient: '合成收件人',
+      recipient_phone_line_text: '合成收件人 13900000001',
+      phone: { unexpected: '13900000001' },
+      address: '测试省测试市示例区安全路1号',
+      province: '测试省',
+      city: '测试市',
+      district: '示例区',
+      controls: ['复制'],
+    };
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      return body.parameters?.ocr_options?.task === 'advanced_recognition'
+        ? advancedRecognitionResponse(completeLocatedWords())
+        : keyInformationResponse(result);
+    });
+    const client = new BailianOcrClient(request, { semanticRegionsEnabled: true });
+
+    const attempt = await client.recognizeOrder(recognitionInput());
+
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'shipping_information',
+      field: 'phone',
+      extractedValues: ['{"unexpected":"13900000001"}'],
+      retainedValue: '13900000001',
+    }));
   });
 
   it('用各区域的定位文字补回 KIE 漏掉的关键字段', async () => {
@@ -443,6 +633,14 @@ describe('闲鱼订单六区识别', () => {
     expect(attempt.result.phone).toBe('');
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
     expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'shipping_information',
+      field: 'phone',
+      kind: 'multiple_candidates',
+      locatedValues: expect.arrayContaining(['13900000001', '13700000002']),
+      extractedValues: ['13900000001'],
+      retainedValue: null,
+    }));
     expect(request).toHaveBeenCalledTimes(2);
   });
 
@@ -491,6 +689,32 @@ describe('闲鱼订单六区识别', () => {
       amountCents: 1_200,
     });
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.recognitionConflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        region: 'shipping_information',
+        field: 'phone',
+        kind: 'value_mismatch',
+        locatedValues: ['13900000001'],
+        extractedValues: ['13800000009'],
+        retainedValue: '13900000001',
+      }),
+      expect.objectContaining({
+        region: 'amount_summary',
+        field: 'amount',
+        kind: 'value_mismatch',
+        locatedValues: ['12.00'],
+        extractedValues: ['99.00'],
+        retainedValue: '12.00',
+      }),
+      expect.objectContaining({
+        region: 'order_details',
+        field: 'order_number',
+        kind: 'value_mismatch',
+        locatedValues: ['XY-SYNTH-SIX-0001'],
+        extractedValues: ['XY-CONFLICT-9999'],
+        retainedValue: 'XY-SYNTH-SIX-0001',
+      }),
+    ]));
     expect(request).toHaveBeenCalledTimes(2);
   });
 
@@ -673,6 +897,14 @@ describe('闲鱼订单六区识别', () => {
 
     expect(attempt.result.orderNumber).toBe('XY-PROCESSED-0001');
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'order_details',
+      field: 'order_number',
+      kind: 'unsupported_value',
+      locatedValues: [],
+      extractedValues: ['XY-PROCESSED-0001'],
+      retainedValue: 'XY-PROCESSED-0001',
+    }));
     expect(request).toHaveBeenCalledTimes(2);
   });
 
@@ -867,6 +1099,17 @@ describe('闲鱼订单六区识别', () => {
     expect(attempt.result.fulfillmentStatus).toBe('pending_shipment');
     expect(attempt.reviewIssues).toContain('targeted_review_conflict');
     expect(attempt.reviewIssues).toContain('screenshot_content_incomplete');
+    expect(attempt.recognitionConflicts).toContainEqual(expect.objectContaining({
+      region: 'platform_status',
+      field: 'platform_status',
+      kind: 'multiple_candidates',
+      locatedValues: expect.arrayContaining([
+        '买家已付款，请尽快发货',
+        '交易已取消',
+      ]),
+      extractedValues: ['买家已付款，请尽快发货'],
+      retainedValue: null,
+    }));
     expect(request).toHaveBeenCalledTimes(2);
   });
 

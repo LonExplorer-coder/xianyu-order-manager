@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   OrderReviewIssueCode,
+  RecognitionConflictDetail,
   RecognitionResult,
   Recognizer,
 } from '../src/core/contracts';
@@ -1563,6 +1564,102 @@ describe('批量来源截图识别队列', () => {
       counts: { awaiting_confirmation: 1 },
       items: [{ status: 'awaiting_confirmation', reviewIssues: ['missing_phone'] }],
     });
+  });
+
+  it('识别冲突明细随草稿与批次持久化，重启后仍可诊断', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-recognition-conflicts-restart-'));
+    const preferencesDirectory = join(root, '启动配置');
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '手机号冲突.png');
+    await writeFile(sourcePath, 'persist-recognition-conflicts');
+    const conflict = {
+      region: 'shipping_information',
+      field: 'phone',
+      kind: 'value_mismatch',
+      locatedValues: ['13800000000'],
+      extractedValues: ['13900000000'],
+      retainedValue: '13800000000',
+    } satisfies RecognitionConflictDetail;
+    const first = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      {
+        recognize: async () => ({
+          ...recognitionAttempt(
+            { ...recognition, orderNumber: 'CONFLICT-RESTART-001' },
+            ['targeted_review_conflict'],
+          ),
+          recognitionConflicts: [conflict],
+        }),
+      },
+      unusedOcrSettings,
+    );
+    sessions.push(first);
+    first.useDataDirectory(dataDirectory);
+    const batch = await first.submitSourceScreenshots([sourcePath]);
+
+    await eventually(() => {
+      expect(first.listRecognitionBatches()[0]).toMatchObject({
+        id: batch.id,
+        items: [{
+          status: 'awaiting_confirmation',
+          recognitionConflicts: [conflict],
+        }],
+      });
+    });
+    const draftId = first.listRecognitionBatches()[0].items[0].draftId!;
+    expect(first.getDraft(draftId).recognitionConflicts).toEqual([conflict]);
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = new DesktopSession(
+      new Preferences(preferencesDirectory),
+      { recognize: async () => attempt('SHOULD-NOT-RUN') },
+      unusedOcrSettings,
+    );
+    sessions.push(reopened);
+    await eventually(() => {
+      expect(reopened.restore()).toMatchObject({ kind: 'ready', dataDirectory });
+    });
+    expect(reopened.listRecognitionBatches()[0]).toMatchObject({
+      id: batch.id,
+      items: [{
+        status: 'awaiting_confirmation',
+        recognitionConflicts: [conflict],
+      }],
+    });
+    expect(reopened.getDraft(draftId).recognitionConflicts).toEqual([conflict]);
+  });
+
+  it('拒绝超过 100 条的识别冲突明细且不落盘部分草稿', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-recognition-conflicts-limit-'));
+    const dataDirectory = join(root, '订单数据');
+    const sourcePath = join(root, '超限冲突.png');
+    await writeFile(sourcePath, 'oversized-recognition-conflicts');
+    const conflict = {
+      region: 'shipping_information',
+      field: 'phone',
+      kind: 'multiple_candidates',
+      locatedValues: ['13800000000', '13900000000'],
+      extractedValues: ['13800000000'],
+      retainedValue: '13800000000',
+    } satisfies RecognitionConflictDetail;
+    const application = new LocalApplication({
+      recognize: async () => ({
+        ...attempt('CONFLICT-LIMIT-001'),
+        recognitionConflicts: Array.from(
+          { length: 101 },
+          () => ({ ...conflict }),
+        ),
+      }),
+    });
+    application.openDataDirectory(dataDirectory);
+    try {
+      await expect(application.submitRecognitionBatch([sourcePath]))
+        .rejects.toThrow('订单草稿识别冲突明细格式无效');
+      expect(readStoredDraftCount(dataDirectory)).toBe(0);
+    } finally {
+      application.close();
+    }
   });
 
   it('草稿落盘后在入库决策前退出，重启会恢复未完成的自动入库', async () => {

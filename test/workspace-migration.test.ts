@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v12 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v13 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -32,6 +32,7 @@ describe('数据库升级', () => {
       { version: 10 },
       { version: 11 },
       { version: 12 },
+      { version: 13 },
     ]);
     expect(
       first.database
@@ -366,6 +367,7 @@ describe('数据库升级', () => {
       { version: 10 },
       { version: 11 },
       { version: 12 },
+      { version: 13 },
     ]);
     expect(
       (
@@ -603,6 +605,7 @@ describe('数据库升级', () => {
         { version: 10 },
         { version: 11 },
         { version: 12 },
+        { version: 13 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -801,7 +804,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 12 });
+        .toEqual({ version: 13 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -915,7 +918,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 12 });
+        .toEqual({ version: 13 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -935,11 +938,84 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version = 12',
-      ).all()).toEqual([{ version: 12 }]);
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13) ORDER BY version',
+      ).all()).toEqual([{ version: 12 }, { version: 13 }]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
       ).get()).toEqual({ note: '' });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('将 v12 订单草稿升级到 v13 时补充空识别冲突并约束为 JSON 数组', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v12-conflicts-migration-'));
+    createVersion1Database(dataDirectory);
+    const prepared = Workspace.open(dataDirectory);
+    prepared.close();
+    downgradeOrderDraftsToVersion12(dataDirectory);
+
+    const legacy = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 12 });
+      const columns = legacy.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
+        name: string;
+      }>;
+      expect(columns.map(({ name }) => name)).not.toContain('recognition_conflicts_json');
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = Workspace.open(dataDirectory);
+    try {
+      expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 13 });
+      const columns = migrated.database
+        .prepare('PRAGMA table_info(order_drafts)')
+        .all() as unknown as Array<{
+          name: string;
+          type: string;
+          notnull: number;
+          dflt_value: string | null;
+        }>;
+      expect(columns.filter(({ name }) => name === 'recognition_conflicts_json')).toMatchObject([{
+        name: 'recognition_conflicts_json',
+        type: 'TEXT',
+        notnull: 1,
+        dflt_value: "'[]'",
+      }]);
+      expect(migrated.database.prepare(`
+        SELECT recognition_conflicts_json
+        FROM order_drafts
+        WHERE id = 'draft-v1'
+      `).get()).toEqual({ recognition_conflicts_json: '[]' });
+      expect(() => migrated.database.prepare(`
+        UPDATE order_drafts
+        SET recognition_conflicts_json = '{}'
+        WHERE id = 'draft-v1'
+      `).run()).toThrow();
+      expect(() => migrated.database.prepare(`
+        UPDATE order_drafts
+        SET recognition_conflicts_json = 'not-json'
+        WHERE id = 'draft-v1'
+      `).run()).toThrow();
+    } finally {
+      migrated.close();
+    }
+
+    const reopened = Workspace.open(dataDirectory);
+    try {
+      expect(reopened.database.prepare(
+        'SELECT version FROM schema_migrations WHERE version = 13',
+      ).all()).toEqual([{ version: 13 }]);
+      expect(reopened.database.prepare(`
+        SELECT recognition_conflicts_json
+        FROM order_drafts
+        WHERE id = 'draft-v1'
+      `).get()).toEqual({ recognition_conflicts_json: '[]' });
     } finally {
       reopened.close();
     }
@@ -1065,7 +1141,8 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         DROP TABLE table_templates;
         ALTER TABLE table_templates_v10_fixture RENAME TO table_templates;
         ALTER TABLE original_orders DROP COLUMN note;
-        DELETE FROM schema_migrations WHERE version IN (11, 12);
+        ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1088,9 +1165,34 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
     database.exec(`
       BEGIN IMMEDIATE;
       ALTER TABLE original_orders DROP COLUMN note;
-      DELETE FROM schema_migrations WHERE version = 12;
+      ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
+      DELETE FROM schema_migrations WHERE version IN (12, 13);
       COMMIT;
     `);
+  } finally {
+    database.close();
+  }
+}
+
+function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
+  const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    const columns = database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
+      name: string;
+    }>;
+    database.exec('BEGIN IMMEDIATE;');
+    if (columns.some(({ name }) => name === 'recognition_conflicts_json')) {
+      database.exec('ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;');
+    }
+    database.exec(`
+      DELETE FROM schema_migrations WHERE version = 13;
+      COMMIT;
+    `);
+  } catch (error) {
+    database.exec('ROLLBACK;');
+    throw error;
   } finally {
     database.close();
   }
@@ -1282,7 +1384,8 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         DROP TABLE order_items;
         ALTER TABLE order_items_v9_fixture RENAME TO order_items;
         ALTER TABLE original_orders DROP COLUMN note;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12);
+        ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13);
       `);
       database.exec('COMMIT;');
     } catch (error) {

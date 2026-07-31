@@ -10,6 +10,7 @@ import type {
   OrderReviewIssueCode,
   PlatformTransactionStatus,
   RecognitionAttempt,
+  RecognitionConflictDetail,
   RecognitionEvidence,
   RecognitionItem,
   RecognitionResult,
@@ -493,6 +494,7 @@ export class BailianOcrClient implements BailianConnectionTester {
       ? flattenSixRegionExtraction(extraction.extracted, layout)
       : undefined;
     const criticalConflict = sixRegionExtraction?.hasCriticalConflict ?? false;
+    const recognitionConflicts = sixRegionExtraction?.recognitionConflicts ?? [];
     const flattened = sixRegionExtraction?.extracted ??
       flattenModularExtraction(extraction.extracted);
     const result = normalizeOrderResult(
@@ -508,6 +510,7 @@ export class BailianOcrClient implements BailianConnectionTester {
       result,
       evidences: [advanced.evidence, extraction.evidence],
       reviewIssues,
+      recognitionConflicts,
     };
   }
 
@@ -1426,7 +1429,11 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
 function flattenSixRegionExtraction(
   extracted: Record<string, unknown>,
   layout: XianyuSemanticRegionLayout,
-): { extracted: Record<string, unknown>; hasCriticalConflict: boolean } {
+): {
+  extracted: Record<string, unknown>;
+  hasCriticalConflict: boolean;
+  recognitionConflicts: RecognitionConflictDetail[];
+} {
   const processed = processXianyuSixRegionExtraction({
     extracted,
     layout,
@@ -1436,6 +1443,7 @@ function flattenSixRegionExtraction(
   });
   return {
     hasCriticalConflict: processed.hasCriticalConflict,
+    recognitionConflicts: processed.recognitionConflicts,
     extracted: flattenModularExtraction({
       [XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY]: true,
       ...processed.modularExtraction,

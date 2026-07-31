@@ -2558,6 +2558,149 @@ describe('订单管理工作台', () => {
       .not.toHaveTextContent('置信度');
   });
 
+  it('批次历史保留冲突摘要，并仅为有明细的记录提供按区域分组的冲突详情', async () => {
+    const user = userEvent.setup();
+    const recognitionConflicts: NonNullable<OrderDraft['recognitionConflicts']> = [
+      {
+        region: 'shipping_information',
+        field: 'recipient',
+        kind: 'multiple_candidates',
+        locatedValues: ['张三', '李四'],
+        extractedValues: ['李四'],
+        retainedValue: '李四',
+      },
+      {
+        region: 'shipping_information',
+        field: 'phone',
+        kind: 'value_mismatch',
+        locatedValues: ['13800000000'],
+        extractedValues: ['13900000000'],
+        retainedValue: '13800000000',
+      },
+      {
+        region: 'amount_summary',
+        field: 'amount',
+        kind: 'unsupported_value',
+        locatedValues: ['¥88.00'],
+        extractedValues: ['88.00 元'],
+        retainedValue: '88.00',
+      },
+    ];
+    const batch = recognitionBatchView('batch-conflict-details', [
+      {
+        id: 'batch-item-with-conflict-details',
+        batchId: 'batch-conflict-details',
+        sourceName: '新版冲突订单.png',
+        status: 'awaiting_confirmation',
+        draftId: draft.id,
+        reviewIssues: ['targeted_review_conflict'],
+        recognitionConflicts,
+      },
+      {
+        id: 'batch-item-legacy-conflict',
+        batchId: 'batch-conflict-details',
+        sourceName: '旧版冲突订单.png',
+        status: 'awaiting_confirmation',
+        draftId: 'draft-legacy-conflict',
+        reviewIssues: ['targeted_review_conflict'],
+      },
+      {
+        id: 'batch-item-confirmed-conflict',
+        batchId: 'batch-conflict-details',
+        sourceName: '已确认的冲突订单.png',
+        status: 'imported',
+        draftId: 'draft-confirmed-conflict',
+        recognitionConflicts,
+      },
+    ]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listRecognitionBatches: vi.fn().mockResolvedValue([batch]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '识别批次' }));
+
+    expect(screen.getAllByText(orderReviewIssueLabel('targeted_review_conflict'))).toHaveLength(2);
+    const triggers = screen.getAllByRole('button', { name: '查看冲突详情' });
+    expect(triggers).toHaveLength(2);
+    const trigger = triggers[0];
+
+    await user.click(trigger);
+
+    const dialog = screen.getByRole('dialog', { name: '识别冲突详情' });
+    expect(Number.parseFloat(dialog.style.top)).toBeGreaterThanOrEqual(12);
+    expect(within(dialog).getAllByRole('heading', { name: '收货信息区' })).toHaveLength(1);
+    expect(within(dialog).getByRole('heading', { name: '金额汇总区' })).toBeVisible();
+    expect(dialog).toHaveTextContent('收件人');
+    expect(dialog).toHaveTextContent('首次定位发现多个候选值');
+    expect(dialog).toHaveTextContent('手机号');
+    expect(dialog).toHaveTextContent('两次识别值不一致');
+    expect(dialog).toHaveTextContent('成交金额');
+    expect(dialog).toHaveTextContent('首次定位未找到对应内容');
+    expect(dialog).toHaveTextContent('首次定位值张三李四');
+    expect(dialog).toHaveTextContent('二次提取值李四');
+    expect(dialog).toHaveTextContent('当前保留值李四');
+
+    fireEvent.focusIn(triggers[1]);
+    expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();
+  });
+
+  it('校对页可查看同一份冲突明细，并可用 Escape 或点击外部关闭', async () => {
+    const user = userEvent.setup();
+    const reviewDraft: OrderDraft = {
+      ...draft,
+      reviewIssues: ['targeted_review_conflict'],
+      recognitionConflicts: [{
+        region: 'purchased_items',
+        field: 'item_quantity',
+        kind: 'outside_region',
+        itemIndex: 0,
+        locatedValues: ['2'],
+        extractedValues: ['1'],
+        retainedValue: '1',
+      }],
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(reviewDraft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    const reasons = await screen.findByRole('region', { name: '请重点核对' });
+    expect(reasons).toHaveTextContent(orderReviewIssueLabel('targeted_review_conflict'));
+    const trigger = within(reasons).getByRole('button', { name: '查看冲突详情' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+
+    await user.click(trigger);
+    let dialog = screen.getByRole('dialog', { name: '识别冲突详情' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(dialog).toHaveTextContent('商品信息区');
+    expect(dialog).toHaveTextContent('商品数量 · 商品 1');
+    expect(dialog).toHaveTextContent('内容来自指定区域外');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    dialog = screen.getByRole('dialog', { name: '识别冲突详情' });
+    expect(dialog).toBeVisible();
+    await user.click(screen.getByRole('heading', { name: '校对识别结果' }));
+    expect(screen.queryByRole('dialog', { name: '识别冲突详情' })).not.toBeInTheDocument();
+  });
+
   it('订单内容变化时展示当前值与新识别值并通过明确动作确认更新', async () => {
     const user = userEvent.setup();
     const updateDraft: OrderDraft = {

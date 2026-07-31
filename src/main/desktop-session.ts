@@ -260,6 +260,7 @@ export class DesktopSession {
         draftId: draft.id,
         nextRetryAt: null,
         reviewIssues: draft.reviewIssues ?? [],
+        recognitionConflicts: draft.recognitionConflicts ?? [],
       },
     );
     return structuredClone(draft);
@@ -655,6 +656,7 @@ export class DesktopSession {
             retryCount,
             nextRetryAt: null,
             reviewIssues: [],
+            recognitionConflicts: draft.recognitionConflicts ?? [],
             resolution: 'new_order',
           },
         );
@@ -672,6 +674,7 @@ export class DesktopSession {
             retryCount,
             nextRetryAt: null,
             reviewIssues: [],
+            recognitionConflicts: draft.recognitionConflicts ?? [],
             resolution: 'equivalent_order',
           },
         );
@@ -688,6 +691,7 @@ export class DesktopSession {
           retryCount,
           nextRetryAt: null,
           reviewIssues: intake.draft.reviewIssues ?? [],
+          recognitionConflicts: intake.draft.recognitionConflicts ?? [],
         },
       );
     } catch (error) {
@@ -823,6 +827,9 @@ export class DesktopSession {
     if (update.errorMessage) item.errorMessage = update.errorMessage;
     else delete item.errorMessage;
     if (update.reviewIssues) item.reviewIssues = [...update.reviewIssues];
+    if (update.recognitionConflicts !== undefined) {
+      item.recognitionConflicts = structuredClone(update.recognitionConflicts);
+    }
     if (update.resolution) item.resolution = update.resolution;
     else if (!['imported', 'duplicate_skipped'].includes(update.status)) {
       delete item.resolution;

@@ -1,4 +1,10 @@
-import type { PlatformTransactionStatus } from '../../core/contracts';
+import type {
+  PlatformTransactionStatus,
+  RecognitionConflictDetail,
+  RecognitionConflictField,
+  RecognitionConflictKind,
+} from '../../core/contracts';
+import { RECOGNITION_CONFLICT_LIMITS } from '../../core/contracts';
 import {
   semanticExcludedLines,
   semanticRegionContainsText,
@@ -24,6 +30,7 @@ export type XianyuSixRegionModularExtraction = {
 export type XianyuSixRegionProcessingResult = {
   modularExtraction: XianyuSixRegionModularExtraction;
   hasCriticalConflict: boolean;
+  recognitionConflicts: RecognitionConflictDetail[];
 };
 
 export function processXianyuSixRegionExtraction(input: {
@@ -32,9 +39,10 @@ export function processXianyuSixRegionExtraction(input: {
   processedOrderNumber?: string;
 }): XianyuSixRegionProcessingResult {
   const { extracted, layout } = input;
-  const hasCriticalConflict = sixRegionExtractionHasCriticalConflict(
+  const recognitionConflicts = sixRegionExtractionConflicts(
     extracted,
     layout,
+    input.processedOrderNumber ?? '',
   );
   const modules = recoverSixRegionModules({
     platformStatus: constrainRegionFields(
@@ -97,7 +105,8 @@ export function processXianyuSixRegionExtraction(input: {
   const topStatusText = modules.platformStatus.top_status_text;
 
   return {
-    hasCriticalConflict,
+    hasCriticalConflict: recognitionConflicts.length > 0,
+    recognitionConflicts,
     modularExtraction: {
       page_header_status_text: topStatusText,
       purchased_items: modules.purchasedItems,
@@ -424,132 +433,339 @@ function semanticRegionSupportsScalar(
   return false;
 }
 
-function sixRegionExtractionHasCriticalConflict(
+function sixRegionExtractionConflicts(
   extracted: Record<string, unknown>,
   layout: XianyuSemanticRegionLayout,
-): boolean {
-  if (
-    semanticPlatformStatuses(
-      semanticRegionRows(layout, 'platform_status'),
-    ).length > 1
-  ) {
-    return true;
+  processedOrderNumber: string,
+): RecognitionConflictDetail[] {
+  const conflicts: RecognitionConflictDetail[] = [];
+  const platformLines = semanticRegionRows(layout, 'platform_status');
+  const platformStatuses = semanticPlatformStatuses(platformLines);
+  const platformModule = recordOrEmpty(extracted.platform_status);
+  if (platformStatuses.length > 1) {
+    conflicts.push(createConflictDetail({
+      region: 'platform_status',
+      field: 'platform_status',
+      kind: 'multiple_candidates',
+      locatedValues: platformLines.filter((line) =>
+        semanticPlatformStatuses([line]).length > 0
+      ),
+      extractedValues: conflictValues(platformModule.top_status_text),
+      retainedValue: null,
+    }));
   }
-  if (
-    semanticPhones(
-      semanticRegionRows(layout, 'shipping_information'),
-    ).length > 1
-  ) {
-    return true;
+
+  const shippingLines = semanticRegionRows(layout, 'shipping_information');
+  const shippingPhones = semanticPhones(shippingLines);
+  const shippingModule = recordOrEmpty(extracted.shipping_information);
+  if (shippingPhones.length > 1) {
+    conflicts.push(createConflictDetail({
+      region: 'shipping_information',
+      field: 'phone',
+      kind: 'multiple_candidates',
+      locatedValues: shippingPhones,
+      extractedValues: conflictValues(shippingModule.phone),
+      retainedValue: null,
+    }));
   }
-  if (amountSummaryHasLabelConflict(extracted, layout)) return true;
-  if (orderDetailsHaveLabelConflict(extracted, layout)) return true;
-  if (purchasedItemsHaveRegionConflict(extracted, layout)) return true;
+
+  conflicts.push(...amountSummaryConflicts(extracted, layout));
+  conflicts.push(...orderDetailsConflicts(extracted, layout, processedOrderNumber));
+  conflicts.push(...purchasedItemsConflicts(extracted, layout));
+
+  const locatedPlatformStatus = platformLines.find((line) =>
+    semanticPlatformStatuses([line]).length === 1
+  );
+  const locatedShipping = recoverSemanticShipping({}, shippingLines);
   const checks: Array<{
     module: Record<string, unknown>;
-    regionId: XianyuSemanticRegionId;
-    keys: string[];
+    regionId: RecognitionConflictDetail['region'];
+    fields: Array<{
+      key: string;
+      field: RecognitionConflictField;
+      retainedValue: unknown;
+    }>;
   }> = [
     {
-      module: recordOrEmpty(extracted.platform_status),
+      module: platformModule,
       regionId: 'platform_status',
-      keys: ['top_status_text'],
+      fields: [{
+        key: 'top_status_text',
+        field: 'platform_status',
+        retainedValue: locatedPlatformStatus,
+      }],
     },
     {
-      module: recordOrEmpty(extracted.shipping_information),
+      module: shippingModule,
       regionId: 'shipping_information',
-      keys: ['recipient', 'recipient_phone_line_text', 'phone', 'address'],
+      fields: [
+        { key: 'recipient', field: 'recipient', retainedValue: locatedShipping.recipient },
+        {
+          key: 'recipient_phone_line_text',
+          field: 'recipient_phone_line_text',
+          retainedValue: locatedShipping.recipient_phone_line_text,
+        },
+        { key: 'phone', field: 'phone', retainedValue: locatedShipping.phone },
+        { key: 'address', field: 'address', retainedValue: locatedShipping.address },
+      ],
     },
   ];
-  return checks.some(({ module, regionId, keys }) => keys.some((key) => {
-    const value = module[key];
-    return !isMissingExtractedValue(value) &&
-      supportedRegionValue(value, layout, regionId) === null;
-  }));
+  for (const { module, regionId, fields } of checks) {
+    for (const { key, field, retainedValue } of fields) {
+      const value = module[key];
+      if (
+        isMissingExtractedValue(value) ||
+        supportedRegionValue(value, layout, regionId) !== null
+      ) {
+        continue;
+      }
+      conflicts.push(createConflictDetail({
+        region: regionId,
+        field,
+        kind: looksLikeInstructionEcho(value)
+          ? 'instruction_echo'
+          : conflictValue(retainedValue) === null
+            ? 'unsupported_value'
+            : 'value_mismatch',
+        locatedValues: conflictValues(retainedValue),
+        extractedValues: conflictValues(value),
+        retainedValue: conflictValue(retainedValue),
+      }));
+    }
+  }
+  return conflicts.slice(0, RECOGNITION_CONFLICT_LIMITS.details);
 }
 
-function amountSummaryHasLabelConflict(
+function amountSummaryConflicts(
   extracted: Record<string, unknown>,
   layout: XianyuSemanticRegionLayout,
-): boolean {
+): RecognitionConflictDetail[] {
   const source = recordOrEmpty(extracted.amount_summary);
   const expected = expectedSemanticAmounts(
     semanticRegionRows(layout, 'amount_summary'),
   );
-  return [
-    ['product_total', expected.product_total],
-    ['shipping_fee', expected.shipping_fee],
-    ['amount', expected.amount],
-  ].some(([key, expectedValue]) => {
-    const value = source[String(key)];
-    return !isMissingExtractedValue(value) &&
-      supportedLabeledMoney(value, expectedValue) === null;
+  const fields: Array<[string, RecognitionConflictField, string | undefined]> = [
+    ['product_total', 'product_total', expected.product_total],
+    ['shipping_fee', 'shipping_fee', expected.shipping_fee],
+    ['amount', 'amount', expected.amount],
+  ];
+  return fields.flatMap(([key, field, expectedValue]) => {
+    const value = source[key];
+    if (
+      isMissingExtractedValue(value) ||
+      supportedLabeledMoney(value, expectedValue) !== null
+    ) {
+      return [];
+    }
+    return [createConflictDetail({
+      region: 'amount_summary',
+      field,
+      kind: looksLikeInstructionEcho(value)
+        ? 'instruction_echo'
+        : expectedValue === undefined
+          ? 'unsupported_value'
+          : 'value_mismatch',
+      locatedValues: conflictValues(expectedValue),
+      extractedValues: conflictValues(value),
+      retainedValue: conflictValue(expectedValue),
+    })];
   });
 }
 
-function orderDetailsHaveLabelConflict(
+function orderDetailsConflicts(
   extracted: Record<string, unknown>,
   layout: XianyuSemanticRegionLayout,
-): boolean {
+  processedOrderNumberValue: string,
+): RecognitionConflictDetail[] {
   const source = recordOrEmpty(extracted.order_details);
   const expected = expectedSemanticOrderDetails(
     semanticRegionRows(layout, 'order_details'),
   );
-  return [
-    ['order_number', expected.order_number],
-    ['alipay_transaction_number', expected.alipay_transaction_number],
-    ['buyer_nickname_label', expected.buyer_nickname_label],
-    ['buyer_nickname', expected.buyer_nickname],
-    ['order_time', expected.order_time],
-    ['payment_time', expected.payment_time],
-  ].some(([key, expectedValue]) => {
-    const value = source[String(key)];
-    return !isMissingExtractedValue(value) &&
-      supportedLabeledText(value, expectedValue) === null;
+  const fields: Array<[string, RecognitionConflictField, string | undefined]> = [
+    ['order_number', 'order_number', expected.order_number],
+    [
+      'alipay_transaction_number',
+      'alipay_transaction_number',
+      expected.alipay_transaction_number,
+    ],
+    ['buyer_nickname_label', 'buyer_nickname_label', expected.buyer_nickname_label],
+    ['buyer_nickname', 'buyer_nickname', expected.buyer_nickname],
+    ['order_time', 'order_time', expected.order_time],
+    ['payment_time', 'payment_time', expected.payment_time],
+  ];
+  const processedOrderNumber = validatedOrderNumber(processedOrderNumberValue);
+  return fields.flatMap(([key, field, expectedValue]) => {
+    const value = source[key];
+    if (
+      isMissingExtractedValue(value) ||
+      supportedLabeledText(value, expectedValue) !== null
+    ) {
+      return [];
+    }
+    const retainedValue = key === 'order_number' &&
+        expectedValue === undefined &&
+        processedOrderNumber &&
+        processedOrderNumber === validatedOrderNumber(value)
+      ? processedOrderNumber
+      : expectedValue;
+    return [createConflictDetail({
+      region: 'order_details',
+      field,
+      kind: looksLikeInstructionEcho(value)
+        ? 'instruction_echo'
+        : expectedValue === undefined
+          ? 'unsupported_value'
+          : 'value_mismatch',
+      locatedValues: conflictValues(expectedValue),
+      extractedValues: conflictValues(value),
+      retainedValue: conflictValue(retainedValue),
+    })];
   });
 }
 
-function purchasedItemsHaveRegionConflict(
+function purchasedItemsConflicts(
   extracted: Record<string, unknown>,
   layout: XianyuSemanticRegionLayout,
-): boolean {
+): RecognitionConflictDetail[] {
   const module = recordOrEmpty(extracted.purchased_items);
-  if (!Array.isArray(module.items)) return false;
+  if (!Array.isArray(module.items)) return [];
   const sections = semanticItemSections(
     semanticRegionRows(layout, 'purchased_items'),
   );
-  return module.items.map(recordOrEmpty).some((item) => {
-    if (isMissingExtractedValue(item.title)) return false;
+  const conflicts: RecognitionConflictDetail[] = [];
+  module.items.map(recordOrEmpty).forEach((item, itemIndex) => {
+    if (isMissingExtractedValue(item.title)) return;
     const title = typeof item.title === 'string' ? comparableText(item.title) : '';
     const section = sections.find((candidate) =>
       title && comparableText(candidate.lines.join('')).includes(title)
     );
-    if (!section) return true;
+    if (!section) {
+      conflicts.push(createConflictDetail({
+        region: 'purchased_items',
+        field: 'item_title',
+        kind: looksLikeInstructionEcho(item.title)
+          ? 'instruction_echo'
+          : 'outside_region',
+        itemIndex,
+        locatedValues: [],
+        extractedValues: conflictValues(item.title),
+        retainedValue: null,
+      }));
+      return;
+    }
     if (
       !isMissingExtractedValue(item.spec) &&
       !semanticSectionContainsText(section, item.spec)
     ) {
-      return true;
+      conflicts.push(createConflictDetail({
+        region: 'purchased_items',
+        field: 'item_spec',
+        kind: looksLikeInstructionEcho(item.spec)
+          ? 'instruction_echo'
+          : section.specification === undefined
+            ? 'unsupported_value'
+            : 'value_mismatch',
+        itemIndex,
+        locatedValues: conflictValues(section.specification),
+        extractedValues: conflictValues(item.spec),
+        retainedValue: conflictValue(section.specification),
+      }));
     }
-    if (
-      !isMissingExtractedValue(item.unit_price) &&
-      !semanticSectionSupportsMoney(section, item.unit_price)
-    ) {
-      return true;
-    }
-    if (
-      !isMissingExtractedValue(item.price_tag_text) &&
-      !semanticSectionSupportsMoney(section, item.price_tag_text)
-    ) {
-      return true;
+    const extractedPrices = [item.unit_price, item.price_tag_text]
+      .filter((value) => !isMissingExtractedValue(value));
+    const unsupportedPrices = extractedPrices.filter((value) =>
+      !semanticSectionSupportsMoney(section, value)
+    );
+    if (unsupportedPrices.length > 0) {
+      conflicts.push(createConflictDetail({
+        region: 'purchased_items',
+        field: 'item_unit_price',
+        kind: unsupportedPrices.some(looksLikeInstructionEcho)
+          ? 'instruction_echo'
+          : 'value_mismatch',
+        itemIndex,
+        locatedValues: [section.unitPrice],
+        extractedValues: unsupportedPrices.flatMap(conflictValues),
+        retainedValue: section.unitPrice,
+      }));
     }
     const quantityValue = hasExplicitQuantity(item.quantity)
       ? item.quantity
       : item.quantity_text;
-    if (isMissingExtractedValue(quantityValue)) return false;
-    const quantity = positiveQuantity(quantityValue);
-    return quantity.inferred || section.quantity?.value !== quantity.value;
+    if (!isMissingExtractedValue(quantityValue)) {
+      const quantity = positiveQuantity(quantityValue);
+      if (quantity.inferred || section.quantity?.value !== quantity.value) {
+        conflicts.push(createConflictDetail({
+          region: 'purchased_items',
+          field: 'item_quantity',
+          kind: looksLikeInstructionEcho(quantityValue)
+            ? 'instruction_echo'
+            : section.quantity === undefined
+              ? 'unsupported_value'
+              : 'value_mismatch',
+          itemIndex,
+          locatedValues: conflictValues(section.quantity?.raw),
+          extractedValues: conflictValues(quantityValue),
+          retainedValue: conflictValue(section.quantity?.raw),
+        }));
+      }
+    }
   });
+  return conflicts;
+}
+
+function createConflictDetail(
+  input: RecognitionConflictDetail,
+): RecognitionConflictDetail {
+  return {
+    ...input,
+    locatedValues: boundedConflictValues(input.locatedValues),
+    extractedValues: boundedConflictValues(input.extractedValues),
+    retainedValue: input.retainedValue === null
+      ? null
+      : boundedConflictText(input.retainedValue),
+  };
+}
+
+function boundedConflictValues(values: string[]): string[] {
+  return [...new Set(values
+    .filter(Boolean)
+    .map(boundedConflictText))]
+    .slice(0, RECOGNITION_CONFLICT_LIMITS.valuesPerSide);
+}
+
+function boundedConflictText(value: string): string {
+  return value.slice(0, RECOGNITION_CONFLICT_LIMITS.textLength);
+}
+
+function conflictValues(value: unknown): string[] {
+  const normalized = conflictValue(value);
+  return normalized === null ? [] : [normalized];
+}
+
+function conflictValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized && !isNullMarker(normalized) ? normalized : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  if (typeof value === 'object' && value !== null) {
+    try {
+      const serialized = JSON.stringify(value);
+      if (serialized) return serialized;
+    } catch {
+      return '[无法序列化的异常值]';
+    }
+  }
+  return null;
+}
+
+function looksLikeInstructionEcho(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, '');
+  return /(?:返回|提取|列出|填写)/u.test(normalized) &&
+    /(?:看不到|无法|例如|null|字段|区域)/iu.test(normalized);
 }
 
 type SixRegionModules = {

@@ -4,10 +4,13 @@ import {
   useMemo,
   useRef,
   useState,
+  useId,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { BootstrapState, DesktopApi } from '../core/desktop-api';
 import type {
@@ -27,6 +30,7 @@ import type {
   OrderEditReview,
   OriginalOrder,
   OrderSummary,
+  RecognitionConflictDetail,
   RecognitionBatchView,
   RecognitionBatchItemStatus,
 } from '../core/contracts';
@@ -2523,6 +2527,9 @@ function BatchesWorkspace({
                             ))}
                           </ul>
                         )}
+                        <RecognitionConflictDetails
+                          details={item.recognitionConflicts}
+                        />
                       </td>
                       <td>
                         {item.status === 'awaiting_confirmation' && item.draftId && (
@@ -2579,6 +2586,274 @@ function RecentBatchStrip({ batch, onOpen }: { batch: RecognitionBatchView; onOp
       <button className="text-button" type="button" onClick={onOpen}>查看批次</button>
     </section>
   );
+}
+
+type RecognitionConflictDetailsProps = {
+  details?: RecognitionConflictDetail[];
+};
+
+type ConflictPopoverPosition = {
+  left: number;
+  width: number;
+  maxHeight: number;
+  top?: number;
+  bottom?: number;
+};
+
+const RECOGNITION_CONFLICT_REGION_LABELS: Record<RecognitionConflictDetail['region'], string> = {
+  platform_status: '平台状态区',
+  shipping_information: '收货信息区',
+  purchased_items: '商品信息区',
+  amount_summary: '金额汇总区',
+  order_details: '订单详情区',
+};
+
+const RECOGNITION_CONFLICT_FIELD_LABELS: Record<RecognitionConflictDetail['field'], string> = {
+  platform_status: '平台交易状态',
+  recipient: '收件人',
+  recipient_phone_line_text: '收件人与手机号原行',
+  phone: '手机号',
+  address: '收货地址',
+  item_title: '商品标题',
+  item_spec: '商品规格',
+  item_unit_price: '商品单价',
+  item_quantity: '商品数量',
+  product_total: '商品总额',
+  shipping_fee: '运费',
+  amount: '成交金额',
+  order_number: '订单号',
+  alipay_transaction_number: '支付宝交易号',
+  buyer_nickname_label: '买家昵称标签',
+  buyer_nickname: '买家昵称',
+  order_time: '下单时间',
+  payment_time: '付款时间',
+};
+
+const RECOGNITION_CONFLICT_KIND_LABELS: Record<RecognitionConflictDetail['kind'], string> = {
+  multiple_candidates: '首次定位发现多个候选值',
+  value_mismatch: '两次识别值不一致',
+  unsupported_value: '首次定位未找到对应内容',
+  outside_region: '内容来自指定区域外',
+  instruction_echo: '把字段说明当成识别结果',
+};
+
+function RecognitionConflictDetails({
+  details,
+}: RecognitionConflictDetailsProps) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<ConflictPopoverPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogId = useId();
+  const visible = details && details.length > 0;
+  const groups = useMemo(() => {
+    if (!details) return [];
+    return details.reduce<Array<{
+      region: RecognitionConflictDetail['region'];
+      details: RecognitionConflictDetail[];
+    }>>((result, detail) => {
+      const group = result.find((entry) => entry.region === detail.region);
+      if (group) group.details.push(detail);
+      else result.push({ region: detail.region, details: [detail] });
+      return result;
+    }, []);
+  }, [details]);
+
+  function updatePosition() {
+    if (!triggerRef.current) return;
+    setPosition(conflictPopoverPosition(triggerRef.current.getBoundingClientRect()));
+  }
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    updatePosition();
+    dialogRef.current?.focus();
+    const handleViewportChange = () => updatePosition();
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (dialogRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (dialogRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!visible && open) setOpen(false);
+  }, [open, visible]);
+
+  if (!visible) return null;
+
+  const dialogStyle: CSSProperties | undefined = position
+    ? {
+      left: position.left,
+      width: position.width,
+      maxHeight: position.maxHeight,
+      ...(position.top === undefined ? {} : { top: position.top }),
+      ...(position.bottom === undefined ? {} : { bottom: position.bottom }),
+    }
+    : { visibility: 'hidden' };
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        className="recognition-conflict-trigger"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? dialogId : undefined}
+        onClick={() => {
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          updatePosition();
+          setOpen(true);
+        }}
+      >
+        查看冲突详情
+      </button>
+      {open && createPortal(
+        <div
+          ref={dialogRef}
+          id={dialogId}
+          className="recognition-conflict-popover"
+          role="dialog"
+          aria-label="识别冲突详情"
+          tabIndex={-1}
+          style={dialogStyle}
+        >
+          <header className="recognition-conflict-popover__header">
+            <div>
+              <span className="section-kicker">定位与提取对照</span>
+              <h2>识别冲突详情</h2>
+            </div>
+            <button
+              className="recognition-conflict-popover__close"
+              type="button"
+              aria-label="关闭识别冲突详情"
+              onClick={() => {
+                setOpen(false);
+                triggerRef.current?.focus();
+              }}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </header>
+          <p className="recognition-conflict-popover__intro">
+            以下 {details.length} 项结果未能自动对齐，请对照来源截图确认。
+          </p>
+          <div className="recognition-conflict-popover__groups">
+            {groups.map((group) => (
+              <section className="recognition-conflict-group" key={group.region}>
+                <h3>{RECOGNITION_CONFLICT_REGION_LABELS[group.region]}</h3>
+                <ul>
+                  {group.details.map((detail, index) => (
+                    <li key={`${detail.field}:${detail.itemIndex ?? 'order'}:${index}`}>
+                      <div className="recognition-conflict-item__heading">
+                        <strong>
+                          {RECOGNITION_CONFLICT_FIELD_LABELS[detail.field]}
+                          {detail.itemIndex === undefined ? '' : ` · 商品 ${detail.itemIndex + 1}`}
+                        </strong>
+                        <span>{RECOGNITION_CONFLICT_KIND_LABELS[detail.kind]}</span>
+                      </div>
+                      <dl>
+                        <ConflictValueRow label="首次定位值" values={detail.locatedValues} />
+                        <ConflictValueRow label="二次提取值" values={detail.extractedValues} />
+                        <ConflictValueRow
+                          label="当前保留值"
+                          values={detail.retainedValue === null ? [] : [detail.retainedValue]}
+                          emptyLabel="未保留"
+                        />
+                      </dl>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function ConflictValueRow({
+  label,
+  values,
+  emptyLabel = '未返回',
+}: {
+  label: string;
+  values: string[];
+  emptyLabel?: string;
+}) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>
+        {values.length === 0
+          ? <span className="recognition-conflict-value is-empty">{emptyLabel}</span>
+          : values.map((value, index) => (
+            <span className="recognition-conflict-value" key={`${value}:${index}`}>
+              {value === '' ? '空字符串' : value}
+            </span>
+          ))}
+      </dd>
+    </div>
+  );
+}
+
+function conflictPopoverPosition(rect: DOMRect): ConflictPopoverPosition {
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const margin = 12;
+  const gap = 8;
+  const width = Math.max(0, Math.min(520, viewportWidth - margin * 2));
+  const left = Math.min(
+    Math.max(margin, rect.right - width),
+    Math.max(margin, viewportWidth - width - margin),
+  );
+  const verticalLimit = Math.max(margin, viewportHeight - margin);
+  const anchorTop = Math.min(Math.max(rect.top, margin), verticalLimit);
+  const anchorBottom = Math.min(Math.max(rect.bottom, margin), verticalLimit);
+  const roomBelow = Math.max(0, viewportHeight - anchorBottom - gap - margin);
+  const roomAbove = Math.max(0, anchorTop - gap - margin);
+  const placeBelow = roomBelow >= Math.min(360, roomAbove);
+  const maxHeight = Math.min(560, placeBelow ? roomBelow : roomAbove);
+  return placeBelow
+    ? { top: anchorBottom + gap, left, width, maxHeight }
+    : { bottom: viewportHeight - anchorTop + gap, left, width, maxHeight };
 }
 
 function BatchStats({ batch, compact = false }: { batch: RecognitionBatchView; compact?: boolean }) {
@@ -3216,11 +3491,16 @@ function ReviewWorkspace({
                 <span className="section-kicker">待确认原因</span>
                 <h2 id="review-issues-heading">请重点核对</h2>
               </div>
-              <ul>
-                {draft.reviewIssues.map((issue) => (
-                  <li key={issue}>{orderReviewIssueLabel(issue)}</li>
-                ))}
-              </ul>
+              <div className="review-issues__body">
+                <ul>
+                  {draft.reviewIssues.map((issue) => (
+                    <li key={issue}>{orderReviewIssueLabel(issue)}</li>
+                  ))}
+                </ul>
+                <RecognitionConflictDetails
+                  details={draft.recognitionConflicts}
+                />
+              </div>
             </section>
           )}
           {isOrderUpdate && (

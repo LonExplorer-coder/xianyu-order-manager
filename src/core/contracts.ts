@@ -64,6 +64,68 @@ export const ORDER_REVIEW_ISSUE_CODES = [
 
 export type OrderReviewIssueCode = (typeof ORDER_REVIEW_ISSUE_CODES)[number];
 
+export const RECOGNITION_CONFLICT_REGIONS = [
+  'platform_status',
+  'shipping_information',
+  'purchased_items',
+  'amount_summary',
+  'order_details',
+] as const;
+
+export type RecognitionConflictRegion =
+  (typeof RECOGNITION_CONFLICT_REGIONS)[number];
+
+export const RECOGNITION_CONFLICT_FIELDS = [
+  'platform_status',
+  'recipient',
+  'recipient_phone_line_text',
+  'phone',
+  'address',
+  'item_title',
+  'item_spec',
+  'item_unit_price',
+  'item_quantity',
+  'product_total',
+  'shipping_fee',
+  'amount',
+  'order_number',
+  'alipay_transaction_number',
+  'buyer_nickname_label',
+  'buyer_nickname',
+  'order_time',
+  'payment_time',
+] as const;
+
+export type RecognitionConflictField =
+  (typeof RECOGNITION_CONFLICT_FIELDS)[number];
+
+export const RECOGNITION_CONFLICT_KINDS = [
+  'multiple_candidates',
+  'value_mismatch',
+  'unsupported_value',
+  'outside_region',
+  'instruction_echo',
+] as const;
+
+export type RecognitionConflictKind =
+  (typeof RECOGNITION_CONFLICT_KINDS)[number];
+
+export const RECOGNITION_CONFLICT_LIMITS = {
+  details: 100,
+  valuesPerSide: 20,
+  textLength: 1_000,
+} as const;
+
+export type RecognitionConflictDetail = {
+  region: RecognitionConflictRegion;
+  field: RecognitionConflictField;
+  kind: RecognitionConflictKind;
+  itemIndex?: number;
+  locatedValues: string[];
+  extractedValues: string[];
+  retainedValue: string | null;
+};
+
 export type RecognitionResult = {
   platform: OrderPlatform;
   sellerAccount: string;
@@ -102,6 +164,7 @@ export type RecognitionAttempt = {
   result: RecognitionResult;
   evidences: [RecognitionEvidence, ...RecognitionEvidence[]];
   reviewIssues?: OrderReviewIssueCode[];
+  recognitionConflicts?: RecognitionConflictDetail[];
 };
 
 export type RecognizerSource = {
@@ -127,6 +190,7 @@ export type OrderDraft = Omit<RecognitionResult, 'items'> & {
   screenshotId: string;
   status: 'awaiting_review' | 'confirmed' | 'cancelled';
   reviewIssues?: OrderReviewIssueCode[];
+  recognitionConflicts?: RecognitionConflictDetail[];
   createdAt: string;
   items: DraftItem[];
 };
@@ -163,6 +227,7 @@ export type RecognitionBatchItem = {
   retryCount?: number;
   nextRetryAt?: string;
   reviewIssues?: OrderReviewIssueCode[];
+  recognitionConflicts?: RecognitionConflictDetail[];
   resolution?: RecognitionBatchItemResolution;
 };
 

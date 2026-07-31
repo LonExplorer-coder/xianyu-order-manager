@@ -154,6 +154,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 10) migrateToVersion10(database);
   if (row.version < 11) migrateToVersion11(database);
   if (row.version < 12) migrateToVersion12(database);
+  if (row.version < 13) migrateToVersion13(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1214,6 +1215,31 @@ function migrateToVersion12(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion13(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE order_drafts
+      ADD COLUMN recognition_conflicts_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (
+          json_valid(recognition_conflicts_json)
+          AND json_type(recognition_conflicts_json) = 'array'
+        );
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

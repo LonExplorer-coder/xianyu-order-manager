@@ -15,6 +15,7 @@ import type {
   RecognitionBatch,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
+  RecognitionConflictDetail,
   RecognitionEvidence,
   OrderSummary,
   OrderUpdateConfirmation,
@@ -24,6 +25,12 @@ import type {
   Recognizer,
   SourceScreenshot,
   SourceSnapshot,
+} from '../core/contracts';
+import {
+  RECOGNITION_CONFLICT_FIELDS,
+  RECOGNITION_CONFLICT_KINDS,
+  RECOGNITION_CONFLICT_LIMITS,
+  RECOGNITION_CONFLICT_REGIONS,
 } from '../core/contracts';
 import { orderEditTargetId, prepareOrderEdit } from '../core/order-edit';
 import type {
@@ -122,6 +129,7 @@ export type RecognitionBatchItemUpdate = {
   retryCount?: number;
   nextRetryAt?: string | null;
   reviewIssues?: OrderReviewIssueCode[];
+  recognitionConflicts?: RecognitionConflictDetail[];
   resolution?: RecognitionBatchItemResolution;
 };
 
@@ -144,6 +152,7 @@ type PersistRecognitionDraftInput = {
   recognition: RecognitionResult;
   evidences: readonly RecognitionEvidence[];
   reviewIssues: readonly OrderReviewIssueCode[];
+  recognitionConflicts: readonly RecognitionConflictDetail[];
   intakeDecisionPending: boolean;
   createdAt: string;
 };
@@ -155,6 +164,19 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   '.webp': 'image/webp',
 };
 const MAX_SOURCE_SCREENSHOT_BYTES = 7_500_000;
+const MAX_RECOGNITION_CONFLICTS = RECOGNITION_CONFLICT_LIMITS.details;
+const MAX_RECOGNITION_CONFLICT_VALUES = RECOGNITION_CONFLICT_LIMITS.valuesPerSide;
+const MAX_RECOGNITION_CONFLICT_TEXT_LENGTH = RECOGNITION_CONFLICT_LIMITS.textLength;
+const MAX_RECOGNITION_CONFLICTS_JSON_LENGTH = 5_000_000;
+const RECOGNITION_CONFLICT_DETAIL_KEYS = new Set([
+  'region',
+  'field',
+  'kind',
+  'itemIndex',
+  'locatedValues',
+  'extractedValues',
+  'retainedValue',
+]);
 
 export class LocalApplication {
   private workspace?: Workspace;
@@ -451,6 +473,7 @@ export class LocalApplication {
           recognition,
           evidences: [],
           reviewIssues: assessAutomaticImport(recognition),
+          recognitionConflicts: [],
           intakeDecisionPending: false,
           createdAt: now,
         });
@@ -502,7 +525,8 @@ export class LocalApplication {
       .prepare(`
         SELECT items.id, items.batch_id, items.source_name, items.status,
           items.draft_id, items.error_message, items.retry_count, items.next_retry_at,
-          items.resolution_kind, drafts.review_issues_json
+          items.resolution_kind, drafts.review_issues_json,
+          drafts.recognition_conflicts_json
         FROM recognition_batch_items AS items
         JOIN recognition_batches AS batches ON batches.id = items.batch_id
         LEFT JOIN order_drafts AS drafts ON drafts.id = items.draft_id
@@ -539,6 +563,13 @@ export class LocalApplication {
           ...(row.review_issues_json === null
             ? {}
             : { reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json) }),
+          ...(row.recognition_conflicts_json === null
+            ? {}
+            : {
+                recognitionConflicts: parseStoredRecognitionConflicts(
+                  row.recognition_conflicts_json,
+                ),
+              }),
         }));
       return {
         id: batchId,
@@ -673,6 +704,7 @@ export class LocalApplication {
           recognition,
           evidences: attempt.evidences,
           reviewIssues,
+          recognitionConflicts: attempt.recognitionConflicts ?? [],
           intakeDecisionPending: true,
           createdAt: now,
         });
@@ -805,6 +837,9 @@ export class LocalApplication {
         ? asString(row.status) as OrderDraft['status']
         : 'cancelled',
       reviewIssues: parseStoredOrderReviewIssues(row.review_issues_json),
+      recognitionConflicts: parseStoredRecognitionConflicts(
+        row.recognition_conflicts_json,
+      ),
       createdAt: asString(row.created_at),
       items: itemRows.map((item) => {
         const quantitySource = asQuantitySource(item.quantity_source);
@@ -3415,10 +3450,11 @@ export class LocalApplication {
           product_total_cents, product_total_present,
           shipping_fee_cents, shipping_fee_present, amount_cents, amount_present,
           platform_transaction_status, fulfillment_status,
-          status, recognition_json, review_issues_json, intake_decision_pending, created_at
+          status, recognition_json, review_issues_json, recognition_conflicts_json,
+          intake_decision_pending, created_at
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, 'awaiting_review', ?, ?, ?, ?
+          ?, ?, ?, 'awaiting_review', ?, ?, ?, ?, ?
         )
       `)
       .run(
@@ -3452,6 +3488,7 @@ export class LocalApplication {
         recognition.fulfillmentStatus,
         serializeRecognition(recognition),
         serializeOrderReviewIssues(input.reviewIssues),
+        serializeRecognitionConflicts(input.recognitionConflicts),
         input.intakeDecisionPending ? 1 : 0,
         input.createdAt,
       );
@@ -4163,6 +4200,83 @@ function serializeOrderReviewIssues(
     throw new Error('订单草稿待确认原因格式无效');
   }
   return JSON.stringify(normalizeOrderReviewIssues(reviewIssues));
+}
+
+function parseStoredRecognitionConflicts(
+  value: string | number | null | undefined,
+): RecognitionConflictDetail[] {
+  const serialized = asString(value);
+  if (serialized.length > MAX_RECOGNITION_CONFLICTS_JSON_LENGTH) {
+    throw new Error('订单草稿识别冲突明细格式错误');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error('订单草稿识别冲突明细格式错误', { cause: error });
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length > MAX_RECOGNITION_CONFLICTS ||
+    !parsed.every(isRecognitionConflictDetail)
+  ) {
+    throw new Error('订单草稿识别冲突明细格式错误');
+  }
+  return parsed;
+}
+
+function serializeRecognitionConflicts(
+  conflicts: readonly RecognitionConflictDetail[],
+): string {
+  if (
+    !Array.isArray(conflicts) ||
+    conflicts.length > MAX_RECOGNITION_CONFLICTS ||
+    !conflicts.every(isRecognitionConflictDetail)
+  ) {
+    throw new Error('订单草稿识别冲突明细格式无效');
+  }
+  const serialized = JSON.stringify(conflicts.map((conflict) => ({
+    region: conflict.region,
+    field: conflict.field,
+    kind: conflict.kind,
+    ...(conflict.itemIndex === undefined ? {} : { itemIndex: conflict.itemIndex }),
+    locatedValues: [...conflict.locatedValues],
+    extractedValues: [...conflict.extractedValues],
+    retainedValue: conflict.retainedValue,
+  })));
+  if (serialized.length > MAX_RECOGNITION_CONFLICTS_JSON_LENGTH) {
+    throw new Error('订单草稿识别冲突明细格式无效');
+  }
+  return serialized;
+}
+
+function isRecognitionConflictDetail(value: unknown): value is RecognitionConflictDetail {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return Object.keys(candidate).every((key) => RECOGNITION_CONFLICT_DETAIL_KEYS.has(key)) &&
+    RECOGNITION_CONFLICT_REGIONS.some((region) => region === candidate.region) &&
+    RECOGNITION_CONFLICT_FIELDS.some((field) => field === candidate.field) &&
+    RECOGNITION_CONFLICT_KINDS.some((kind) => kind === candidate.kind) &&
+    (
+      candidate.itemIndex === undefined ||
+      (Number.isSafeInteger(candidate.itemIndex) && (candidate.itemIndex as number) >= 0)
+    ) &&
+    isStringArray(candidate.locatedValues) &&
+    isStringArray(candidate.extractedValues) &&
+    (
+      candidate.retainedValue === null ||
+      isBoundedRecognitionConflictText(candidate.retainedValue)
+    );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) &&
+    value.length <= MAX_RECOGNITION_CONFLICT_VALUES &&
+    value.every(isBoundedRecognitionConflictText);
+}
+
+function isBoundedRecognitionConflictText(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_RECOGNITION_CONFLICT_TEXT_LENGTH;
 }
 
 function reviewIssuesForRetargetedOrder(
