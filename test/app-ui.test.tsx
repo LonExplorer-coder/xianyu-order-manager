@@ -314,7 +314,7 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
     expect(screen.getByRole('button', { name: '上传订单截图' })).toBeVisible();
     expect(screen.getByText(
-      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。',
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。',
     )).toBeVisible();
     expect(screen.getByText('/Users/test/闲鱼订单')).toBeVisible();
   });
@@ -1356,7 +1356,7 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('table', { name: '原始订单' })).toBeVisible();
     expect(screen.getByText(
-      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。',
+      '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。',
     )).toBeVisible();
     await user.click(
       screen.getByRole('button', { name: `查看订单 ${confirmedOrder.orderNumber}` }),

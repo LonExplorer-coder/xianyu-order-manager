@@ -19,6 +19,12 @@ import type {
   BailianConnectionTester,
   BailianRegion,
 } from '../../main/ocr-settings';
+import {
+  planXianyuSemanticRegions,
+  xianyuSemanticRegionPrompt,
+  type XianyuSemanticRegionLayout,
+} from './xianyu-semantic-regions';
+import { processXianyuSixRegionExtraction } from './xianyu-six-region-extraction';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -28,6 +34,9 @@ const CONNECTION_TEST_IMAGE =
 const MAXIMUM_BASE64_DATA_URL_BYTES = 10 * 1024 * 1024;
 const ORDER_NUMBER_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;
 const XIANYU_STATUS_SIGNALS_KEY = '__xianyu_status_signals';
+const XIANYU_PROCESSED_ORDER_NUMBER_KEY = '__xianyu_processed_order_number';
+const XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY =
+  '__xianyu_platform_status_region_only';
 
 const ORDER_EXTRACTION_USER_PROMPT = [
   '请严格按照 result_schema 分模块提取当前闲鱼订单，只依据截图中可见内容，不得猜测。',
@@ -184,6 +193,41 @@ const ORDER_RESULT_SCHEMA = {
   ...PAGE_CONTEXT_MODULE_SCHEMA,
 } as const;
 
+const SIX_REGION_RESULT_SCHEMA = {
+  platform_status: {
+    top_status_text:
+      '只原样复制区域 1 中的顶部平台交易状态标题，看不到时返回 null',
+  },
+  ...SHIPPING_INFORMATION_MODULE_SCHEMA,
+  ...PURCHASED_ITEMS_MODULE_SCHEMA,
+  amount_summary: {
+    product_total: '只提取区域 4 中“商品总价”对应的金额，看不到时返回 null',
+    shipping_fee: '只提取区域 4 中“运费”对应的金额，看不到时返回 null',
+    amount: '只提取区域 4 中“成交价”或“实付金额”对应的金额，看不到时返回 null',
+  },
+  order_details: {
+    detail_state:
+      '区域 5 只显示订单编号时返回 collapsed；还显示支付宝交易号、买家昵称或时间等详情时返回 expanded；无法判断返回 unknown',
+    order_number: '只提取区域 5 中明确标注“订单编号”或“订单号”的完整字符串',
+    alipay_transaction_number:
+      '只提取区域 5 中明确标注“支付宝交易号”的完整字符串，看不到时返回 null',
+    buyer_nickname_label:
+      '区域 5 中明确看到“买家昵称”标签时返回“买家昵称”，否则返回 null',
+    buyer_nickname:
+      '只提取区域 5 中“买家昵称”标签对应的值，不能使用区域 2 的收件人，看不到标签时返回 null',
+    order_time: '只提取区域 5 中“下单时间”或“订单时间”的原文，看不到时返回 null',
+    payment_time: '只提取区域 5 中“付款时间”或“支付时间”的原文，看不到时返回 null',
+    controls: [
+      '只列区域 5 内可点击的按钮或链接，例如“复制”“交易快照”“展开”“收起”',
+    ],
+  },
+  fulfillment_signals: {
+    global_controls: [
+      '只原样列出区域 6 中的订单操作按钮，例如“联系买家”“取消订单”“去发货”；不得列广告区的“一键转卖”',
+    ],
+  },
+} as const;
+
 const SHIPPING_REVIEW_SCHEMA = {
   shipping_contact: {
     recipient:
@@ -228,6 +272,29 @@ type KieResponse = {
   evidence: RecognitionEvidence;
 };
 
+type AdvancedRecognitionResponse = {
+  wordsInfo: unknown;
+  evidence: RecognitionEvidence;
+};
+
+type OcrTaskResponse = {
+  ocrResult: Record<string, unknown>;
+  evidence: RecognitionEvidence;
+};
+
+type OcrTaskInput = {
+  endpoint: string;
+  apiKey: string;
+  imageDataUrl: string;
+} & (
+  | { task: 'advanced_recognition' }
+  | {
+      task: 'key_information_extraction';
+      resultSchema: Record<string, unknown>;
+      userPrompt: string;
+    }
+);
+
 type XianyuStatusSignals = {
   platformStatuses: PlatformTransactionStatus[];
   shippingControls: string[];
@@ -237,11 +304,13 @@ type XianyuStatusSignals = {
 export type BailianOcrClientOptions = {
   timeoutMilliseconds?: number;
   maxResponseBytes?: number;
+  semanticRegionsEnabled?: boolean;
 };
 
 export class BailianOcrClient implements BailianConnectionTester {
   private readonly timeoutMilliseconds: number;
   private readonly maxResponseBytes: number;
+  private readonly semanticRegionsEnabled: boolean;
 
   public constructor(
     private readonly request: FetchLike = globalThis.fetch,
@@ -249,6 +318,7 @@ export class BailianOcrClient implements BailianConnectionTester {
   ) {
     this.timeoutMilliseconds = Math.max(1, options.timeoutMilliseconds ?? 60_000);
     this.maxResponseBytes = Math.max(1, options.maxResponseBytes ?? 1_048_576);
+    this.semanticRegionsEnabled = options.semanticRegionsEnabled ?? false;
   }
 
   public async recognizeOrder(input: {
@@ -258,6 +328,9 @@ export class BailianOcrClient implements BailianConnectionTester {
     sellerAccount: string;
     source: RecognizerSource;
   }): Promise<RecognitionAttempt> {
+    if (this.semanticRegionsEnabled) {
+      return this.recognizeOrderWithSemanticRegions(input);
+    }
     const endpoint = orderRecognitionEndpointFor(input.workspaceId, input.region);
     const imageDataUrl = toImageDataUrl(input.source);
     const primary = await this.requestKeyInformation({
@@ -347,6 +420,112 @@ export class BailianOcrClient implements BailianConnectionTester {
     return { result, evidences, reviewIssues: [...new Set(reviewIssues)] };
   }
 
+  private async recognizeOrderWithSemanticRegions(input: {
+    workspaceId: string;
+    region: BailianRegion;
+    apiKey: string;
+    sellerAccount: string;
+    source: RecognizerSource;
+  }): Promise<RecognitionAttempt> {
+    const endpoint = orderRecognitionEndpointFor(input.workspaceId, input.region);
+    const imageDataUrl = toImageDataUrl(input.source);
+    let advanced: AdvancedRecognitionResponse | undefined;
+    try {
+      advanced = await this.requestAdvancedRecognition({
+        endpoint,
+        apiKey: input.apiKey,
+        imageDataUrl,
+      });
+    } catch {
+      const fallback = await this.requestKeyInformation({
+        endpoint,
+        apiKey: input.apiKey,
+        imageDataUrl,
+        resultSchema: ORDER_RESULT_SCHEMA,
+        userPrompt: ORDER_EXTRACTION_USER_PROMPT,
+      });
+      const result = normalizeOrderResult(
+        sanitizeOrderExtraction(flattenModularExtraction(fallback.extracted)),
+        input.sellerAccount,
+      );
+      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
+      if (semanticScreenshotContentIsIncomplete(result)) {
+        reviewIssues.push('screenshot_content_incomplete');
+      }
+      return {
+        result,
+        evidences: [fallback.evidence],
+        reviewIssues,
+      };
+    }
+
+    const layout = planXianyuSemanticRegions(advanced.wordsInfo);
+    let extraction: KieResponse;
+    try {
+      extraction = await this.requestKeyInformation({
+        endpoint,
+        apiKey: input.apiKey,
+        imageDataUrl,
+        resultSchema: layout ? SIX_REGION_RESULT_SCHEMA : ORDER_RESULT_SCHEMA,
+        userPrompt: layout
+          ? xianyuSemanticRegionPrompt(layout)
+          : ORDER_EXTRACTION_USER_PROMPT,
+      });
+    } catch (error) {
+      if (!layout) throw error;
+      const result = normalizeOrderResult(
+        sanitizeOrderExtraction(
+          flattenSixRegionExtraction({}, layout).extracted,
+        ),
+        input.sellerAccount,
+      );
+      const reviewIssues: OrderReviewIssueCode[] = ['targeted_review_failed'];
+      if (semanticScreenshotContentIsIncomplete(result)) {
+        reviewIssues.push('screenshot_content_incomplete');
+      }
+      return {
+        result,
+        evidences: [advanced.evidence],
+        reviewIssues,
+      };
+    }
+    const sixRegionExtraction = layout
+      ? flattenSixRegionExtraction(extraction.extracted, layout)
+      : undefined;
+    const criticalConflict = sixRegionExtraction?.hasCriticalConflict ?? false;
+    const flattened = sixRegionExtraction?.extracted ??
+      flattenModularExtraction(extraction.extracted);
+    const result = normalizeOrderResult(
+      sanitizeOrderExtraction(flattened),
+      input.sellerAccount,
+    );
+    const reviewIssues: OrderReviewIssueCode[] = [];
+    if (criticalConflict) reviewIssues.push('targeted_review_conflict');
+    if (!layout || semanticScreenshotContentIsIncomplete(result)) {
+      reviewIssues.push('screenshot_content_incomplete');
+    }
+    return {
+      result,
+      evidences: [advanced.evidence, extraction.evidence],
+      reviewIssues,
+    };
+  }
+
+  private async requestAdvancedRecognition(input: {
+    endpoint: string;
+    apiKey: string;
+    imageDataUrl: string;
+  }): Promise<AdvancedRecognitionResponse> {
+    const response = await this.requestOcrTask({
+      ...input,
+      task: 'advanced_recognition',
+    });
+    return {
+      wordsInfo: response.ocrResult.words_info,
+      evidence: response.evidence,
+    };
+  }
+
   private async requestKeyInformation(input: {
     endpoint: string;
     apiKey: string;
@@ -354,9 +533,38 @@ export class BailianOcrClient implements BailianConnectionTester {
     resultSchema: Record<string, unknown>;
     userPrompt: string;
   }): Promise<KieResponse> {
+    const response = await this.requestOcrTask({
+      ...input,
+      task: 'key_information_extraction',
+    });
+    return {
+      extracted: enrichExtractionFromProcessedText(
+        asRecord(response.ocrResult.kv_result),
+        response.ocrResult.processed_text,
+      ),
+      evidence: response.evidence,
+    };
+  }
+
+  private async requestOcrTask(input: OcrTaskInput): Promise<OcrTaskResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMilliseconds);
     let response: Response;
+    const content: Array<Record<string, unknown>> = [{
+      image: input.imageDataUrl,
+      min_pixels: 32 * 32 * 3,
+      max_pixels: 32 * 32 * 8192,
+      enable_rotate: false,
+    }];
+    if (input.task === 'key_information_extraction') {
+      content.push({ text: input.userPrompt });
+    }
+    const ocrOptions = input.task === 'key_information_extraction'
+      ? {
+          task: input.task,
+          task_config: { result_schema: input.resultSchema },
+        }
+      : { task: input.task };
     try {
       response = await this.request(input.endpoint, {
         method: 'POST',
@@ -367,26 +575,10 @@ export class BailianOcrClient implements BailianConnectionTester {
         body: JSON.stringify({
           model: 'qwen3.5-ocr',
           input: {
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  {
-                    image: input.imageDataUrl,
-                    min_pixels: 32 * 32 * 3,
-                    max_pixels: 32 * 32 * 8192,
-                    enable_rotate: false,
-                  },
-                  { text: input.userPrompt },
-                ],
-              },
-            ],
+            messages: [{ role: 'user', content }],
           },
           parameters: {
-            ocr_options: {
-              task: 'key_information_extraction',
-              task_config: { result_schema: input.resultSchema },
-            },
+            ocr_options: ocrOptions,
           },
         }),
         signal: controller.signal,
@@ -427,13 +619,8 @@ export class BailianOcrClient implements BailianConnectionTester {
       }
       const firstContent = asRecord(content[0]);
       const ocrResult = asRecord(firstContent.ocr_result);
-      const extracted = enrichExtractionFromProcessedText(
-        asRecord(ocrResult.kv_result),
-        ocrResult.processed_text,
-      );
-
       return {
-        extracted,
+        ocrResult,
         evidence: {
           provider: 'aliyun-bailian',
           model: 'qwen3.5-ocr',
@@ -577,17 +764,31 @@ function enrichExtractionFromProcessedText(
   };
   enriched = enrichShippingPhoneFromProcessed(enriched, processedExtraction);
   const transaction = recordOrEmpty(enriched.transaction_information);
-  const modularOrderNumber = transaction.order_number;
-  const currentOrderNumber = Object.prototype.hasOwnProperty.call(
+  const orderDetails = recordOrEmpty(enriched.order_details);
+  const hasOrderDetails = Object.prototype.hasOwnProperty.call(
+    enriched,
+    'order_details',
+  );
+  const hasTransactionInformation = Object.prototype.hasOwnProperty.call(
     enriched,
     'transaction_information',
-  )
-    ? modularOrderNumber
-    : enriched.order_number;
+  );
+  const currentOrderNumber = hasOrderDetails
+    ? orderDetails.order_number
+    : hasTransactionInformation
+      ? transaction.order_number
+      : enriched.order_number;
   if (usableOrderNumber(currentOrderNumber)) return enriched;
   const orderNumber = orderNumberFromProcessedExtraction(processedExtraction);
   if (!orderNumber) return enriched;
-  if (Object.prototype.hasOwnProperty.call(enriched, 'transaction_information')) {
+  if (hasOrderDetails) {
+    return {
+      ...enriched,
+      order_details: { ...orderDetails, order_number: orderNumber },
+      [XIANYU_PROCESSED_ORDER_NUMBER_KEY]: orderNumber,
+    };
+  }
+  if (hasTransactionInformation) {
     enriched = {
       ...enriched,
       transaction_information: { ...transaction, order_number: orderNumber },
@@ -655,6 +856,9 @@ function normalizedComparableAddress(value: unknown): string {
 function orderNumberFromProcessedExtraction(
   processedExtraction: Record<string, unknown>,
 ): string {
+  const orderDetails = recordOrEmpty(processedExtraction.order_details);
+  const sixRegionOrderNumber = validatedOrderNumber(orderDetails.order_number);
+  if (sixRegionOrderNumber) return sixRegionOrderNumber;
   const transaction = recordOrEmpty(processedExtraction.transaction_information);
   return validatedOrderNumber(transaction.order_number);
 }
@@ -1219,6 +1423,26 @@ function flattenReviewResult(review: Record<string, unknown>): Record<string, un
   };
 }
 
+function flattenSixRegionExtraction(
+  extracted: Record<string, unknown>,
+  layout: XianyuSemanticRegionLayout,
+): { extracted: Record<string, unknown>; hasCriticalConflict: boolean } {
+  const processed = processXianyuSixRegionExtraction({
+    extracted,
+    layout,
+    processedOrderNumber: validatedOrderNumber(
+      extracted[XIANYU_PROCESSED_ORDER_NUMBER_KEY],
+    ),
+  });
+  return {
+    hasCriticalConflict: processed.hasCriticalConflict,
+    extracted: flattenModularExtraction({
+      [XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY]: true,
+      ...processed.modularExtraction,
+    }),
+  };
+}
+
 function hasModularExtraction(extracted: Record<string, unknown>): boolean {
   return [
     'page_header_status_text',
@@ -1240,6 +1464,13 @@ function modularScreenshotContentIsIncomplete(
     result.productTotalCents === null ||
     result.shippingFeeCents === null ||
     result.amountCents === null;
+}
+
+function semanticScreenshotContentIsIncomplete(
+  result: RecognitionResult,
+): boolean {
+  return modularScreenshotContentIsIncomplete(result) ||
+    result.platformTransactionStatus === 'unknown';
 }
 
 function flattenModularExtraction(
@@ -1422,6 +1653,7 @@ function resolvedPlatformTransactionStatus(
   const inferredStatuses = [...new Set(signals.platformStatuses)];
   if (inferredStatuses.length === 1) return inferredStatuses[0];
   if (inferredStatuses.length > 1) return 'unknown';
+  if (extracted[XIANYU_PLATFORM_STATUS_REGION_ONLY_KEY] === true) return 'unknown';
   // On the seller's Xianyu order page, an actionable "去发货" is only
   // shown after buyer payment. Explicit header evidence always wins above.
   return [...signals.shippingControls, ...signals.globalControls].some(isGoShipControl)

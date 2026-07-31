@@ -14,7 +14,9 @@ export function createConfiguredDesktopSession(input: {
   request?: FetchLike;
   validateDataDirectory?: DataDirectoryValidator;
 }): DesktopSession {
-  const client = new BailianOcrClient(input.request);
+  const client = new BailianOcrClient(input.request, {
+    semanticRegionsEnabled: true,
+  });
   const ocrSettings = new OcrSettingsService(
     new OcrSettingsFile(input.configDirectory),
     input.apiKeyStore,

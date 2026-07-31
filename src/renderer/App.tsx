@@ -95,7 +95,7 @@ type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 
-const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 1 次 OCR；关键字段缺失或冲突时最多自动复核 1 次，可能产生第 2 次调用与费用。复核失败仍保留首次结果供人工校对。';
+const OCR_UPLOAD_DISCLOSURE = '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图通常调用 2 次 OCR：先定位订单六区，再按区提取字段；不会追加第 3 次自动复核。定位缺失、字段冲突或截图不完整时会转入人工确认。';
 const DEFAULT_ORDER_QUERY: OrderWorkbenchQuery = {
   dateField: 'ordered_at',
   lifecycleStatus: 'active',
