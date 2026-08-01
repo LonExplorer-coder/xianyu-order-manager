@@ -1,18 +1,27 @@
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { BootstrapState } from '../src/core/desktop-api';
 import type { DesktopSession } from '../src/main/desktop-session';
 
-const electronBoundary = vi.hoisted(() => ({
-  handlers: new Map<string, (...args: unknown[]) => unknown>(),
-  showOpenDialog: vi.fn(),
-  getPath: vi.fn((name: string) => {
-    if (name === 'documents') return '/Users/test/Documents';
-    if (name === 'exe') return '/Applications/XianyuOrderManager.app/Contents/MacOS/XianyuOrderManager';
-    return '/Users/test/Library/Application Support/闲鱼订单管理';
-  }),
-  window: { isDestroyed: () => false },
-}));
+const electronBoundary = vi.hoisted(() => {
+  const documentsPath = process.platform === 'win32'
+    ? 'C:\\Users\\test\\Documents'
+    : '/Users/test/Documents';
+
+  return {
+    documentsPath,
+    handlers: new Map<string, (...args: unknown[]) => unknown>(),
+    showOpenDialog: vi.fn(),
+    getPath: vi.fn((name: string) => {
+      if (name === 'documents') return documentsPath;
+      if (name === 'exe') return '/Applications/XianyuOrderManager.app/Contents/MacOS/XianyuOrderManager';
+      return '/Users/test/Library/Application Support/闲鱼订单管理';
+    }),
+    window: { isDestroyed: () => false },
+  };
+});
 
 vi.mock('electron', () => ({
   app: {
@@ -103,7 +112,7 @@ describe('数据目录 Electron IPC', () => {
     expect(electronBoundary.showOpenDialog).toHaveBeenCalledWith(
       electronBoundary.window,
       expect.objectContaining({
-        defaultPath: '/Users/test/Documents/闲鱼订单数据',
+        defaultPath: join(electronBoundary.documentsPath, '闲鱼订单数据'),
       }),
     );
   });
