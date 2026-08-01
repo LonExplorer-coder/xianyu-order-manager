@@ -28,7 +28,10 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+      - name: Run checks with bounded test workers
+        run: pnpm check
+        env:
+          VITEST_MAX_WORKERS: 1
       - run: pnpm test:native-image-crop
       - run: pnpm test:credential-store
       - name: Build macOS portable ZIP

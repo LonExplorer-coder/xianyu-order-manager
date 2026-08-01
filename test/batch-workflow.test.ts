@@ -89,15 +89,14 @@ describe('批量来源截图识别队列', () => {
 
     expect(session.getOrderIntakeSettings()).toEqual({ automaticImportEnabled: false });
     await session.submitSourceScreenshots([sourcePath]);
+    await session.waitForCurrentRecognitionWork();
 
-    await eventually(() => {
-      expect(session.listRecognitionBatches()[0]).toMatchObject({
-        counts: { awaiting_confirmation: 1, imported: 0 },
-        items: [{
-          status: 'awaiting_confirmation',
-          reviewIssues: ['automatic_import_disabled'],
-        }],
-      });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      counts: { awaiting_confirmation: 1, imported: 0 },
+      items: [{
+        status: 'awaiting_confirmation',
+        reviewIssues: ['automatic_import_disabled'],
+      }],
     });
     expect(session.listOrders()).toEqual([]);
   });
@@ -1921,10 +1920,9 @@ describe('批量来源截图识别队列', () => {
     expect(single.totalCount).toBe(1);
     expect(maximum.totalCount).toBe(50);
     expect(single.id).not.toBe(maximum.id);
-    await eventually(() => {
-      expect(session.listRecognitionBatches().map((batch) => batch.processedCount))
-        .toEqual([50, 1]);
-    });
+    await session.waitForCurrentRecognitionWork();
+    expect(session.listRecognitionBatches().map((batch) => batch.processedCount))
+      .toEqual([50, 1]);
     expect(recognize).toHaveBeenCalledTimes(51);
   });
 

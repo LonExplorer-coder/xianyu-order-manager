@@ -231,6 +231,10 @@ export class DesktopSession {
     return structuredClone(this.recognitionBatches);
   }
 
+  public async waitForCurrentRecognitionWork(): Promise<void> {
+    await this.recognitionQueue;
+  }
+
   public async retryRecognitionItem(batchId: string, itemId: string): Promise<void> {
     const application = this.requireApplication();
     const generation = this.workspaceGeneration;

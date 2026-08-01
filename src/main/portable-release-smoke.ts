@@ -44,6 +44,7 @@ export async function runPortableReleaseDataSmoke(
   try {
     if (input.phase === 'write') {
       await importPortableSmokeOrder(session, configDirectory, dataDirectory);
+      await session.waitForCurrentRecognitionWork();
     } else {
       const restored = session.restore();
       if (restored.kind !== 'ready' || resolve(restored.dataDirectory) !== dataDirectory) {
