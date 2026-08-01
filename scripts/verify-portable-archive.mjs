@@ -201,6 +201,7 @@ function stageProgram(sourceProgram, stageRoot, platform) {
     recursive: true,
     dereference: false,
     preserveTimestamps: true,
+    verbatimSymlinks: true,
   });
   const executable = platform === 'darwin'
     ? join(destination, 'Contents', 'MacOS', 'XianyuOrderManager')
