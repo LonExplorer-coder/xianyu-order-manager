@@ -199,6 +199,70 @@ describe('闲鱼订单六区识别', () => {
     expect(body.parameters?.ocr_options).toEqual({ task: 'advanced_recognition' });
   });
 
+  it('支付宝交易号续行拉大标签间距时仍保留昵称、交易时间和完整交易号', async () => {
+    const words = [
+      locatedWord('买家已付款，请尽快发货', 43, 343, 770, 390),
+      locatedWord('合成收件人 13900000001 复制', 72, 538, 700, 582),
+      locatedWord('测试省测试市示例区安全路1号', 72, 602, 1_000, 650),
+      locatedWord('合成真实商品', 369, 806, 800, 850),
+      locatedWord('¥8.00', 980, 814, 1_080, 850),
+      locatedWord('款式：白色', 371, 870, 650, 914),
+      locatedWord('成交价', 72, 1_129, 180, 1_170),
+      locatedWord('¥8.00', 940, 1_134, 1_040, 1_170),
+      locatedWord('商品总价', 97, 1_221, 240, 1_265),
+      locatedWord('¥8.00', 987, 1_226, 1_080, 1_265),
+      locatedWord('运费', 95, 1_303, 160, 1_345),
+      locatedWord('¥0.00', 987, 1_311, 1_080, 1_345),
+      locatedWord('订单编号', 71, 1_446, 240, 1_490),
+      locatedWord('XY-WRAPPED-0001', 534, 1_449, 920, 1_490),
+      locatedWord('交易快照', 71, 1_544, 240, 1_587),
+      locatedWord('支付宝交易号', 70, 1_636, 320, 1_679),
+      locatedWord('20260727230011518114410211', 392, 1_638, 1_000, 1_677),
+      locatedWord('38', 926, 1_702, 970, 1_736),
+      locatedWord('买家昵称', 71, 1_795, 240, 1_838),
+      locatedWord('x***4', 983, 1_800, 1_082, 1_836),
+      locatedWord('下单时间', 71, 1_889, 240, 1_935),
+      locatedWord('2026-07-27 11:21:46', 687, 1_892, 1_080, 1_933),
+      locatedWord('付款时间', 71, 1_984, 240, 2_028),
+      locatedWord('2026-07-27 11:21:54', 687, 1_987, 1_080, 2_028),
+      locatedWord('联系买家', 49, 2_368, 220, 2_410),
+      locatedWord('取消订单', 628, 2_322, 790, 2_365),
+      locatedWord('去发货', 939, 2_322, 1_080, 2_365),
+    ];
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      alipayTransactionNumber: '2026072723001151811441021138',
+      buyerNickname: 'x***4',
+      orderedAtOriginal: '2026-07-27 11:21:46',
+      paidAtOriginal: '2026-07-27 11:21:54',
+    });
+    expect(attempt.reviewIssues).toEqual([]);
+  });
+
+  it.each([
+    ['买家昵称', /买家昵称/u, 'buyerNickname'],
+    ['下单时间', /下单时间/u, 'orderedAtOriginal'],
+    ['付款时间', /付款时间/u, 'paidAtOriginal'],
+  ] as const)('已展开到支付宝交易号但缺少%s时进入待确认', async (
+    _label,
+    omittedLine,
+    resultField,
+  ) => {
+    const words = completeLocatedWords().filter((word) =>
+      !omittedLine.test(word.text)
+    );
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result.alipayTransactionNumber).toBe('ALI-SYNTH-SIX-0001');
+    expect(attempt.result[resultField]).toBe('');
+    expect(attempt.reviewIssues).toEqual(['screenshot_content_incomplete']);
+  });
+
   it('行政区划只从识别原文中的完整地址拆分，不会生成楼盘名称中的江城区', async () => {
     const address = '四川省成都市锦江区狮子山街道安全路1号滨江樾城10栋';
     const words = completeLocatedWords().flatMap((word) =>
@@ -266,6 +330,23 @@ describe('闲鱼订单六区识别', () => {
     expect(attempt.result.items).toHaveLength(1);
     expect(JSON.stringify(attempt.result)).not.toContain('推广');
     expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('折叠订单号后的短数字不会桥接到推广买家昵称', async () => {
+    const words = [
+      ...collapsedLocatedWords(),
+      locatedWord('38', 620, 1_040, 660, 1_080),
+    ];
+
+    const attempt = await semanticClient(rawOnlyRequest(words))
+      .recognizeOrder(recognitionInput());
+
+    expect(attempt.result).toMatchObject({
+      orderNumber: 'XY-COLLAPSED-0001',
+      alipayTransactionNumber: '',
+      buyerNickname: '',
+    });
+    expect(JSON.stringify(attempt.result)).not.toContain('推广');
   });
 
   it('收货区出现多个不同手机号时不猜测联系人或手机号', async () => {

@@ -249,6 +249,7 @@ function expectedSemanticOrderDetails(
     alipay_transaction_number: semanticIdentifierAfterLabel(
       lines,
       /支付宝交易号/u,
+      { appendNumericContinuation: true },
     ),
     buyer_nickname_label: semanticLinesContainLabel(lines, /买家昵称/u)
       ? '买家昵称'
@@ -1197,6 +1198,7 @@ function recoverSemanticOrderDetails(
     { alipay_transaction_number: semanticIdentifierAfterLabel(
       lines,
       /支付宝交易号/u,
+      { appendNumericContinuation: true },
     ) },
     'alipay_transaction_number',
   );
@@ -1276,8 +1278,10 @@ function semanticPrice(line: string): { value: string; index: number } | undefin
 function semanticIdentifierAfterLabel(
   lines: string[],
   label: RegExp,
+  options: { appendNumericContinuation?: boolean } = {},
 ): string | undefined {
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]!;
     const compactLine = line.normalize('NFKC').replace(/\s+/gu, '');
     const labelMatch = label.exec(compactLine);
     if (!labelMatch) continue;
@@ -1285,7 +1289,18 @@ function semanticIdentifierAfterLabel(
     const identifier = /[⌃⌄∨^\s:：]*([A-Za-z0-9][A-Za-z0-9_-]{7,63})/u.exec(
       remainder,
     )?.[1];
-    if (identifier) return identifier;
+    if (!identifier) continue;
+    if (!options.appendNumericContinuation || !/^\d{8,63}$/u.test(identifier)) {
+      return identifier;
+    }
+    let combined = identifier;
+    for (const continuationLine of lines.slice(lineIndex + 1)) {
+      const continuation = continuationLine.normalize('NFKC').replace(/\s+/gu, '');
+      if (!/^\d{1,8}$/u.test(continuation)) break;
+      if (combined.length + continuation.length > 64) break;
+      combined += continuation;
+    }
+    return combined;
   }
   return undefined;
 }

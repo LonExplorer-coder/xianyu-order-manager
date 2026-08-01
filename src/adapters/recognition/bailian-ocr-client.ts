@@ -1628,6 +1628,14 @@ function semanticScreenshotContentIsIncomplete(
   result: RecognitionResult,
 ): boolean {
   return modularScreenshotContentIsIncomplete(result) ||
+    (
+      Boolean(result.alipayTransactionNumber) &&
+      (
+        !result.buyerNickname ||
+        !result.orderedAtOriginal ||
+        !result.paidAtOriginal
+      )
+    ) ||
     result.platformTransactionStatus === 'unknown' ||
     (
       result.platformTransactionStatus === 'paid' &&

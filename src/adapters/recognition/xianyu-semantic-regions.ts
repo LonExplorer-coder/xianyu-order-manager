@@ -47,6 +47,8 @@ const AMOUNT_LABEL_PATTERN = /(?:成交价|实付金额|商品总价)/u;
 const ORDER_NUMBER_LABEL_PATTERN = /(?:订单编号|订单号)/u;
 const DETAIL_LABEL_PATTERN =
   /(?:订单编号|订单号|交易快照|支付宝交易号|买家昵称|下单时间|付款时间|订单时间|支付时间)/u;
+const ALIPAY_TRANSACTION_LABEL_PATTERN = /支付宝交易号/u;
+const DETAIL_NUMERIC_CONTINUATION_PATTERN = /^\d{1,8}$/u;
 const ITEM_CUE_PATTERN = /(?:[¥￥]\s*\d|款式|规格|[x×]\s*\d|数量\s*[:：]?\s*\d|共\s*\d+\s*件)/iu;
 const FULFILLMENT_CONTROL_PATTERN =
   /(?:联系买家|联系卖家|联系对方|取消订单|去发货|查看物流|提醒收货)/u;
@@ -94,7 +96,13 @@ export function planXianyuSemanticRegions(
   let lastDetailAnchor = detailsStart;
   for (const candidate of detailLines) {
     if (candidate === detailsStart) continue;
-    if (candidate.top - lastDetailAnchor.bottom > medianHeight * 2.5) break;
+    const precedingContentEnd = detailIdentifierContinuationEnd(
+      lines,
+      lastDetailAnchor,
+      candidate,
+      medianHeight,
+    );
+    if (candidate.top - precedingContentEnd > medianHeight * 2.5) break;
     lastDetailAnchor = candidate;
   }
   const detailContentEnd = Math.min(
@@ -316,6 +324,56 @@ function precedingItemRowStart(
     .at(-1);
   if (!previous || cue.top - previous.bottom > medianHeight * 1.8) return cue.top;
   return previous.top;
+}
+
+function detailIdentifierContinuationEnd(
+  lines: readonly LocatedOcrLine[],
+  anchor: LocatedOcrLine,
+  nextAnchor: LocatedOcrLine,
+  medianHeight: number,
+): number {
+  const identifierBounds = alipayNumericIdentifierBounds(anchor);
+  if (!identifierBounds) return anchor.bottom;
+  let contentEnd = anchor.bottom;
+  for (const line of lines) {
+    if (line.top <= anchor.bottom) continue;
+    if (line.top >= nextAnchor.top) break;
+    if (line.top - contentEnd > medianHeight * 1.5) break;
+    if (!DETAIL_NUMERIC_CONTINUATION_PATTERN.test(normalizedLine(line.text))) {
+      break;
+    }
+    if (
+      line.right < identifierBounds.left ||
+      Math.abs(line.right - identifierBounds.right) > medianHeight * 2
+    ) {
+      break;
+    }
+    contentEnd = Math.max(contentEnd, line.bottom);
+  }
+  return contentEnd;
+}
+
+function alipayNumericIdentifierBounds(
+  line: LocatedOcrLine,
+): Bounds | undefined {
+  const normalized = normalizedLine(line.text);
+  const labelMatch = ALIPAY_TRANSACTION_LABEL_PATTERN.exec(normalized);
+  if (!labelMatch) return undefined;
+  const remainder = normalized.slice(labelMatch.index + labelMatch[0].length);
+  const identifier = /^[⌃⌄∨^:：]*(\d{8,63})(?:复制)?$/u.exec(remainder)?.[1];
+  if (!identifier) return undefined;
+
+  const identifierWords = line.words.filter((word) => {
+    const candidate = normalizedLine(word.text);
+    return /^\d+$/u.test(candidate) && identifier.includes(candidate);
+  });
+  if (identifierWords.length === 0) return line;
+  return {
+    left: Math.min(...identifierWords.map((word) => word.left)),
+    top: Math.min(...identifierWords.map((word) => word.top)),
+    right: Math.max(...identifierWords.map((word) => word.right)),
+    bottom: Math.max(...identifierWords.map((word) => word.bottom)),
+  };
 }
 
 function wordsInRange(
