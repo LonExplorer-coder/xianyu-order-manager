@@ -19,6 +19,9 @@
     "test:native-image-crop": "electron scripts/electron-native-image-crop-smoke.cjs",
     "test:credential-store": "node scripts/system-credential-smoke.mjs",
     "test:packaged-credential-store": "node scripts/run-packaged-credential-smoke.mjs",
+    "acceptance:stage-one:capture": "node scripts/run-private-stage-one-capture.mjs",
+    "acceptance:stage-one:verify": "node scripts/verify-stage-one-acceptance.mjs",
+    "acceptance:stage-one:release": "node scripts/verify-stage-one-release.mjs",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test"
   },

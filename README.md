@@ -2,7 +2,7 @@
 
 一个面向个人卖家的本机订单管理工具：批量识别包含闲鱼订单详情的来源截图，将结果校对后汇总为可自定义表头的订单表、商品明细表和合并发货表。
 
-当前状态：已进入第一阶段实施。应用已打通“批量选择 1–50 张闲鱼订单截图 → 本机队列持久化 → 后台逐张真实识别 → 确定性校验 → 自动入库或带原因校对 → 重复来源判断或新旧值确认更新 → 自定义业务字段 → 多套表格模板 → 默认脱敏的两表 Excel 导出 → 退出重启后继续”的纵向流程。Mac 与 Windows 免安装 ZIP 的构建和自动验证流程已经建立；合并发货和历史导入仍按后续 Issue 实施。
+当前状态：已进入第一阶段发布验收，尚未宣告第一阶段正式发布。应用已打通“批量选择 1–50 张闲鱼订单截图 → 本机队列持久化 → 后台逐张真实识别 → 确定性校验 → 自动入库或带原因校对 → 重复来源判断或新旧值确认更新 → 自定义业务字段 → 多套表格模板 → 默认脱敏的两表 Excel 导出 → 退出重启后继续”的纵向流程。Mac 与 Windows 免安装 ZIP 的构建和自动验证流程已经建立；正式发布还需同一提交的完整 CI、至少 30 张私有金标截图验收和双平台产物证据全部通过。合并发货和历史导入仍按后续 Issue 实施。
 
 ## 当前可运行能力
 
@@ -106,6 +106,7 @@ Excel 导出验收可先筛选出数笔订单，直接点击“导出当前结�
 - [产品规格](docs/specs/001-xianyu-order-management-system.md)
 - [免安装版使用说明](docs/release/portable-user-guide.md)
 - [Mac 与 Windows 免安装版验收记录](docs/release/portable-acceptance.md)
+- [第一阶段核心可用版私有验收](docs/release/stage-one-acceptance.md)
 - [GitHub 规格 Issue #1](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/1)
 - [领域词汇](CONTEXT.md)
 - [架构决策](docs/adr/)
