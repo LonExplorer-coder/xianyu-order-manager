@@ -4779,7 +4779,9 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.selectOptions(await screen.findByRole('combobox', { name: '表格模板' }), template.id);
+    const templateSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(templateSelect, template.id);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('模板查询失败');
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
