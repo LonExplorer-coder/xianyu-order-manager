@@ -10,6 +10,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local ProjectWiki metadata and backups.
+.projectwiki/
+
 # Real order screenshots, local databases and private acceptance data never belong in git.
 /data/
 /backups/
