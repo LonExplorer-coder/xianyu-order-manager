@@ -1514,11 +1514,10 @@ describe('批量来源截图识别队列', () => {
     await Promise.all(paths.map((path, index) => writeFile(path, `missing-${index}`)));
 
     await session.submitSourceScreenshots(paths);
+    await session.waitForCurrentRecognitionWork();
 
-    await eventually(() => {
-      expect(session.listRecognitionBatches()[0]).toMatchObject({
-        counts: { awaiting_confirmation: cases.length, imported: 0 },
-      });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      counts: { awaiting_confirmation: cases.length, imported: 0 },
     });
     const items = session.listRecognitionBatches()[0].items;
     for (const entry of cases) {
@@ -1587,11 +1586,10 @@ describe('批量来源截图识别队列', () => {
     await Promise.all(paths.map((path, index) => writeFile(path, `conflict-${index}`)));
 
     await session.submitSourceScreenshots(paths);
+    await session.waitForCurrentRecognitionWork();
 
-    await eventually(() => {
-      expect(session.listRecognitionBatches()[0]).toMatchObject({
-        counts: { awaiting_confirmation: cases.length, imported: 0 },
-      });
+    expect(session.listRecognitionBatches()[0]).toMatchObject({
+      counts: { awaiting_confirmation: cases.length, imported: 0 },
     });
     const items = session.listRecognitionBatches()[0].items;
     for (const entry of cases) {

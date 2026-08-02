@@ -7,12 +7,16 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+
+import {
+  removeDirectoryBestEffort,
+  removeDirectoryWithRetries,
+} from './portable-cleanup.mjs';
 
 const packageJson = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -42,11 +46,9 @@ try {
   }, '系统凭据库');
   runPortablePhase(firstInstall.executable, 'write', configDirectory, dataDirectory);
 
-  rmSync(firstInstall.root, {
-    recursive: true,
-    force: true,
-    maxRetries: 8,
-    retryDelay: 250,
+  await removeDirectoryWithRetries(firstInstall.root, {
+    label: '第一份便携程序目录',
+    timeoutMs: 30_000,
   });
   if (existsSync(firstInstall.root)) throw new Error('无法删除第一份便携程序目录');
   for (const requiredPath of [
@@ -87,11 +89,9 @@ try {
   if (process.env.XIANYU_KEEP_PORTABLE_SMOKE_TEMP === '1' && !completed) {
     console.error(`已保留失败现场：${temporaryRoot}`);
   } else {
-    rmSync(temporaryRoot, {
-      recursive: true,
-      force: true,
-      maxRetries: 8,
-      retryDelay: 250,
+    await removeDirectoryBestEffort(temporaryRoot, {
+      label: '便携验证临时目录',
+      timeoutMs: 10_000,
     });
   }
 }
