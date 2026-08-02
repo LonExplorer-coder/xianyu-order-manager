@@ -393,6 +393,12 @@ export class DesktopSession {
     return details;
   }
 
+  public updateOrderStatusAndLogistics(input: unknown): OrderDetails[] {
+    const details = this.requireApplication().updateOrderStatusAndLogistics(input);
+    this.refreshOrders();
+    return details;
+  }
+
   public listCustomFieldDefinitions(): CustomFieldDefinition[] {
     return this.requireApplication().listCustomFieldDefinitions();
   }

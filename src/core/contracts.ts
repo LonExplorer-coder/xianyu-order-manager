@@ -261,6 +261,8 @@ export type OriginalOrder = Omit<RecognitionResult, 'items' | 'amountCents'> & {
   id: string;
   amountCents: number;
   note?: string;
+  shippingCarrier: string;
+  trackingNumber: string;
   revision: number;
   lifecycleStatus: LifecycleStatus;
   createdAt: string;
@@ -293,6 +295,8 @@ export type OrderSummary = {
   district?: string;
   amountCents: number;
   note?: string;
+  shippingCarrier: string;
+  trackingNumber: string;
   revision?: number;
   updatedAt?: string;
   lastManualEditAt?: string | null;
@@ -425,4 +429,23 @@ export type OrderEditReview = {
   input: OrderEditInput;
   changes: OrderFieldChange[];
   shippedSnapshotWarning: boolean;
+};
+
+export type OrderStatusAndLogisticsTarget = {
+  orderId: string;
+  expectedRevision: number;
+};
+
+export type OrderStatusAndLogisticsPatch = {
+  platformTransactionStatus?: PlatformTransactionStatus;
+  fulfillmentStatus?: FulfillmentStatus;
+  /** An empty string clears the manually maintained carrier. */
+  shippingCarrier?: string;
+  /** An empty string clears the manually maintained tracking number. */
+  trackingNumber?: string;
+};
+
+export type OrderStatusAndLogisticsUpdateInput = {
+  targets: OrderStatusAndLogisticsTarget[];
+  patch: OrderStatusAndLogisticsPatch;
 };

@@ -61,6 +61,9 @@ const api: DesktopApi = {
   },
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),
   updateOrder: (input) => ipcRenderer.invoke('orders:update', input),
+  updateOrderStatusAndLogistics: (input) => (
+    ipcRenderer.invoke('orders:update-status-and-logistics', input)
+  ),
   listCustomFieldDefinitions: () => ipcRenderer.invoke('custom-fields:list'),
   createCustomFieldDefinition: (input) => (
     ipcRenderer.invoke('custom-fields:create', input)

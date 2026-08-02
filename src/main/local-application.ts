@@ -49,6 +49,10 @@ import {
   RECOGNITION_CONFLICT_REGIONS,
 } from '../core/contracts';
 import { orderEditTargetId, prepareOrderEdit } from '../core/order-edit';
+import {
+  diffOrderStatusAndLogistics,
+  prepareOrderStatusAndLogisticsUpdate,
+} from '../core/order-fulfillment';
 import type {
   ConfirmDraftCustomFieldOptions,
   CreateCustomFieldDefinitionInput,
@@ -2662,6 +2666,82 @@ export class LocalApplication {
     return this.getOrder(current.id);
   }
 
+  public updateOrderStatusAndLogistics(input: unknown): OrderDetails[] {
+    const workspace = this.requireWorkspace();
+    const prepared = prepareOrderStatusAndLogisticsUpdate(input).input;
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      for (const target of prepared.targets) {
+        const current = this.getOrder(target.orderId).order;
+        if (current.revision !== target.expectedRevision) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+        const changes = diffOrderStatusAndLogistics(current, prepared.patch);
+        if (changes.length === 0) continue;
+        const values = {
+          platformTransactionStatus:
+            prepared.patch.platformTransactionStatus ?? current.platformTransactionStatus,
+          fulfillmentStatus:
+            prepared.patch.fulfillmentStatus ?? current.fulfillmentStatus,
+          shippingCarrier:
+            prepared.patch.shippingCarrier ?? current.shippingCarrier,
+          trackingNumber:
+            prepared.patch.trackingNumber ?? current.trackingNumber,
+        };
+        const updated = workspace.database.prepare(`
+          UPDATE original_orders
+          SET
+            platform_transaction_status = ?,
+            fulfillment_status = ?,
+            shipping_carrier = ?,
+            tracking_number = ?,
+            revision = revision + 1,
+            updated_at = ?
+          WHERE id = ? AND revision = ?
+        `).run(
+          values.platformTransactionStatus,
+          values.fulfillmentStatus,
+          values.shippingCarrier,
+          values.trackingNumber,
+          now,
+          current.id,
+          target.expectedRevision,
+        );
+        if (updated.changes !== 1) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+        const eventId = randomUUID();
+        workspace.database.prepare(`
+          INSERT INTO order_change_events (
+            id, order_id, source_snapshot_id, source,
+            base_revision, result_revision, created_at
+          ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+        `).run(
+          eventId,
+          current.id,
+          target.expectedRevision,
+          target.expectedRevision + 1,
+          now,
+        );
+        const insertChange = workspace.database.prepare(`
+          INSERT INTO order_field_changes (
+            id, event_id, field_path, before_json, after_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const change of changes) {
+          insertChange.run(
+            randomUUID(),
+            eventId,
+            change.path,
+            JSON.stringify(change.before),
+            JSON.stringify(change.after),
+          );
+        }
+      }
+    });
+    return prepared.targets.map((target) => this.getOrder(target.orderId));
+  }
+
   public listOrders(): OrderSummary[] {
     return this.queryOrders({}, []).orders;
   }
@@ -2756,6 +2836,9 @@ export class LocalApplication {
     if (query.fulfillmentStatus) {
       where.push('orders.fulfillment_status = ?');
       parameters.push(query.fulfillmentStatus);
+      if (query.fulfillmentStatus === 'pending_shipment') {
+        where.push("orders.platform_transaction_status NOT IN ('cancelled', 'refunded')");
+      }
     }
     const dateColumn = orderWorkbenchDateColumn(query.dateField ?? 'created_at');
     if (query.dateFrom) {
@@ -2851,6 +2934,8 @@ export class LocalApplication {
           orders.district,
           orders.amount_cents,
           orders.note,
+          orders.shipping_carrier,
+          orders.tracking_number,
           orders.revision,
           orders.updated_at,
           (
@@ -2907,6 +2992,8 @@ export class LocalApplication {
       district: asString(row.district),
       amountCents: asNumber(row.amount_cents),
       note: asString(row.note),
+      shippingCarrier: asString(row.shipping_carrier),
+      trackingNumber: asString(row.tracking_number),
       revision: asNumber(row.revision),
       updatedAt: asString(row.updated_at),
       lastManualEditAt: row.last_manual_edit_at === null
@@ -3240,6 +3327,8 @@ export class LocalApplication {
       shippingFeeCents: asNullableNumber(row.shipping_fee_cents),
       amountCents: asNumber(row.amount_cents),
       note: asString(row.note),
+      shippingCarrier: asString(row.shipping_carrier),
+      trackingNumber: asString(row.tracking_number),
       platformTransactionStatus: asPlatformTransactionStatus(
         row.platform_transaction_status,
       ),

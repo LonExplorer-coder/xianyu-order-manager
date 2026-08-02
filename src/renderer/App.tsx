@@ -28,6 +28,8 @@ import type {
   OrderDraftReview,
   OrderEditInput,
   OrderEditReview,
+  OrderStatusAndLogisticsPatch,
+  OrderStatusAndLogisticsUpdateInput,
   OriginalOrder,
   OrderSummary,
   RecognitionConflictDetail,
@@ -100,7 +102,7 @@ export type AppProps = {
   api: DesktopApi;
 };
 
-type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | null;
+type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
 type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
@@ -910,6 +912,26 @@ export function App({ api }: AppProps) {
     }
   }
 
+  async function updateOrderStatusAndLogistics(
+    input: OrderStatusAndLogisticsUpdateInput,
+  ): Promise<OrderDetails[]> {
+    setBusyAction('status-logistics');
+    setOperationError('');
+    try {
+      const details = await api.updateOrderStatusAndLogistics(input);
+      setOrderDetails((current) => (
+        details.find(({ order }) => order.id === current?.order.id) ?? current
+      ));
+      setOrderQueryRefreshToken((current) => current + 1);
+      return details;
+    } catch (error) {
+      setOperationError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function refreshOrderForEdit(orderId: string): Promise<OrderDetails> {
     setBusyAction('order-edit');
     setOperationError('');
@@ -1093,12 +1115,14 @@ export function App({ api }: AppProps) {
         sourceLoading={busyAction === 'detail'}
         customFieldsSaving={busyAction === 'custom-fields'}
         orderEditSaving={busyAction === 'order-edit'}
+        statusLogisticsSaving={busyAction === 'status-logistics'}
         error={operationError}
         onBack={() => leaveOrderDetails(() => undefined)}
         onDirtyChange={setDetailDirtyKind}
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
         onSaveCustomFieldValues={saveOrderCustomFieldValues}
         onUpdateOrder={updateExistingOrder}
+        onUpdateStatusAndLogistics={updateOrderStatusAndLogistics}
         onRefreshOrder={refreshOrderForEdit}
       />
     );
@@ -1149,6 +1173,7 @@ export function App({ api }: AppProps) {
         error={operationError}
         uploading={busyAction === 'upload'}
         openingOrder={busyAction === 'detail'}
+        statusLogisticsSaving={busyAction === 'status-logistics'}
         onUpload={() => void uploadScreenshots()}
         onOpenBatch={(batchId) => {
           setActiveBatchId(batchId);
@@ -1162,6 +1187,7 @@ export function App({ api }: AppProps) {
         onClearTableTemplate={clearTableTemplate}
         onManageTableTemplates={() => setActivePage('templates')}
         onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
+        onUpdateStatusAndLogistics={updateOrderStatusAndLogistics}
         onExport={(input) => api.exportOrders(input)}
       />
     );
@@ -1399,6 +1425,7 @@ type OrdersWorkspaceProps = {
   error: string;
   uploading: boolean;
   openingOrder: boolean;
+  statusLogisticsSaving: boolean;
   onUpload: () => void;
   onOpenBatch: (batchId: string) => void;
   onOpenOrder: (orderId: string) => void;
@@ -1409,6 +1436,9 @@ type OrdersWorkspaceProps = {
   onClearTableTemplate: (granularity: TableTemplate['granularity']) => void;
   onManageTableTemplates: () => void;
   onSaveActiveTableTemplate: () => void;
+  onUpdateStatusAndLogistics: (
+    input: OrderStatusAndLogisticsUpdateInput,
+  ) => Promise<OrderDetails[]>;
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
 };
 
@@ -1437,6 +1467,7 @@ function OrdersWorkspace({
   error,
   uploading,
   openingOrder,
+  statusLogisticsSaving,
   onUpload,
   onOpenBatch,
   onOpenOrder,
@@ -1447,6 +1478,7 @@ function OrdersWorkspace({
   onClearTableTemplate,
   onManageTableTemplates,
   onSaveActiveTableTemplate,
+  onUpdateStatusAndLogistics,
   onExport,
 }: OrdersWorkspaceProps) {
   const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
@@ -1458,6 +1490,8 @@ function OrdersWorkspace({
     orders: OrderSummary[];
   } | null>(null);
   const [exportFeedback, setExportFeedback] = useState('');
+  const [statusLogisticsFeedback, setStatusLogisticsFeedback] = useState('');
+  const [statusLogisticsOrders, setStatusLogisticsOrders] = useState<OrderSummary[] | null>(null);
   const selectAllOrdersRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
@@ -1933,23 +1967,44 @@ function OrdersWorkspace({
           <span><strong>{orders.reduce((total, order) => total + order.itemCount, 0)}</strong> 件商品</span>
           <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
         </div>
-        <button
-          className="button button--quiet table-toolbar__export"
-          type="button"
-          disabled={queryLoading || orders.length === 0}
-          onClick={() => {
-            setExportFeedback('');
-            setExportPreview({
-              kind: selectedOrders.length > 0 ? 'selected_orders' : 'current_result',
-              orders: selectedOrders.length > 0 ? selectedOrders : orders,
-            });
-          }}
-        >
-          {selectedOrders.length > 0
-            ? `导出已选 ${selectedOrders.length} 笔`
-            : `导出当前结果 ${orders.length} 笔`}
-        </button>
+        <div className="table-toolbar__actions">
+          {selectedOrders.length > 0 && (
+            <button
+              className="button button--primary"
+              type="button"
+              disabled={queryLoading || statusLogisticsSaving}
+              onClick={() => {
+                setStatusLogisticsFeedback('');
+                setStatusLogisticsOrders(selectedOrders);
+              }}
+            >
+              {`维护已选 ${selectedOrders.length} 笔`}
+            </button>
+          )}
+          <button
+            className="button button--quiet table-toolbar__export"
+            type="button"
+            disabled={queryLoading || orders.length === 0 || statusLogisticsSaving}
+            onClick={() => {
+              setExportFeedback('');
+              setExportPreview({
+                kind: selectedOrders.length > 0 ? 'selected_orders' : 'current_result',
+                orders: selectedOrders.length > 0 ? selectedOrders : orders,
+              });
+            }}
+          >
+            {selectedOrders.length > 0
+              ? `导出已选 ${selectedOrders.length} 笔`
+              : `导出当前结果 ${orders.length} 笔`}
+          </button>
+        </div>
       </div>
+
+      {statusLogisticsFeedback && (
+        <p className="status-logistics-feedback" role="status" aria-label="状态与物流维护结果">
+          {statusLogisticsFeedback}
+        </p>
+      )}
 
       <InlineError message={orderProjection.error} />
 
@@ -2042,6 +2097,18 @@ function OrdersWorkspace({
                     <button
                       className="order-link"
                       type="button"
+                      aria-label={`维护订单状态与物流 ${order.orderNumber}`}
+                      onClick={() => {
+                        setStatusLogisticsFeedback('');
+                        setStatusLogisticsOrders([order]);
+                      }}
+                      disabled={statusLogisticsSaving}
+                    >
+                      状态与物流
+                    </button>
+                    <button
+                      className="order-link"
+                      type="button"
                       aria-label={`打开订单详情 ${order.orderNumber}`}
                       onClick={() => onOpenOrder(order.id)}
                       disabled={openingOrder}
@@ -2082,6 +2149,21 @@ function OrdersWorkspace({
           }}
         />
       )}
+
+      {statusLogisticsOrders && (
+        <OrderStatusAndLogisticsDialog
+          orders={statusLogisticsOrders}
+          saving={statusLogisticsSaving}
+          onClose={() => setStatusLogisticsOrders(null)}
+          onSave={onUpdateStatusAndLogistics}
+          onSaved={() => {
+            const updatedCount = statusLogisticsOrders.length;
+            setStatusLogisticsOrders(null);
+            if (updatedCount > 1) setSelectedOrderIds(new Set());
+            setStatusLogisticsFeedback(`已更新 ${updatedCount} 笔订单。`);
+          }}
+        />
+      )}
         </div>
       ) : (
         <OrderItemsWorkbench
@@ -2100,6 +2182,242 @@ function OrdersWorkspace({
       )}
     </section>
   );
+}
+
+type StatusAndLogisticsOrder = Pick<
+  OrderSummary,
+  | 'id'
+  | 'orderNumber'
+  | 'revision'
+  | 'platformTransactionStatus'
+  | 'fulfillmentStatus'
+  | 'shippingCarrier'
+  | 'trackingNumber'
+>;
+
+function OrderStatusAndLogisticsDialog({
+  orders,
+  saving,
+  onSave,
+  onSaved,
+  onClose,
+}: {
+  orders: StatusAndLogisticsOrder[];
+  saving: boolean;
+  onSave: (input: OrderStatusAndLogisticsUpdateInput) => Promise<OrderDetails[]>;
+  onSaved: () => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const firstFieldRef = useRef<HTMLSelectElement>(null);
+  const [platformTransactionStatus, setPlatformTransactionStatus] = useState<
+    '' | NonNullable<OrderStatusAndLogisticsPatch['platformTransactionStatus']>
+  >('');
+  const [fulfillmentStatus, setFulfillmentStatus] = useState<
+    '' | NonNullable<OrderStatusAndLogisticsPatch['fulfillmentStatus']>
+  >('');
+  const [shippingCarrierEnabled, setShippingCarrierEnabled] = useState(false);
+  const [trackingNumberEnabled, setTrackingNumberEnabled] = useState(false);
+  const [shippingCarrier, setShippingCarrier] = useState(() => commonOrderText(
+    orders,
+    'shippingCarrier',
+  ));
+  const [trackingNumber, setTrackingNumber] = useState(() => commonOrderText(
+    orders,
+    'trackingNumber',
+  ));
+  const [error, setError] = useState('');
+  const hasPatch = Boolean(
+    platformTransactionStatus || fulfillmentStatus ||
+    shippingCarrierEnabled || trackingNumberEnabled,
+  );
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    firstFieldRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !hasPatch || orders.length === 0) return;
+    const patch: OrderStatusAndLogisticsPatch = {};
+    if (platformTransactionStatus) patch.platformTransactionStatus = platformTransactionStatus;
+    if (fulfillmentStatus) patch.fulfillmentStatus = fulfillmentStatus;
+    if (shippingCarrierEnabled) patch.shippingCarrier = shippingCarrier;
+    if (trackingNumberEnabled) patch.trackingNumber = trackingNumber;
+    setError('');
+    try {
+      await onSave({
+        targets: orders.map((order) => ({
+          orderId: order.id,
+          expectedRevision: order.revision ?? 1,
+        })),
+        patch,
+      });
+      onSaved();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      if (!saving) {
+        event.preventDefault();
+        onClose();
+      }
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = dialogRef.current
+      ? Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ))
+      : [];
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+    >
+      <form className="order-status-logistics-dialog" onSubmit={(event) => void save(event)}>
+        <header>
+          <span className="section-kicker">订单当前值 · 人工维护</span>
+          <h2 id={headingId}>维护状态与物流</h2>
+          <p id={descriptionId}>
+            {orders.length === 1
+              ? `仅修改订单 ${orders[0].orderNumber}；未选择的字段保持不变。`
+              : `相同值将应用到已选 ${orders.length} 笔订单；未选择的字段保持不变。`}
+          </p>
+        </header>
+
+        <div className="order-status-logistics-dialog__fields">
+          <label className="order-status-logistics-dialog__field">
+            <span>平台交易状态</span>
+            <select
+              ref={firstFieldRef}
+              aria-label="平台交易状态"
+              value={platformTransactionStatus}
+              disabled={saving}
+              onChange={(event) => setPlatformTransactionStatus(
+                event.target.value as typeof platformTransactionStatus,
+              )}
+            >
+              <option value="">不修改</option>
+              <option value="paid">已付款</option>
+              <option value="cancelled">已取消</option>
+              <option value="refunded">已退款</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label className="order-status-logistics-dialog__field">
+            <span>履约状态</span>
+            <select
+              aria-label="履约状态"
+              value={fulfillmentStatus}
+              disabled={saving}
+              onChange={(event) => setFulfillmentStatus(
+                event.target.value as typeof fulfillmentStatus,
+              )}
+            >
+              <option value="">不修改</option>
+              <option value="pending_shipment">待发货</option>
+              <option value="shipped">已发货</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <div className="order-status-logistics-dialog__field">
+            <label className="order-status-logistics-dialog__toggle">
+              <input
+                type="checkbox"
+                aria-label="修改快递公司"
+                checked={shippingCarrierEnabled}
+                disabled={saving}
+                onChange={(event) => setShippingCarrierEnabled(event.target.checked)}
+              />
+              <span>修改快递公司</span>
+            </label>
+            <input
+              type="text"
+              aria-label="快递公司"
+              value={shippingCarrier}
+              disabled={saving || !shippingCarrierEnabled}
+              placeholder="留空并提交即清空"
+              onChange={(event) => setShippingCarrier(event.target.value)}
+            />
+          </div>
+          <div className="order-status-logistics-dialog__field">
+            <label className="order-status-logistics-dialog__toggle">
+              <input
+                type="checkbox"
+                aria-label="修改运单号"
+                checked={trackingNumberEnabled}
+                disabled={saving}
+                onChange={(event) => setTrackingNumberEnabled(event.target.checked)}
+              />
+              <span>修改运单号</span>
+            </label>
+            <input
+              type="text"
+              aria-label="运单号"
+              value={trackingNumber}
+              disabled={saving || !trackingNumberEnabled}
+              placeholder="留空并提交即清空"
+              onChange={(event) => setTrackingNumber(event.target.value)}
+            />
+          </div>
+        </div>
+
+        <p className="order-status-logistics-dialog__notice">
+          已取消或已退款的订单仍保留在系统中，但不进入待发货视图。平台交易状态不会自动改写履约状态。
+        </p>
+        {error && <p className="order-status-logistics-dialog__error" role="alert">{error}</p>}
+        <footer className="order-status-logistics-dialog__actions">
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button className="button button--primary" type="submit" disabled={saving || !hasPatch}>
+            {saving ? '正在保存…' : `确认修改 ${orders.length} 笔`}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function commonOrderText(
+  orders: StatusAndLogisticsOrder[],
+  field: 'shippingCarrier' | 'trackingNumber',
+): string {
+  const first = orders[0]?.[field] ?? '';
+  return orders.every((order) => order[field] === first) ? first : '';
 }
 
 type OrderItemsWorkbenchProps = {
@@ -4773,6 +5091,8 @@ const ORDER_CHANGE_FIELD_LABELS: Record<string, string> = {
   note: '备注',
   platformTransactionStatus: '平台交易状态',
   fulfillmentStatus: '履约状态',
+  shippingCarrier: '快递公司',
+  trackingNumber: '运单号',
 };
 
 function orderChangeFieldLabel(path: string): string {
@@ -5586,12 +5906,14 @@ function DetailWorkspace({
   sourceLoading,
   customFieldsSaving,
   orderEditSaving,
+  statusLogisticsSaving,
   error,
   onBack,
   onDirtyChange,
   onSelectSource,
   onSaveCustomFieldValues,
   onUpdateOrder,
+  onUpdateStatusAndLogistics,
   onRefreshOrder,
 }: {
   details: OrderDetails;
@@ -5600,16 +5922,22 @@ function DetailWorkspace({
   sourceLoading: boolean;
   customFieldsSaving: boolean;
   orderEditSaving: boolean;
+  statusLogisticsSaving: boolean;
   error: string;
   onBack: () => void;
   onDirtyChange: (kind: DetailDirtyKind) => void;
   onSelectSource: (screenshotId: string) => void;
   onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
   onUpdateOrder: (input: OrderEditInput) => Promise<OrderDetails>;
+  onUpdateStatusAndLogistics: (
+    input: OrderStatusAndLogisticsUpdateInput,
+  ) => Promise<OrderDetails[]>;
   onRefreshOrder: (orderId: string) => Promise<OrderDetails>;
 }) {
   const { order } = details;
   const [editing, setEditing] = useState(false);
+  const [maintainingStatusAndLogistics, setMaintainingStatusAndLogistics] = useState(false);
+  const [statusLogisticsFeedback, setStatusLogisticsFeedback] = useState('');
   const [orderEditDirty, setOrderEditDirty] = useState(false);
   const definitions = details.customFieldDefinitions ?? [];
   const persistedCustomFieldValues = details.customFieldValues ?? [];
@@ -5773,6 +6101,18 @@ function DetailWorkspace({
             {platformTransactionStatusLabel(order.platformTransactionStatus)} · {fulfillmentStatusLabel(order.fulfillmentStatus)}
           </span>
           <button
+            className="button button--quiet"
+            type="button"
+            disabled={customFieldsDirty || customFieldsSaving || statusLogisticsSaving}
+            title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
+            onClick={() => {
+              setStatusLogisticsFeedback('');
+              setMaintainingStatusAndLogistics(true);
+            }}
+          >
+            状态与物流
+          </button>
+          <button
             className="button button--primary"
             type="button"
             disabled={customFieldsDirty || customFieldsSaving}
@@ -5788,6 +6128,11 @@ function DetailWorkspace({
       </header>
 
       <InlineError message={error} />
+      {statusLogisticsFeedback && (
+        <p className="status-logistics-feedback status-logistics-feedback--detail" role="status" aria-label="状态与物流维护结果">
+          {statusLogisticsFeedback}
+        </p>
+      )}
 
       <div className="detail-layout">
         <figure className="source-panel source-panel--detail">
@@ -5838,6 +6183,17 @@ function DetailWorkspace({
               />
               <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
               <DetailTerm label="生命周期状态" value={lifecycleStatusLabel(order.lifecycleStatus)} />
+            </dl>
+          </section>
+
+          <section className="detail-section" aria-label="手工物流">
+            <div className="detail-section-title">
+              <h2>物流信息</h2>
+              <span>人工维护</span>
+            </div>
+            <dl className="detail-grid">
+              <DetailTerm label="快递公司" value={displayValue(order.shippingCarrier)} />
+              <DetailTerm label="运单号" value={displayValue(order.trackingNumber)} />
             </dl>
           </section>
 
@@ -6091,6 +6447,18 @@ function DetailWorkspace({
           </section>
         </div>
       </div>
+      {maintainingStatusAndLogistics && (
+        <OrderStatusAndLogisticsDialog
+          orders={[order]}
+          saving={statusLogisticsSaving}
+          onClose={() => setMaintainingStatusAndLogistics(false)}
+          onSave={onUpdateStatusAndLogistics}
+          onSaved={() => {
+            setMaintainingStatusAndLogistics(false);
+            setStatusLogisticsFeedback('已更新 1 笔订单。');
+          }}
+        />
+      )}
     </section>
   );
 }

@@ -7,6 +7,7 @@ import type {
   OrderUpdateConfirmation,
   OriginalOrder,
   OrderEditInput,
+  OrderStatusAndLogisticsUpdateInput,
   RecognitionBatchView,
 } from './contracts';
 import type {
@@ -92,6 +93,9 @@ export interface DesktopApi {
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   updateOrder(input: OrderEditInput): Promise<OrderDetails>;
+  updateOrderStatusAndLogistics(
+    input: OrderStatusAndLogisticsUpdateInput,
+  ): Promise<OrderDetails[]>;
   listCustomFieldDefinitions(): Promise<CustomFieldDefinition[]>;
   createCustomFieldDefinition(
     input: CreateCustomFieldDefinitionInput,

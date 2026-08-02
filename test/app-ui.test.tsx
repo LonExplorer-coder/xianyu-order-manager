@@ -96,6 +96,8 @@ const confirmedOrder: OriginalOrder = {
   amountCents: 800,
   platformTransactionStatus: 'paid',
   fulfillmentStatus: 'pending_shipment',
+  shippingCarrier: '',
+  trackingNumber: '',
   lifecycleStatus: 'active',
   createdAt: '2026-07-27T11:22:00.000Z',
   updatedAt: '2026-07-27T11:24:00.000Z',
@@ -154,6 +156,8 @@ function orderSummary(
     initialSourceRecognitionStatus: 'imported',
     platformTransactionStatus: order.platformTransactionStatus,
     fulfillmentStatus: order.fulfillmentStatus,
+    shippingCarrier: order.shippingCarrier,
+    trackingNumber: order.trackingNumber,
     lifecycleStatus: order.lifecycleStatus,
     orderedAtNormalized: order.orderedAtNormalized,
     paidAtNormalized: order.paidAtNormalized,
@@ -246,6 +250,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     updateOrder: vi.fn(),
+    updateOrderStatusAndLogistics: vi.fn().mockResolvedValue([]),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
@@ -1382,6 +1387,114 @@ describe('订单管理工作台', () => {
       'src',
       'data:image/png;base64,ZGV0YWls',
     );
+  });
+
+  it('选中多笔订单后可以批量独立设置交易状态、履约状态和手工物流', async () => {
+    const user = userEvent.setup();
+    const first = orderSummary(confirmedOrder, { revision: 1 });
+    const secondOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-2',
+      orderNumber: 'XY-TEST-20260727-0002',
+      revision: 3,
+    };
+    const second = orderSummary(secondOrder, { revision: 3 });
+    const updateOrderStatusAndLogistics = vi.fn().mockResolvedValue([]);
+    const queryOrders = vi.fn().mockResolvedValue(workbenchResult([first, second]));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [first, second],
+      }),
+      listOrders: vi.fn().mockResolvedValue([first, second]),
+      queryOrders,
+      updateOrderStatusAndLogistics,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('checkbox', { name: '选择当前结果全部订单' }));
+    await user.click(screen.getByRole('button', { name: '维护已选 2 笔' }));
+
+    const dialog = screen.getByRole('dialog', { name: '维护状态与物流' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '平台交易状态' }), 'refunded');
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '履约状态' }), 'shipped');
+    await user.click(within(dialog).getByRole('checkbox', { name: '修改快递公司' }));
+    await user.type(within(dialog).getByRole('textbox', { name: '快递公司' }), '顺丰速运');
+    await user.click(within(dialog).getByRole('checkbox', { name: '修改运单号' }));
+    await user.type(within(dialog).getByRole('textbox', { name: '运单号' }), 'SF1234567890');
+    await user.click(within(dialog).getByRole('button', { name: '确认修改 2 笔' }));
+
+    expect(updateOrderStatusAndLogistics).toHaveBeenCalledWith({
+      targets: [
+        { orderId: first.id, expectedRevision: 1 },
+        { orderId: second.id, expectedRevision: 3 },
+      ],
+      patch: {
+        platformTransactionStatus: 'refunded',
+        fulfillmentStatus: 'shipped',
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF1234567890',
+      },
+    });
+    expect(screen.queryByRole('dialog', { name: '维护状态与物流' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '状态与物流维护结果' }))
+      .toHaveTextContent('已更新 2 笔订单');
+    expect(screen.queryByRole('button', { name: '维护已选 2 笔' })).not.toBeInTheDocument();
+    await waitFor(() => expect(queryOrders).toHaveBeenCalledTimes(2));
+  });
+
+  it('订单详情可仅维护一个状态或一项手工物流且其余字段保持不变', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const updatedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 2,
+      platformTransactionStatus: 'cancelled',
+      shippingCarrier: '中通快递',
+    };
+    const updatedDetails: OrderDetails = {
+      ...orderDetails,
+      order: updatedOrder,
+    };
+    const updateOrderStatusAndLogistics = vi.fn().mockResolvedValue([updatedDetails]);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+      updateOrderStatusAndLogistics,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }));
+    await user.click(await screen.findByRole('button', { name: '状态与物流' }));
+
+    const dialog = screen.getByRole('dialog', { name: '维护状态与物流' });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '平台交易状态' }),
+      'cancelled',
+    );
+    await user.click(within(dialog).getByRole('checkbox', { name: '修改快递公司' }));
+    await user.type(within(dialog).getByRole('textbox', { name: '快递公司' }), '中通快递');
+    await user.click(within(dialog).getByRole('button', { name: '确认修改 1 笔' }));
+
+    expect(updateOrderStatusAndLogistics).toHaveBeenCalledWith({
+      targets: [{ orderId: confirmedOrder.id, expectedRevision: 1 }],
+      patch: {
+        platformTransactionStatus: 'cancelled',
+        shippingCarrier: '中通快递',
+      },
+    });
+    expect(screen.getByText('已取消 · 待发货')).toBeVisible();
+    expect(screen.getByRole('region', { name: '手工物流' })).toHaveTextContent('中通快递');
+    expect(screen.getByRole('region', { name: '手工物流' })).toHaveTextContent('—');
   });
 
   it('订单详情展示完整当前值与真实状态，不暴露 OCR 原始响应', async () => {

@@ -156,6 +156,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 12) migrateToVersion12(database);
   if (row.version < 13) migrateToVersion13(database);
   if (row.version < 14) migrateToVersion14(database);
+  if (row.version < 15) migrateToVersion15(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1348,6 +1349,29 @@ function migrateToVersion14(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion15(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE original_orders
+      ADD COLUMN shipping_carrier TEXT NOT NULL DEFAULT '';
+      ALTER TABLE original_orders
+      ADD COLUMN tracking_number TEXT NOT NULL DEFAULT '';
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (15, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {
