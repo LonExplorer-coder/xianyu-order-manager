@@ -51,6 +51,29 @@ describe('渲染布局约束', () => {
     workspace.remove();
   });
 
+  it('把发货组宽表的横向滚动限制在表格容器内', () => {
+    const workspace = document.createElement('main');
+    workspace.className = 'workspace';
+    workspace.innerHTML = `
+      <section class="shipment-groups-workspace">
+        <div class="table-frame shipment-groups-table-frame">
+          <table><tbody><tr><td>发货组</td></tr></tbody></table>
+        </div>
+      </section>
+    `;
+    document.body.append(workspace);
+
+    const frame = workspace.querySelector('.shipment-groups-table-frame');
+    const table = frame?.querySelector('table');
+    expect(frame).not.toBeNull();
+    expect(table).not.toBeNull();
+    expect(getComputedStyle(workspace).overflowX).toBe('hidden');
+    expect(getComputedStyle(frame!).overflowX).toBe('auto');
+    expect(getComputedStyle(table!).minWidth).toBe('980px');
+
+    workspace.remove();
+  });
+
   it('把超宽导出预览限制在弹窗内部并禁止遮罩层横向滚动', () => {
     const backdrop = document.createElement('div');
     backdrop.className = 'order-export-backdrop';

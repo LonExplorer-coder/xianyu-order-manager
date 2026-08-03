@@ -70,6 +70,10 @@ describe('桌面启动状态', () => {
       platforms: [],
       sellerAccounts: [],
     });
+    expect(session.queryShipmentGroups()).toEqual({
+      groups: [],
+      attentionOrders: [],
+    });
   });
 
   it('首次要求选择数据目录，并在重启后自动打开最近目录', async () => {

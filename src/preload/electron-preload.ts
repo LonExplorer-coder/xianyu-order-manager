@@ -48,6 +48,7 @@ const api: DesktopApi = {
   queryOrderItems: (query, customFieldDefinitionIds) => (
     ipcRenderer.invoke('order-items:query', query, customFieldDefinitionIds)
   ),
+  queryShipmentGroups: () => ipcRenderer.invoke('shipment-groups:query'),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   onOrdersChanged: (listener) => {
     const ipcListener = (

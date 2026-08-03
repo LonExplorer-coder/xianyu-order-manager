@@ -205,6 +205,7 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       parseProjectedCustomFieldDefinitionIds(definitionIds),
     )
   ));
+  ipcMain.handle('shipment-groups:query', () => desktopSession.queryShipmentGroups());
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

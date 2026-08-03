@@ -127,6 +127,10 @@ import type {
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import {
+  buildShipmentGroupProjection,
+  type ShipmentGroupProjection,
+} from '../core/shipment-groups';
+import {
   DEFAULT_ORDER_TABLE_COLUMNS,
   normalizeCreateTableTemplateInput,
   normalizeStoredTableTemplateInput,
@@ -2755,6 +2759,25 @@ export class LocalApplication {
 
   public listOrders(): OrderSummary[] {
     return this.queryOrders({}, []).orders;
+  }
+
+  public queryShipmentGroups(): ShipmentGroupProjection {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT id
+      FROM original_orders
+      WHERE lifecycle_status = 'active'
+        AND fulfillment_status = 'pending_shipment'
+        AND platform_transaction_status NOT IN ('cancelled', 'refunded')
+      ORDER BY created_at, id
+    `).all() as unknown as SqlRow[];
+    const orders = rows.map((row) => this.getOrder(asString(row.id)).order);
+    return buildShipmentGroupProjection(orders, (phoneNormalized, addressNormalized) => (
+      `shipment-group-${createHash('sha256')
+        .update(`${phoneNormalized.length}:${phoneNormalized}${addressNormalized}`)
+        .digest('hex')
+        .slice(0, 24)}`
+    ));
   }
 
   public queryOrders(

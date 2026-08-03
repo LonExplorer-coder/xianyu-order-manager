@@ -58,6 +58,7 @@ import type {
   OrderExportInput,
   OrderExportWriteResult,
 } from '../core/order-export';
+import type { ShipmentGroupProjection } from '../core/shipment-groups';
 import type {
   CreateTableTemplateInput,
   TableTemplate,
@@ -374,6 +375,10 @@ export class DesktopSession {
     customFieldDefinitionIds?: readonly string[],
   ): OrderItemWorkbenchResult {
     return this.requireApplication().queryOrderItems(query, customFieldDefinitionIds);
+  }
+
+  public queryShipmentGroups(): ShipmentGroupProjection {
+    return this.requireApplication().queryShipmentGroups();
   }
 
   public exportOrdersToWorkbook(

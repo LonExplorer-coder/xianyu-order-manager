@@ -26,6 +26,7 @@ import type {
 } from '../src/core/order-workbench';
 import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
+import type { ShipmentGroupProjection } from '../src/core/shipment-groups';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { App } from '../src/renderer/App';
 
@@ -199,6 +200,50 @@ function workbenchResult(
   };
 }
 
+function singleShipmentGroupProjection(
+  order: OriginalOrder = confirmedOrder,
+): ShipmentGroupProjection {
+  return {
+    groups: [{
+      id: 'shipment-group-single000000000000',
+      phone: order.phone,
+      phoneNormalized: order.phoneNormalized,
+      addressOriginal: order.addressOriginal,
+      addressNormalized: order.addressNormalized,
+      recipients: [order.recipient],
+      recipientConflict: false,
+      orderCount: 1,
+      totalQuantity: order.items.reduce((total, item) => total + item.quantity, 0),
+      totalAmountCents: order.amountCents,
+      orders: [{
+        id: order.id,
+        orderNumber: order.orderNumber,
+        sellerAccount: order.sellerAccount,
+        buyerNickname: order.buyerNickname,
+        recipient: order.recipient,
+        amountCents: order.amountCents,
+        items: order.items.map((item) => ({
+          id: item.id,
+          sourceTitle: item.sourceTitle,
+          sourceSpec: item.sourceSpec,
+          unitPriceCents: item.unitPriceCents,
+          quantity: item.quantity,
+          subtotalCents: item.subtotalCents,
+        })),
+      }],
+      items: order.items.map((item) => ({
+        sourceTitle: item.sourceTitle,
+        sourceSpec: item.sourceSpec,
+        quantity: item.quantity,
+        subtotalCents: item.subtotalCents,
+        unitPricesCents: [item.unitPriceCents],
+        orderIds: [order.id],
+      })),
+    }],
+    attentionOrders: [],
+  };
+}
+
 type DesktopApiTestOverrides = Partial<DesktopApi> & {
   selectSourceScreenshot?: () => Promise<OrderDraft | null>;
 };
@@ -251,6 +296,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
+    queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
@@ -341,6 +387,178 @@ describe('订单管理工作台', () => {
       '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图调用 1 次 advanced_recognition，并由本机规则按六区拆分字段；有有限候选且已启用候选裁决时，最多追加 1 次文本模型调用。无法确定时会转入人工确认。',
     )).toBeVisible();
     expect(screen.getByText('/Users/test/闲鱼订单')).toBeVisible();
+  });
+
+  it('从侧栏查看开放发货组汇总和未自动成组提示', async () => {
+    const user = userEvent.setup();
+    const projection: ShipmentGroupProjection = {
+      groups: [{
+        id: 'shipment-group-abc123abc123abc123abc123',
+        phone: '13800000000',
+        phoneNormalized: '13800000000',
+        addressOriginal: '广东省深圳市南山区测试路1号',
+        addressNormalized: '广东省深圳市南山区测试路1号',
+        recipients: ['人工修正收件人'],
+        recipientConflict: false,
+        orderCount: 2,
+        totalQuantity: 3,
+        totalAmountCents: 2_400,
+        orders: [
+          {
+            id: 'order-1',
+            orderNumber: 'XY-SHIPMENT-UI-0001',
+            sellerAccount: '测试闲鱼账号',
+            buyerNickname: '测试买家',
+            recipient: '人工修正收件人',
+            amountCents: 800,
+            items: [{
+              id: 'item-1',
+              sourceTitle: '脱敏测试商品',
+              sourceSpec: '白色',
+              unitPriceCents: 800,
+              quantity: 1,
+              subtotalCents: 800,
+            }],
+          },
+          {
+            id: 'order-2',
+            orderNumber: 'XY-SHIPMENT-UI-0002',
+            sellerAccount: '测试闲鱼账号',
+            buyerNickname: '测试买家',
+            recipient: '人工修正收件人',
+            amountCents: 1_600,
+            items: [{
+              id: 'item-2',
+              sourceTitle: '脱敏测试商品',
+              sourceSpec: '白色',
+              unitPriceCents: 800,
+              quantity: 2,
+              subtotalCents: 1_600,
+            }],
+          },
+        ],
+        items: [{
+          sourceTitle: '脱敏测试商品',
+          sourceSpec: '白色',
+          quantity: 3,
+          subtotalCents: 2_400,
+          unitPricesCents: [800],
+          orderIds: ['order-1', 'order-2'],
+        }],
+      }],
+      attentionOrders: [{
+        id: 'order-attention',
+        orderNumber: 'XY-SHIPMENT-UI-ATTENTION',
+        recipient: '待补全收件人',
+        phone: '',
+        addressOriginal: '广东省深圳市福田区测试路2号',
+        reasons: ['missing_phone'],
+      }],
+    };
+    const queryShipmentGroups = vi.fn().mockResolvedValue(projection);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups,
+    });
+
+    render(<App api={api} />);
+    const navigation = await screen.findByRole('button', { name: '发货组' });
+    await user.click(navigation);
+
+    expect(await screen.findByRole('heading', { level: 1, name: '发货组' })).toBeVisible();
+    expect(navigation).toHaveAttribute('aria-current', 'page');
+    expect(queryShipmentGroups).toHaveBeenCalledTimes(1);
+    const overview = screen.getByRole('region', { name: '发货组概况' });
+    expect(overview).toHaveTextContent('开放发货组1');
+    expect(overview).toHaveTextContent('待发货订单3');
+    expect(overview).toHaveTextContent('未自动成组1');
+    const groupTable = screen.getByRole('table', { name: '开放发货组' });
+    expect(groupTable).toHaveTextContent('人工修正收件人');
+    expect(groupTable).toHaveTextContent('13800000000');
+    expect(groupTable).toHaveTextContent('广东省深圳市南山区测试路1号');
+    expect(groupTable).toHaveTextContent('XY-SHIPMENT-UI-0001');
+    expect(groupTable).toHaveTextContent('XY-SHIPMENT-UI-0002');
+    expect(groupTable).toHaveTextContent('脱敏测试商品');
+    expect(groupTable).toHaveTextContent('白色 × 3');
+    expect(groupTable).toHaveTextContent('¥24.00');
+    const attentionTable = screen.getByRole('table', { name: '未自动成组订单' });
+    expect(attentionTable).toHaveTextContent('XY-SHIPMENT-UI-ATTENTION');
+    expect(attentionTable).toHaveTextContent('缺少手机号');
+    expect(screen.queryByRole('button', { name: /拆分|重新组合|标记已发货|导出发货组/u }))
+      .not.toBeInTheDocument();
+  });
+
+  it('从发货组追溯原始订单详情后返回发货组', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue(singleShipmentGroupProjection()),
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    await user.click(await screen.findByRole('button', {
+      name: `查看原始订单 ${confirmedOrder.orderNumber}`,
+    }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: '订单详情' })).toBeVisible();
+    expect(screen.getAllByText(confirmedOrder.orderNumber)).not.toHaveLength(0);
+    const back = screen.getByRole('button', { name: '返回发货组' });
+    await user.click(back);
+    expect(await screen.findByRole('heading', { level: 1, name: '发货组' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '发货组' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
+  it('订单当前值变化后自动刷新正在查看的发货组', async () => {
+    const user = userEvent.setup();
+    let publishOrdersChanged: Parameters<DesktopApi['onOrdersChanged']>[0] | undefined;
+    const queryShipmentGroups = vi.fn()
+      .mockResolvedValueOnce(singleShipmentGroupProjection())
+      .mockResolvedValueOnce({ groups: [], attentionOrders: [] });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups,
+      onOrdersChanged: vi.fn((listener) => {
+        publishOrdersChanged = listener;
+        return () => undefined;
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    expect(await screen.findByRole('table', { name: '开放发货组' })).toBeVisible();
+
+    act(() => publishOrdersChanged?.([]));
+
+    expect(await screen.findByRole('heading', { level: 2, name: '没有待发货订单' }))
+      .toBeVisible();
+    expect(queryShipmentGroups).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('region', { name: '发货组概况' })).toHaveTextContent(
+      '开放发货组0',
+    );
   });
 
   it('上传一张来源截图后可对照来源修正识别结果，确认后以订单表为主视图', async () => {

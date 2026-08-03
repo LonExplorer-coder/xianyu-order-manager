@@ -69,6 +69,7 @@ import {
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
+import type { ShipmentGroupProjection } from '../core/shipment-groups';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -104,7 +105,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 
@@ -139,6 +140,10 @@ export function App({ api }: AppProps) {
   const [orderItemQuery, setOrderItemQuery] = useState<OrderItemWorkbenchQuery>({});
   const [orderItemWorkbench, setOrderItemWorkbench] = useState<OrderItemWorkbenchResult | null>(null);
   const [orderItemQueryLoading, setOrderItemQueryLoading] = useState(false);
+  const [shipmentGroupProjection, setShipmentGroupProjection] =
+    useState<ShipmentGroupProjection | null>(null);
+  const [shipmentGroupLoading, setShipmentGroupLoading] = useState(false);
+  const [shipmentGroupError, setShipmentGroupError] = useState('');
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
   const [customFieldDefinitionsLoading, setCustomFieldDefinitionsLoading] = useState(false);
   const [customFieldDefinitionsError, setCustomFieldDefinitionsError] = useState('');
@@ -156,6 +161,7 @@ export function App({ api }: AppProps) {
   const orderSnapshotVersion = useRef(0);
   const orderQueryRequestVersion = useRef(0);
   const orderItemQueryRequestVersion = useRef(0);
+  const shipmentGroupRequestVersion = useRef(0);
   const tableTemplateApplyVersion = useRef(0);
   const preloadedOrderTemplateQuery = useRef<OrderWorkbenchQuery | null>(null);
   const preloadedOrderItemTemplateQuery = useRef<OrderItemWorkbenchQuery | null>(null);
@@ -212,11 +218,15 @@ export function App({ api }: AppProps) {
     setOrderQuery(DEFAULT_ORDER_QUERY);
     setOrderWorkbench(null);
     orderItemQueryRequestVersion.current += 1;
+    shipmentGroupRequestVersion.current += 1;
     tableTemplateApplyVersion.current += 1;
     preloadedOrderItemTemplateQuery.current = null;
     setOrdersWorkspaceView('orders');
     setOrderItemQuery({});
     setOrderItemWorkbench(null);
+    setShipmentGroupProjection(null);
+    setShipmentGroupLoading(false);
+    setShipmentGroupError('');
     setOrderQueryRefreshToken(0);
     setCustomFieldDefinitions([]);
     setCustomFieldDefinitionsError('');
@@ -396,6 +406,32 @@ export function App({ api }: AppProps) {
     orderQueryRefreshToken,
     readyDataDirectory,
   ]);
+
+  useEffect(() => {
+    if (!readyDataDirectory || activePage !== 'shipments') return undefined;
+    let active = true;
+    const requestVersion = ++shipmentGroupRequestVersion.current;
+    setShipmentGroupLoading(true);
+    setShipmentGroupError('');
+    void api.queryShipmentGroups()
+      .then((projection) => {
+        if (!active || requestVersion !== shipmentGroupRequestVersion.current) return;
+        setShipmentGroupProjection(projection);
+      })
+      .catch((error: unknown) => {
+        if (active && requestVersion === shipmentGroupRequestVersion.current) {
+          setShipmentGroupError(errorMessage(error));
+        }
+      })
+      .finally(() => {
+        if (active && requestVersion === shipmentGroupRequestVersion.current) {
+          setShipmentGroupLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activePage, api, orderQueryRefreshToken, readyDataDirectory]);
 
   useEffect(() => {
     if (!readyDataDirectory || ordersWorkspaceView !== 'order_items') return undefined;
@@ -1088,6 +1124,16 @@ export function App({ api }: AppProps) {
         onRefresh={refreshCustomFieldDefinitions}
       />
     );
+  } else if (activePage === 'shipments' && !orderDetails) {
+    workspace = (
+      <ShipmentGroupsWorkspace
+        projection={shipmentGroupProjection}
+        loading={shipmentGroupLoading}
+        openingOrder={busyAction === 'detail'}
+        error={shipmentGroupError}
+        onOpenOrder={(orderId) => void openOrder(orderId)}
+      />
+    );
   } else if (draft) {
     workspace = (
       <ReviewWorkspace
@@ -1107,7 +1153,7 @@ export function App({ api }: AppProps) {
         onConfirm={(event) => void confirmOrder(event)}
       />
     );
-  } else if (activePage === 'orders' && orderDetails) {
+  } else if ((activePage === 'orders' || activePage === 'shipments') && orderDetails) {
     workspace = (
       <DetailWorkspace
         details={orderDetails}
@@ -1118,6 +1164,7 @@ export function App({ api }: AppProps) {
         orderEditSaving={busyAction === 'order-edit'}
         statusLogisticsSaving={busyAction === 'status-logistics'}
         error={operationError}
+        backLabel={activePage === 'shipments' ? '返回发货组' : '返回订单表'}
         onBack={() => leaveOrderDetails(() => undefined)}
         onDirtyChange={setDetailDirtyKind}
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
@@ -1245,10 +1292,15 @@ function AppFrame({
             <Icon name="orders" />
             <span className="nav-label">原始订单</span>
           </button>
-          <button className="nav-item" type="button" disabled>
+          <button
+            className={`nav-item${activePage === 'shipments' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="发货组"
+            aria-current={activePage === 'shipments' ? 'page' : undefined}
+            onClick={() => onNavigate('shipments')}
+          >
             <Icon name="shipment" />
             <span className="nav-label">发货组</span>
-            <span className="nav-badge">稍后</span>
           </button>
           <button
             className={`nav-item${activePage === 'templates' ? ' is-active' : ''}`}
@@ -1399,6 +1451,183 @@ function SystemScreen(props: SystemScreenProps) {
       </section>
     </main>
   );
+}
+
+function ShipmentGroupsWorkspace({
+  projection,
+  loading,
+  openingOrder,
+  error,
+  onOpenOrder,
+}: {
+  projection: ShipmentGroupProjection | null;
+  loading: boolean;
+  openingOrder: boolean;
+  error: string;
+  onOpenOrder: (orderId: string) => void;
+}) {
+  const groups = projection?.groups ?? [];
+  const attentionOrders = projection?.attentionOrders ?? [];
+  const pendingOrderCount = groups.reduce(
+    (total, group) => total + group.orderCount,
+    attentionOrders.length,
+  );
+
+  return (
+    <section
+      className="shipment-groups-workspace workspace-enter"
+      aria-busy={loading || openingOrder}
+    >
+      <header className="workspace-header">
+        <div>
+          <span className="section-kicker">合并发货</span>
+          <h1>发货组</h1>
+          <p>按手机号与完整地址精确匹配待发货订单；原始订单不会被合并或改写。</p>
+        </div>
+      </header>
+
+      <InlineError message={error} />
+
+      <section className="orders-overview" aria-label="发货组概况">
+        <span><small>开放发货组</small><strong>{groups.length}</strong></span>
+        <span><small>待发货订单</small><strong>{pendingOrderCount}</strong></span>
+        <span><small>未自动成组</small><strong>{attentionOrders.length}</strong></span>
+      </section>
+
+      {loading && !projection ? (
+        <p className="shipment-groups-status" role="status" aria-label="发货组计算状态">
+          正在根据订单当前值计算发货组…
+        </p>
+      ) : groups.length === 0 ? (
+        <section className="shipment-groups-empty">
+          <h2>{attentionOrders.length > 0
+            ? '暂无可自动成组的订单'
+            : '没有待发货订单'}</h2>
+          <p>{attentionOrders.length > 0
+            ? '补全收货信息后，发货组会自动重新计算。'
+            : '新的待发货订单入库后会自动显示在这里。'}</p>
+        </section>
+      ) : (
+        <section className="shipment-groups-section" aria-labelledby="open-shipment-groups-title">
+          <div className="shipment-groups-section__heading">
+            <div>
+              <h2 id="open-shipment-groups-title">开放发货组</h2>
+              <p>单笔订单也会形成一个发货组；商品按原始商品与款式或规格精确汇总。</p>
+            </div>
+            {loading && <span role="status">正在更新…</span>}
+          </div>
+          <div className="table-frame shipment-groups-table-frame">
+            <table aria-label="开放发货组">
+              <thead>
+                <tr>
+                  <th>收件信息</th>
+                  <th>成员订单</th>
+                  <th>商品汇总</th>
+                  <th>订单数</th>
+                  <th>商品数量</th>
+                  <th>成交金额</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map((group) => (
+                  <tr key={group.id}>
+                    <td>
+                      <span className="order-cell-stack order-cell-stack--recipient">
+                        <strong>{group.recipients.join(' / ') || '—'}</strong>
+                        {group.recipientConflict && <small>收件人名称不一致，请按原始订单核对</small>}
+                        <small>{group.phone}</small>
+                        <small>{group.addressOriginal}</small>
+                      </span>
+                    </td>
+                    <td>
+                      <span className="shipment-group-orders">
+                        {group.orders.map((order) => (
+                          <button
+                            className="order-link"
+                            type="button"
+                            key={order.id}
+                            aria-label={`查看原始订单 ${order.orderNumber}`}
+                            onClick={() => onOpenOrder(order.id)}
+                            disabled={openingOrder}
+                          >
+                            {order.orderNumber}
+                          </button>
+                        ))}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="order-product-summary">
+                        {group.items.map((item) => (
+                          <span key={`${item.sourceTitle}\u0000${item.sourceSpec}`}>
+                            <strong>{item.sourceTitle}</strong>
+                            <small>{item.sourceSpec ? `${item.sourceSpec} × ${item.quantity}` : `× ${item.quantity}`}</small>
+                          </span>
+                        ))}
+                      </span>
+                    </td>
+                    <td>{group.orderCount}</td>
+                    <td>{group.totalQuantity}</td>
+                    <td className="money-cell"><strong>{formatMoney(group.totalAmountCents)}</strong></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {attentionOrders.length > 0 && (
+        <section className="shipment-groups-section" aria-labelledby="shipment-attention-title">
+          <div className="shipment-groups-section__heading">
+            <div>
+              <h2 id="shipment-attention-title">未自动成组</h2>
+              <p>补全手机号和完整地址后，系统会按最新订单当前值自动重新计算。</p>
+            </div>
+          </div>
+          <div className="table-frame shipment-groups-attention-table-frame">
+            <table aria-label="未自动成组订单">
+              <thead>
+                <tr>
+                  <th>订单号</th>
+                  <th>收件人</th>
+                  <th>手机号</th>
+                  <th>完整地址</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody>
+                {attentionOrders.map((order) => (
+                  <tr key={order.id}>
+                    <td>
+                      <button
+                        className="order-link"
+                        type="button"
+                        aria-label={`查看原始订单 ${order.orderNumber}`}
+                        onClick={() => onOpenOrder(order.id)}
+                        disabled={openingOrder}
+                      >
+                        {order.orderNumber}
+                      </button>
+                    </td>
+                    <td>{order.recipient || '—'}</td>
+                    <td>{order.phone || '—'}</td>
+                    <td>{order.addressOriginal || '—'}</td>
+                    <td>{order.reasons.map(shipmentGroupAttentionReasonLabel).join('、')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function shipmentGroupAttentionReasonLabel(
+  reason: ShipmentGroupProjection['attentionOrders'][number]['reasons'][number],
+): string {
+  return reason === 'missing_phone' ? '缺少手机号' : '缺少完整地址';
 }
 
 type OrdersWorkspaceProps = {
@@ -5920,6 +6149,7 @@ function DetailWorkspace({
   orderEditSaving,
   statusLogisticsSaving,
   error,
+  backLabel,
   onBack,
   onDirtyChange,
   onSelectSource,
@@ -5936,6 +6166,7 @@ function DetailWorkspace({
   orderEditSaving: boolean;
   statusLogisticsSaving: boolean;
   error: string;
+  backLabel: string;
   onBack: () => void;
   onDirtyChange: (kind: DetailDirtyKind) => void;
   onSelectSource: (screenshotId: string) => void;
@@ -6093,7 +6324,7 @@ function DetailWorkspace({
     <section className="detail-workspace detail-enter">
       <header className="workspace-header workspace-header--detail">
         <div className="header-title-row">
-          <button className="icon-button" type="button" onClick={onBack} aria-label="返回订单表">
+          <button className="icon-button" type="button" onClick={onBack} aria-label={backLabel}>
             <Icon name="back" />
           </button>
           <div>

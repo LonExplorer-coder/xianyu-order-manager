@@ -41,6 +41,7 @@ import type {
   OrderWorkbenchResult,
 } from './order-workbench';
 import type { OrderExportInput, OrderExportResult } from './order-export';
+import type { ShipmentGroupProjection } from './shipment-groups';
 import type {
   CreateTableTemplateInput,
   TableTemplate,
@@ -89,6 +90,7 @@ export interface DesktopApi {
     query: OrderItemWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
   ): Promise<OrderItemWorkbenchResult>;
+  queryShipmentGroups(): Promise<ShipmentGroupProjection>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

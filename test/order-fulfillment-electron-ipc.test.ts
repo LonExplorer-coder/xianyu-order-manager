@@ -102,6 +102,40 @@ describe('订单状态与手工物流 Electron IPC', () => {
   });
 });
 
+describe('发货组 Electron IPC', () => {
+  it('通过只读通道返回本机动态发货组投影', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-groups-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '待发货订单.png');
+    await writeFile(sourcePath, Buffer.from('shipment-groups-ipc-source'));
+    const recognition = completeRecognition();
+    const seeder = new LocalApplication(new ControlledRecognizer(recognition));
+    seeder.openDataDirectory(dataDirectory);
+    const [draft] = (await seeder.submitRecognitionBatch([sourcePath])).drafts;
+    const order = seeder.confirmDraft(draft);
+    seeder.close();
+
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+    registerIpcHandlers(session);
+
+    await expect(invoke('shipment-groups:query')).resolves.toMatchObject({
+      groups: [{
+        orderCount: 1,
+        totalQuantity: 1,
+        totalAmountCents: 800,
+        orders: [{ id: order.id, orderNumber: order.orderNumber }],
+      }],
+      attentionOrders: [],
+    });
+  });
+});
+
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
   const handler = electronBoundary.handlers.get(channel);
   if (!handler) throw new Error(`IPC 通道未注册：${channel}`);
