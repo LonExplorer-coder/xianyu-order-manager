@@ -59,16 +59,28 @@ export type ShipmentGroupProjection = {
   attentionOrders: ShipmentGroupAttentionOrder[];
 };
 
-export type ShipmentGroupIdFactory = (
-  phoneNormalized: string,
-  addressNormalized: string,
-) => string;
+export type ShipmentMatchKey = Readonly<{
+  phoneNormalized: string;
+  addressNormalized: string;
+}>;
+
+export type ShipmentGroupIdFactory = (matchKey: ShipmentMatchKey) => string;
+
+export function shipmentMatchKeyIdentity(matchKey: ShipmentMatchKey): string {
+  return JSON.stringify([
+    matchKey.phoneNormalized,
+    matchKey.addressNormalized,
+  ]);
+}
 
 export function buildShipmentGroupProjection(
   candidateOrders: readonly OriginalOrder[],
   idFor: ShipmentGroupIdFactory,
 ): ShipmentGroupProjection {
-  const grouped = new Map<string, OriginalOrder[]>();
+  const grouped = new Map<string, {
+    matchKey: ShipmentMatchKey;
+    orders: OriginalOrder[];
+  }>();
   const attentionOrders: ShipmentGroupAttentionOrder[] = [];
   for (const order of candidateOrders) {
     const reasons: ShipmentGroupAttentionReason[] = [];
@@ -85,18 +97,19 @@ export function buildShipmentGroupProjection(
       });
       continue;
     }
-    const matchIdentity = shipmentMatchIdentity(
-      order.phoneNormalized,
-      order.addressNormalized,
-    );
-    const orders = grouped.get(matchIdentity) ?? [];
-    orders.push(order);
-    grouped.set(matchIdentity, orders);
+    const matchKey: ShipmentMatchKey = {
+      phoneNormalized: order.phoneNormalized,
+      addressNormalized: order.addressNormalized,
+    };
+    const matchIdentity = shipmentMatchKeyIdentity(matchKey);
+    const group = grouped.get(matchIdentity) ?? { matchKey, orders: [] };
+    group.orders.push(order);
+    grouped.set(matchIdentity, group);
   }
 
   return {
     groups: [...grouped.values()]
-      .map((orders) => openShipmentGroup(orders, idFor))
+      .map(({ matchKey, orders }) => openShipmentGroup(matchKey, orders, idFor))
       .sort((left, right) => (
         left.addressNormalized.localeCompare(right.addressNormalized, 'zh-CN') ||
         left.phoneNormalized.localeCompare(right.phoneNormalized)
@@ -107,11 +120,8 @@ export function buildShipmentGroupProjection(
   };
 }
 
-function shipmentMatchIdentity(phoneNormalized: string, addressNormalized: string): string {
-  return `${phoneNormalized.length}:${phoneNormalized}${addressNormalized}`;
-}
-
 function openShipmentGroup(
+  matchKey: ShipmentMatchKey,
   sourceOrders: readonly OriginalOrder[],
   idFor: ShipmentGroupIdFactory,
 ): OpenShipmentGroup {
@@ -124,7 +134,7 @@ function openShipmentGroup(
   const items = aggregateItems(orders);
 
   return {
-    id: idFor(first.phoneNormalized, first.addressNormalized),
+    id: idFor(matchKey),
     phone: first.phone,
     phoneNormalized: first.phoneNormalized,
     addressOriginal: first.addressOriginal,

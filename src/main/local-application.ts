@@ -128,6 +128,7 @@ import type {
 } from '../core/table-templates';
 import {
   buildShipmentGroupProjection,
+  shipmentMatchKeyIdentity,
   type ShipmentGroupProjection,
 } from '../core/shipment-groups';
 import {
@@ -2772,9 +2773,9 @@ export class LocalApplication {
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
     const orders = rows.map((row) => this.getOrder(asString(row.id)).order);
-    return buildShipmentGroupProjection(orders, (phoneNormalized, addressNormalized) => (
+    return buildShipmentGroupProjection(orders, (matchKey) => (
       `shipment-group-${createHash('sha256')
-        .update(`${phoneNormalized.length}:${phoneNormalized}${addressNormalized}`)
+        .update(shipmentMatchKeyIdentity(matchKey))
         .digest('hex')
         .slice(0, 24)}`
     ));
