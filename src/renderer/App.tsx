@@ -22,6 +22,7 @@ import type {
 } from '../core/custom-fields';
 import type {
   DraftItem,
+  FulfillmentStatus,
   OrderChangeValue,
   OrderDetails,
   OrderDraft,
@@ -1866,6 +1867,8 @@ function OrdersWorkspace({
               <option value="">全部履约状态</option>
               <option value="pending_shipment">待发货</option>
               <option value="shipped">已发货</option>
+              <option value="delivered">已收货</option>
+              <option value="returned">已退货</option>
               <option value="unknown">未知</option>
             </select>
           </label>
@@ -2349,6 +2352,8 @@ function OrderStatusAndLogisticsDialog({
               <option value="">不修改</option>
               <option value="pending_shipment">待发货</option>
               <option value="shipped">已发货</option>
+              <option value="delivered">已收货</option>
+              <option value="returned">已退货</option>
               <option value="unknown">未知</option>
             </select>
           </label>
@@ -2395,7 +2400,9 @@ function OrderStatusAndLogisticsDialog({
         </div>
 
         <p className="order-status-logistics-dialog__notice">
-          已取消或已退款的订单仍保留在系统中，但不进入待发货视图。平台交易状态不会自动改写履约状态。
+          填写有效运单号时，待发货会自动同步为已发货；清空运单号时，已发货会退回待发货。
+          已收货、已退货等终态不会被自动覆盖。已取消或已退款的订单仍保留在系统中，但不进入待发货视图；
+          平台交易状态不会自动改写履约状态。
         </p>
         {error && <p className="order-status-logistics-dialog__error" role="alert">{error}</p>}
         <footer className="order-status-logistics-dialog__actions">
@@ -4745,6 +4752,8 @@ function ReviewWorkspace({
                 >
                   <option value="pending_shipment">待发货</option>
                   <option value="shipped">已发货</option>
+                  <option value="delivered">已收货</option>
+                  <option value="returned">已退货</option>
                   <option value="unknown">未知</option>
                 </select>
               </Field>
@@ -5309,7 +5318,7 @@ function OrderEditWorkspace({
   );
   const dirty = JSON.stringify(input) !== JSON.stringify(baselineInput) ||
     JSON.stringify(moneyInputs) !== JSON.stringify(baselineMoneyInputs);
-  const shippedSnapshotWarning = details.order.fulfillmentStatus === 'shipped';
+  const shippedSnapshotWarning = hasShipmentHistory(details.order.fulfillmentStatus);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -5585,7 +5594,10 @@ function OrderEditWorkspace({
       {shippedSnapshotWarning && (
         <div className="order-edit-warning" role="status">
           <Icon name="warning" />
-          <span>该订单已发货；保存只更新订单当前值，不会改写已冻结的发货快照。</span>
+          <span>
+            该订单已经历发货（当前{fulfillmentStatusLabel(details.order.fulfillmentStatus)}）；
+            保存只更新订单当前值，不会改写已冻结的发货快照。
+          </span>
         </div>
       )}
 
@@ -6743,10 +6755,19 @@ function platformTransactionStatusLabel(status: OrderDraft['platformTransactionS
   }[status];
 }
 
-function fulfillmentStatusLabel(status: OrderDraft['fulfillmentStatus']): string {
-  if (status === 'shipped') return '已发货';
-  if (status === 'pending_shipment') return '待发货';
-  return '未知';
+function fulfillmentStatusLabel(status: FulfillmentStatus): string {
+  const labels: Record<FulfillmentStatus, string> = {
+    pending_shipment: '待发货',
+    shipped: '已发货',
+    delivered: '已收货',
+    returned: '已退货',
+    unknown: '未知',
+  };
+  return labels[status];
+}
+
+function hasShipmentHistory(status: FulfillmentStatus): boolean {
+  return status === 'shipped' || status === 'delivered' || status === 'returned';
 }
 
 function recognitionStatusLabel(status: RecognitionBatchItemStatus): string {

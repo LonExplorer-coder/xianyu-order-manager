@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, rmdir, stat, unlink, writeFile } from 'node:fs/pro
 import { basename, dirname, extname, join } from 'node:path';
 
 import type {
+  ConfirmedOrderSnapshot,
   OrderDetails,
   OrderChangeEvent,
   OrderChangeValue,
@@ -21,6 +22,7 @@ import type {
   OrderUpdateConfirmation,
   OriginalOrder,
   RecognitionItem,
+  RecognitionFulfillmentStatus,
   RecognitionResult,
   Recognizer,
   SourceScreenshot,
@@ -52,6 +54,7 @@ import { orderEditTargetId, prepareOrderEdit } from '../core/order-edit';
 import {
   diffOrderStatusAndLogistics,
   prepareOrderStatusAndLogisticsUpdate,
+  resolveOrderStatusAndLogisticsPatch,
 } from '../core/order-fulfillment';
 import type {
   ConfirmDraftCustomFieldOptions,
@@ -84,6 +87,7 @@ import {
   hasEquivalentOrderContent,
   hasSameOrderIdentity,
   normalizedOrderIdentityPart,
+  shouldPreserveManualTerminalFulfillment,
 } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import {
@@ -913,7 +917,7 @@ export class LocalApplication {
         recognition: parseStoredRecognition(asString(snapshotRow.recognition_json)),
         confirmed: snapshotRow.confirmed_json === null
           ? null
-          : parseStoredRecognition(asString(snapshotRow.confirmed_json)),
+          : parseStoredConfirmedOrderSnapshot(asString(snapshotRow.confirmed_json)),
       },
     };
   }
@@ -1247,7 +1251,7 @@ export class LocalApplication {
       `)
       .run(
         orderId,
-        serializeRecognition(toRecognitionResult(existing)),
+        serializeRecognition(toConfirmedOrderSnapshot(existing)),
         now,
         draftId,
       );
@@ -1860,7 +1864,7 @@ export class LocalApplication {
     });
     const orderId = randomUUID();
     const now = new Date().toISOString();
-    const confirmedRecognition = toRecognitionResult(draft);
+    const confirmedRecognition = toConfirmedOrderSnapshot(draft);
     const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
     const shippingFeeCents = requireMoney('运费', draft.shippingFeeCents);
     const amountCents = requireMoney('成交金额', draft.amountCents);
@@ -2084,16 +2088,23 @@ export class LocalApplication {
     }
     draft = withHigherPriorityCurrentQuantities(existing, draft);
     const changes = diffOrderCurrentValues(existing, draft);
+    const fulfillmentStatus = shouldPreserveManualTerminalFulfillment(
+      existing.fulfillmentStatus,
+      draft.fulfillmentStatus,
+    )
+      ? existing.fulfillmentStatus
+      : draft.fulfillmentStatus;
 
     const productTotalCents = requireMoney('商品总价', draft.productTotalCents);
     const shippingFeeCents = requireMoney('运费', draft.shippingFeeCents);
     const amountCents = requireMoney('成交金额', draft.amountCents);
     const now = new Date().toISOString();
-    const confirmedRecognition = toRecognitionResult({
+    const confirmedRecognition = toConfirmedOrderSnapshot({
       ...draft,
       platform: existing.platform,
       sellerAccount: existing.sellerAccount,
       orderNumber: existing.orderNumber,
+      fulfillmentStatus,
     });
     const preparedCustomValues = this.prepareDraftCustomFieldValues(
       draft,
@@ -2159,7 +2170,6 @@ export class LocalApplication {
       persistedItemIds.set(draftItem.id, persistedId);
     }
     const existingItemIds = new Set(existing.items.map((item) => item.id));
-
     workspace.transaction(() => {
       const currentDraft = workspace.database
         .prepare(`
@@ -2223,7 +2233,7 @@ export class LocalApplication {
           shippingFeeCents,
           amountCents,
           draft.platformTransactionStatus,
-          draft.fulfillmentStatus,
+          fulfillmentStatus,
           now,
           orderId,
           expectedRevision,
@@ -2676,17 +2686,18 @@ export class LocalApplication {
         if (current.revision !== target.expectedRevision) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
         }
-        const changes = diffOrderStatusAndLogistics(current, prepared.patch);
+        const resolvedPatch = resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
+        const changes = diffOrderStatusAndLogistics(current, resolvedPatch);
         if (changes.length === 0) continue;
         const values = {
           platformTransactionStatus:
-            prepared.patch.platformTransactionStatus ?? current.platformTransactionStatus,
+            resolvedPatch.platformTransactionStatus ?? current.platformTransactionStatus,
           fulfillmentStatus:
-            prepared.patch.fulfillmentStatus ?? current.fulfillmentStatus,
+            resolvedPatch.fulfillmentStatus ?? current.fulfillmentStatus,
           shippingCarrier:
-            prepared.patch.shippingCarrier ?? current.shippingCarrier,
+            resolvedPatch.shippingCarrier ?? current.shippingCarrier,
           trackingNumber:
-            prepared.patch.trackingNumber ?? current.trackingNumber,
+            resolvedPatch.trackingNumber ?? current.trackingNumber,
         };
         const updated = workspace.database.prepare(`
           UPDATE original_orders
@@ -3386,7 +3397,7 @@ export class LocalApplication {
         recognition: parseStoredRecognition(asString(sourceRow.recognition_json)),
         confirmed: sourceRow.confirmed_json === null
           ? null
-          : parseStoredRecognition(asString(sourceRow.confirmed_json)),
+          : parseStoredConfirmedOrderSnapshot(asString(sourceRow.confirmed_json)),
       } satisfies SourceSnapshot,
     }));
     const latestSource = sources[0];
@@ -4045,9 +4056,12 @@ export class LocalApplication {
   }
 }
 
-function toRecognitionResult(
-  draft: Omit<RecognitionResult, 'items'> & { items: readonly RecognitionItem[] },
-): RecognitionResult {
+function toConfirmedOrderSnapshot(
+  draft: Omit<RecognitionResult, 'items' | 'fulfillmentStatus'> & {
+    fulfillmentStatus: OriginalOrder['fulfillmentStatus'];
+    items: readonly RecognitionItem[];
+  },
+): ConfirmedOrderSnapshot {
   return {
     platform: draft.platform,
     sellerAccount: draft.sellerAccount,
@@ -4162,7 +4176,9 @@ function requiredQuantitySource(item: RecognitionItem): QuantitySource {
   return item.quantitySource;
 }
 
-function serializeRecognition(recognition: RecognitionResult): string {
+function serializeRecognition(
+  recognition: RecognitionResult | ConfirmedOrderSnapshot,
+): string {
   return JSON.stringify({
     ...recognition,
     items: recognition.items.map(({ quantityInferred: _legacyFlag, ...item }) => item),
@@ -4170,6 +4186,9 @@ function serializeRecognition(recognition: RecognitionResult): string {
 }
 
 function validateRecognition(recognition: RecognitionResult): void {
+  if (!isRecognitionFulfillmentStatus(recognition.fulfillmentStatus)) {
+    throw new Error('OCR 识别履约状态格式错误');
+  }
   validateValues(recognition, recognition.items, false);
 }
 
@@ -4178,7 +4197,9 @@ function validateDraft(draft: OrderDraft): void {
 }
 
 function validateValues(
-  value: Omit<RecognitionResult, 'items'>,
+  value: Omit<RecognitionResult, 'items' | 'fulfillmentStatus'> & {
+    fulfillmentStatus: OriginalOrder['fulfillmentStatus'];
+  },
   items: RecognitionItem[],
   strict: boolean,
 ): void {
@@ -4237,7 +4258,13 @@ function validateValues(
   if (!['paid', 'cancelled', 'refunded', 'unknown'].includes(value.platformTransactionStatus)) {
     throw new Error('平台交易状态格式错误');
   }
-  if (!['pending_shipment', 'shipped', 'unknown'].includes(value.fulfillmentStatus)) {
+  if (![
+    'pending_shipment',
+    'shipped',
+    'delivered',
+    'returned',
+    'unknown',
+  ].includes(value.fulfillmentStatus)) {
     throw new Error('履约状态格式错误');
   }
   if (!Array.isArray(items) || (strict && items.length === 0)) {
@@ -4312,10 +4339,21 @@ function parseStoredRecognition(serialized: string): RecognitionResult {
     )
       ? stored.platformTransactionStatus
       : 'paid',
-    fulfillmentStatus: isFulfillmentStatus(stored.fulfillmentStatus)
+    fulfillmentStatus: isRecognitionFulfillmentStatus(stored.fulfillmentStatus)
       ? stored.fulfillmentStatus
       : 'pending_shipment',
     items,
+  };
+}
+
+function parseStoredConfirmedOrderSnapshot(serialized: string): ConfirmedOrderSnapshot {
+  const recognition = parseStoredRecognition(serialized);
+  const parsed = JSON.parse(serialized) as Record<string, unknown>;
+  return {
+    ...recognition,
+    fulfillmentStatus: isFulfillmentStatus(parsed.fulfillmentStatus)
+      ? parsed.fulfillmentStatus
+      : recognition.fulfillmentStatus,
   };
 }
 
@@ -4493,6 +4531,13 @@ function asOrderPlatform(
 }
 
 function isFulfillmentStatus(value: unknown): value is OriginalOrder['fulfillmentStatus'] {
+  return value === 'pending_shipment' || value === 'shipped' || value === 'delivered' ||
+    value === 'returned' || value === 'unknown';
+}
+
+function isRecognitionFulfillmentStatus(
+  value: unknown,
+): value is RecognitionFulfillmentStatus {
   return value === 'pending_shipment' || value === 'shipped' || value === 'unknown';
 }
 

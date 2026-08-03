@@ -72,7 +72,13 @@ function normalizePatch(record: Record<string, unknown>): OrderStatusAndLogistic
   }
   if (Object.hasOwn(record, 'fulfillmentStatus')) {
     const value = record.fulfillmentStatus;
-    if (value !== 'pending_shipment' && value !== 'shipped' && value !== 'unknown') {
+    if (
+      value !== 'pending_shipment' &&
+      value !== 'shipped' &&
+      value !== 'delivered' &&
+      value !== 'returned' &&
+      value !== 'unknown'
+    ) {
       throw new Error('履约状态格式无效');
     }
     patch.fulfillmentStatus = value;
@@ -113,6 +119,24 @@ function normalizeTarget(value: unknown, index: number): OrderStatusAndLogistics
     throw new Error(`${label} 的订单版本格式无效`);
   }
   return { orderId, expectedRevision: record.expectedRevision as number };
+}
+
+export function resolveOrderStatusAndLogisticsPatch(
+  current: OriginalOrder,
+  patch: OrderStatusAndLogisticsPatch,
+): OrderStatusAndLogisticsPatch {
+  const resolved = { ...patch };
+  const fulfillmentStatus = patch.fulfillmentStatus ?? current.fulfillmentStatus;
+  const trackingNumber = Object.hasOwn(patch, 'trackingNumber')
+    ? patch.trackingNumber ?? current.trackingNumber
+    : current.trackingNumber;
+
+  if (fulfillmentStatus === 'pending_shipment' && trackingNumber) {
+    resolved.fulfillmentStatus = 'shipped';
+  } else if (fulfillmentStatus === 'shipped' && !trackingNumber) {
+    resolved.fulfillmentStatus = 'pending_shipment';
+  }
+  return resolved;
 }
 
 export function diffOrderStatusAndLogistics(

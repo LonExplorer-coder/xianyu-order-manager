@@ -235,7 +235,11 @@ export function prepareOrderEdit(
       expectedRevision,
       input: normalizedInput,
       changes,
-      shippedSnapshotWarning: current.fulfillmentStatus === 'shipped',
+      shippedSnapshotWarning: [
+        'shipped',
+        'delivered',
+        'returned',
+      ].includes(current.fulfillmentStatus),
     },
     identity,
     values,

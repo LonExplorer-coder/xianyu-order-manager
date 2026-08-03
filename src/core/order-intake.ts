@@ -1,5 +1,6 @@
 import {
   ORDER_REVIEW_ISSUE_CODES,
+  type FulfillmentStatus,
   type OrderReviewIssueCode,
   type RecognitionItem,
   type RecognitionResult,
@@ -10,6 +11,10 @@ import {
   normalizeAddress,
   normalizeShanghaiDateTime,
 } from './order-normalization';
+
+type AssessableOrder = Omit<RecognitionResult, 'fulfillmentStatus'> & {
+  fulfillmentStatus: FulfillmentStatus;
+};
 
 export type OrderIntakeSettingsView = {
   automaticImportEnabled: boolean;
@@ -93,7 +98,7 @@ export function normalizeOrderReviewIssues(
 }
 
 export function assessOrderForAutomaticImport(
-  result: RecognitionResult,
+  result: AssessableOrder,
   reportedReviewIssues: readonly OrderReviewIssueCode[] = [],
 ): OrderIntakeAssessment {
   const issues = new Set<OrderReviewIssueCode>(reportedReviewIssues);
@@ -109,7 +114,7 @@ export function assessOrderForAutomaticImport(
 export const assessOrderIntake = assessOrderForAutomaticImport;
 
 export function assessAutomaticImport(
-  result: RecognitionResult & { reviewIssues?: readonly OrderReviewIssueCode[] },
+  result: AssessableOrder & { reviewIssues?: readonly OrderReviewIssueCode[] },
 ): OrderReviewIssueCode[] {
   return assessOrderForAutomaticImport(
     result,
@@ -118,7 +123,7 @@ export function assessAutomaticImport(
 }
 
 function assessIdentity(
-  result: RecognitionResult,
+  result: AssessableOrder,
   issues: Set<OrderReviewIssueCode>,
 ): void {
   if (!result.sellerAccount.trim()) issues.add('missing_seller_account');
@@ -144,7 +149,7 @@ function assessIdentity(
 }
 
 function assessShipping(
-  result: RecognitionResult,
+  result: AssessableOrder,
   issues: Set<OrderReviewIssueCode>,
 ): void {
   if (!result.phone.trim()) issues.add('missing_phone');
@@ -273,7 +278,7 @@ function assessItems(
 }
 
 function assessAmounts(
-  result: RecognitionResult,
+  result: AssessableOrder,
   itemTotal: number | null,
   issues: Set<OrderReviewIssueCode>,
 ): void {
@@ -302,7 +307,7 @@ function assessMoney(
 }
 
 function assessTimes(
-  result: RecognitionResult,
+  result: AssessableOrder,
   issues: Set<OrderReviewIssueCode>,
 ): void {
   const orderTimeValid = isValidTimePair(

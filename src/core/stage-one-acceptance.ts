@@ -1,7 +1,7 @@
 import type {
-  FulfillmentStatus,
   OrderReviewIssueCode,
   PlatformTransactionStatus,
+  RecognitionFulfillmentStatus,
   RecognitionResult,
 } from './contracts';
 import { ORDER_REVIEW_ISSUE_CODES } from './contracts';
@@ -34,7 +34,7 @@ export type StageOneExpectedOrder = {
   productTotalCents: number | null;
   shippingFeeCents: number | null;
   platformTransactionStatus: PlatformTransactionStatus;
-  fulfillmentStatus: FulfillmentStatus;
+  fulfillmentStatus: RecognitionFulfillmentStatus;
   items: StageOneExpectedItem[];
 };
 
@@ -206,7 +206,7 @@ const PLATFORM_TRANSACTION_STATUSES = new Set<PlatformTransactionStatus>([
   'refunded',
   'unknown',
 ]);
-const FULFILLMENT_STATUSES = new Set<FulfillmentStatus>([
+const FULFILLMENT_STATUSES = new Set<RecognitionFulfillmentStatus>([
   'pending_shipment',
   'shipped',
   'unknown',
@@ -701,7 +701,7 @@ function parseExpectedOrder(value: unknown): StageOneExpectedOrder {
     !PLATFORM_TRANSACTION_STATUSES.has(
       value.platformTransactionStatus as PlatformTransactionStatus,
     ) ||
-    !FULFILLMENT_STATUSES.has(value.fulfillmentStatus as FulfillmentStatus) ||
+    !FULFILLMENT_STATUSES.has(value.fulfillmentStatus as RecognitionFulfillmentStatus) ||
     !Array.isArray(value.items) ||
     value.items.length === 0 ||
     value.items.length > 100
@@ -725,7 +725,7 @@ function parseExpectedOrder(value: unknown): StageOneExpectedOrder {
     productTotalCents: value.productTotalCents,
     shippingFeeCents: value.shippingFeeCents,
     platformTransactionStatus: value.platformTransactionStatus as PlatformTransactionStatus,
-    fulfillmentStatus: value.fulfillmentStatus as FulfillmentStatus,
+    fulfillmentStatus: value.fulfillmentStatus as RecognitionFulfillmentStatus,
     items: value.items.map((item) => parseExpectedItem(item)),
   };
 }
@@ -805,7 +805,7 @@ function parseRecognitionResult(value: unknown): RecognitionResult {
     !PLATFORM_TRANSACTION_STATUSES.has(
       value.platformTransactionStatus as PlatformTransactionStatus,
     ) ||
-    !FULFILLMENT_STATUSES.has(value.fulfillmentStatus as FulfillmentStatus) ||
+    !FULFILLMENT_STATUSES.has(value.fulfillmentStatus as RecognitionFulfillmentStatus) ||
     !Array.isArray(value.items) ||
     value.items.length > 100
   ) {
@@ -834,7 +834,7 @@ function parseRecognitionResult(value: unknown): RecognitionResult {
     shippingFeeCents: value.shippingFeeCents,
     amountCents: value.amountCents,
     platformTransactionStatus: value.platformTransactionStatus as PlatformTransactionStatus,
-    fulfillmentStatus: value.fulfillmentStatus as FulfillmentStatus,
+    fulfillmentStatus: value.fulfillmentStatus as RecognitionFulfillmentStatus,
     items,
   };
 }

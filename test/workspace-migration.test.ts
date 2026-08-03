@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v15 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v16 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -35,6 +35,7 @@ describe('数据库升级', () => {
       { version: 13 },
       { version: 14 },
       { version: 15 },
+      { version: 16 },
     ]);
     expect(
       first.database
@@ -321,7 +322,9 @@ describe('数据库升级', () => {
     const updateFulfillmentStatus = first.database.prepare(
       "UPDATE original_orders SET fulfillment_status = ? WHERE id = 'order-v1'",
     );
-    for (const status of ['pending_shipment', 'shipped', 'unknown']) {
+    for (const status of [
+      'pending_shipment', 'shipped', 'delivered', 'returned', 'unknown',
+    ]) {
       expect(updateFulfillmentStatus.run(status).changes).toBe(1);
     }
     expect(() => updateFulfillmentStatus.run('invalid')).toThrow();
@@ -372,6 +375,7 @@ describe('数据库升级', () => {
       { version: 13 },
       { version: 14 },
       { version: 15 },
+      { version: 16 },
     ]);
     expect(
       (
@@ -612,6 +616,7 @@ describe('数据库升级', () => {
         { version: 13 },
         { version: 14 },
         { version: 15 },
+        { version: 16 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -810,7 +815,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 15 });
+        .toEqual({ version: 16 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -924,7 +929,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 15 });
+        .toEqual({ version: 16 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -944,9 +949,9 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16) ORDER BY version',
       ).all()).toEqual([
-        { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 },
+        { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -980,7 +985,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 15 });
+        .toEqual({ version: 16 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1246,7 +1251,7 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
         DROP TABLE IF EXISTS candidate_adjudication_decisions;
         DROP TABLE IF EXISTS candidate_adjudication_runs;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15);
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1274,7 +1279,7 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
       DROP TABLE IF EXISTS candidate_adjudication_decisions;
       DROP TABLE IF EXISTS candidate_adjudication_runs;
-      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15);
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16);
       COMMIT;
     `);
   } finally {
@@ -1299,7 +1304,7 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       ALTER TABLE original_orders DROP COLUMN tracking_number;
       DROP TABLE IF EXISTS candidate_adjudication_decisions;
       DROP TABLE IF EXISTS candidate_adjudication_runs;
-      DELETE FROM schema_migrations WHERE version IN (13, 14, 15);
+      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16);
       COMMIT;
     `);
   } catch (error) {
@@ -1501,7 +1506,7 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
         DROP TABLE IF EXISTS candidate_adjudication_decisions;
         DROP TABLE IF EXISTS candidate_adjudication_runs;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15);
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16);
       `);
       database.exec('COMMIT;');
     } catch (error) {

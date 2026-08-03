@@ -96,6 +96,10 @@ describe('表格模板 Electron IPC', () => {
       sortField: 'unit_price',
       sortDirection: 'desc',
     }, [])).toEqual(expect.objectContaining({ items: [] }));
+    await expect(invoke('orders:query', { fulfillmentStatus: 'delivered' }, []))
+      .resolves.toEqual(expect.objectContaining({ orders: [] }));
+    await expect(invoke('orders:query', { fulfillmentStatus: 'returned' }, []))
+      .resolves.toEqual(expect.objectContaining({ orders: [] }));
     await expect(invoke('orders:query', {}, 'field-1'))
       .rejects.toThrow(/自定义字段/);
     await expect(invoke('orders:query', {}, ['']))

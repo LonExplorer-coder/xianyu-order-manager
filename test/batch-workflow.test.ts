@@ -474,6 +474,239 @@ describe('批量来源截图识别队列', () => {
     });
   });
 
+  it.each(['delivered', 'returned'] as const)(
+    '人工终态 %s 不被后续 OCR 基础履约态回退，且新来源仅记录真实变化',
+    async (terminalStatus) => {
+      const firstRecognition = {
+        ...recognition,
+        orderNumber: `TERMINAL-SOURCE-UPDATE-${terminalStatus}`,
+      };
+      const changedRecognition = {
+        ...firstRecognition,
+        recipient: `${terminalStatus} 的新收件人`,
+        fulfillmentStatus: 'pending_shipment' as const,
+      };
+      const manuallyChangedRecognition = {
+        ...changedRecognition,
+        recipient: `${terminalStatus} 的二次新收件人`,
+      };
+      const recognize = vi.fn<Recognizer['recognize']>()
+        .mockResolvedValueOnce(recognitionAttempt(firstRecognition))
+        .mockResolvedValueOnce(recognitionAttempt(changedRecognition))
+        .mockResolvedValueOnce(recognitionAttempt(manuallyChangedRecognition));
+      const session = await openSession({ recognize });
+      const root = await mkdtemp(join(tmpdir(), `xianyu-terminal-${terminalStatus}-`));
+      const firstPath = join(root, '终态订单原值.png');
+      const changedPath = join(root, '终态订单更新来源.png');
+      const manuallyChangedPath = join(root, '终态订单人工切换来源.png');
+      await Promise.all([
+        writeFile(firstPath, `terminal-${terminalStatus}-original`),
+        writeFile(changedPath, `terminal-${terminalStatus}-changed`),
+        writeFile(manuallyChangedPath, `terminal-${terminalStatus}-manual-transition`),
+      ]);
+
+      await session.submitSourceScreenshots([firstPath]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+      });
+      const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+      const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+      const [terminalOrder] = session.updateOrderStatusAndLogistics({
+        targets: [{ orderId: originalOrder.id, expectedRevision: originalOrder.revision }],
+        patch: { fulfillmentStatus: terminalStatus },
+      });
+      expect(terminalOrder.order).toMatchObject({
+        fulfillmentStatus: terminalStatus,
+        revision: 2,
+      });
+
+      const changedBatch = await session.submitSourceScreenshots([changedPath]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0]).toMatchObject({
+          id: changedBatch.id,
+          counts: { awaiting_confirmation: 1 },
+        });
+      });
+      const changedDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+      const review = session.getDraftReview(changedDraftId);
+      if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+      expect(review).toMatchObject({
+        currentOrder: {
+          id: originalOrder.id,
+          fulfillmentStatus: terminalStatus,
+          revision: 2,
+        },
+        expectedRevision: 2,
+        changes: [{
+          path: 'recipient',
+          before: '批次收件人',
+          after: `${terminalStatus} 的新收件人`,
+        }],
+        sourceSnapshot: {
+          recognition: {
+            recipient: `${terminalStatus} 的新收件人`,
+            fulfillmentStatus: 'pending_shipment',
+          },
+          confirmed: null,
+        },
+      });
+      expect(review.changes).not.toContainEqual(expect.objectContaining({
+        path: 'fulfillmentStatus',
+      }));
+
+      const updated = session.confirmOrderUpdate(review.draft, review.expectedRevision);
+      expect(updated.order).toMatchObject({
+        id: originalOrder.id,
+        recipient: `${terminalStatus} 的新收件人`,
+        fulfillmentStatus: terminalStatus,
+        revision: 3,
+      });
+      const details = session.getOrder(originalOrder.id);
+      expect(details.order).toMatchObject({
+        recipient: `${terminalStatus} 的新收件人`,
+        fulfillmentStatus: terminalStatus,
+        revision: 3,
+      });
+      expect(details.changeEvents[0]).toMatchObject({
+        source: 'source_update',
+        baseRevision: 2,
+        resultRevision: 3,
+        changes: [{
+          path: 'recipient',
+          before: '批次收件人',
+          after: `${terminalStatus} 的新收件人`,
+        }],
+      });
+      expect(details.sources[0]).toMatchObject({
+        sourceSnapshot: {
+          recognition: {
+            recipient: `${terminalStatus} 的新收件人`,
+            fulfillmentStatus: 'pending_shipment',
+          },
+          confirmed: {
+            recipient: `${terminalStatus} 的新收件人`,
+            fulfillmentStatus: terminalStatus,
+          },
+        },
+      });
+
+      const manualBatch = await session.submitSourceScreenshots([manuallyChangedPath]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0]).toMatchObject({
+          id: manualBatch.id,
+          counts: { awaiting_confirmation: 1 },
+        });
+      });
+      const manualDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+      const manualReview = session.getDraftReview(manualDraftId);
+      if (manualReview.kind !== 'order_update') throw new Error('预期订单更新校对');
+      const nextTerminalStatus = terminalStatus === 'delivered' ? 'returned' : 'delivered';
+      const manuallyConfirmed = session.confirmOrderUpdate({
+        ...manualReview.draft,
+        fulfillmentStatus: nextTerminalStatus,
+      }, manualReview.expectedRevision);
+
+      expect(manuallyConfirmed.order).toMatchObject({
+        recipient: `${terminalStatus} 的二次新收件人`,
+        fulfillmentStatus: nextTerminalStatus,
+        revision: 4,
+      });
+      expect(session.getOrder(originalOrder.id).changeEvents[0]).toMatchObject({
+        source: 'source_update',
+        baseRevision: 3,
+        resultRevision: 4,
+        changes: expect.arrayContaining([
+          {
+            path: 'recipient',
+            before: `${terminalStatus} 的新收件人`,
+            after: `${terminalStatus} 的二次新收件人`,
+          },
+          {
+            path: 'fulfillmentStatus',
+            before: terminalStatus,
+            after: nextTerminalStatus,
+          },
+        ]),
+      });
+      expect(session.getOrder(originalOrder.id).sources[0]).toMatchObject({
+        sourceSnapshot: {
+          recognition: { fulfillmentStatus: 'pending_shipment' },
+          confirmed: { fulfillmentStatus: nextTerminalStatus },
+        },
+      });
+    },
+  );
+
+  it.each(['delivered', 'returned'] as const)(
+    '人工终态 %s 与内容等价的 OCR 基础态截图自动合并为重复来源',
+    async (terminalStatus) => {
+      const equivalentRecognition = {
+        ...recognition,
+        orderNumber: `TERMINAL-EQUIVALENT-${terminalStatus}`,
+        fulfillmentStatus: 'pending_shipment' as const,
+      };
+      const recognize = vi.fn<Recognizer['recognize']>()
+        .mockResolvedValue(recognitionAttempt(equivalentRecognition));
+      const session = await openSession({ recognize });
+      const root = await mkdtemp(join(tmpdir(), `xianyu-terminal-equivalent-${terminalStatus}-`));
+      const firstPath = join(root, '终态等价订单首次截图.png');
+      const repeatedPath = join(root, '终态等价订单后续截图.png');
+      await Promise.all([
+        writeFile(firstPath, `terminal-equivalent-${terminalStatus}-first`),
+        writeFile(repeatedPath, `terminal-equivalent-${terminalStatus}-repeated`),
+      ]);
+
+      await session.submitSourceScreenshots([firstPath]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0].counts.awaiting_confirmation).toBe(1);
+      });
+      const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
+      const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
+      const [terminalOrder] = session.updateOrderStatusAndLogistics({
+        targets: [{ orderId: originalOrder.id, expectedRevision: originalOrder.revision }],
+        patch: { fulfillmentStatus: terminalStatus },
+      });
+      expect(terminalOrder.order).toMatchObject({
+        fulfillmentStatus: terminalStatus,
+        revision: 2,
+      });
+      expect(terminalOrder.sources).toHaveLength(1);
+
+      const repeatedBatch = await session.submitSourceScreenshots([repeatedPath]);
+      await eventually(() => {
+        expect(session.listRecognitionBatches()[0]).toMatchObject({
+          id: repeatedBatch.id,
+          counts: { duplicate_skipped: 1, awaiting_confirmation: 0 },
+          items: [{
+            status: 'duplicate_skipped',
+            resolution: 'equivalent_order',
+          }],
+        });
+      });
+
+      expect(recognize).toHaveBeenCalledTimes(2);
+      expect(session.listOrders()).toHaveLength(1);
+      const details = session.getOrder(originalOrder.id);
+      expect(details.order).toMatchObject({
+        fulfillmentStatus: terminalStatus,
+        revision: 2,
+      });
+      expect(details.sources).toHaveLength(2);
+      expect(details.sources[0]).toMatchObject({
+        sourceSnapshot: {
+          recognition: { fulfillmentStatus: 'pending_shipment' },
+        },
+      });
+      expect(details.changeEvents).toHaveLength(1);
+      expect(details.changeEvents[0]).toMatchObject({
+        source: 'manual_edit',
+        baseRevision: 1,
+        resultRevision: 2,
+      });
+    },
+  );
+
   it('把变化草稿全部改回当前值时只保留新来源且即时状态与持久化结果一致', async () => {
     const firstRecognition = {
       ...recognition,

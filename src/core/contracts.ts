@@ -18,7 +18,9 @@ export type RecognitionItem = {
 
 export type PlatformTransactionStatus = 'paid' | 'cancelled' | 'refunded' | 'unknown';
 
-export type FulfillmentStatus = 'pending_shipment' | 'shipped' | 'unknown';
+export type RecognitionFulfillmentStatus = 'pending_shipment' | 'shipped' | 'unknown';
+
+export type FulfillmentStatus = RecognitionFulfillmentStatus | 'delivered' | 'returned';
 
 export type OrderPlatform = 'xianyu';
 
@@ -157,7 +159,7 @@ export type RecognitionResult = {
   shippingFeeCents: number | null;
   amountCents: number | null;
   platformTransactionStatus: PlatformTransactionStatus;
-  fulfillmentStatus: FulfillmentStatus;
+  fulfillmentStatus: RecognitionFulfillmentStatus;
   items: RecognitionItem[];
 };
 
@@ -194,10 +196,11 @@ export type DraftItem = RecognitionItem & {
   position: number;
 };
 
-export type OrderDraft = Omit<RecognitionResult, 'items'> & {
+export type OrderDraft = Omit<RecognitionResult, 'items' | 'fulfillmentStatus'> & {
   id: string;
   batchId: string;
   screenshotId: string;
+  fulfillmentStatus: FulfillmentStatus;
   status: 'awaiting_review' | 'confirmed' | 'cancelled';
   reviewIssues?: OrderReviewIssueCode[];
   recognitionConflicts?: RecognitionConflictDetail[];
@@ -257,9 +260,13 @@ export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
   subtotalCents: number;
 };
 
-export type OriginalOrder = Omit<RecognitionResult, 'items' | 'amountCents'> & {
+export type OriginalOrder = Omit<
+  RecognitionResult,
+  'items' | 'amountCents' | 'fulfillmentStatus'
+> & {
   id: string;
   amountCents: number;
+  fulfillmentStatus: FulfillmentStatus;
   note?: string;
   shippingCarrier: string;
   trackingNumber: string;
@@ -320,11 +327,15 @@ export type SourceScreenshot = {
   createdAt: string;
 };
 
+export type ConfirmedOrderSnapshot = Omit<RecognitionResult, 'fulfillmentStatus'> & {
+  fulfillmentStatus: FulfillmentStatus;
+};
+
 export type SourceSnapshot = {
   id: string;
   createdAt: string;
   recognition: RecognitionResult;
-  confirmed: RecognitionResult | null;
+  confirmed: ConfirmedOrderSnapshot | null;
 };
 
 export type OrderChangeValue =

@@ -18,6 +18,7 @@ import type {
   OriginalOrder,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
+  SourceSnapshot,
 } from '../src/core/contracts';
 import type {
   OrderWorkbenchQuery,
@@ -118,11 +119,15 @@ const sourceScreenshot = {
   sha256: 'abc123',
   createdAt: draft.createdAt,
 };
-const sourceSnapshot = {
+const sourceSnapshot: SourceSnapshot = {
   id: 'snapshot-1',
   createdAt: draft.createdAt,
-  recognition: draft,
-  confirmed: { ...draft, recipient: confirmedOrder.recipient },
+  recognition: { ...draft, fulfillmentStatus: 'pending_shipment' },
+  confirmed: {
+    ...draft,
+    fulfillmentStatus: 'pending_shipment',
+    recipient: confirmedOrder.recipient,
+  },
 };
 const orderDetails: OrderDetails = {
   order: confirmedOrder,
@@ -624,6 +629,28 @@ describe('订单管理工作台', () => {
       platformTransactionStatus: 'refunded',
       fulfillmentStatus: 'shipped',
     }));
+  });
+
+  it('截图确认时可以选择已收货和已退货', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+
+    const fulfillmentSelect = await screen.findByRole('combobox', { name: '履约状态' });
+    expect(within(fulfillmentSelect).getByRole('option', { name: '已收货' }))
+      .toHaveValue('delivered');
+    expect(within(fulfillmentSelect).getByRole('option', { name: '已退货' }))
+      .toHaveValue('returned');
   });
 
   it('金额按十进制精确保存为分，并拒绝三位小数与指数格式', async () => {
@@ -1239,6 +1266,26 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
   });
 
+  it('履约状态筛选可以选择已收货和已退货', async () => {
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+    });
+
+    render(<App api={api} />);
+
+    const fulfillmentFilter = await screen.findByRole('combobox', { name: '履约状态' });
+    expect(within(fulfillmentFilter).getByRole('option', { name: '已收货' }))
+      .toHaveValue('delivered');
+    expect(within(fulfillmentFilter).getByRole('option', { name: '已退货' }))
+      .toHaveValue('returned');
+  });
+
   it('选择商品升序后表格按查询结果顺序呈现', async () => {
     const user = userEvent.setup();
     const zOrder = orderSummary(confirmedOrder, {
@@ -1444,6 +1491,97 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(queryOrders).toHaveBeenCalledTimes(2));
   });
 
+  it('状态与物流弹窗支持完整履约状态并说明运单自动同步边界', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `维护订单状态与物流 ${summary.orderNumber}`,
+    }));
+
+    const dialog = screen.getByRole('dialog', { name: '维护状态与物流' });
+    const fulfillmentSelect = within(dialog).getByRole('combobox', { name: '履约状态' });
+    expect(within(fulfillmentSelect).getByRole('option', { name: '已收货' }))
+      .toHaveValue('delivered');
+    expect(within(fulfillmentSelect).getByRole('option', { name: '已退货' }))
+      .toHaveValue('returned');
+    expect(dialog).toHaveTextContent('填写有效运单号时，待发货会自动同步为已发货');
+    expect(dialog).toHaveTextContent('清空运单号时，已发货会退回待发货');
+    expect(dialog).toHaveTextContent('已收货、已退货等终态不会被自动覆盖');
+  });
+
+  it('批量登记运单号时只提交用户补丁并展示后端最终履约状态', async () => {
+    const user = userEvent.setup();
+    const first = orderSummary(confirmedOrder, { revision: 1 });
+    const secondOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-status-final-2',
+      orderNumber: 'XY-STATUS-FINAL-0002',
+      revision: 4,
+    };
+    const second = orderSummary(secondOrder, { revision: 4 });
+    const shippedFirstOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 2,
+      fulfillmentStatus: 'shipped',
+      trackingNumber: 'SF-AUTO-123456',
+    };
+    const shippedSecondOrder: OriginalOrder = {
+      ...secondOrder,
+      revision: 5,
+      fulfillmentStatus: 'shipped',
+      trackingNumber: 'SF-AUTO-123456',
+    };
+    let updated = false;
+    const queryOrders = vi.fn(async () => workbenchResult(updated
+      ? [orderSummary(shippedFirstOrder), orderSummary(shippedSecondOrder)]
+      : [first, second]));
+    const updateOrderStatusAndLogistics = vi.fn(async () => {
+      updated = true;
+      return [
+        { ...orderDetails, order: shippedFirstOrder },
+        { ...orderDetails, order: shippedSecondOrder },
+      ];
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [first, second],
+      }),
+      queryOrders,
+      updateOrderStatusAndLogistics,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('checkbox', { name: '选择当前结果全部订单' }));
+    await user.click(screen.getByRole('button', { name: '维护已选 2 笔' }));
+
+    const dialog = screen.getByRole('dialog', { name: '维护状态与物流' });
+    await user.click(within(dialog).getByRole('checkbox', { name: '修改运单号' }));
+    await user.type(within(dialog).getByRole('textbox', { name: '运单号' }), 'SF-AUTO-123456');
+    await user.click(within(dialog).getByRole('button', { name: '确认修改 2 笔' }));
+
+    expect(updateOrderStatusAndLogistics).toHaveBeenCalledWith({
+      targets: [
+        { orderId: first.id, expectedRevision: 1 },
+        { orderId: second.id, expectedRevision: 4 },
+      ],
+      patch: { trackingNumber: 'SF-AUTO-123456' },
+    });
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    await waitFor(() => expect(within(table).getAllByText('已发货')).toHaveLength(2));
+  });
+
   it('订单详情可仅维护一个状态或一项手工物流且其余字段保持不变', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
@@ -1598,7 +1736,7 @@ describe('订单管理工作台', () => {
       ...sourceSnapshot,
       id: 'snapshot-earlier-source',
       createdAt: earlierScreenshot.createdAt,
-      confirmed: draft,
+      confirmed: { ...draft, fulfillmentStatus: 'pending_shipment' as const },
     };
     const latestScreenshot = {
       ...sourceScreenshot,
@@ -1696,6 +1834,56 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('region', { name: '订单状态' }))
       .toHaveTextContent('当前来源识别状态重复跳过');
     expect(screen.queryByText(/已在本次来源确认时修正/)).not.toBeInTheDocument();
+  });
+
+  it('订单列表、详情和修改记录正确显示已收货与已退货', async () => {
+    const user = userEvent.setup();
+    const returnedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 3,
+      fulfillmentStatus: 'returned',
+    };
+    const returnedDetails: OrderDetails = {
+      ...orderDetails,
+      order: returnedOrder,
+      changeEvents: [{
+        id: 'event-returned',
+        sourceSnapshotId: null,
+        source: 'manual_edit',
+        baseRevision: 2,
+        resultRevision: 3,
+        createdAt: '2026-07-27T12:00:00.000Z',
+        changes: [{
+          path: 'fulfillmentStatus',
+          before: 'delivered',
+          after: 'returned',
+        }],
+      }],
+    };
+    const summary = orderSummary(returnedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(returnedDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(table).toHaveTextContent('已退货');
+    expect(table).not.toHaveTextContent('未知');
+    await user.click(within(table).getByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }));
+
+    expect(await screen.findByText('已付款 · 已退货')).toBeVisible();
+    const history = screen.getByRole('region', { name: '来源与修改记录' });
+    expect(history).toHaveTextContent('履约状态已收货→已退货');
   });
 
   it('从订单详情显式编辑普通字段与多商品，预览差异后才保存', async () => {
@@ -2031,6 +2219,41 @@ describe('订单管理工作台', () => {
     await user.click(screen.getByRole('button', { name: '刷新最新订单' }));
     expect(await screen.findByRole('textbox', { name: '买家昵称' })).toHaveValue('其他窗口的新值');
     expect(getOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['delivered', '已收货'],
+    ['returned', '已退货'],
+  ] as const)('%s 订单仍视为已经历发货并提示快照不会改写', async (
+    fulfillmentStatus,
+    statusLabel,
+  ) => {
+    const user = userEvent.setup();
+    const fulfilledOrder: OriginalOrder = {
+      ...confirmedOrder,
+      fulfillmentStatus,
+    };
+    const summary = orderSummary(fulfilledOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue({ ...orderDetails, order: fulfilledOrder }),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+
+    expect(screen.getByText(new RegExp(`该订单已经历发货.*${statusLabel}`)))
+      .toBeVisible();
+    expect(screen.getByText(/不会改写已冻结的发货快照/)).toBeVisible();
   });
 
   it('数据目录被其他实例占用时说明原因，并允许选择其他目录', async () => {

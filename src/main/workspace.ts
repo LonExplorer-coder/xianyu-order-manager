@@ -157,6 +157,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 13) migrateToVersion13(database);
   if (row.version < 14) migrateToVersion14(database);
   if (row.version < 15) migrateToVersion15(database);
+  if (row.version < 16) migrateToVersion16(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1381,6 +1382,186 @@ function migrateToVersion15(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  }
+}
+
+function migrateToVersion16(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE order_drafts_v16 (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL REFERENCES recognition_batches(id) ON DELETE RESTRICT,
+        screenshot_id TEXT NOT NULL UNIQUE REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        platform TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        order_number TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        status TEXT NOT NULL CHECK (status IN ('awaiting_review', 'confirmed')),
+        recognition_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        alipay_transaction_number TEXT NOT NULL DEFAULT '',
+        phone_normalized TEXT NOT NULL DEFAULT '',
+        address_normalized TEXT NOT NULL DEFAULT '',
+        province TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        district TEXT NOT NULL DEFAULT '',
+        ordered_at_original TEXT NOT NULL DEFAULT '',
+        ordered_at_normalized TEXT NOT NULL DEFAULT '',
+        paid_at_original TEXT NOT NULL DEFAULT '',
+        paid_at_normalized TEXT NOT NULL DEFAULT '',
+        product_total_cents INTEGER NOT NULL DEFAULT 0 CHECK (product_total_cents >= 0),
+        product_total_present INTEGER NOT NULL DEFAULT 0
+          CHECK (product_total_present IN (0, 1)),
+        shipping_fee_cents INTEGER NOT NULL DEFAULT 0 CHECK (shipping_fee_cents >= 0),
+        shipping_fee_present INTEGER NOT NULL DEFAULT 0
+          CHECK (shipping_fee_present IN (0, 1)),
+        amount_present INTEGER NOT NULL DEFAULT 1 CHECK (amount_present IN (0, 1)),
+        platform_transaction_status TEXT NOT NULL DEFAULT 'unknown'
+          CHECK (platform_transaction_status IN ('paid', 'cancelled', 'refunded', 'unknown')),
+        fulfillment_status TEXT NOT NULL DEFAULT 'unknown'
+          CHECK (fulfillment_status IN (
+            'pending_shipment', 'shipped', 'delivered', 'returned', 'unknown'
+          )),
+        review_cancelled_at TEXT,
+        review_issues_json TEXT NOT NULL DEFAULT '[]'
+          CHECK (json_valid(review_issues_json) AND json_type(review_issues_json) = 'array'),
+        intake_decision_pending INTEGER NOT NULL DEFAULT 0
+          CHECK (intake_decision_pending IN (0, 1)),
+        matched_order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+        recognition_conflicts_json TEXT NOT NULL DEFAULT '[]'
+          CHECK (
+            json_valid(recognition_conflicts_json)
+            AND json_type(recognition_conflicts_json) = 'array'
+          )
+      ) STRICT;
+
+      INSERT INTO order_drafts_v16 (
+        id, batch_id, screenshot_id, platform, seller_account, order_number,
+        buyer_nickname, recipient, phone, address_original, amount_cents,
+        status, recognition_json, created_at, confirmed_at,
+        alipay_transaction_number, phone_normalized, address_normalized,
+        province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, product_total_present,
+        shipping_fee_cents, shipping_fee_present, amount_present,
+        platform_transaction_status, fulfillment_status,
+        review_cancelled_at, review_issues_json, intake_decision_pending,
+        matched_order_id, recognition_conflicts_json
+      )
+      SELECT
+        id, batch_id, screenshot_id, platform, seller_account, order_number,
+        buyer_nickname, recipient, phone, address_original, amount_cents,
+        status, recognition_json, created_at, confirmed_at,
+        alipay_transaction_number, phone_normalized, address_normalized,
+        province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, product_total_present,
+        shipping_fee_cents, shipping_fee_present, amount_present,
+        platform_transaction_status, fulfillment_status,
+        review_cancelled_at, review_issues_json, intake_decision_pending,
+        matched_order_id, recognition_conflicts_json
+      FROM order_drafts;
+
+      DROP TABLE order_drafts;
+      ALTER TABLE order_drafts_v16 RENAME TO order_drafts;
+
+      CREATE TABLE original_orders_v16 (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        screenshot_id TEXT NOT NULL REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        platform TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        platform_order_number TEXT NOT NULL,
+        alipay_transaction_number TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        province TEXT NOT NULL,
+        city TEXT NOT NULL,
+        district TEXT NOT NULL,
+        ordered_at_original TEXT NOT NULL,
+        ordered_at_normalized TEXT NOT NULL,
+        paid_at_original TEXT NOT NULL,
+        paid_at_normalized TEXT NOT NULL,
+        product_total_cents INTEGER CHECK (product_total_cents >= 0),
+        shipping_fee_cents INTEGER CHECK (shipping_fee_cents >= 0),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        platform_transaction_status TEXT NOT NULL
+          CHECK (platform_transaction_status IN ('paid', 'cancelled', 'refunded', 'unknown')),
+        fulfillment_status TEXT NOT NULL
+          CHECK (fulfillment_status IN (
+            'pending_shipment', 'shipped', 'delivered', 'returned', 'unknown'
+          )),
+        lifecycle_status TEXT NOT NULL
+          CHECK (lifecycle_status IN ('active', 'trashed', 'deleted')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        seller_account_normalized TEXT NOT NULL DEFAULT '',
+        platform_order_number_normalized TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        shipping_carrier TEXT NOT NULL DEFAULT '',
+        tracking_number TEXT NOT NULL DEFAULT '',
+        UNIQUE (platform, seller_account, platform_order_number)
+      ) STRICT;
+
+      INSERT INTO original_orders_v16 (
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number
+      )
+      SELECT
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number
+      FROM original_orders;
+
+      DROP TABLE original_orders;
+      ALTER TABLE original_orders_v16 RENAME TO original_orders;
+
+      CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (
+        platform,
+        seller_account_normalized,
+        platform_order_number_normalized
+      );
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (16, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

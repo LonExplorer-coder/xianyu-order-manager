@@ -396,7 +396,7 @@ describe('表格模板核心契约', () => {
     ['非法平台', { platform: 'taobao' }],
     ['非法识别状态', { initialSourceRecognitionStatus: 'done' }],
     ['非法交易状态', { platformTransactionStatus: 'completed' }],
-    ['非法履约状态', { fulfillmentStatus: 'delivered' }],
+    ['非法履约状态', { fulfillmentStatus: 'in_transit' }],
     ['非法生命周期', { lifecycleStatus: 'archived' }],
     ['非法排序字段', { sortField: 'phone' }],
     ['非法排序方向', { sortDirection: 'sideways' }],
@@ -416,6 +416,19 @@ describe('表格模板核心契约', () => {
       : { ...base, query: { ...base.query, ...patch } };
     expect(() => normalizeCreateTableTemplateInput(input, definitions)).toThrow();
   });
+
+  it.each(['delivered', 'returned'] as const)(
+    '订单模板查询接受完整履约终态 %s',
+    (fulfillmentStatus) => {
+      const base = validOrderInput() as { query: Record<string, unknown> };
+      const normalized = normalizeCreateTableTemplateInput({
+        ...base,
+        query: { ...base.query, fulfillmentStatus },
+      }, definitions);
+      if (normalized.granularity !== 'order') throw new Error('期望订单粒度模板');
+      expect(normalized.query.fulfillmentStatus).toBe(fulfillmentStatus);
+    },
+  );
 
   it('商品模板查询只允许商品查询结构', () => {
     const input = {

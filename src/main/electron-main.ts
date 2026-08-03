@@ -387,7 +387,7 @@ function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
     ),
     fulfillmentStatus: optionalWorkbenchEnum(
       input.fulfillmentStatus,
-      ['pending_shipment', 'shipped', 'unknown'] as const,
+      ['pending_shipment', 'shipped', 'delivered', 'returned', 'unknown'] as const,
       '履约状态',
     ),
     lifecycleStatus: optionalWorkbenchEnum(

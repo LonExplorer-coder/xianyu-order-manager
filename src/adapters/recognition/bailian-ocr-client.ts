@@ -7,12 +7,12 @@ import {
   normalizeShanghaiDateTime,
 } from '../../core/order-normalization';
 import type {
-  FulfillmentStatus,
   OrderReviewIssueCode,
   PlatformTransactionStatus,
   RecognitionAttempt,
   RecognitionConflictDetail,
   RecognitionEvidence,
+  RecognitionFulfillmentStatus,
   RecognitionItem,
   RecognitionResult,
   RecognizerSource,
@@ -277,7 +277,7 @@ type OcrTaskInput = {
 
 type XianyuStatusSignals = {
   platformStatuses: PlatformTransactionStatus[];
-  fulfillmentStatuses: FulfillmentStatus[];
+  fulfillmentStatuses: RecognitionFulfillmentStatus[];
   shippingControls: string[];
   globalControls: string[];
 };
@@ -1785,7 +1785,7 @@ function readXianyuStatusSignals(
     : [];
   const fulfillmentStatuses = Array.isArray(raw.fulfillmentStatuses)
     ? raw.fulfillmentStatuses.filter(
-        (status): status is FulfillmentStatus =>
+        (status): status is RecognitionFulfillmentStatus =>
           status === 'pending_shipment' || status === 'shipped',
       )
     : [];
@@ -1847,7 +1847,7 @@ function resolvedPlatformTransactionStatus(
 
 function resolvedFulfillmentStatus(
   extracted: Record<string, unknown>,
-): FulfillmentStatus {
+): RecognitionFulfillmentStatus {
   const explicitStatus = normalizeFulfillmentStatus(extracted.fulfillment_status);
   if (explicitStatus === 'shipped') return explicitStatus;
   const platformStatus = resolvedPlatformTransactionStatus(extracted);
@@ -1883,7 +1883,7 @@ function platformStatusSignals(value: unknown): PlatformTransactionStatus[] {
   return [...new Set(statuses)];
 }
 
-function fulfillmentStatusSignals(value: unknown): FulfillmentStatus[] {
+function fulfillmentStatusSignals(value: unknown): RecognitionFulfillmentStatus[] {
   if (typeof value !== 'string') return [];
   const normalized = value
     .normalize('NFKC')
@@ -2894,7 +2894,7 @@ function normalizePlatformTransactionStatus(value: unknown): PlatformTransaction
   return 'unknown';
 }
 
-function normalizeFulfillmentStatus(value: unknown): FulfillmentStatus {
+function normalizeFulfillmentStatus(value: unknown): RecognitionFulfillmentStatus {
   const normalized = optionalText(value).toLowerCase();
   if (normalized === 'shipped' || normalized.includes('已发货')) return 'shipped';
   if (

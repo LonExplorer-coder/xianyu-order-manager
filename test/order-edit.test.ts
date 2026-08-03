@@ -12,6 +12,7 @@ import type {
   Recognizer,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
+import { reviewOrderEdit } from '../src/core/order-edit';
 
 const openedApplications: LocalApplication[] = [];
 
@@ -78,6 +79,12 @@ describe('已入库原始订单人工修改', () => {
       expectedRevision: 1,
       shippedSnapshotWarning: true,
     });
+    for (const fulfillmentStatus of ['delivered', 'returned'] as const) {
+      expect(reviewOrderEdit(
+        { ...before.order, fulfillmentStatus },
+        input,
+      ).shippedSnapshotWarning).toBe(true);
+    }
     expect(review.changes).toEqual(expect.arrayContaining([
       { path: 'buyerNickname', before: '原买家', after: '人工修正买家' },
       { path: 'note', before: '', after: '人工备注：优先联系' },

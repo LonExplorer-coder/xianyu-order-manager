@@ -1,4 +1,5 @@
 import type {
+  FulfillmentStatus,
   OrderChangeValue,
   OrderFieldChange,
   OriginalOrder,
@@ -11,7 +12,8 @@ import {
   normalizeShanghaiDateTime,
 } from './order-normalization';
 
-type ComparableOrder = Omit<RecognitionResult, 'items'> & {
+type ComparableOrder = Omit<RecognitionResult, 'items' | 'fulfillmentStatus'> & {
+  fulfillmentStatus: FulfillmentStatus;
   items: readonly RecognitionItem[];
 };
 
@@ -34,8 +36,12 @@ export function hasEquivalentOrderContent(
   existing: OriginalOrder,
   candidate: ComparableOrder,
 ): boolean {
-  return JSON.stringify(canonicalOrderContent(existing)) ===
-    JSON.stringify(canonicalOrderContent(candidate));
+  const preserveTerminalStatus = shouldPreserveManualTerminalFulfillment(
+    existing.fulfillmentStatus,
+    candidate.fulfillmentStatus,
+  );
+  return JSON.stringify(canonicalOrderContent(existing, preserveTerminalStatus)) ===
+    JSON.stringify(canonicalOrderContent(candidate, preserveTerminalStatus));
 }
 
 const ORDER_FIELD_PATHS = [
@@ -74,6 +80,12 @@ export function diffOrderCurrentValues(
 ): OrderFieldChange[] {
   const changes: OrderFieldChange[] = [];
   for (const path of ORDER_FIELD_PATHS) {
+    if (path === 'fulfillmentStatus' && shouldPreserveManualTerminalFulfillment(
+      existing.fulfillmentStatus,
+      candidate.fulfillmentStatus,
+    )) {
+      continue;
+    }
     if (existing[path] === candidate[path]) continue;
     changes.push({
       path,
@@ -259,7 +271,10 @@ function itemDifferenceCount(left: RecognitionItem, right: RecognitionItem): num
   ), 0);
 }
 
-function canonicalOrderContent(value: ComparableOrder) {
+function canonicalOrderContent(
+  value: ComparableOrder,
+  ignoreFulfillmentStatus: boolean,
+) {
   return {
     alipayTransactionNumber: normalizedOrderIdentityPart(value.alipayTransactionNumber),
     buyerNickname: normalizedText(value.buyerNickname),
@@ -275,9 +290,20 @@ function canonicalOrderContent(value: ComparableOrder) {
     shippingFeeCents: value.shippingFeeCents,
     amountCents: value.amountCents,
     platformTransactionStatus: value.platformTransactionStatus,
-    fulfillmentStatus: value.fulfillmentStatus,
+    fulfillmentStatus: ignoreFulfillmentStatus ? null : value.fulfillmentStatus,
     items: canonicalItems(value.items),
   };
+}
+
+function isTerminalFulfillmentStatus(status: FulfillmentStatus): boolean {
+  return status === 'delivered' || status === 'returned';
+}
+
+export function shouldPreserveManualTerminalFulfillment(
+  existing: FulfillmentStatus,
+  candidate: FulfillmentStatus,
+): boolean {
+  return isTerminalFulfillmentStatus(existing) && !isTerminalFulfillmentStatus(candidate);
 }
 
 function canonicalItems(items: readonly RecognitionItem[]) {

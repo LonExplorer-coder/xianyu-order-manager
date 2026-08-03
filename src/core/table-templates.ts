@@ -300,7 +300,13 @@ const RECOGNITION_STATUSES = [
   'cancelled',
 ] as const;
 const PLATFORM_TRANSACTION_STATUSES = ['paid', 'cancelled', 'refunded', 'unknown'] as const;
-const FULFILLMENT_STATUSES = ['pending_shipment', 'shipped', 'unknown'] as const;
+const FULFILLMENT_STATUSES = [
+  'pending_shipment',
+  'shipped',
+  'delivered',
+  'returned',
+  'unknown',
+] as const;
 const LIFECYCLE_STATUSES = ['active', 'trashed', 'deleted', 'all'] as const;
 const SORT_DIRECTIONS = ['asc', 'desc'] as const;
 const ORDER_ITEM_SORT_FIELDS = [

@@ -16,6 +16,9 @@ import type {
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
 import {
+  orderExportBuiltinTextLabel,
+} from '../src/core/order-export';
+import {
   writeOrderExportWorkbook,
   type OrderExportWorkbookPlan,
 } from '../src/main/order-export-workbook';
@@ -102,6 +105,12 @@ afterEach(() => {
 });
 
 describe('默认脱敏的两表工作簿导出', () => {
+  it('导出将完整履约五态显示为中文标签', () => {
+    expect(['pending_shipment', 'shipped', 'delivered', 'returned', 'unknown'].map((status) => (
+      orderExportBuiltinTextLabel('fulfillment_status', status)
+    ))).toEqual(['待发货', '已发货', '已收货', '已退货', '未知']);
+  });
+
   it('把当前筛选订单导出为一单一行和一商品条目一行，并以正确类型保存默认脱敏值', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({

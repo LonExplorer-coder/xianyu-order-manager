@@ -135,6 +135,8 @@ export function orderExportBuiltinTextLabel(
     return {
       pending_shipment: '待发货',
       shipped: '已发货',
+      delivered: '已收货',
+      returned: '已退货',
       unknown: '未知',
     }[value];
   }
