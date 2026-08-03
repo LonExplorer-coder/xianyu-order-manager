@@ -3088,9 +3088,10 @@ describe('批量来源截图识别队列', () => {
   });
 
   it('通过深拷贝快照实时通知，并在确认或取消后同步批次项状态', async () => {
-    const recognize = vi.fn<Recognizer['recognize']>(async (source) => (
-      attempt(`ORDER-${source.originalName}`)
-    ));
+    const recognize = vi.fn<Recognizer['recognize']>(async (source) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      return attempt(`ORDER-${source.originalName}`);
+    });
     const session = await openSession({ recognize });
     const root = await mkdtemp(join(tmpdir(), 'xianyu-batch-events-'));
     const paths = [join(root, '确认.png'), join(root, '取消.png')];
@@ -3213,7 +3214,8 @@ function recognitionAttempt(
 }
 
 async function eventually(assertion: () => void): Promise<void> {
-  for (let index = 0; index < 2_000; index += 1) {
+  const deadline = performance.now() + 10_000;
+  while (performance.now() < deadline) {
     try {
       assertion();
       return;
