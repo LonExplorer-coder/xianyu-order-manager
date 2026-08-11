@@ -65,8 +65,8 @@ import type {
 import type {
   ShipmentCancellationResult,
   ShipmentConfirmationResult,
+  ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
-  ShipmentRecord,
 } from '../core/shipment-records';
 import type {
   CreateTableTemplateInput,
@@ -398,8 +398,8 @@ export class DesktopSession {
     return this.requireApplication().mergeShipmentGroups(input);
   }
 
-  public queryShipmentRecords(): ShipmentRecord[] {
-    return this.requireApplication().queryShipmentRecords();
+  public queryShipmentGroupArchives(): ShipmentGroupArchive[] {
+    return this.requireApplication().queryShipmentGroupArchives();
   }
 
   public confirmShipment(input: unknown): ShipmentConfirmationResult {

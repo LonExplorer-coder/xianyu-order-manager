@@ -106,14 +106,17 @@ describe('发货组 Electron IPC', () => {
     expect(mergeShipmentGroups).toHaveBeenCalledWith(mergeInput);
   });
 
-  it('通过受控通道查询发货记录并确认实际发货', async () => {
-    const queryShipmentRecords = vi.fn().mockReturnValue([{ id: 'shipment-record-1' }]);
+  it('通过受控通道查询发货组档案并确认实际发货', async () => {
+    const queryShipmentGroupArchives = vi.fn().mockReturnValue([{
+      id: 'shipment-group-archive-1',
+      records: [{ id: 'shipment-record-1' }],
+    }]);
     const confirmShipment = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-2' },
       projection: { groups: [], attentionOrders: [] },
     });
     registerIpcHandlers({
-      queryShipmentRecords,
+      queryShipmentGroupArchives,
       confirmShipment,
       onRecognitionBatchesChanged: vi.fn(),
       onOrdersChanged: vi.fn(),
@@ -132,13 +135,16 @@ describe('发货组 Electron IPC', () => {
       }],
     };
 
-    await expect(invoke('shipment-records:query')).resolves.toEqual([
-      { id: 'shipment-record-1' },
+    await expect(invoke('shipment-group-archives:query')).resolves.toEqual([
+      {
+        id: 'shipment-group-archive-1',
+        records: [{ id: 'shipment-record-1' }],
+      },
     ]);
     await expect(invoke('shipment-records:confirm', input)).resolves.toMatchObject({
       record: { id: 'shipment-record-2' },
     });
-    expect(queryShipmentRecords).toHaveBeenCalledTimes(1);
+    expect(queryShipmentGroupArchives).toHaveBeenCalledTimes(1);
     expect(confirmShipment).toHaveBeenCalledWith(input);
   });
 

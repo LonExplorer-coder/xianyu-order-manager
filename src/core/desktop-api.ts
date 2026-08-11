@@ -53,8 +53,8 @@ import type {
   CorrectShipmentPackageLogisticsInput,
   ShipmentCancellationResult,
   ShipmentConfirmationResult,
+  ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
-  ShipmentRecord,
 } from './shipment-records';
 import type {
   CreateTableTemplateInput,
@@ -107,7 +107,7 @@ export interface DesktopApi {
   queryShipmentGroups(): Promise<ShipmentGroupProjection>;
   splitShipmentGroup(input: SplitShipmentGroupInput): Promise<ShipmentGroupAdjustmentResult>;
   mergeShipmentGroups(input: MergeShipmentGroupsInput): Promise<ShipmentGroupAdjustmentResult>;
-  queryShipmentRecords(): Promise<ShipmentRecord[]>;
+  queryShipmentGroupArchives(): Promise<ShipmentGroupArchive[]>;
   confirmShipment(input: ConfirmShipmentInput): Promise<ShipmentConfirmationResult>;
   cancelShipmentPackages(
     input: CancelShipmentPackagesInput,

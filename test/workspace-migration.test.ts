@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v18 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v19 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -38,6 +38,7 @@ describe('数据库升级', () => {
       { version: 16 },
       { version: 17 },
       { version: 18 },
+      { version: 19 },
     ]);
     expect(
       first.database
@@ -51,6 +52,7 @@ describe('数据库升级', () => {
               'table_templates',
               'table_template_custom_field_dependencies',
               'shipment_group_adjustment_events',
+              'shipment_group_archives',
               'shipment_package_cancellation_events',
               'shipment_package_items',
               'shipment_package_logistics_change_events',
@@ -66,6 +68,7 @@ describe('数据库升级', () => {
       { name: 'custom_field_definitions' },
       { name: 'custom_field_values' },
       { name: 'shipment_group_adjustment_events' },
+      { name: 'shipment_group_archives' },
       { name: 'shipment_package_cancellation_events' },
       { name: 'shipment_package_items' },
       { name: 'shipment_package_logistics_change_events' },
@@ -423,6 +426,7 @@ describe('数据库升级', () => {
       { version: 16 },
       { version: 17 },
       { version: 18 },
+      { version: 19 },
     ]);
     expect(
       (
@@ -666,6 +670,7 @@ describe('数据库升级', () => {
         { version: 16 },
         { version: 17 },
         { version: 18 },
+        { version: 19 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -864,7 +869,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 18 });
+        .toEqual({ version: 19 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -978,7 +983,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 18 });
+        .toEqual({ version: 19 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -998,10 +1003,10 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
-        { version: 17 }, { version: 18 },
+        { version: 17 }, { version: 18 }, { version: 19 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1035,7 +1040,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 18 });
+        .toEqual({ version: 19 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1308,8 +1313,9 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_record_order_snapshots;
         DROP TABLE IF EXISTS shipment_packages;
         DROP TABLE IF EXISTS shipment_records;
+        DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18);
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1344,8 +1350,9 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_record_order_snapshots;
       DROP TABLE IF EXISTS shipment_packages;
       DROP TABLE IF EXISTS shipment_records;
+      DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18);
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19);
       COMMIT;
     `);
   } finally {
@@ -1377,8 +1384,9 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_record_order_snapshots;
       DROP TABLE IF EXISTS shipment_packages;
       DROP TABLE IF EXISTS shipment_records;
+      DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18);
+      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19);
       COMMIT;
     `);
   } catch (error) {
@@ -1587,8 +1595,9 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_record_order_snapshots;
         DROP TABLE IF EXISTS shipment_packages;
         DROP TABLE IF EXISTS shipment_records;
+        DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18);
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
       `);
       database.exec('COMMIT;');
     } catch (error) {

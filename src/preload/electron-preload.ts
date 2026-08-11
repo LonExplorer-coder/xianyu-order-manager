@@ -51,7 +51,7 @@ const api: DesktopApi = {
   queryShipmentGroups: () => ipcRenderer.invoke('shipment-groups:query'),
   splitShipmentGroup: (input) => ipcRenderer.invoke('shipment-groups:split', input),
   mergeShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:merge', input),
-  queryShipmentRecords: () => ipcRenderer.invoke('shipment-records:query'),
+  queryShipmentGroupArchives: () => ipcRenderer.invoke('shipment-group-archives:query'),
   confirmShipment: (input) => ipcRenderer.invoke('shipment-records:confirm', input),
   cancelShipmentPackages: (input) => (
     ipcRenderer.invoke('shipment-records:cancel-packages', input)

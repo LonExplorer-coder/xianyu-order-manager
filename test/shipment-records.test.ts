@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -121,12 +123,26 @@ async function createApplication(
       quantity: 2,
       quantityInferred: false,
     }]),
+    recognition('XY-SHIPMENT-RECORD-0003', [{
+      sourceTitle: '后续新订单商品',
+      sourceSpec: '独立发货轮次',
+      unitPriceCents: 800,
+      quantity: 2,
+      quantityInferred: false,
+    }]),
+    recognition('XY-SHIPMENT-RECORD-0004', [{
+      sourceTitle: '另一笔后续新订单商品',
+      sourceSpec: '可独立调整',
+      unitPriceCents: 900,
+      quantity: 1,
+      quantityInferred: false,
+    }]),
   ];
   const application = new LocalApplication(new SequenceRecognizer([...recognitions]));
   openedApplications.push(application);
   application.openDataDirectory(join(applicationRoot, '数据'));
   if (!seedOrders) return application;
-  for (const [index] of recognitions.entries()) {
+  for (const [index] of recognitions.slice(0, 2).entries()) {
     const sourcePath = join(sourceDirectory, `订单-${index + 1}.png`);
     await writeFile(sourcePath, Buffer.from(`shipment-record-order-${index + 1}`));
     const batch = await application.submitRecognitionBatch([sourcePath]);
@@ -140,6 +156,43 @@ afterEach(() => {
 });
 
 describe('发货记录', () => {
+  it('第一次实际发出时建立发货组档案并在全部发出后标记完成', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+
+    const result = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-0001',
+        items: remainingItems,
+      }],
+    });
+
+    const [archive] = application.queryShipmentGroupArchives();
+    expect(archive).toMatchObject({
+      sourceGroupId: group.id,
+      status: 'completed',
+      recipient: '林青',
+      phone: '13800000001',
+      orderNumbers: [
+        'XY-SHIPMENT-RECORD-0001',
+        'XY-SHIPMENT-RECORD-0002',
+      ],
+      shippedQuantity: 4,
+      remainingQuantity: 0,
+      totalQuantity: 4,
+      records: [result.record],
+    });
+    expect(result.record.archiveId).toBe(archive.id);
+  });
+
   it('把开放组的全部商品分配给一个包裹后生成可追溯记录并关闭开放组', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -223,6 +276,523 @@ describe('发货记录', () => {
     expect(application.getOrder(shippedOrder.id).order.fulfillmentStatus).toBe('shipped');
   });
 
+  it('分批实际发出持续写入同一发货组档案并累计商品进度', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const firstItem = expectedRemainingItems[0];
+
+    const first = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-PART-1',
+        items: [{ ...firstItem, quantity: 1 }],
+      }],
+    });
+
+    expect(application.queryShipmentGroupArchives()[0]).toMatchObject({
+      id: first.record.archiveId,
+      status: 'open',
+      shippedQuantity: 1,
+      remainingQuantity: 3,
+      totalQuantity: 4,
+      records: [{ id: first.record.id }],
+    });
+
+    const remainingGroup = application.queryShipmentGroupArchives()[0].remainingGroup;
+    expect(remainingGroup).not.toBeNull();
+    if (!remainingGroup) throw new Error('测试要求发货组档案仍有待发商品');
+    const remainingItems = remainingGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const second = application.confirmShipment({
+      groupId: remainingGroup.id,
+      archiveId: first.record.archiveId,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-PART-2',
+        items: remainingItems,
+      }],
+    });
+
+    expect(second.record.archiveId).toBe(first.record.archiveId);
+    expect(application.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        id: first.record.archiveId,
+        status: 'completed',
+        shippedQuantity: 4,
+        remainingQuantity: 0,
+        totalQuantity: 4,
+        records: [
+          expect.objectContaining({ id: second.record.id }),
+          expect.objectContaining({ id: first.record.id }),
+        ],
+      }),
+    ]);
+  });
+
+  it('成员订单修改收货信息后仍按档案固定成员累计全部剩余数量', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-RECIPIENT-CHANGE-1',
+        items: [{ ...expectedRemainingItems[0], quantity: 1 }],
+      }],
+    });
+
+    const changedOrder = application.getOrder(group.orders[1].id).order;
+    application.confirmOrderEdit({
+      ...orderEditInput(changedOrder),
+      addressOriginal: '浙江省杭州市西湖区新地址2号',
+      province: '浙江省',
+      city: '杭州市',
+      district: '西湖区',
+    });
+
+    expect(application.queryShipmentGroups().groups).toEqual([]);
+    expect(application.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        recipient: '林青',
+        addressOriginal: '广东省深圳市南山区海风路1号',
+        shippedQuantity: 1,
+        remainingQuantity: 3,
+        totalQuantity: 4,
+        orderNumbers: [
+          'XY-SHIPMENT-RECORD-0001',
+          'XY-SHIPMENT-RECORD-0002',
+        ],
+        recipientDifferences: [{
+          orderId: changedOrder.id,
+          orderNumber: 'XY-SHIPMENT-RECORD-0002',
+          fields: ['address'],
+        }],
+      }),
+    ]);
+  });
+
+  it('只把成员建档后的收货信息变化标为差异', async () => {
+    const application = await createApplication();
+    const initialGroup = application.queryShipmentGroups().groups[0];
+    const secondOrder = application.getOrder(initialGroup.orders[1].id).order;
+    application.confirmOrderEdit({
+      ...orderEditInput(secondOrder),
+      recipient: '建档时已有差异的收件人',
+    });
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-MEMBER-SNAPSHOT-1',
+        items: [{ ...remainingItems[0], quantity: 1 }],
+      }],
+    });
+
+    expect(application.queryShipmentGroupArchives()[0].recipientDifferences).toEqual([]);
+
+    const archivedSecondOrder = application.getOrder(secondOrder.id).order;
+    application.confirmOrderEdit({
+      ...orderEditInput(archivedSecondOrder),
+      recipient: '林青',
+    });
+    expect(application.queryShipmentGroupArchives()[0].recipientDifferences).toEqual([{
+      orderId: secondOrder.id,
+      orderNumber: 'XY-SHIPMENT-RECORD-0002',
+      fields: ['recipient'],
+    }]);
+  });
+
+  it('固定成员后来取消交易时仍保留在档案并标明不可继续发货', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-MEMBER-CANCELLED-1',
+        items: [{ ...expectedRemainingItems[0], quantity: 1 }],
+      }],
+    });
+
+    const cancelledOrder = application.getOrder(group.orders[1].id).order;
+    application.updateOrderStatusAndLogistics({
+      targets: [{ orderId: cancelledOrder.id, expectedRevision: cancelledOrder.revision }],
+      patch: { platformTransactionStatus: 'cancelled' },
+    });
+
+    expect(application.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        orderNumbers: [
+          'XY-SHIPMENT-RECORD-0001',
+          'XY-SHIPMENT-RECORD-0002',
+        ],
+        memberOrders: [
+          expect.objectContaining({
+            orderNumber: 'XY-SHIPMENT-RECORD-0001',
+            hasRemainingShipment: true,
+          }),
+          expect.objectContaining({
+            orderNumber: 'XY-SHIPMENT-RECORD-0002',
+            hasRemainingShipment: false,
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it('同收货信息的后续新订单独立进入待发货组并可正常拆分', async () => {
+    const application = await createApplication();
+    const firstGroup = application.queryShipmentGroups().groups[0];
+    const firstRemainingItems = firstGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    application.confirmShipment({
+      groupId: firstGroup.id,
+      expectedRemainingItems: firstRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-NEW-PENDING-GROUP-1',
+        items: [{ ...firstRemainingItems[0], quantity: 1 }],
+      }],
+    });
+
+    for (const index of [3, 4]) {
+      const sourcePath = join(tmpdir(), `shipment-record-new-pending-${index}-${randomUUID()}.png`);
+      await writeFile(sourcePath, Buffer.from(`shipment-record-new-pending-${index}`));
+      const batch = await application.submitRecognitionBatch([sourcePath]);
+      application.confirmDraft(batch.drafts[0]);
+    }
+
+    const newGroup = application.queryShipmentGroups().groups[0];
+    expect(newGroup.orders.map(({ orderNumber }) => orderNumber)).toEqual([
+      'XY-SHIPMENT-RECORD-0003',
+      'XY-SHIPMENT-RECORD-0004',
+    ]);
+    const splitOrderId = newGroup.orders[0].id;
+    const split = application.splitShipmentGroup({
+      groupId: newGroup.id,
+      expectedMemberOrderIds: newGroup.orders.map(({ id }) => id),
+      splitOrderIds: [splitOrderId],
+      reason: '后续新订单需要分别包装',
+    });
+    expect(split.projection.groups.map(({ orderCount }) => orderCount)).toEqual([1, 1]);
+    expect(split.projection.groups.flatMap(({ orders }) => (
+      orders.map(({ orderNumber }) => orderNumber)
+    )).sort()).toEqual([
+      'XY-SHIPMENT-RECORD-0003',
+      'XY-SHIPMENT-RECORD-0004',
+    ]);
+  });
+
+  it('相同收货信息之后形成的新订单不会混入已经完成的旧档案', async () => {
+    const application = await createApplication();
+    const firstGroup = application.queryShipmentGroups().groups[0];
+    const firstItems = firstGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: firstGroup.id,
+      expectedRemainingItems: firstItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-CYCLE-1',
+        items: firstItems,
+      }],
+    });
+
+    const laterSourcePath = join(tmpdir(), `shipment-record-later-${randomUUID()}.png`);
+    await writeFile(laterSourcePath, Buffer.from('shipment-record-later-order'));
+    const laterBatch = await application.submitRecognitionBatch([laterSourcePath]);
+    application.confirmDraft(laterBatch.drafts[0]);
+    const laterGroup = application.queryShipmentGroups().groups[0];
+    const laterItems = laterGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const later = application.confirmShipment({
+      groupId: laterGroup.id,
+      expectedRemainingItems: laterItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ARCHIVE-CYCLE-2',
+        items: laterItems,
+      }],
+    });
+
+    expect(laterGroup.id).toBe(firstGroup.id);
+    expect(later.record.archiveId).not.toBe(first.record.archiveId);
+    expect(application.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        id: later.record.archiveId,
+        status: 'completed',
+        orderNumbers: ['XY-SHIPMENT-RECORD-0003'],
+      }),
+      expect.objectContaining({
+        id: first.record.archiveId,
+        status: 'completed',
+        orderNumbers: [
+          'XY-SHIPMENT-RECORD-0001',
+          'XY-SHIPMENT-RECORD-0002',
+        ],
+      }),
+    ]);
+  });
+
+  it('新一轮部分发货后撤销旧轮次时分别恢复两个发货组档案', async () => {
+    const application = await createApplication();
+    const firstGroup = application.queryShipmentGroups().groups[0];
+    const firstItems = firstGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: firstGroup.id,
+      expectedRemainingItems: firstItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-OLD-CYCLE',
+        items: firstItems,
+      }],
+    });
+
+    const laterSourcePath = join(tmpdir(), `shipment-record-overlap-${randomUUID()}.png`);
+    await writeFile(laterSourcePath, Buffer.from('shipment-record-overlap-order'));
+    const laterBatch = await application.submitRecognitionBatch([laterSourcePath]);
+    application.confirmDraft(laterBatch.drafts[0]);
+    const laterGroup = application.queryShipmentGroups().groups[0];
+    const laterItem = laterGroup.orders[0].items[0];
+    const later = application.confirmShipment({
+      groupId: laterGroup.id,
+      expectedRemainingItems: [{
+        orderId: laterGroup.orders[0].id,
+        orderItemId: laterItem.id,
+        quantity: laterItem.quantity,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-NEW-CYCLE-PART',
+        items: [{
+          orderId: laterGroup.orders[0].id,
+          orderItemId: laterItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+
+    application.cancelShipmentPackages({
+      recordId: first.record.id,
+      packageIds: [first.record.packages[0].id],
+      reason: '旧轮次包裹尚未交寄，恢复待发',
+    });
+
+    const openArchives = application.queryShipmentGroupArchives()
+      .filter(({ status }) => status === 'open');
+    expect(openArchives).toHaveLength(2);
+    expect(openArchives.find(({ id }) => id === first.record.archiveId)).toMatchObject({
+      shippedQuantity: 0,
+      remainingQuantity: 4,
+      totalQuantity: 4,
+      orderNumbers: [
+        'XY-SHIPMENT-RECORD-0001',
+        'XY-SHIPMENT-RECORD-0002',
+      ],
+    });
+    expect(openArchives.find(({ id }) => id === later.record.archiveId)).toMatchObject({
+      shippedQuantity: 1,
+      remainingQuantity: 1,
+      totalQuantity: 2,
+      orderNumbers: ['XY-SHIPMENT-RECORD-0003'],
+    });
+
+    const restoredOldGroup = application.queryShipmentGroupArchives().find(
+      ({ id }) => id === first.record.archiveId,
+    )?.remainingGroup;
+    expect(restoredOldGroup).not.toBeNull();
+    if (!restoredOldGroup) throw new Error('测试要求旧发货组档案重新开放');
+    const restoredOldItems = restoredOldGroup.orders
+      .flatMap((order) => order.items.map((item) => ({
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+      })));
+    const resentOld = application.confirmShipment({
+      groupId: restoredOldGroup.id,
+      archiveId: first.record.archiveId,
+      expectedRemainingItems: restoredOldItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-OLD-CYCLE-RESENT',
+        items: restoredOldItems,
+      }],
+    });
+    expect(resentOld.record.archiveId).toBe(first.record.archiveId);
+    expect(application.queryShipmentGroupArchives().find(
+      ({ id }) => id === later.record.archiveId,
+    )).toMatchObject({ status: 'open', remainingQuantity: 1 });
+  });
+
+  it('升级旧版发货记录时补建已完成档案并保留原包裹与商品', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-archive-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const items = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: items,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V18-ARCHIVE-BACKFILL',
+        items,
+      }],
+    });
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        DROP TRIGGER shipment_records_require_archive_on_insert;
+        ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
+        DROP TABLE shipment_group_archives;
+        DELETE FROM schema_migrations WHERE version = 19;
+        COMMIT;
+      `);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        status: 'completed',
+        sourceGroupId: group.id,
+        orderNumbers: [
+          'XY-SHIPMENT-RECORD-0001',
+          'XY-SHIPMENT-RECORD-0002',
+        ],
+        records: [expect.objectContaining({
+          id: confirmation.record.id,
+          packages: [expect.objectContaining({
+            trackingNumber: 'SF-V18-ARCHIVE-BACKFILL',
+            totalQuantity: 4,
+          })],
+        })],
+      }),
+    ]);
+  });
+
+  it('升级旧版同收货信息的多轮发货记录时保守拆成独立档案', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-archive-cycles-migration-'));
+    const application = await createApplication(root);
+    const firstGroup = application.queryShipmentGroups().groups[0];
+    const firstItems = firstGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: firstGroup.id,
+      expectedRemainingItems: firstItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V18-CYCLE-1',
+        items: firstItems,
+      }],
+    });
+    const laterSourcePath = join(tmpdir(), `shipment-record-migration-cycle-${randomUUID()}.png`);
+    await writeFile(laterSourcePath, Buffer.from('shipment-record-migration-cycle'));
+    const laterBatch = await application.submitRecognitionBatch([laterSourcePath]);
+    application.confirmDraft(laterBatch.drafts[0]);
+    const laterGroup = application.queryShipmentGroups().groups[0];
+    const laterItems = laterGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const later = application.confirmShipment({
+      groupId: laterGroup.id,
+      expectedRemainingItems: laterItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V18-CYCLE-2',
+        items: laterItems,
+      }],
+    });
+    expect(first.record.sourceGroupId).toBe(later.record.sourceGroupId);
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        DROP TRIGGER shipment_records_require_archive_on_insert;
+        ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
+        DROP TABLE shipment_group_archives;
+        DELETE FROM schema_migrations WHERE version = 19;
+        COMMIT;
+      `);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        orderNumbers: ['XY-SHIPMENT-RECORD-0003'],
+        records: [expect.objectContaining({ id: later.record.id })],
+      }),
+      expect.objectContaining({
+        orderNumbers: [
+          'XY-SHIPMENT-RECORD-0001',
+          'XY-SHIPMENT-RECORD-0002',
+        ],
+        records: [expect.objectContaining({ id: first.record.id })],
+      }),
+    ]);
+  });
+
   it('部分实际发出后只扣减对应数量并保留开放发货组', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -251,9 +821,8 @@ describe('发货记录', () => {
     });
 
     expect(result.record.totalQuantity).toBe(1);
-    expect(result.projection.groups).toHaveLength(1);
-    expect(result.projection.groups[0]).toMatchObject({
-      id: group.id,
+    expect(result.projection.groups).toEqual([]);
+    expect(result.archive.remainingGroup).toMatchObject({
       totalQuantity: 3,
       orders: expect.arrayContaining([
         expect.objectContaining({
@@ -374,6 +943,15 @@ describe('发货记录', () => {
     expect(records[0].packages.flatMap(({ items }) => items)
       .filter(({ orderItemId }) => orderItemId === firstItem.id)
       .map(({ quantity }) => quantity)).toEqual([1, 1]);
+    expect(reopened.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        id: confirmation.record.archiveId,
+        status: 'completed',
+        shippedQuantity: 4,
+        remainingQuantity: 0,
+        records: [records[0]],
+      }),
+    ]);
     expect(reopened.queryShipmentGroups().groups).toEqual([]);
   });
 
@@ -423,8 +1001,8 @@ describe('发货记录', () => {
         { status: 'active', cancellation: null },
       ],
     });
-    expect(result.projection.groups).toHaveLength(1);
-    expect(result.projection.groups[0]).toMatchObject({
+    expect(result.projection.groups).toEqual([]);
+    expect(result.archive.remainingGroup).toMatchObject({
       totalQuantity: 2,
       orders: [{ id: firstOrder.id }],
     });
@@ -470,7 +1048,18 @@ describe('发货记录', () => {
       }],
     });
     expect(application.queryShipmentRecords()).toEqual([result.record]);
-    expect(result.projection.groups[0].totalQuantity).toBe(4);
+    expect(result.projection.groups).toEqual([]);
+    expect(result.archive.remainingGroup?.totalQuantity).toBe(4);
+    expect(application.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        id: confirmation.record.archiveId,
+        status: 'open',
+        shippedQuantity: 0,
+        remainingQuantity: 4,
+        totalQuantity: 4,
+        records: [expect.objectContaining({ status: 'voided' })],
+      }),
+    ]);
     expect(group.orders.map((order) => (
       application.getOrder(order.id).order.fulfillmentStatus
     ))).toEqual(['pending_shipment', 'pending_shipment']);

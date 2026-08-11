@@ -79,6 +79,15 @@ export type ManualShipmentGroupDefinition = {
   selectedRecipientOrder: OriginalOrder | null;
 };
 
+export type ShipmentGroupRecipientSnapshot = Pick<
+  ShipmentMatchKey,
+  'phoneNormalized' | 'addressNormalized'
+> & {
+  recipient: string;
+  phone: string;
+  addressOriginal: string;
+};
+
 export function shipmentMatchKeyIdentity(matchKey: ShipmentMatchKey): string {
   return JSON.stringify([
     matchKey.phoneNormalized,
@@ -90,6 +99,24 @@ export function shipmentGroupsRequireFinalRecipient(
   groups: readonly OpenShipmentGroup[],
 ): boolean {
   return new Set(groups.map((group) => shipmentMatchKeyIdentity(group))).size > 1;
+}
+
+export function buildFixedMemberShipmentGroup(
+  candidateOrders: readonly OriginalOrder[],
+  id: string,
+  recipientSnapshot: ShipmentGroupRecipientSnapshot,
+): OpenShipmentGroup | null {
+  if (candidateOrders.length === 0) return null;
+  const group = openShipmentGroup(candidateOrders, id, 'automatic', null);
+  return {
+    ...group,
+    selectedRecipientOrderId: null,
+    recipient: recipientSnapshot.recipient,
+    phone: recipientSnapshot.phone,
+    phoneNormalized: recipientSnapshot.phoneNormalized,
+    addressOriginal: recipientSnapshot.addressOriginal,
+    addressNormalized: recipientSnapshot.addressNormalized,
+  };
 }
 
 export function buildShipmentGroupProjection(

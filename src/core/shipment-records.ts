@@ -1,4 +1,4 @@
-import type { ShipmentGroupProjection } from './shipment-groups';
+import type { OpenShipmentGroup, ShipmentGroupProjection } from './shipment-groups';
 
 export type ShipmentItemQuantityInput = {
   orderId: string;
@@ -14,6 +14,7 @@ export type ConfirmShipmentPackageInput = {
 
 export type ConfirmShipmentInput = {
   groupId: string;
+  archiveId?: string | null;
   expectedRemainingItems: ShipmentItemQuantityInput[];
   packages: ConfirmShipmentPackageInput[];
 };
@@ -85,6 +86,7 @@ export type ShipmentCancellation = {
 
 export type ShipmentRecord = {
   id: string;
+  archiveId: string;
   sourceGroupId: string;
   status: 'active' | 'voided';
   recipient: string;
@@ -100,8 +102,43 @@ export type ShipmentRecord = {
   createdAt: string;
 };
 
+export type ShipmentGroupArchiveMember = {
+  orderId: string;
+  orderNumber: string;
+  hasRemainingShipment: boolean;
+};
+
+export type ShipmentGroupArchiveRecipientDifference = {
+  orderId: string;
+  orderNumber: string;
+  fields: Array<'recipient' | 'phone' | 'address'>;
+};
+
+export type ShipmentGroupArchive = {
+  id: string;
+  sourceGroupId: string;
+  status: 'open' | 'completed';
+  recipient: string;
+  phone: string;
+  phoneNormalized: string;
+  addressOriginal: string;
+  addressNormalized: string;
+  orderIds: string[];
+  orderNumbers: string[];
+  memberOrders: ShipmentGroupArchiveMember[];
+  recipientDifferences: ShipmentGroupArchiveRecipientDifference[];
+  shippedQuantity: number;
+  remainingQuantity: number;
+  totalQuantity: number;
+  remainingGroup: OpenShipmentGroup | null;
+  records: ShipmentRecord[];
+  createdAt: string;
+  completedAt: string | null;
+};
+
 export type ShipmentConfirmationResult = {
   record: ShipmentRecord;
+  archive: ShipmentGroupArchive;
   projection: ShipmentGroupProjection;
 };
 
@@ -126,10 +163,13 @@ export function normalizeConfirmShipmentInput(input: unknown): ConfirmShipmentIn
   const record = asRecord(input, '确认发货参数无效');
   rejectUnknownKeys(
     record,
-    ['groupId', 'expectedRemainingItems', 'packages'],
+    ['groupId', 'archiveId', 'expectedRemainingItems', 'packages'],
     '确认发货参数',
   );
   const groupId = boundedText(record.groupId, 200, '发货组标识无效');
+  const archiveId = record.archiveId === undefined || record.archiveId === null
+    ? null
+    : boundedText(record.archiveId, 200, '发货组档案标识无效');
   const expectedRemainingItems = itemQuantities(
     record.expectedRemainingItems,
     '发货组剩余商品快照无效',
@@ -156,7 +196,7 @@ export function normalizeConfirmShipmentInput(input: unknown): ConfirmShipmentIn
   if (packages.some((shipmentPackage) => shipmentPackage.items.length === 0)) {
     throw new Error('每个包裹至少需要一条商品明细');
   }
-  return { groupId, expectedRemainingItems, packages };
+  return { groupId, archiveId, expectedRemainingItems, packages };
 }
 
 export function normalizeCancelShipmentPackagesInput(

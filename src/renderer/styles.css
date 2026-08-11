@@ -1100,6 +1100,36 @@ select:focus-visible {
   padding-bottom: 24px;
 }
 
+.shipment-stage-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin: 18px 34px 0;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+
+.shipment-stage-tabs button {
+  min-width: 0;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--navy-500);
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.shipment-stage-tabs button[aria-selected='true'] {
+  color: var(--navy-950);
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(15 28 40 / 8%);
+}
+
 .shipment-groups-section {
   min-width: 0;
   margin-top: 26px;
@@ -1316,6 +1346,24 @@ select:focus-visible {
   line-height: 1.5;
 }
 
+.shipment-archive-recipient-warning {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #efd88a;
+  border-radius: 7px;
+  color: #6f5300;
+  background: #fff9df;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shipment-archive-recipient-warning ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+
 .shipment-confirmation-dialog__packages {
   display: grid;
   gap: 12px;
@@ -1416,6 +1464,142 @@ select:focus-visible {
   border-block: 1px solid var(--line-soft);
   color: var(--navy-500);
   font-size: 10px;
+}
+
+.shipment-archive-list {
+  display: grid;
+  gap: 12px;
+  margin: 0 34px;
+}
+
+.shipment-archive-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.shipment-archive-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.shipment-archive-card > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.shipment-archive-card > header strong {
+  color: var(--navy-950);
+  font-size: 12px;
+}
+
+.shipment-archive-card > header small {
+  color: var(--navy-500);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shipment-archive-card__state {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #735800;
+  background: #fff4bc;
+  font-size: 8px;
+  font-weight: 750;
+}
+
+.shipment-archive-card__progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 15px;
+}
+
+.shipment-archive-card__progress > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shipment-archive-card__progress strong,
+.shipment-archive-card__progress span,
+.shipment-archive-card__orders {
+  color: var(--navy-600);
+  font-size: 9px;
+}
+
+.shipment-archive-card__progress strong {
+  color: var(--navy-900);
+}
+
+.shipment-archive-card__progress > span {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-muted);
+}
+
+.shipment-archive-card__progress > span > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--yellow);
+}
+
+.shipment-archive-card__orders {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 13px;
+}
+
+.shipment-archive-card__products {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.shipment-archive-card__products > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 9px 10px;
+  background: var(--surface-muted);
+}
+
+.shipment-archive-card__products strong,
+.shipment-archive-card__products small {
+  color: var(--navy-800);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.shipment-archive-card__products small {
+  color: var(--navy-500);
+}
+
+.shipment-archive-card__records {
+  margin-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.shipment-archive-card__records > summary {
+  padding: 12px 0 0;
+  color: var(--navy-700);
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.shipment-records-embedded .shipment-records-list {
+  margin: 12px 0 0;
 }
 
 .shipment-records-list {

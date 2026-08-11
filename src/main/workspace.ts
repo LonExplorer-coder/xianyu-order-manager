@@ -160,6 +160,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 16) migrateToVersion16(database);
   if (row.version < 17) migrateToVersion17(database);
   if (row.version < 18) migrateToVersion18(database);
+  if (row.version < 19) migrateToVersion19(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1802,6 +1803,126 @@ function migrateToVersion18(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (18, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion19(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE shipment_group_archives (
+        id TEXT PRIMARY KEY,
+        source_group_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        member_order_ids_json TEXT NOT NULL CHECK (
+          json_valid(member_order_ids_json)
+          AND json_type(member_order_ids_json) = 'array'
+          AND json_array_length(member_order_ids_json) > 0
+        ),
+        member_recipient_snapshots_json TEXT NOT NULL CHECK (
+          json_valid(member_recipient_snapshots_json)
+          AND json_type(member_recipient_snapshots_json) = 'array'
+          AND json_array_length(member_recipient_snapshots_json) > 0
+        ),
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (status = 'open' AND completed_at IS NULL)
+          OR (status = 'completed' AND completed_at IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX shipment_group_archives_by_source_group
+      ON shipment_group_archives (source_group_id, status, created_at, id);
+
+      ALTER TABLE shipment_records
+      ADD COLUMN shipment_group_archive_id TEXT
+        REFERENCES shipment_group_archives(id) ON DELETE RESTRICT;
+
+      INSERT INTO shipment_group_archives (
+        id, source_group_id, status,
+        recipient, phone, phone_normalized,
+        address_original, address_normalized,
+        member_order_ids_json, member_recipient_snapshots_json,
+        created_at, completed_at, updated_at
+      )
+      SELECT
+        'legacy-shipment-group-archive-' || records.id,
+        records.source_group_id,
+        'completed',
+        records.recipient,
+        records.phone,
+        records.phone_normalized,
+        records.address_original,
+        records.address_normalized,
+        (
+          SELECT json_group_array(order_id)
+          FROM (
+            SELECT DISTINCT snapshots.order_id AS order_id
+            FROM shipment_record_order_snapshots AS snapshots
+            WHERE snapshots.shipment_record_id = records.id
+            ORDER BY snapshots.order_id
+          )
+        ),
+        (
+          SELECT json_group_array(json_object(
+            'orderId', order_id,
+            'recipient', recipient,
+            'phone', phone,
+            'addressOriginal', address_original
+          ))
+          FROM (
+            SELECT
+              snapshots.order_id,
+              snapshots.recipient,
+              snapshots.phone,
+              snapshots.address_original
+            FROM shipment_record_order_snapshots AS snapshots
+            WHERE snapshots.shipment_record_id = records.id
+            ORDER BY snapshots.order_id
+          )
+        ),
+        records.created_at,
+        records.created_at,
+        records.created_at
+      FROM shipment_records AS records;
+
+      DROP TRIGGER shipment_records_are_immutable_on_update;
+
+      UPDATE shipment_records
+      SET shipment_group_archive_id = 'legacy-shipment-group-archive-' || id;
+
+      CREATE TRIGGER shipment_records_are_immutable_on_update
+      BEFORE UPDATE ON shipment_records
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment records are immutable');
+      END;
+
+      CREATE TRIGGER shipment_records_require_archive_on_insert
+      BEFORE INSERT ON shipment_records
+      WHEN NEW.shipment_group_archive_id IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment record archive is required');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (19, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

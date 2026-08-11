@@ -98,6 +98,7 @@ import {
 import {
   isValidPhonePair,
   normalizeAddress,
+  normalizePhone,
   normalizeShanghaiDateTime,
 } from '../core/order-normalization';
 import {
@@ -134,6 +135,7 @@ import {
   type ShipmentGroupAdjustmentResult,
 } from '../core/shipment-group-adjustments';
 import {
+  buildFixedMemberShipmentGroup,
   buildShipmentGroupProjection,
   shipmentMatchKeyIdentity,
   type ShipmentGroupProjection,
@@ -144,6 +146,7 @@ import {
   normalizeCorrectShipmentPackageLogisticsInput,
   type ShipmentCancellationResult,
   type ShipmentConfirmationResult,
+  type ShipmentGroupArchive,
   type ShipmentItemQuantityInput,
   type ShipmentLogisticsCorrectionResult,
   type ShipmentPackage,
@@ -2812,7 +2815,7 @@ export class LocalApplication {
     return this.queryOrders({}, []).orders;
   }
 
-  public queryShipmentGroups(): ShipmentGroupProjection {
+  private listShipmentCandidateOrders(): OriginalOrder[] {
     const workspace = this.requireWorkspace();
     const rows = workspace.database.prepare(`
       SELECT id
@@ -2822,7 +2825,7 @@ export class LocalApplication {
         AND platform_transaction_status NOT IN ('cancelled', 'refunded')
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
-    const orders = rows.flatMap((row) => {
+    return rows.flatMap((row) => {
       const order = this.getOrder(asString(row.id)).order;
       const items = order.items.flatMap((item) => {
         const shippedQuantity = this.activeShippedQuantity(item.id);
@@ -2837,6 +2840,21 @@ export class LocalApplication {
       });
       return items.length > 0 ? [{ ...order, items }] : [];
     });
+  }
+
+  public queryShipmentGroups(): ShipmentGroupProjection {
+    const workspace = this.requireWorkspace();
+    const archivedOrderIds = new Set((workspace.database.prepare(`
+      SELECT member_order_ids_json
+      FROM shipment_group_archives
+      WHERE status = 'open'
+    `).all() as unknown as SqlRow[]).flatMap((row) => parseStoredTextArray(
+      asString(row.member_order_ids_json),
+      '数据库发货组档案成员订单格式错误',
+    )));
+    const orders = this.listShipmentCandidateOrders().filter(
+      ({ id }) => !archivedOrderIds.has(id),
+    );
     const adjustmentState = replayShipmentGroupAdjustmentEvents(
       this.listShipmentGroupAdjustmentEvents(),
     );
@@ -2880,9 +2898,47 @@ export class LocalApplication {
   public confirmShipment(input: unknown): ShipmentConfirmationResult {
     const prepared = normalizeConfirmShipmentInput(input);
     const projection = this.queryShipmentGroups();
-    const group = projection.groups.find(({ id }) => id === prepared.groupId);
-    if (!group) throw new Error('发货组已变化，请刷新后重试');
-    const remainingByItemId = new Map(group.orders.flatMap((order) => (
+    const workspace = this.requireWorkspace();
+    const expectedOrderIds = new Set(
+      prepared.expectedRemainingItems.map(({ orderId }) => orderId),
+    );
+    const openArchiveRows = workspace.database.prepare(`
+      SELECT *
+      FROM shipment_group_archives
+      WHERE status = 'open'
+      ORDER BY created_at DESC, id DESC
+    `).all() as unknown as SqlRow[];
+    const existingArchiveRow = prepared.archiveId
+      ? openArchiveRows.find((row) => asString(row.id) === prepared.archiveId)
+      : undefined;
+    if (prepared.archiveId && !existingArchiveRow) {
+      throw new Error('发货组档案已变化，请刷新后重试');
+    }
+    const claimedOrderIds = new Set(openArchiveRows.flatMap((row) => (
+      parseStoredTextArray(
+        asString(row.member_order_ids_json),
+        '数据库发货组档案成员订单格式错误',
+      )
+    )));
+    const existingMemberOrderIds = existingArchiveRow
+      ? new Set(parseStoredTextArray(
+        asString(existingArchiveRow.member_order_ids_json),
+        '数据库发货组档案成员订单格式错误',
+      ))
+      : null;
+    if (existingMemberOrderIds && [...expectedOrderIds].some(
+      (orderId) => !existingMemberOrderIds.has(orderId),
+    )) {
+      throw new Error('本次商品不属于所选发货组档案');
+    }
+    const group = prepared.archiveId
+      ? null
+      : projection.groups.find(({ id }) => id === prepared.groupId) ?? null;
+    if (!prepared.archiveId && !group) throw new Error('发货组已变化，请刷新后重试');
+    const shipmentOrders = existingArchiveRow
+      ? this.listShipmentCandidateOrders().filter(({ id }) => existingMemberOrderIds?.has(id))
+      : group?.orders.filter(({ id }) => !claimedOrderIds.has(id)) ?? [];
+    const remainingByItemId = new Map(shipmentOrders.flatMap((order) => (
       order.items.map((item) => [item.id, { order, item }] as const)
     )));
     assertExpectedShipmentItems(prepared.expectedRemainingItems, remainingByItemId);
@@ -2907,25 +2963,86 @@ export class LocalApplication {
     }
     const now = new Date().toISOString();
     const recordId = randomUUID();
-    const sourceOrderById = new Map(group.orders.map(({ id }) => (
+    const sourceOrderById = new Map(shipmentOrders.map(({ id }) => (
       [id, this.getOrder(id).order] as const
     )));
-    const workspace = this.requireWorkspace();
+    const archiveId = prepared.archiveId ?? randomUUID();
+    const allocatedQuantity = [...allocatedByItemId.values()].reduce(
+      (total, quantity) => total + quantity,
+      0,
+    );
+    const shipmentGroupQuantity = shipmentOrders.flatMap(({ items }) => items)
+      .reduce((total, item) => total + item.quantity, 0);
+    const archiveCompleted = allocatedQuantity === shipmentGroupQuantity;
+    const selectedRecipientOrderId = group?.selectedRecipientOrderId ?? null;
+    const currentRecipientSource = shipmentOrders.find(({ id }) => (
+      id === selectedRecipientOrderId
+    )) ?? shipmentOrders[0];
+    const recipientSource = existingArchiveRow
+      ? {
+        recipient: asString(existingArchiveRow.recipient),
+        phone: asString(existingArchiveRow.phone),
+        phoneNormalized: asString(existingArchiveRow.phone_normalized),
+        addressOriginal: asString(existingArchiveRow.address_original),
+        addressNormalized: asString(existingArchiveRow.address_normalized),
+      }
+      : currentRecipientSource;
+    if (!recipientSource) throw new Error('发货组没有可确认的成员订单');
+    const sourceGroupId = existingArchiveRow
+      ? asString(existingArchiveRow.source_group_id)
+      : asString(group?.id);
     workspace.transaction(() => {
+      if (!existingArchiveRow) {
+        workspace.database.prepare(`
+          INSERT INTO shipment_group_archives (
+            id, source_group_id, status,
+            recipient, phone, phone_normalized,
+            address_original, address_normalized,
+            member_order_ids_json, member_recipient_snapshots_json,
+            created_at, completed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          archiveId,
+          sourceGroupId,
+          archiveCompleted ? 'completed' : 'open',
+          recipientSource.recipient,
+          recipientSource.phone,
+          recipientSource.phoneNormalized,
+          recipientSource.addressOriginal,
+          recipientSource.addressNormalized,
+          JSON.stringify(shipmentOrders.map(({ id }) => id).sort()),
+          JSON.stringify(shipmentOrders.map((order) => ({
+            orderId: order.id,
+            recipient: order.recipient,
+            phone: order.phone,
+            addressOriginal: order.addressOriginal,
+          })).sort((left, right) => left.orderId.localeCompare(right.orderId))),
+          now,
+          archiveCompleted ? now : null,
+          now,
+        );
+      } else if (archiveCompleted) {
+        workspace.database.prepare(`
+          UPDATE shipment_group_archives
+          SET status = 'completed', completed_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'open'
+        `).run(now, now, archiveId);
+      }
       workspace.database.prepare(`
         INSERT INTO shipment_records (
-          id, source_group_id,
+          id, shipment_group_archive_id, source_group_id,
           recipient, phone, phone_normalized,
           address_original, address_normalized, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         recordId,
-        group.id,
-        group.recipient,
-        group.phone,
-        group.phoneNormalized,
-        group.addressOriginal,
-        group.addressNormalized,
+        archiveId,
+        sourceGroupId,
+        recipientSource.recipient,
+        recipientSource.phone,
+        recipientSource.phoneNormalized,
+        recipientSource.addressOriginal,
+        recipientSource.addressNormalized,
         now,
       );
       const allocatedOrderIds = new Set(prepared.packages.flatMap((shipmentPackage) => (
@@ -3013,8 +3130,10 @@ export class LocalApplication {
         this.synchronizeShipmentOrderFulfillment(orderId, now);
       }
     });
+    const record = this.getShipmentRecord(recordId);
     return {
-      record: this.getShipmentRecord(recordId),
+      record,
+      archive: this.getShipmentGroupArchive(record.archiveId),
       projection: this.queryShipmentGroups(),
     };
   }
@@ -3027,6 +3146,132 @@ export class LocalApplication {
       ORDER BY created_at DESC, id DESC
     `).all() as unknown as SqlRow[];
     return rows.map((row) => this.getShipmentRecord(asString(row.id)));
+  }
+
+  public queryShipmentGroupArchives(): ShipmentGroupArchive[] {
+    const workspace = this.requireWorkspace();
+    const shipmentCandidateOrders = this.listShipmentCandidateOrders();
+    const rows = workspace.database.prepare(`
+      SELECT *
+      FROM shipment_group_archives
+      ORDER BY created_at DESC, id DESC
+    `).all() as unknown as SqlRow[];
+    return rows.map((row): ShipmentGroupArchive => {
+      const archiveId = asString(row.id);
+      const recordRows = workspace.database.prepare(`
+        SELECT id
+        FROM shipment_records
+        WHERE shipment_group_archive_id = ?
+        ORDER BY created_at DESC, id DESC
+      `).all(archiveId) as unknown as SqlRow[];
+      const records = recordRows.map((recordRow) => (
+        this.getShipmentRecord(asString(recordRow.id))
+      ));
+      const activeQuantityRow = workspace.database.prepare(`
+        SELECT COALESCE(SUM(items.quantity), 0) AS quantity
+        FROM shipment_package_items AS items
+        JOIN shipment_packages AS packages ON packages.id = items.package_id
+        JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+        LEFT JOIN shipment_package_cancellation_events AS cancellations
+          ON cancellations.package_id = packages.id
+        WHERE records.shipment_group_archive_id = ?
+          AND cancellations.id IS NULL
+      `).get(archiveId) as SqlRow;
+      const sourceGroupId = asString(row.source_group_id);
+      const orderIds = parseStoredTextArray(
+        asString(row.member_order_ids_json),
+        '数据库发货组档案成员订单格式错误',
+      );
+      const orderIdSet = new Set(orderIds);
+      const recipientSnapshotByOrderId = new Map(
+        parseStoredShipmentArchiveRecipientSnapshots(
+          asString(row.member_recipient_snapshots_json),
+        ).map((snapshot) => [snapshot.orderId, snapshot] as const),
+      );
+      if (
+        recipientSnapshotByOrderId.size !== orderIdSet.size ||
+        orderIds.some((orderId) => !recipientSnapshotByOrderId.has(orderId))
+      ) {
+        throw new Error('数据库发货组档案成员收货快照与成员订单不一致');
+      }
+      const currentMemberOrders = orderIds.map((orderId) => this.getOrder(orderId).order)
+        .sort((left, right) => (
+          left.orderNumber.localeCompare(right.orderNumber) || left.id.localeCompare(right.id)
+        ));
+      const shippedQuantity = asNumber(activeQuantityRow.quantity);
+      const remainingGroup = asString(row.status) === 'open'
+        ? buildFixedMemberShipmentGroup(
+          shipmentCandidateOrders.filter(({ id }) => orderIdSet.has(id)),
+          `shipment-archive-${archiveId}`,
+          {
+            recipient: asString(row.recipient),
+            phone: asString(row.phone),
+            phoneNormalized: asString(row.phone_normalized),
+            addressOriginal: asString(row.address_original),
+            addressNormalized: asString(row.address_normalized),
+          },
+        )
+        : null;
+      const remainingQuantity = remainingGroup?.totalQuantity ?? 0;
+      const status = asString(row.status) === 'open' && remainingQuantity > 0
+        ? 'open'
+        : 'completed';
+      const remainingOrderIds = new Set(remainingGroup?.orders.map(({ id }) => id) ?? []);
+      const memberOrders = currentMemberOrders.map((order) => ({
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        hasRemainingShipment: remainingOrderIds.has(order.id),
+      }));
+      const recipientDifferences = currentMemberOrders.flatMap((order) => {
+        const snapshot = recipientSnapshotByOrderId.get(order.id);
+        if (!snapshot) throw new Error('数据库发货组档案成员收货快照缺失');
+        const fields: Array<'recipient' | 'phone' | 'address'> = [];
+        if (order.recipient !== snapshot.recipient) fields.push('recipient');
+        if (order.phoneNormalized !== normalizePhone(snapshot.phone)) fields.push('phone');
+        if (order.addressNormalized !== normalizeAddress(snapshot.addressOriginal)) {
+          fields.push('address');
+        }
+        return fields.length > 0
+          ? [{
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            fields,
+          }]
+          : [];
+      });
+      const orderNumbers = memberOrders.map(({ orderNumber }) => orderNumber);
+      return {
+        id: archiveId,
+        sourceGroupId,
+        status,
+        recipient: asString(row.recipient),
+        phone: asString(row.phone),
+        phoneNormalized: asString(row.phone_normalized),
+        addressOriginal: asString(row.address_original),
+        addressNormalized: asString(row.address_normalized),
+        orderIds,
+        orderNumbers,
+        memberOrders,
+        recipientDifferences,
+        shippedQuantity,
+        remainingQuantity,
+        totalQuantity: shippedQuantity + remainingQuantity,
+        remainingGroup: status === 'open' ? remainingGroup : null,
+        records,
+        createdAt: asString(row.created_at),
+        completedAt: status === 'open'
+          ? null
+          : row.completed_at === null
+            ? asString(row.updated_at)
+            : asString(row.completed_at),
+      };
+    });
+  }
+
+  private getShipmentGroupArchive(archiveId: string): ShipmentGroupArchive {
+    const archive = this.queryShipmentGroupArchives().find(({ id }) => id === archiveId);
+    if (!archive) throw new Error('发货组档案不存在');
+    return archive;
   }
 
   public cancelShipmentPackages(input: unknown): ShipmentCancellationResult {
@@ -3078,9 +3323,38 @@ export class LocalApplication {
       )))) {
         this.synchronizeShipmentOrderFulfillment(orderId, now);
       }
+      const archiveRow = workspace.database.prepare(`
+        SELECT member_order_ids_json
+        FROM shipment_group_archives
+        WHERE id = ?
+      `).get(record.archiveId) as SqlRow;
+      const archiveOrderIds = new Set(parseStoredTextArray(
+        asString(archiveRow.member_order_ids_json),
+        '数据库发货组档案成员订单格式错误',
+      ));
+      workspace.database.prepare(`
+        UPDATE shipment_group_archives
+        SET status = 'open', completed_at = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(now, record.archiveId);
+      const archiveStillOpen = this.listShipmentCandidateOrders().some(
+        ({ id }) => archiveOrderIds.has(id),
+      );
+      workspace.database.prepare(`
+        UPDATE shipment_group_archives
+        SET status = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        archiveStillOpen ? 'open' : 'completed',
+        archiveStillOpen ? null : now,
+        now,
+        record.archiveId,
+      );
     });
+    const updatedRecord = this.getShipmentRecord(record.id);
     return {
-      record: this.getShipmentRecord(record.id),
+      record: updatedRecord,
+      archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
       projection: this.queryShipmentGroups(),
     };
   }
@@ -3139,8 +3413,10 @@ export class LocalApplication {
         now,
       );
     });
+    const updatedRecord = this.getShipmentRecord(record.id);
     return {
-      record: this.getShipmentRecord(record.id),
+      record: updatedRecord,
+      archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
       projection: this.queryShipmentGroups(),
     };
   }
@@ -3244,6 +3520,7 @@ export class LocalApplication {
     });
     return {
       id: asString(row.id),
+      archiveId: asString(row.shipment_group_archive_id),
       sourceGroupId: asString(row.source_group_id),
       status: voidRow ? 'voided' : 'active',
       recipient: asString(row.recipient),
@@ -6077,6 +6354,49 @@ function parseStoredTextArray(serialized: string, message: string): string[] {
     throw new Error(message);
   }
   return parsed;
+}
+
+type StoredShipmentArchiveRecipientSnapshot = {
+  orderId: string;
+  recipient: string;
+  phone: string;
+  addressOriginal: string;
+};
+
+function parseStoredShipmentArchiveRecipientSnapshots(
+  serialized: string,
+): StoredShipmentArchiveRecipientSnapshot[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error('数据库发货组档案成员收货快照格式错误', { cause: error });
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('数据库发货组档案成员收货快照格式错误');
+  }
+  const snapshots = parsed.map((value) => {
+    if (
+      typeof value !== 'object' || value === null || Array.isArray(value) ||
+      typeof Reflect.get(value, 'orderId') !== 'string' ||
+      asString(Reflect.get(value, 'orderId')).length === 0 ||
+      typeof Reflect.get(value, 'recipient') !== 'string' ||
+      typeof Reflect.get(value, 'phone') !== 'string' ||
+      typeof Reflect.get(value, 'addressOriginal') !== 'string'
+    ) {
+      throw new Error('数据库发货组档案成员收货快照格式错误');
+    }
+    return {
+      orderId: asString(Reflect.get(value, 'orderId')),
+      recipient: asString(Reflect.get(value, 'recipient')),
+      phone: asString(Reflect.get(value, 'phone')),
+      addressOriginal: asString(Reflect.get(value, 'addressOriginal')),
+    };
+  });
+  if (new Set(snapshots.map(({ orderId }) => orderId)).size !== snapshots.length) {
+    throw new Error('数据库发货组档案成员收货快照格式错误');
+  }
+  return snapshots;
 }
 
 function asOptionalStoredMoney(

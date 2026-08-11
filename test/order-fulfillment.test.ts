@@ -222,7 +222,7 @@ describe('订单状态与手工物流', () => {
       `).run();
       expect(workspace.database.prepare(`
         SELECT MAX(version) AS version FROM schema_migrations
-      `).get()).toEqual({ version: 18 });
+      `).get()).toEqual({ version: 19 });
       expect(workspace.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       workspace.close();

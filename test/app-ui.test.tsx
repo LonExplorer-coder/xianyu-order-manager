@@ -27,7 +27,7 @@ import type {
 import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
 import type { ShipmentGroupProjection } from '../src/core/shipment-groups';
-import type { ShipmentRecord } from '../src/core/shipment-records';
+import type { ShipmentGroupArchive, ShipmentRecord } from '../src/core/shipment-records';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { App } from '../src/renderer/App';
 
@@ -272,6 +272,7 @@ function shipmentRecordForGroup(
   })));
   return {
     id: 'shipment-record-ui-1',
+    archiveId: 'shipment-group-archive-ui-1',
     sourceGroupId: group.id,
     status: 'active',
     recipient: group.recipient,
@@ -307,6 +308,39 @@ function shipmentRecordForGroup(
     sourceDifferences: [],
     voiding: null,
     createdAt,
+  };
+}
+
+function shipmentArchiveForGroup(
+  group: ShipmentGroupProjection['groups'][number],
+  status: ShipmentGroupArchive['status'] = 'completed',
+): ShipmentGroupArchive {
+  const record = shipmentRecordForGroup(group);
+  const remainingQuantity = status === 'open' ? group.totalQuantity : 0;
+  return {
+    id: record.archiveId,
+    sourceGroupId: group.id,
+    status,
+    recipient: group.recipient,
+    phone: group.phone,
+    phoneNormalized: group.phoneNormalized,
+    addressOriginal: group.addressOriginal,
+    addressNormalized: group.addressNormalized,
+    orderIds: group.orders.map(({ id }) => id),
+    orderNumbers: group.orders.map(({ orderNumber }) => orderNumber),
+    memberOrders: group.orders.map((order) => ({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      hasRemainingShipment: status === 'open',
+    })),
+    recipientDifferences: [],
+    shippedQuantity: record.totalQuantity,
+    remainingQuantity,
+    totalQuantity: record.totalQuantity + remainingQuantity,
+    remainingGroup: status === 'open' ? group : null,
+    records: [record],
+    createdAt: record.createdAt,
+    completedAt: status === 'completed' ? record.createdAt : null,
   };
 }
 
@@ -365,7 +399,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
     splitShipmentGroup: vi.fn(),
     mergeShipmentGroups: vi.fn(),
-    queryShipmentRecords: vi.fn().mockResolvedValue([]),
+    queryShipmentGroupArchives: vi.fn().mockResolvedValue([]),
     confirmShipment: vi.fn(),
     cancelShipmentPackages: vi.fn(),
     correctShipmentPackageLogistics: vi.fn(),
@@ -573,8 +607,9 @@ describe('订单管理工作台', () => {
     expect(navigation).toHaveAttribute('aria-current', 'page');
     expect(queryShipmentGroups).toHaveBeenCalledTimes(1);
     const overview = screen.getByRole('region', { name: '发货组概况' });
-    expect(overview).toHaveTextContent('开放发货组1');
-    expect(overview).toHaveTextContent('待发货订单3');
+    expect(overview).toHaveTextContent('待发货组1');
+    expect(overview).toHaveTextContent('部分发货0');
+    expect(overview).toHaveTextContent('已完成0');
     expect(overview).toHaveTextContent('未自动成组1');
     const groupTable = screen.getByRole('table', { name: '开放发货组' });
     expect(groupTable).toHaveTextContent('人工修正收件人');
@@ -604,12 +639,209 @@ describe('订单管理工作台', () => {
       .not.toBeInTheDocument();
   });
 
+  it('按待发货、部分发货和已完成组织发货组档案及其发货记录', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const completedArchive = shipmentArchiveForGroup(group);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([completedArchive]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+
+    expect(await screen.findByRole('tab', { name: '已完成 1' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const archive = screen.getByRole('article', {
+      name: `发货组档案 ${completedArchive.orderNumbers.join('、')}`,
+    });
+    expect(archive).toHaveTextContent('已发 2 / 共 2 件');
+    expect(archive).toHaveTextContent(confirmedOrder.orderNumber);
+    await user.click(within(archive).getByRole('button', { name: '查看 1 条发货记录' }));
+    expect(archive).toHaveTextContent('SF1000000020');
+    expect(archive).toHaveTextContent('脱敏测试商品');
+  });
+
+  it('有剩余商品的发货组进入部分发货并可继续实际发出', async () => {
+    const user = userEvent.setup();
+    const projection = singleShipmentGroupProjection();
+    const group = projection.groups[0];
+    const partialArchive = shipmentArchiveForGroup(group, 'open');
+    partialArchive.shippedQuantity = 1;
+    partialArchive.remainingQuantity = group.totalQuantity;
+    partialArchive.totalQuantity = partialArchive.shippedQuantity + group.totalQuantity;
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([partialArchive]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+
+    expect(await screen.findByRole('tab', { name: '部分发货 1' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: '待发货 0' })).toBeVisible();
+    const archive = screen.getByRole('article', {
+      name: `发货组档案 ${confirmedOrder.orderNumber}`,
+    });
+    expect(archive).toHaveTextContent('已发 1 / 共 3 件');
+    expect(archive).toHaveTextContent('剩余 2 件待发');
+    expect(within(archive).getByRole('button', { name: '继续发货' })).toBeVisible();
+  });
+
+  it('档案成员修改收货信息并分散到多个当前组后仍在同一档案继续发货', async () => {
+    const user = userEvent.setup();
+    const firstProjection = singleShipmentGroupProjection();
+    const changedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-recipient-changed-after-partial-shipment',
+      orderNumber: 'XY-SHIPMENT-UI-RECIPIENT-CHANGED',
+      addressOriginal: '浙江省杭州市西湖区新地址2号',
+      addressNormalized: '浙江省杭州市西湖区新地址2号',
+      province: '浙江省',
+      city: '杭州市',
+      district: '西湖区',
+      items: confirmedOrder.items.map((item) => ({
+        ...item,
+        id: 'item-recipient-changed-after-partial-shipment',
+      })),
+    };
+    const changedProjection = singleShipmentGroupProjection(changedOrder);
+    const archive = shipmentArchiveForGroup(firstProjection.groups[0], 'open');
+    const remainingGroup = structuredClone(firstProjection.groups[0]);
+    remainingGroup.id = `shipment-archive-${archive.id}`;
+    remainingGroup.orders.push(changedProjection.groups[0].orders[0]);
+    remainingGroup.orderCount = 2;
+    remainingGroup.totalQuantity += changedProjection.groups[0].totalQuantity;
+    remainingGroup.totalAmountCents += changedProjection.groups[0].totalAmountCents;
+    remainingGroup.items[0].quantity += changedProjection.groups[0].items[0].quantity;
+    remainingGroup.items[0].subtotalCents += changedProjection.groups[0].items[0].subtotalCents;
+    remainingGroup.items[0].orderIds.push(changedOrder.id);
+    archive.orderIds.push(changedOrder.id);
+    archive.orderNumbers.push(changedOrder.orderNumber);
+    archive.memberOrders.push({
+      orderId: changedOrder.id,
+      orderNumber: changedOrder.orderNumber,
+      hasRemainingShipment: true,
+    });
+    archive.recipientDifferences = [{
+      orderId: changedOrder.id,
+      orderNumber: changedOrder.orderNumber,
+      fields: ['address'],
+    }];
+    archive.remainingGroup = remainingGroup;
+    archive.remainingQuantity = remainingGroup.totalQuantity;
+    archive.totalQuantity = archive.shippedQuantity + archive.remainingQuantity;
+    const confirmShipment = vi.fn().mockResolvedValue({
+      record: archive.records[0],
+      archive: { ...archive, status: 'completed', remainingGroup: null },
+      projection: { groups: [], attentionOrders: [] },
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      confirmShipment,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+
+    expect(await screen.findByRole('tab', { name: '部分发货 1' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: '待发货 0' })).toBeVisible();
+    expect(screen.getByText('成员订单的当前收货信息已有变化')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '继续发货' }));
+    const dialog = screen.getByRole('dialog', { name: '确认实际发出' });
+    expect(dialog).toHaveTextContent(confirmedOrder.orderNumber);
+    expect(dialog).toHaveTextContent(changedOrder.orderNumber);
+    expect(dialog).toHaveTextContent('本次继续使用档案中保存的收货信息');
+    expect(dialog).toHaveTextContent('完整地址已变化');
+    await user.click(within(dialog).getByRole('button', { name: '确认实际发出' }));
+    expect(confirmShipment).toHaveBeenCalledWith(expect.objectContaining({
+      groupId: remainingGroup.id,
+      archiveId: archive.id,
+    }));
+  });
+
+  it('相同收货信息的新订单与既有部分发货档案分开展示', async () => {
+    const user = userEvent.setup();
+    const originalProjection = singleShipmentGroupProjection();
+    const originalOrder = confirmedOrder;
+    const laterOrder = {
+      ...structuredClone(originalOrder),
+      id: 'order-later-same-recipient',
+      orderNumber: 'XY-SHIPMENT-UI-LATER',
+      items: originalOrder.items.map((item) => ({
+        ...item,
+        id: 'item-later-same-recipient',
+        quantity: 1,
+        subtotalCents: item.unitPriceCents,
+      })),
+    };
+    const projection = singleShipmentGroupProjection(laterOrder);
+    const partialArchive = shipmentArchiveForGroup(originalProjection.groups[0], 'open');
+    partialArchive.shippedQuantity = 1;
+    partialArchive.remainingQuantity = 1;
+    partialArchive.totalQuantity = 2;
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue(projection),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([partialArchive]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+
+    expect(await screen.findByRole('tab', { name: '待发货 1' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const pendingTable = screen.getByRole('table', { name: '开放发货组' });
+    expect(pendingTable).toHaveTextContent('XY-SHIPMENT-UI-LATER');
+    expect(pendingTable).not.toHaveTextContent(confirmedOrder.orderNumber);
+
+    await user.click(screen.getByRole('tab', { name: '部分发货 1' }));
+    const archive = screen.getByRole('article', {
+      name: `发货组档案 ${confirmedOrder.orderNumber}`,
+    });
+    expect(archive).toHaveTextContent(confirmedOrder.orderNumber);
+    expect(archive).not.toHaveTextContent('XY-SHIPMENT-UI-LATER');
+  });
+
   it('从开放发货组确认实际发出并立即显示发货记录', async () => {
     const user = userEvent.setup();
     const projection = singleShipmentGroupProjection();
     const record = shipmentRecordForGroup(projection.groups[0]);
+    const archive = shipmentArchiveForGroup(projection.groups[0]);
     const confirmShipment = vi.fn().mockResolvedValue({
       record,
+      archive,
       projection: { groups: [], attentionOrders: [] },
     });
     const api = createApi({
@@ -621,7 +853,7 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue(projection),
-      queryShipmentRecords: vi.fn().mockResolvedValue([]),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([]),
       confirmShipment,
     });
 
@@ -640,6 +872,7 @@ describe('订单管理工作台', () => {
 
     expect(confirmShipment).toHaveBeenCalledWith({
       groupId: projection.groups[0].id,
+      archiveId: null,
       expectedRemainingItems: [{
         orderId: confirmedOrder.id,
         orderItemId: confirmedOrder.items[0].id,
@@ -665,8 +898,10 @@ describe('订单管理工作台', () => {
     const user = userEvent.setup();
     const projection = singleShipmentGroupProjection();
     const record = shipmentRecordForGroup(projection.groups[0]);
+    const archive = shipmentArchiveForGroup(projection.groups[0]);
     const confirmShipment = vi.fn().mockResolvedValue({
       record,
+      archive,
       projection: { groups: [], attentionOrders: [] },
     });
     const api = createApi({
@@ -678,7 +913,7 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue(projection),
-      queryShipmentRecords: vi.fn().mockResolvedValue([]),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([]),
       confirmShipment,
     });
 
@@ -745,6 +980,13 @@ describe('订单管理工作台', () => {
     };
     const cancelShipmentPackages = vi.fn().mockResolvedValue({
       record: cancelledRecord,
+      archive: {
+        ...shipmentArchiveForGroup(projection.groups[0], 'open'),
+        shippedQuantity: 0,
+        remainingQuantity: projection.groups[0].totalQuantity,
+        totalQuantity: projection.groups[0].totalQuantity,
+        records: [cancelledRecord],
+      },
       projection,
     });
     const api = createApi({
@@ -756,7 +998,9 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
-      queryShipmentRecords: vi.fn().mockResolvedValue([record]),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([
+        shipmentArchiveForGroup(projection.groups[0]),
+      ]),
       cancelShipmentPackages,
     });
 
@@ -783,8 +1027,15 @@ describe('订单管理工作台', () => {
       packageIds: [record.packages[0].id],
       reason: '误操作，包裹尚未交给快递员',
     });
-    expect(history).toHaveTextContent('已作废');
-    expect(await screen.findByRole('table', { name: '开放发货组' })).toBeVisible();
+    expect(await screen.findByRole('tab', { name: '部分发货 1' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const reopenedArchive = screen.getByRole('article', {
+      name: `发货组档案 ${confirmedOrder.orderNumber}`,
+    });
+    expect(reopenedArchive).toHaveTextContent('剩余 2 件待发');
+    expect(within(reopenedArchive).getByRole('button', { name: '继续发货' })).toBeVisible();
+    expect(within(reopenedArchive).getByRole('region', { name: '发货记录' }))
+      .toHaveTextContent('已作废');
   });
 
   it('更正包裹物流时保留原因并按包裹版本提交', async () => {
@@ -816,6 +1067,10 @@ describe('订单管理工作台', () => {
     };
     const correctShipmentPackageLogistics = vi.fn().mockResolvedValue({
       record: correctedRecord,
+      archive: {
+        ...shipmentArchiveForGroup(group),
+        records: [correctedRecord],
+      },
       projection: { groups: [], attentionOrders: [] },
     });
     const api = createApi({
@@ -827,7 +1082,9 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
-      queryShipmentRecords: vi.fn().mockResolvedValue([record]),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([
+        shipmentArchiveForGroup(group),
+      ]),
       correctShipmentPackageLogistics,
     });
 
@@ -883,7 +1140,10 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
-      queryShipmentRecords: vi.fn().mockResolvedValue([record]),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([{
+        ...shipmentArchiveForGroup(group),
+        records: [record],
+      }]),
     });
 
     render(<App api={api} />);
@@ -1032,7 +1292,7 @@ describe('订单管理工作台', () => {
       .toBeVisible();
     expect(queryShipmentGroups).toHaveBeenCalledTimes(2);
     expect(screen.getByRole('region', { name: '发货组概况' })).toHaveTextContent(
-      '开放发货组0',
+      '待发货组0',
     );
   });
 

@@ -212,7 +212,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('shipment-groups:merge', (_event, input: unknown) => (
     desktopSession.mergeShipmentGroups(input)
   ));
-  ipcMain.handle('shipment-records:query', () => desktopSession.queryShipmentRecords());
+  ipcMain.handle('shipment-group-archives:query', () => (
+    desktopSession.queryShipmentGroupArchives()
+  ));
   ipcMain.handle('shipment-records:confirm', (_event, input: unknown) => (
     desktopSession.confirmShipment(input)
   ));
