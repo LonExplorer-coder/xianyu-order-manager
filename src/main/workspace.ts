@@ -161,6 +161,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 17) migrateToVersion17(database);
   if (row.version < 18) migrateToVersion18(database);
   if (row.version < 19) migrateToVersion19(database);
+  if (row.version < 20) migrateToVersion20(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1932,6 +1933,131 @@ function migrateToVersion19(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  }
+}
+
+function migrateToVersion20(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE shipment_group_archives_v20 (
+        id TEXT PRIMARY KEY,
+        source_group_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+          status IN ('partially_shipped', 'fully_shipped')
+        ),
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        member_order_ids_json TEXT NOT NULL CHECK (
+          json_valid(member_order_ids_json)
+          AND json_type(member_order_ids_json) = 'array'
+          AND json_array_length(member_order_ids_json) > 0
+        ),
+        member_recipient_snapshots_json TEXT NOT NULL CHECK (
+          json_valid(member_recipient_snapshots_json)
+          AND json_type(member_recipient_snapshots_json) = 'array'
+          AND json_array_length(member_recipient_snapshots_json) > 0
+        ),
+        total_quantity INTEGER NOT NULL CHECK (total_quantity > 0),
+        created_at TEXT NOT NULL,
+        fully_shipped_at TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (status = 'partially_shipped' AND fully_shipped_at IS NULL)
+          OR (status = 'fully_shipped' AND fully_shipped_at IS NOT NULL)
+        )
+      ) STRICT;
+
+      WITH archive_quantities AS (
+        SELECT
+          archives.*,
+          COALESCE((
+            SELECT SUM(items.quantity)
+            FROM order_items AS items
+            JOIN json_each(archives.member_order_ids_json) AS members
+              ON members.value = items.order_id
+          ), 0) AS member_quantity,
+          COALESCE((
+            SELECT SUM(items.quantity)
+            FROM shipment_package_items AS items
+            JOIN shipment_packages AS packages ON packages.id = items.package_id
+            JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+            WHERE records.shipment_group_archive_id = archives.id
+          ), 0) AS recorded_quantity,
+          COALESCE((
+            SELECT SUM(items.quantity)
+            FROM shipment_package_items AS items
+            JOIN shipment_packages AS packages ON packages.id = items.package_id
+            JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+            LEFT JOIN shipment_package_cancellation_events AS cancellations
+              ON cancellations.package_id = packages.id
+            WHERE records.shipment_group_archive_id = archives.id
+              AND cancellations.id IS NULL
+          ), 0) AS shipped_quantity
+        FROM shipment_group_archives AS archives
+      ), normalized_archives AS (
+        SELECT
+          archive_quantities.*,
+          CASE
+            WHEN id LIKE 'legacy-shipment-group-archive-%' THEN recorded_quantity
+            ELSE MAX(member_quantity, recorded_quantity)
+          END AS total_quantity
+        FROM archive_quantities
+      )
+      INSERT INTO shipment_group_archives_v20 (
+        id, source_group_id, status,
+        recipient, phone, phone_normalized,
+        address_original, address_normalized,
+        member_order_ids_json, member_recipient_snapshots_json,
+        total_quantity, created_at, fully_shipped_at, updated_at
+      )
+      SELECT
+        id,
+        source_group_id,
+        CASE
+          WHEN shipped_quantity >= total_quantity THEN 'fully_shipped'
+          ELSE 'partially_shipped'
+        END,
+        recipient,
+        phone,
+        phone_normalized,
+        address_original,
+        address_normalized,
+        member_order_ids_json,
+        member_recipient_snapshots_json,
+        total_quantity,
+        created_at,
+        CASE
+          WHEN shipped_quantity >= total_quantity THEN COALESCE(completed_at, updated_at)
+          ELSE NULL
+        END,
+        updated_at
+      FROM normalized_archives;
+
+      DROP TABLE shipment_group_archives;
+      ALTER TABLE shipment_group_archives_v20 RENAME TO shipment_group_archives;
+
+      CREATE INDEX shipment_group_archives_by_source_group
+      ON shipment_group_archives (source_group_id, status, created_at, id);
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (20, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

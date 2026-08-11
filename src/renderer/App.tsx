@@ -1492,7 +1492,9 @@ function ShipmentGroupsWorkspace({
   onArchivesChange: (archives: ShipmentGroupArchive[]) => void;
   onOpenOrder: (orderId: string) => void;
 }) {
-  const [activeView, setActiveView] = useState<'pending' | 'partial' | 'completed'>('pending');
+  const [activeView, setActiveView] = useState<
+    'pending' | 'partially_shipped' | 'fully_shipped'
+  >('pending');
   const initializedView = useRef(false);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [adjustmentTarget, setAdjustmentTarget] = useState<
@@ -1517,8 +1519,10 @@ function ShipmentGroupsWorkspace({
   } | null>(null);
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
-  const partialArchives = archives.filter(({ status }) => status === 'open');
-  const completedArchives = archives.filter(({ status }) => status === 'completed');
+  const partiallyShippedArchives = archives.filter(
+    ({ status }) => status === 'partially_shipped',
+  );
+  const fullyShippedArchives = archives.filter(({ status }) => status === 'fully_shipped');
   const pendingGroups = groups;
   const selectedGroupIdSet = new Set(selectedGroupIds);
   const selectedGroups = pendingGroups.filter(({ id }) => selectedGroupIdSet.has(id));
@@ -1533,16 +1537,16 @@ function ShipmentGroupsWorkspace({
     initializedView.current = true;
     if (pendingGroups.length > 0 || attentionOrders.length > 0) {
       setActiveView('pending');
-    } else if (partialArchives.length > 0) {
-      setActiveView('partial');
-    } else if (completedArchives.length > 0) {
-      setActiveView('completed');
+    } else if (partiallyShippedArchives.length > 0) {
+      setActiveView('partially_shipped');
+    } else if (fullyShippedArchives.length > 0) {
+      setActiveView('fully_shipped');
     }
   }, [
     attentionOrders.length,
-    completedArchives.length,
+    fullyShippedArchives.length,
     loading,
-    partialArchives.length,
+    partiallyShippedArchives.length,
     pendingGroups.length,
     projection,
   ]);
@@ -1552,7 +1556,7 @@ function ShipmentGroupsWorkspace({
       nextArchive,
       ...archives.filter(({ id }) => id !== nextArchive.id),
     ]);
-    setActiveView(nextArchive.status === 'open' ? 'partial' : 'completed');
+    setActiveView(nextArchive.status);
   }
 
   function toggleGroup(groupId: string) {
@@ -1580,8 +1584,8 @@ function ShipmentGroupsWorkspace({
 
       <section className="orders-overview" aria-label="发货组概况">
         <span><small>待发货组</small><strong>{pendingGroups.length}</strong></span>
-        <span><small>部分发货</small><strong>{partialArchives.length}</strong></span>
-        <span><small>已完成</small><strong>{completedArchives.length}</strong></span>
+        <span><small>部分发货</small><strong>{partiallyShippedArchives.length}</strong></span>
+        <span><small>已全部发货</small><strong>{fullyShippedArchives.length}</strong></span>
         <span><small>未自动成组</small><strong>{attentionOrders.length}</strong></span>
       </section>
 
@@ -1597,18 +1601,18 @@ function ShipmentGroupsWorkspace({
         <button
           type="button"
           role="tab"
-          aria-selected={activeView === 'partial'}
-          onClick={() => setActiveView('partial')}
+          aria-selected={activeView === 'partially_shipped'}
+          onClick={() => setActiveView('partially_shipped')}
         >
-          部分发货 {partialArchives.length}
+          部分发货 {partiallyShippedArchives.length}
         </button>
         <button
           type="button"
           role="tab"
-          aria-selected={activeView === 'completed'}
-          onClick={() => setActiveView('completed')}
+          aria-selected={activeView === 'fully_shipped'}
+          onClick={() => setActiveView('fully_shipped')}
         >
-          已完成 {completedArchives.length}
+          已全部发货 {fullyShippedArchives.length}
         </button>
       </div>
 
@@ -1791,11 +1795,11 @@ function ShipmentGroupsWorkspace({
         </section>
       )}
 
-      {activeView === 'partial' && (
+      {activeView === 'partially_shipped' && (
         <ShipmentArchiveSection
           label="部分发货组"
           emptyMessage="没有部分发货的发货组"
-          archives={partialArchives}
+          archives={partiallyShippedArchives}
           onContinueShipment={(archiveId, group, recipientDifferences) => {
             setConfirmationTarget({ archiveId, group, recipientDifferences });
           }}
@@ -1809,11 +1813,11 @@ function ShipmentGroupsWorkspace({
         />
       )}
 
-      {activeView === 'completed' && (
+      {activeView === 'fully_shipped' && (
         <ShipmentArchiveSection
-          label="已完成发货组"
-          emptyMessage="尚无已完成的发货组档案"
-          archives={completedArchives}
+          label="已全部发货的发货组"
+          emptyMessage="尚无已全部发货的发货组档案"
+          archives={fullyShippedArchives}
           onContinueShipment={(archiveId, group, recipientDifferences) => {
             setConfirmationTarget({ archiveId, group, recipientDifferences });
           }}
@@ -2207,7 +2211,7 @@ function ShipmentArchiveSection({
                 <header>
                   <div>
                     <span className="shipment-archive-card__state">
-                      {archive.status === 'open' ? '部分发货' : '已完成'}
+                      {archive.status === 'partially_shipped' ? '部分发货' : '已全部发货'}
                     </span>
                     <strong>{archive.recipient} · {archive.phone}</strong>
                     <small>{archive.addressOriginal}</small>
@@ -2245,7 +2249,7 @@ function ShipmentArchiveSection({
                         onClick={() => onOpenOrder(member.orderId)}
                       >
                         {member.orderNumber}
-                        {!member.hasRemainingShipment && archive.status === 'open'
+                        {!member.hasRemainingShipment && archive.status === 'partially_shipped'
                           ? '（当前不可继续发货）'
                           : ''}
                       </button>

@@ -313,10 +313,10 @@ function shipmentRecordForGroup(
 
 function shipmentArchiveForGroup(
   group: ShipmentGroupProjection['groups'][number],
-  status: ShipmentGroupArchive['status'] = 'completed',
+  status: ShipmentGroupArchive['status'] = 'fully_shipped',
 ): ShipmentGroupArchive {
   const record = shipmentRecordForGroup(group);
-  const remainingQuantity = status === 'open' ? group.totalQuantity : 0;
+  const remainingQuantity = status === 'partially_shipped' ? group.totalQuantity : 0;
   return {
     id: record.archiveId,
     sourceGroupId: group.id,
@@ -331,16 +331,16 @@ function shipmentArchiveForGroup(
     memberOrders: group.orders.map((order) => ({
       orderId: order.id,
       orderNumber: order.orderNumber,
-      hasRemainingShipment: status === 'open',
+      hasRemainingShipment: status === 'partially_shipped',
     })),
     recipientDifferences: [],
     shippedQuantity: record.totalQuantity,
     remainingQuantity,
     totalQuantity: record.totalQuantity + remainingQuantity,
-    remainingGroup: status === 'open' ? group : null,
+    remainingGroup: status === 'partially_shipped' ? group : null,
     records: [record],
     createdAt: record.createdAt,
-    completedAt: status === 'completed' ? record.createdAt : null,
+    fullyShippedAt: status === 'fully_shipped' ? record.createdAt : null,
   };
 }
 
@@ -609,7 +609,7 @@ describe('订单管理工作台', () => {
     const overview = screen.getByRole('region', { name: '发货组概况' });
     expect(overview).toHaveTextContent('待发货组1');
     expect(overview).toHaveTextContent('部分发货0');
-    expect(overview).toHaveTextContent('已完成0');
+    expect(overview).toHaveTextContent('已全部发货0');
     expect(overview).toHaveTextContent('未自动成组1');
     const groupTable = screen.getByRole('table', { name: '开放发货组' });
     expect(groupTable).toHaveTextContent('人工修正收件人');
@@ -639,7 +639,7 @@ describe('订单管理工作台', () => {
       .not.toBeInTheDocument();
   });
 
-  it('按待发货、部分发货和已完成组织发货组档案及其发货记录', async () => {
+  it('按待发货、部分发货和已全部发货组织发货组档案及其发货记录', async () => {
     const user = userEvent.setup();
     const group = singleShipmentGroupProjection().groups[0];
     const completedArchive = shipmentArchiveForGroup(group);
@@ -658,7 +658,7 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '发货组' }));
 
-    expect(await screen.findByRole('tab', { name: '已完成 1' }))
+    expect(await screen.findByRole('tab', { name: '已全部发货 1' }))
       .toHaveAttribute('aria-selected', 'true');
     const archive = screen.getByRole('article', {
       name: `发货组档案 ${completedArchive.orderNumbers.join('、')}`,
@@ -674,7 +674,7 @@ describe('订单管理工作台', () => {
     const user = userEvent.setup();
     const projection = singleShipmentGroupProjection();
     const group = projection.groups[0];
-    const partialArchive = shipmentArchiveForGroup(group, 'open');
+    const partialArchive = shipmentArchiveForGroup(group, 'partially_shipped');
     partialArchive.shippedQuantity = 1;
     partialArchive.remainingQuantity = group.totalQuantity;
     partialArchive.totalQuantity = partialArchive.shippedQuantity + group.totalQuantity;
@@ -722,7 +722,7 @@ describe('订单管理工作台', () => {
       })),
     };
     const changedProjection = singleShipmentGroupProjection(changedOrder);
-    const archive = shipmentArchiveForGroup(firstProjection.groups[0], 'open');
+    const archive = shipmentArchiveForGroup(firstProjection.groups[0], 'partially_shipped');
     const remainingGroup = structuredClone(firstProjection.groups[0]);
     remainingGroup.id = `shipment-archive-${archive.id}`;
     remainingGroup.orders.push(changedProjection.groups[0].orders[0]);
@@ -749,7 +749,7 @@ describe('订单管理工作台', () => {
     archive.totalQuantity = archive.shippedQuantity + archive.remainingQuantity;
     const confirmShipment = vi.fn().mockResolvedValue({
       record: archive.records[0],
-      archive: { ...archive, status: 'completed', remainingGroup: null },
+      archive: { ...archive, status: 'fully_shipped', remainingGroup: null },
       projection: { groups: [], attentionOrders: [] },
     });
     const api = createApi({
@@ -801,7 +801,10 @@ describe('订单管理工作台', () => {
       })),
     };
     const projection = singleShipmentGroupProjection(laterOrder);
-    const partialArchive = shipmentArchiveForGroup(originalProjection.groups[0], 'open');
+    const partialArchive = shipmentArchiveForGroup(
+      originalProjection.groups[0],
+      'partially_shipped',
+    );
     partialArchive.shippedQuantity = 1;
     partialArchive.remainingQuantity = 1;
     partialArchive.totalQuantity = 2;
@@ -981,7 +984,7 @@ describe('订单管理工作台', () => {
     const cancelShipmentPackages = vi.fn().mockResolvedValue({
       record: cancelledRecord,
       archive: {
-        ...shipmentArchiveForGroup(projection.groups[0], 'open'),
+        ...shipmentArchiveForGroup(projection.groups[0], 'partially_shipped'),
         shippedQuantity: 0,
         remainingQuantity: projection.groups[0].totalQuantity,
         totalQuantity: projection.groups[0].totalQuantity,

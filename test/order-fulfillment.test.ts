@@ -160,6 +160,26 @@ describe('订单状态与手工物流', () => {
         '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z',
         '旧账号', 'XY-LEGACY', '顺丰速运', 'SF-LEGACY-001'
       );
+
+      CREATE TABLE order_items (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        source_title TEXT NOT NULL,
+        source_spec TEXT NOT NULL,
+        unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        quantity_source TEXT NOT NULL,
+        subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+        UNIQUE (order_id, position)
+      ) STRICT;
+      INSERT INTO order_items (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_source, subtotal_cents
+      ) VALUES (
+        'legacy-order-item', 'legacy-order', 0, '旧商品', '旧规格',
+        800, 1, 'legacy_explicit_or_manual', 800
+      );
     `);
     legacy.close();
     const corruptedDataDirectory = join(root, '损坏数据');
@@ -222,7 +242,7 @@ describe('订单状态与手工物流', () => {
       `).run();
       expect(workspace.database.prepare(`
         SELECT MAX(version) AS version FROM schema_migrations
-      `).get()).toEqual({ version: 19 });
+      `).get()).toEqual({ version: 20 });
       expect(workspace.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       workspace.close();

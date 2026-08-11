@@ -117,7 +117,7 @@ export type ShipmentGroupArchiveRecipientDifference = {
 export type ShipmentGroupArchive = {
   id: string;
   sourceGroupId: string;
-  status: 'open' | 'completed';
+  status: 'partially_shipped' | 'fully_shipped';
   recipient: string;
   phone: string;
   phoneNormalized: string;
@@ -133,7 +133,7 @@ export type ShipmentGroupArchive = {
   remainingGroup: OpenShipmentGroup | null;
   records: ShipmentRecord[];
   createdAt: string;
-  completedAt: string | null;
+  fullyShippedAt: string | null;
 };
 
 export type ShipmentConfirmationResult = {

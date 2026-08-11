@@ -2847,7 +2847,7 @@ export class LocalApplication {
     const archivedOrderIds = new Set((workspace.database.prepare(`
       SELECT member_order_ids_json
       FROM shipment_group_archives
-      WHERE status = 'open'
+      WHERE status = 'partially_shipped'
     `).all() as unknown as SqlRow[]).flatMap((row) => parseStoredTextArray(
       asString(row.member_order_ids_json),
       '数据库发货组档案成员订单格式错误',
@@ -2902,19 +2902,19 @@ export class LocalApplication {
     const expectedOrderIds = new Set(
       prepared.expectedRemainingItems.map(({ orderId }) => orderId),
     );
-    const openArchiveRows = workspace.database.prepare(`
+    const partiallyShippedArchiveRows = workspace.database.prepare(`
       SELECT *
       FROM shipment_group_archives
-      WHERE status = 'open'
+      WHERE status = 'partially_shipped'
       ORDER BY created_at DESC, id DESC
     `).all() as unknown as SqlRow[];
     const existingArchiveRow = prepared.archiveId
-      ? openArchiveRows.find((row) => asString(row.id) === prepared.archiveId)
+      ? partiallyShippedArchiveRows.find((row) => asString(row.id) === prepared.archiveId)
       : undefined;
     if (prepared.archiveId && !existingArchiveRow) {
       throw new Error('发货组档案已变化，请刷新后重试');
     }
-    const claimedOrderIds = new Set(openArchiveRows.flatMap((row) => (
+    const claimedOrderIds = new Set(partiallyShippedArchiveRows.flatMap((row) => (
       parseStoredTextArray(
         asString(row.member_order_ids_json),
         '数据库发货组档案成员订单格式错误',
@@ -2973,7 +2973,18 @@ export class LocalApplication {
     );
     const shipmentGroupQuantity = shipmentOrders.flatMap(({ items }) => items)
       .reduce((total, item) => total + item.quantity, 0);
-    const archiveCompleted = allocatedQuantity === shipmentGroupQuantity;
+    const previouslyShippedQuantity = existingArchiveRow
+      ? this.activeShippedQuantityForArchive(archiveId)
+      : 0;
+    const archiveTotalQuantity = existingArchiveRow
+      ? asNumber(existingArchiveRow.total_quantity)
+      : shipmentGroupQuantity;
+    if (previouslyShippedQuantity + allocatedQuantity > archiveTotalQuantity) {
+      throw new Error('实际发出数量不能超过发货组建档数量');
+    }
+    const archiveFullyShipped = (
+      previouslyShippedQuantity + allocatedQuantity === archiveTotalQuantity
+    );
     const selectedRecipientOrderId = group?.selectedRecipientOrderId ?? null;
     const currentRecipientSource = shipmentOrders.find(({ id }) => (
       id === selectedRecipientOrderId
@@ -2999,12 +3010,12 @@ export class LocalApplication {
             recipient, phone, phone_normalized,
             address_original, address_normalized,
             member_order_ids_json, member_recipient_snapshots_json,
-            created_at, completed_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total_quantity, created_at, fully_shipped_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           archiveId,
           sourceGroupId,
-          archiveCompleted ? 'completed' : 'open',
+          archiveFullyShipped ? 'fully_shipped' : 'partially_shipped',
           recipientSource.recipient,
           recipientSource.phone,
           recipientSource.phoneNormalized,
@@ -3017,15 +3028,16 @@ export class LocalApplication {
             phone: order.phone,
             addressOriginal: order.addressOriginal,
           })).sort((left, right) => left.orderId.localeCompare(right.orderId))),
+          archiveTotalQuantity,
           now,
-          archiveCompleted ? now : null,
+          archiveFullyShipped ? now : null,
           now,
         );
-      } else if (archiveCompleted) {
+      } else if (archiveFullyShipped) {
         workspace.database.prepare(`
           UPDATE shipment_group_archives
-          SET status = 'completed', completed_at = ?, updated_at = ?
-          WHERE id = ? AND status = 'open'
+          SET status = 'fully_shipped', fully_shipped_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'partially_shipped'
         `).run(now, now, archiveId);
       }
       workspace.database.prepare(`
@@ -3167,16 +3179,6 @@ export class LocalApplication {
       const records = recordRows.map((recordRow) => (
         this.getShipmentRecord(asString(recordRow.id))
       ));
-      const activeQuantityRow = workspace.database.prepare(`
-        SELECT COALESCE(SUM(items.quantity), 0) AS quantity
-        FROM shipment_package_items AS items
-        JOIN shipment_packages AS packages ON packages.id = items.package_id
-        JOIN shipment_records AS records ON records.id = packages.shipment_record_id
-        LEFT JOIN shipment_package_cancellation_events AS cancellations
-          ON cancellations.package_id = packages.id
-        WHERE records.shipment_group_archive_id = ?
-          AND cancellations.id IS NULL
-      `).get(archiveId) as SqlRow;
       const sourceGroupId = asString(row.source_group_id);
       const orderIds = parseStoredTextArray(
         asString(row.member_order_ids_json),
@@ -3198,8 +3200,13 @@ export class LocalApplication {
         .sort((left, right) => (
           left.orderNumber.localeCompare(right.orderNumber) || left.id.localeCompare(right.id)
         ));
-      const shippedQuantity = asNumber(activeQuantityRow.quantity);
-      const remainingGroup = asString(row.status) === 'open'
+      const shippedQuantity = this.activeShippedQuantityForArchive(archiveId);
+      const totalQuantity = asNumber(row.total_quantity);
+      const remainingQuantity = Math.max(totalQuantity - shippedQuantity, 0);
+      const status = remainingQuantity > 0
+        ? 'partially_shipped'
+        : 'fully_shipped';
+      const remainingGroup = status === 'partially_shipped'
         ? buildFixedMemberShipmentGroup(
           shipmentCandidateOrders.filter(({ id }) => orderIdSet.has(id)),
           `shipment-archive-${archiveId}`,
@@ -3212,10 +3219,6 @@ export class LocalApplication {
           },
         )
         : null;
-      const remainingQuantity = remainingGroup?.totalQuantity ?? 0;
-      const status = asString(row.status) === 'open' && remainingQuantity > 0
-        ? 'open'
-        : 'completed';
       const remainingOrderIds = new Set(remainingGroup?.orders.map(({ id }) => id) ?? []);
       const memberOrders = currentMemberOrders.map((order) => ({
         orderId: order.id,
@@ -3255,15 +3258,15 @@ export class LocalApplication {
         recipientDifferences,
         shippedQuantity,
         remainingQuantity,
-        totalQuantity: shippedQuantity + remainingQuantity,
-        remainingGroup: status === 'open' ? remainingGroup : null,
+        totalQuantity,
+        remainingGroup: status === 'partially_shipped' ? remainingGroup : null,
         records,
         createdAt: asString(row.created_at),
-        completedAt: status === 'open'
+        fullyShippedAt: status === 'partially_shipped'
           ? null
-          : row.completed_at === null
+          : row.fully_shipped_at === null
             ? asString(row.updated_at)
-            : asString(row.completed_at),
+            : asString(row.fully_shipped_at),
       };
     });
   }
@@ -3272,6 +3275,21 @@ export class LocalApplication {
     const archive = this.queryShipmentGroupArchives().find(({ id }) => id === archiveId);
     if (!archive) throw new Error('发货组档案不存在');
     return archive;
+  }
+
+  private activeShippedQuantityForArchive(archiveId: string): number {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT COALESCE(SUM(items.quantity), 0) AS quantity
+      FROM shipment_package_items AS items
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+      LEFT JOIN shipment_package_cancellation_events AS cancellations
+        ON cancellations.package_id = packages.id
+      WHERE records.shipment_group_archive_id = ?
+        AND cancellations.id IS NULL
+    `).get(archiveId) as SqlRow;
+    return asNumber(row.quantity);
   }
 
   public cancelShipmentPackages(input: unknown): ShipmentCancellationResult {
@@ -3323,30 +3341,22 @@ export class LocalApplication {
       )))) {
         this.synchronizeShipmentOrderFulfillment(orderId, now);
       }
-      const archiveRow = workspace.database.prepare(`
-        SELECT member_order_ids_json
+      const archiveQuantityRow = workspace.database.prepare(`
+        SELECT total_quantity
         FROM shipment_group_archives
         WHERE id = ?
       `).get(record.archiveId) as SqlRow;
-      const archiveOrderIds = new Set(parseStoredTextArray(
-        asString(archiveRow.member_order_ids_json),
-        '数据库发货组档案成员订单格式错误',
-      ));
-      workspace.database.prepare(`
-        UPDATE shipment_group_archives
-        SET status = 'open', completed_at = NULL, updated_at = ?
-        WHERE id = ?
-      `).run(now, record.archiveId);
-      const archiveStillOpen = this.listShipmentCandidateOrders().some(
-        ({ id }) => archiveOrderIds.has(id),
+      const archivePartiallyShipped = (
+        this.activeShippedQuantityForArchive(record.archiveId) <
+          asNumber(archiveQuantityRow.total_quantity)
       );
       workspace.database.prepare(`
         UPDATE shipment_group_archives
-        SET status = ?, completed_at = ?, updated_at = ?
+        SET status = ?, fully_shipped_at = ?, updated_at = ?
         WHERE id = ?
       `).run(
-        archiveStillOpen ? 'open' : 'completed',
-        archiveStillOpen ? null : now,
+        archivePartiallyShipped ? 'partially_shipped' : 'fully_shipped',
+        archivePartiallyShipped ? null : now,
         now,
         record.archiveId,
       );
