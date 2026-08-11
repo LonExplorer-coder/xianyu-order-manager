@@ -1300,6 +1300,16 @@ select:focus-visible {
   font-weight: 700;
 }
 
+.shipment-group-adjustment-dialog__hint {
+  margin: 0 0 2px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--yellow);
+  color: var(--navy-700);
+  background: #fffdf1;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
 .shipment-group-adjustment-dialog__choices label {
   display: flex;
   min-width: 0;

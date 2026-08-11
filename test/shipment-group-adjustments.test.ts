@@ -198,6 +198,7 @@ describe('手工发货组调整', () => {
     expect(result.projection.groups[0]).toMatchObject({
       formation: 'manual',
       selectedRecipientOrderId: selectedOrder.id,
+      recipient: selectedOriginalOrder.recipient,
       phone: selectedOriginalOrder.phone,
       addressOriginal: selectedOriginalOrder.addressOriginal,
       orderCount: 2,
@@ -279,6 +280,51 @@ describe('手工发货组调整', () => {
     expect(after.groups).toHaveLength(2);
     expect(after.groups.every(({ formation }) => formation === 'automatic')).toBe(true);
     expect(after.groups.flatMap((group) => group.orders)).toHaveLength(2);
+    expect(application.listShipmentGroupAdjustmentEvents()).toHaveLength(1);
+  });
+
+  it('拒绝会产生含糊目标组或使原组失去最终收货信息的拆分', async () => {
+    const { application } = await createApplication([
+      recognition('XY-SPLIT-MIXED-0001'),
+      recognition('XY-SPLIT-MIXED-0002', {
+        phone: '13900000002',
+        phoneNormalized: '13900000002',
+        addressOriginal: '广东省深圳市福田区新风路2号',
+        addressNormalized: '广东省深圳市福田区新风路2号',
+        district: '福田区',
+      }),
+      recognition('XY-SPLIT-MIXED-0003', {
+        phone: '13700000003',
+        phoneNormalized: '13700000003',
+        addressOriginal: '广东省深圳市宝安区长风路3号',
+        addressNormalized: '广东省深圳市宝安区长风路3号',
+        district: '宝安区',
+      }),
+    ]);
+    const automatic = application.queryShipmentGroups();
+    const selectedRecipientOrderId = automatic.groups[0].orders[0].id;
+    const merged = application.mergeShipmentGroups({
+      groupIds: automatic.groups.map(({ id }) => id),
+      expectedMemberOrderIds: automatic.groups.flatMap((group) => group.orders.map(({ id }) => id)),
+      selectedRecipientOrderId,
+      reason: '先一起发货',
+    }).projection.groups[0];
+    const nonSelectedOrderIds = merged.orders
+      .filter(({ id }) => id !== selectedRecipientOrderId)
+      .map(({ id }) => id);
+
+    expect(() => application.splitShipmentGroup({
+      groupId: merged.id,
+      expectedMemberOrderIds: merged.orders.map(({ id }) => id),
+      splitOrderIds: nonSelectedOrderIds,
+      reason: '含糊拆分',
+    })).toThrow('一次只能拆出收货信息相同的订单');
+    expect(() => application.splitShipmentGroup({
+      groupId: merged.id,
+      expectedMemberOrderIds: merged.orders.map(({ id }) => id),
+      splitOrderIds: [selectedRecipientOrderId],
+      reason: '移走最终收货信息',
+    })).toThrow('最终收货信息来源订单需保留在原发货组');
     expect(application.listShipmentGroupAdjustmentEvents()).toHaveLength(1);
   });
 });

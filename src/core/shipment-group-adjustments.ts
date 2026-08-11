@@ -1,5 +1,8 @@
 import type { ShipmentGroupProjection } from './shipment-groups';
-import { shipmentMatchKeyIdentity } from './shipment-groups';
+import {
+  shipmentGroupsRequireFinalRecipient,
+  shipmentMatchKeyIdentity,
+} from './shipment-groups';
 
 export type ShipmentGroupAdjustmentOperation = 'split' | 'merge';
 
@@ -67,6 +70,18 @@ export function prepareSplitShipmentGroup(
   if (input.splitOrderIds.some((orderId) => !currentOrderIdSet.has(orderId))) {
     throw new Error('要拆出的订单不属于当前发货组');
   }
+  const splitOrderIdSet = new Set(input.splitOrderIds);
+  const splitOrders = group.orders.filter(({ id }) => splitOrderIdSet.has(id));
+  const remainingOrders = group.orders.filter(({ id }) => !splitOrderIdSet.has(id));
+  if (shipmentOrderMatchKeyCount(splitOrders) > 1) {
+    throw new Error('一次只能拆出收货信息相同的订单');
+  }
+  if (
+    shipmentOrderMatchKeyCount(remainingOrders) > 1 &&
+    !remainingOrders.some(({ id }) => id === group.selectedRecipientOrderId)
+  ) {
+    throw new Error('最终收货信息来源订单需保留在原发货组');
+  }
   return input;
 }
 
@@ -112,21 +127,22 @@ export function prepareMergeShipmentGroups(
   ) {
     throw new Error('最终收货信息必须来自当前成员订单');
   }
-  const matchKeyIdentities = new Set(currentGroups.map((group) => (
-    shipmentMatchKeyIdentity({
-      phoneNormalized: group.phoneNormalized,
-      addressNormalized: group.addressNormalized,
-    })
-  )));
-  if (matchKeyIdentities.size > 1 && !input.selectedRecipientOrderId) {
+  const requiresFinalRecipient = shipmentGroupsRequireFinalRecipient(currentGroups);
+  if (requiresFinalRecipient && !input.selectedRecipientOrderId) {
     throw new Error('不同收货信息的发货组重组时，请选择最终收货信息');
   }
-  if (matchKeyIdentities.size === 1 && !input.selectedRecipientOrderId) {
+  if (!requiresFinalRecipient && !input.selectedRecipientOrderId) {
     input.selectedRecipientOrderId = currentGroups.find((group) => (
       group.selectedRecipientOrderId !== null
     ))?.selectedRecipientOrderId ?? null;
   }
   return input;
+}
+
+function shipmentOrderMatchKeyCount(
+  orders: ShipmentGroupProjection['groups'][number]['orders'],
+): number {
+  return new Set(orders.map((order) => shipmentMatchKeyIdentity(order))).size;
 }
 
 export function replayShipmentGroupAdjustmentEvents(

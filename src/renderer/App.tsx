@@ -69,9 +69,10 @@ import {
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
-import type {
-  OpenShipmentGroup,
-  ShipmentGroupProjection,
+import {
+  shipmentGroupsRequireFinalRecipient,
+  type OpenShipmentGroup,
+  type ShipmentGroupProjection,
 } from '../core/shipment-groups';
 import {
   isValidAddressPair,
@@ -1584,9 +1585,13 @@ function ShipmentGroupsWorkspace({
                     </td>
                     <td>
                       <span className="order-cell-stack order-cell-stack--recipient">
-                        <strong>{group.recipients.join(' / ') || '—'}</strong>
+                        <strong>{group.recipient || '—'}</strong>
                         {group.formation === 'manual' && <small>手工调整</small>}
-                        {group.recipientConflict && <small>收件人名称不一致，请按原始订单核对</small>}
+                        {group.recipientConflict && (
+                          <small>
+                            成员收件人不一致：{group.recipients.join(' / ')}
+                          </small>
+                        )}
                         <small>{group.phone}</small>
                         <small>{group.addressOriginal}</small>
                       </span>
@@ -1724,9 +1729,9 @@ function ShipmentGroupAdjustmentDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const groups = target.kind === 'split' ? [target.group] : target.groups;
   const orders = groups.flatMap((group) => group.orders);
-  const requiresRecipientSelection = target.kind === 'merge' && new Set(groups.map((group) => (
-    JSON.stringify([group.phoneNormalized, group.addressNormalized])
-  ))).size > 1;
+  const requiresRecipientSelection = target.kind === 'merge' && (
+    shipmentGroupsRequireFinalRecipient(groups)
+  );
   const canSubmit = Boolean(
     reason.trim() && (
       target.kind === 'split'
@@ -1803,6 +1808,12 @@ function ShipmentGroupAdjustmentDialog({
         {target.kind === 'split' ? (
           <fieldset className="shipment-group-adjustment-dialog__choices">
             <legend>选择要拆出的订单</legend>
+            {target.group.selectedRecipientOrderId && (
+              <p className="shipment-group-adjustment-dialog__hint">
+                一次只能拆出收货信息相同的订单；若原组仍包含多套收货信息，
+                最终收货信息来源订单需保留在原组。
+              </p>
+            )}
             {orders.map((order) => (
               <label key={order.id}>
                 <input

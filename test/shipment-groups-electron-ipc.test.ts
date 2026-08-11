@@ -41,12 +41,12 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
 });
 
-describe('订单状态与手工物流 Electron IPC', () => {
-  it('通过受校验通道批量保存并广播最新订单摘要', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'xianyu-fulfillment-ipc-'));
+describe('发货组 Electron IPC', () => {
+  it('通过只读通道返回本机动态发货组投影', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-groups-ipc-'));
     const dataDirectory = join(root, '数据');
     const sourcePath = join(root, '待发货订单.png');
-    await writeFile(sourcePath, Buffer.from('fulfillment-ipc-source'));
+    await writeFile(sourcePath, Buffer.from('shipment-groups-ipc-source'));
     const recognition = completeRecognition();
     const seeder = new LocalApplication(new ControlledRecognizer(recognition));
     seeder.openDataDirectory(dataDirectory);
@@ -61,44 +61,49 @@ describe('订单状态与手工物流 Electron IPC', () => {
     );
     sessions.push(session);
     session.useDataDirectory(dataDirectory);
-    const ordersChanged = vi.fn();
-    session.onOrdersChanged(ordersChanged);
     registerIpcHandlers(session);
 
-    await expect(invoke('orders:update-status-and-logistics', {
-      targets: [{ orderId: order.id, expectedRevision: order.revision }],
-      patch: { fulfillmentStatus: 'shipped', hidden: true },
-    })).rejects.toThrow('订单状态与物流修改内容包含未知字段：hidden');
-
-    const result = await invoke('orders:update-status-and-logistics', {
-      targets: [{ orderId: order.id, expectedRevision: order.revision }],
-      patch: {
-        fulfillmentStatus: 'shipped',
-        shippingCarrier: '圆通速递',
-        trackingNumber: 'YT001',
-      },
+    await expect(invoke('shipment-groups:query')).resolves.toMatchObject({
+      groups: [{
+        orderCount: 1,
+        totalQuantity: 1,
+        totalAmountCents: 800,
+        orders: [{ id: order.id, orderNumber: order.orderNumber }],
+      }],
+      attentionOrders: [],
     });
+  });
 
-    expect(result).toEqual([
-      expect.objectContaining({
-        order: expect.objectContaining({
-          id: order.id,
-          revision: 2,
-          fulfillmentStatus: 'shipped',
-          shippingCarrier: '圆通速递',
-          trackingNumber: 'YT001',
-        }),
-      }),
-    ]);
-    expect(ordersChanged).toHaveBeenCalledWith([
-      expect.objectContaining({
-        id: order.id,
-        revision: 2,
-        fulfillmentStatus: 'shipped',
-        shippingCarrier: '圆通速递',
-        trackingNumber: 'YT001',
-      }),
-    ]);
+  it('通过受控通道传递拆分与重组命令', async () => {
+    const splitShipmentGroup = vi.fn().mockReturnValue({ event: { operation: 'split' } });
+    const mergeShipmentGroups = vi.fn().mockReturnValue({ event: { operation: 'merge' } });
+    registerIpcHandlers({
+      splitShipmentGroup,
+      mergeShipmentGroups,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const splitInput = {
+      groupId: 'group-1',
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      splitOrderIds: ['order-2'],
+      reason: '单独包装',
+    };
+    const mergeInput = {
+      groupIds: ['group-1', 'group-2'],
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      selectedRecipientOrderId: 'order-1',
+      reason: '一起发货',
+    };
+
+    await expect(invoke('shipment-groups:split', splitInput)).resolves.toMatchObject({
+      event: { operation: 'split' },
+    });
+    await expect(invoke('shipment-groups:merge', mergeInput)).resolves.toMatchObject({
+      event: { operation: 'merge' },
+    });
+    expect(splitShipmentGroup).toHaveBeenCalledWith(splitInput);
+    expect(mergeShipmentGroups).toHaveBeenCalledWith(mergeInput);
   });
 });
 
@@ -112,7 +117,7 @@ function completeRecognition(): RecognitionResult {
   return {
     platform: 'xianyu',
     sellerAccount: '默认闲鱼账号',
-    orderNumber: 'XY-FULFILLMENT-IPC-0001',
+    orderNumber: 'XY-SHIPMENT-GROUPS-IPC-0001',
     alipayTransactionNumber: '',
     buyerNickname: '测试买家',
     recipient: '测试收件人',

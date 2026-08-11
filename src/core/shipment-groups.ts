@@ -36,6 +36,7 @@ export type OpenShipmentGroup = {
   id: string;
   formation: 'automatic' | 'manual';
   selectedRecipientOrderId: string | null;
+  recipient: string;
   phone: string;
   phoneNormalized: string;
   addressOriginal: string;
@@ -83,6 +84,12 @@ export function shipmentMatchKeyIdentity(matchKey: ShipmentMatchKey): string {
     matchKey.phoneNormalized,
     matchKey.addressNormalized,
   ]);
+}
+
+export function shipmentGroupsRequireFinalRecipient(
+  groups: readonly OpenShipmentGroup[],
+): boolean {
+  return new Set(groups.map((group) => shipmentMatchKeyIdentity(group))).size > 1;
 }
 
 export function buildShipmentGroupProjection(
@@ -178,6 +185,7 @@ function openShipmentGroup(
     id,
     formation,
     selectedRecipientOrderId: selectedRecipientOrder?.id ?? null,
+    recipient: recipientSource.recipient,
     phone: recipientSource.phone,
     phoneNormalized: recipientSource.phoneNormalized,
     addressOriginal: recipientSource.addressOriginal,
