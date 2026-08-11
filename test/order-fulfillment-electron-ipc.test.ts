@@ -134,6 +134,38 @@ describe('发货组 Electron IPC', () => {
       attentionOrders: [],
     });
   });
+
+  it('通过受控通道传递拆分与重组命令', async () => {
+    const splitShipmentGroup = vi.fn().mockReturnValue({ event: { operation: 'split' } });
+    const mergeShipmentGroups = vi.fn().mockReturnValue({ event: { operation: 'merge' } });
+    registerIpcHandlers({
+      splitShipmentGroup,
+      mergeShipmentGroups,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const splitInput = {
+      groupId: 'group-1',
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      splitOrderIds: ['order-2'],
+      reason: '单独包装',
+    };
+    const mergeInput = {
+      groupIds: ['group-1', 'group-2'],
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      selectedRecipientOrderId: 'order-1',
+      reason: '一起发货',
+    };
+
+    await expect(invoke('shipment-groups:split', splitInput)).resolves.toMatchObject({
+      event: { operation: 'split' },
+    });
+    await expect(invoke('shipment-groups:merge', mergeInput)).resolves.toMatchObject({
+      event: { operation: 'merge' },
+    });
+    expect(splitShipmentGroup).toHaveBeenCalledWith(splitInput);
+    expect(mergeShipmentGroups).toHaveBeenCalledWith(mergeInput);
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {

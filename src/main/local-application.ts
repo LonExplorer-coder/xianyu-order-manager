@@ -127,6 +127,13 @@ import type {
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import {
+  prepareMergeShipmentGroups,
+  prepareSplitShipmentGroup,
+  replayShipmentGroupAdjustmentEvents,
+  type ShipmentGroupAdjustmentEvent,
+  type ShipmentGroupAdjustmentResult,
+} from '../core/shipment-group-adjustments';
+import {
   buildShipmentGroupProjection,
   shipmentMatchKeyIdentity,
   type ShipmentGroupProjection,
@@ -2773,12 +2780,114 @@ export class LocalApplication {
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
     const orders = rows.map((row) => this.getOrder(asString(row.id)).order);
+    const adjustmentState = replayShipmentGroupAdjustmentEvents(
+      this.listShipmentGroupAdjustmentEvents(),
+    );
+    const orderById = new Map(orders.map((order) => [order.id, order]));
+    const orderIdsByManualGroupId = new Map<string, string[]>();
+    for (const order of orders) {
+      if (!order.phoneNormalized.trim() || !order.addressNormalized.trim()) continue;
+      const manualGroupId = adjustmentState.groupIdByOrderId.get(order.id);
+      if (!manualGroupId) continue;
+      const orderIds = orderIdsByManualGroupId.get(manualGroupId) ?? [];
+      orderIds.push(order.id);
+      orderIdsByManualGroupId.set(manualGroupId, orderIds);
+    }
+    const manualGroups = [...orderIdsByManualGroupId].flatMap(([id, orderIds]) => {
+      const selectedRecipientOrderId =
+        adjustmentState.selectedRecipientOrderIdByGroupId.get(id) ?? null;
+      const selectedRecipientOrder = selectedRecipientOrderId && orderIds.includes(
+        selectedRecipientOrderId,
+      )
+        ? orderById.get(selectedRecipientOrderId) ?? null
+        : null;
+      const matchKeyCount = new Set(orderIds.map((orderId) => {
+        const order = orderById.get(orderId);
+        return order ? shipmentMatchKeyIdentity(order) : '';
+      })).size;
+      if (matchKeyCount > 1 && !selectedRecipientOrder) return [];
+      return [{
+        id,
+        orderIds,
+        selectedRecipientOrder,
+      }];
+    });
     return buildShipmentGroupProjection(orders, (matchKey) => (
       `shipment-group-${createHash('sha256')
         .update(shipmentMatchKeyIdentity(matchKey))
         .digest('hex')
         .slice(0, 24)}`
-    ));
+    ), manualGroups);
+  }
+
+  public splitShipmentGroup(input: unknown): ShipmentGroupAdjustmentResult {
+    const projection = this.queryShipmentGroups();
+    const prepared = prepareSplitShipmentGroup(input, projection);
+    const event: ShipmentGroupAdjustmentEvent = {
+      id: randomUUID(),
+      operation: 'split',
+      reason: prepared.reason,
+      sourceGroupIds: [prepared.groupId],
+      sourceOrderIds: prepared.expectedMemberOrderIds,
+      targetGroupId: `manual-shipment-group-${randomUUID()}`,
+      targetOrderIds: prepared.splitOrderIds,
+      selectedRecipientOrderId: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.insertShipmentGroupAdjustmentEvent(event);
+    return { event, projection: this.queryShipmentGroups() };
+  }
+
+  public mergeShipmentGroups(input: unknown): ShipmentGroupAdjustmentResult {
+    const projection = this.queryShipmentGroups();
+    const prepared = prepareMergeShipmentGroups(input, projection);
+    const event: ShipmentGroupAdjustmentEvent = {
+      id: randomUUID(),
+      operation: 'merge',
+      reason: prepared.reason,
+      sourceGroupIds: prepared.groupIds,
+      sourceOrderIds: prepared.expectedMemberOrderIds,
+      targetGroupId: `manual-shipment-group-${randomUUID()}`,
+      targetOrderIds: prepared.expectedMemberOrderIds,
+      selectedRecipientOrderId: prepared.selectedRecipientOrderId,
+      createdAt: new Date().toISOString(),
+    };
+    this.insertShipmentGroupAdjustmentEvent(event);
+    return { event, projection: this.queryShipmentGroups() };
+  }
+
+  public listShipmentGroupAdjustmentEvents(): ShipmentGroupAdjustmentEvent[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT *
+      FROM shipment_group_adjustment_events
+      ORDER BY sequence
+    `).all() as unknown as SqlRow[];
+    return rows.map(parseShipmentGroupAdjustmentEvent);
+  }
+
+  private insertShipmentGroupAdjustmentEvent(event: ShipmentGroupAdjustmentEvent): void {
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      workspace.database.prepare(`
+        INSERT INTO shipment_group_adjustment_events (
+          id, operation, reason,
+          source_group_ids_json, source_order_ids_json,
+          target_group_id, target_order_ids_json,
+          selected_recipient_order_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        event.id,
+        event.operation,
+        event.reason,
+        JSON.stringify(event.sourceGroupIds),
+        JSON.stringify(event.sourceOrderIds),
+        event.targetGroupId,
+        JSON.stringify(event.targetOrderIds),
+        event.selectedRecipientOrderId,
+        event.createdAt,
+      );
+    });
   }
 
   public queryOrders(
@@ -5330,6 +5439,53 @@ function parseOrderSummaryItems(serialized: string): OrderSummary['items'] {
     throw new Error('数据库订单商品摘要格式错误');
   }
   return parsed as OrderSummary['items'];
+}
+
+function parseShipmentGroupAdjustmentEvent(row: SqlRow): ShipmentGroupAdjustmentEvent {
+  const operation = asString(row.operation);
+  if (operation !== 'split' && operation !== 'merge') {
+    throw new Error('数据库发货组调整类型错误');
+  }
+  return {
+    id: asString(row.id),
+    operation,
+    reason: asString(row.reason),
+    sourceGroupIds: parseStoredTextArray(
+      asString(row.source_group_ids_json),
+      '数据库发货组调整来源组格式错误',
+    ),
+    sourceOrderIds: parseStoredTextArray(
+      asString(row.source_order_ids_json),
+      '数据库发货组调整来源订单格式错误',
+    ),
+    targetGroupId: asString(row.target_group_id),
+    targetOrderIds: parseStoredTextArray(
+      asString(row.target_order_ids_json),
+      '数据库发货组调整目标订单格式错误',
+    ),
+    selectedRecipientOrderId: row.selected_recipient_order_id === null
+      ? null
+      : asString(row.selected_recipient_order_id),
+    createdAt: asString(row.created_at),
+  };
+}
+
+function parseStoredTextArray(serialized: string, message: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(message, { cause: error });
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((value) => typeof value === 'string' && value.length > 0) ||
+    new Set(parsed).size !== parsed.length
+  ) {
+    throw new Error(message);
+  }
+  return parsed;
 }
 
 function asOptionalStoredMoney(

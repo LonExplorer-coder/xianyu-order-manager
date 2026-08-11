@@ -60,6 +60,9 @@ import type {
 } from '../core/order-export';
 import type { ShipmentGroupProjection } from '../core/shipment-groups';
 import type {
+  ShipmentGroupAdjustmentResult,
+} from '../core/shipment-group-adjustments';
+import type {
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -379,6 +382,14 @@ export class DesktopSession {
 
   public queryShipmentGroups(): ShipmentGroupProjection {
     return this.requireApplication().queryShipmentGroups();
+  }
+
+  public splitShipmentGroup(input: unknown): ShipmentGroupAdjustmentResult {
+    return this.requireApplication().splitShipmentGroup(input);
+  }
+
+  public mergeShipmentGroups(input: unknown): ShipmentGroupAdjustmentResult {
+    return this.requireApplication().mergeShipmentGroups(input);
   }
 
   public exportOrdersToWorkbook(

@@ -49,6 +49,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('order-items:query', query, customFieldDefinitionIds)
   ),
   queryShipmentGroups: () => ipcRenderer.invoke('shipment-groups:query'),
+  splitShipmentGroup: (input) => ipcRenderer.invoke('shipment-groups:split', input),
+  mergeShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:merge', input),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   onOrdersChanged: (listener) => {
     const ipcListener = (

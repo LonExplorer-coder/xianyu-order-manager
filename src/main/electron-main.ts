@@ -206,6 +206,12 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     )
   ));
   ipcMain.handle('shipment-groups:query', () => desktopSession.queryShipmentGroups());
+  ipcMain.handle('shipment-groups:split', (_event, input: unknown) => (
+    desktopSession.splitShipmentGroup(input)
+  ));
+  ipcMain.handle('shipment-groups:merge', (_event, input: unknown) => (
+    desktopSession.mergeShipmentGroups(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

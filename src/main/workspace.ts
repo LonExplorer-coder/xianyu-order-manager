@@ -158,6 +158,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 14) migrateToVersion14(database);
   if (row.version < 15) migrateToVersion15(database);
   if (row.version < 16) migrateToVersion16(database);
+  if (row.version < 17) migrateToVersion17(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1562,6 +1563,62 @@ function migrateToVersion16(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion17(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE shipment_group_adjustment_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        operation TEXT NOT NULL CHECK (operation IN ('split', 'merge')),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        source_group_ids_json TEXT NOT NULL CHECK (
+          json_valid(source_group_ids_json)
+          AND json_type(source_group_ids_json) = 'array'
+        ),
+        source_order_ids_json TEXT NOT NULL CHECK (
+          json_valid(source_order_ids_json)
+          AND json_type(source_order_ids_json) = 'array'
+        ),
+        target_group_id TEXT NOT NULL UNIQUE,
+        target_order_ids_json TEXT NOT NULL CHECK (
+          json_valid(target_order_ids_json)
+          AND json_type(target_order_ids_json) = 'array'
+        ),
+        selected_recipient_order_id TEXT
+          REFERENCES original_orders(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX shipment_group_adjustment_events_by_created_at
+      ON shipment_group_adjustment_events (created_at, sequence);
+
+      CREATE TRIGGER shipment_group_adjustment_events_are_immutable_on_update
+      BEFORE UPDATE ON shipment_group_adjustment_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment group adjustment events are immutable');
+      END;
+
+      CREATE TRIGGER shipment_group_adjustment_events_are_immutable_on_delete
+      BEFORE DELETE ON shipment_group_adjustment_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment group adjustment events are immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (17, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
   }
 }
 

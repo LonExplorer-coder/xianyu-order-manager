@@ -69,7 +69,7 @@ describe('渲染布局约束', () => {
     expect(table).not.toBeNull();
     expect(getComputedStyle(workspace).overflowX).toBe('hidden');
     expect(getComputedStyle(frame!).overflowX).toBe('auto');
-    expect(getComputedStyle(table!).minWidth).toBe('980px');
+    expect(getComputedStyle(table!).minWidth).toBe('1120px');
 
     workspace.remove();
   });

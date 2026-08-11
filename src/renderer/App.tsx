@@ -69,7 +69,10 @@ import {
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
   summarizeRecognitionBatchItems,
 } from '../core/recognition-batches';
-import type { ShipmentGroupProjection } from '../core/shipment-groups';
+import type {
+  OpenShipmentGroup,
+  ShipmentGroupProjection,
+} from '../core/shipment-groups';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -1127,10 +1130,12 @@ export function App({ api }: AppProps) {
   } else if (activePage === 'shipments' && !orderDetails) {
     workspace = (
       <ShipmentGroupsWorkspace
+        api={api}
         projection={shipmentGroupProjection}
         loading={shipmentGroupLoading}
         openingOrder={busyAction === 'detail'}
         error={shipmentGroupError}
+        onProjectionChange={setShipmentGroupProjection}
         onOpenOrder={(orderId) => void openOrder(orderId)}
       />
     );
@@ -1454,24 +1459,49 @@ function SystemScreen(props: SystemScreenProps) {
 }
 
 function ShipmentGroupsWorkspace({
+  api,
   projection,
   loading,
   openingOrder,
   error,
+  onProjectionChange,
   onOpenOrder,
 }: {
+  api: DesktopApi;
   projection: ShipmentGroupProjection | null;
   loading: boolean;
   openingOrder: boolean;
   error: string;
+  onProjectionChange: (projection: ShipmentGroupProjection) => void;
   onOpenOrder: (orderId: string) => void;
 }) {
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [adjustmentTarget, setAdjustmentTarget] = useState<
+    | { kind: 'split'; group: OpenShipmentGroup }
+    | { kind: 'merge'; groups: OpenShipmentGroup[] }
+    | null
+  >(null);
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
   const pendingOrderCount = groups.reduce(
     (total, group) => total + group.orderCount,
     attentionOrders.length,
   );
+  const selectedGroupIdSet = new Set(selectedGroupIds);
+  const selectedGroups = groups.filter(({ id }) => selectedGroupIdSet.has(id));
+
+  useEffect(() => {
+    const currentGroupIds = new Set(groups.map(({ id }) => id));
+    setSelectedGroupIds((current) => current.filter((id) => currentGroupIds.has(id)));
+  }, [projection]);
+
+  function toggleGroup(groupId: string) {
+    setSelectedGroupIds((current) => (
+      current.includes(groupId)
+        ? current.filter((id) => id !== groupId)
+        : [...current, groupId]
+    ));
+  }
 
   return (
     <section
@@ -1516,24 +1546,46 @@ function ShipmentGroupsWorkspace({
             </div>
             {loading && <span role="status">正在更新…</span>}
           </div>
+          <div className="shipment-groups-actions" aria-label="发货组调整操作">
+            <span>已选 {selectedGroups.length} 组</span>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={selectedGroups.length < 2}
+              onClick={() => setAdjustmentTarget({ kind: 'merge', groups: selectedGroups })}
+            >
+              重新组合
+            </button>
+          </div>
           <div className="table-frame shipment-groups-table-frame">
             <table aria-label="开放发货组">
               <thead>
                 <tr>
+                  <th aria-label="选择" />
                   <th>收件信息</th>
                   <th>成员订单</th>
                   <th>商品汇总</th>
                   <th>订单数</th>
                   <th>商品数量</th>
                   <th>成交金额</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {groups.map((group) => (
                   <tr key={group.id}>
                     <td>
+                      <input
+                        type="checkbox"
+                        aria-label={`选择发货组 ${group.orders.map(({ orderNumber }) => orderNumber).join('、')}`}
+                        checked={selectedGroupIdSet.has(group.id)}
+                        onChange={() => toggleGroup(group.id)}
+                      />
+                    </td>
+                    <td>
                       <span className="order-cell-stack order-cell-stack--recipient">
                         <strong>{group.recipients.join(' / ') || '—'}</strong>
+                        {group.formation === 'manual' && <small>手工调整</small>}
                         {group.recipientConflict && <small>收件人名称不一致，请按原始订单核对</small>}
                         <small>{group.phone}</small>
                         <small>{group.addressOriginal}</small>
@@ -1568,6 +1620,18 @@ function ShipmentGroupsWorkspace({
                     <td>{group.orderCount}</td>
                     <td>{group.totalQuantity}</td>
                     <td className="money-cell"><strong>{formatMoney(group.totalAmountCents)}</strong></td>
+                    <td>
+                      {group.orders.length > 1 ? (
+                        <button
+                          className="button button--quiet shipment-group-split-button"
+                          type="button"
+                          aria-label={`拆分发货组 ${group.orders.map(({ orderNumber }) => orderNumber).join('、')}`}
+                          onClick={() => setAdjustmentTarget({ kind: 'split', group })}
+                        >
+                          拆分
+                        </button>
+                      ) : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1620,7 +1684,190 @@ function ShipmentGroupsWorkspace({
           </div>
         </section>
       )}
+
+      {adjustmentTarget && (
+        <ShipmentGroupAdjustmentDialog
+          api={api}
+          target={adjustmentTarget}
+          onApplied={(nextProjection) => {
+            onProjectionChange(nextProjection);
+            setSelectedGroupIds([]);
+            setAdjustmentTarget(null);
+          }}
+          onClose={() => setAdjustmentTarget(null)}
+        />
+      )}
     </section>
+  );
+}
+
+function ShipmentGroupAdjustmentDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target:
+    | { kind: 'split'; group: OpenShipmentGroup }
+    | { kind: 'merge'; groups: OpenShipmentGroup[] };
+  onApplied: (projection: ShipmentGroupProjection) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const [splitOrderIds, setSplitOrderIds] = useState<string[]>([]);
+  const [selectedRecipientOrderId, setSelectedRecipientOrderId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const groups = target.kind === 'split' ? [target.group] : target.groups;
+  const orders = groups.flatMap((group) => group.orders);
+  const requiresRecipientSelection = target.kind === 'merge' && new Set(groups.map((group) => (
+    JSON.stringify([group.phoneNormalized, group.addressNormalized])
+  ))).size > 1;
+  const canSubmit = Boolean(
+    reason.trim() && (
+      target.kind === 'split'
+        ? splitOrderIds.length > 0 && splitOrderIds.length < orders.length
+        : !requiresRecipientSelection || selectedRecipientOrderId
+    ),
+  );
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  function toggleSplitOrder(orderId: string) {
+    setSplitOrderIds((current) => (
+      current.includes(orderId)
+        ? current.filter((id) => id !== orderId)
+        : [...current, orderId]
+    ));
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = target.kind === 'split'
+        ? await api.splitShipmentGroup({
+          groupId: target.group.id,
+          expectedMemberOrderIds: orders.map(({ id }) => id),
+          splitOrderIds,
+          reason,
+        })
+        : await api.mergeShipmentGroups({
+          groupIds: groups.map(({ id }) => id),
+          expectedMemberOrderIds: orders.map(({ id }) => id),
+          selectedRecipientOrderId,
+          reason,
+        });
+      onApplied(result.projection);
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-group-adjustment-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">开放发货组 · 手工调整</span>
+          <h2 id={headingId}>{target.kind === 'split' ? '拆分发货组' : '重新组合发货组'}</h2>
+          <p id={descriptionId}>
+            调整只改变开放发货组的归属，不会修改原始订单的收货信息。
+          </p>
+        </header>
+
+        {target.kind === 'split' ? (
+          <fieldset className="shipment-group-adjustment-dialog__choices">
+            <legend>选择要拆出的订单</legend>
+            {orders.map((order) => (
+              <label key={order.id}>
+                <input
+                  type="checkbox"
+                  aria-label={order.orderNumber}
+                  checked={splitOrderIds.includes(order.id)}
+                  disabled={saving}
+                  onChange={() => toggleSplitOrder(order.id)}
+                />
+                <span><strong>{order.orderNumber}</strong><small>{order.recipient}</small></span>
+              </label>
+            ))}
+          </fieldset>
+        ) : (
+          <div className="shipment-group-adjustment-dialog__summary">
+            <strong>已选 {groups.length} 个发货组，共 {orders.length} 笔订单</strong>
+            {requiresRecipientSelection && (
+              <fieldset className="shipment-group-adjustment-dialog__choices">
+                <legend>请选择最终收货信息</legend>
+                {orders.map((order) => (
+                  <label key={order.id}>
+                    <input
+                      type="radio"
+                      name="selected-recipient-order"
+                      aria-label={`最终收货信息：${order.recipient} ${order.phone} ${order.addressOriginal}`}
+                      checked={selectedRecipientOrderId === order.id}
+                      disabled={saving}
+                      onChange={() => setSelectedRecipientOrderId(order.id)}
+                    />
+                    <span>
+                      <strong>{order.recipient} · {order.phone}</strong>
+                      <small>{order.addressOriginal}</small>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            )}
+          </div>
+        )}
+
+        <label className="shipment-group-adjustment-dialog__reason">
+          <span>调整原因</span>
+          <textarea
+            aria-label="调整原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            placeholder="例如：买家要求一起发货"
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving
+              ? '正在保存…'
+              : target.kind === 'split' ? '确认拆分' : '确认重新组合'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
   );
 }
 

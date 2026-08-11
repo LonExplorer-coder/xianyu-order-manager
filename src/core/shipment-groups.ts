@@ -15,6 +15,10 @@ export type ShipmentGroupOrder = {
   sellerAccount: string;
   buyerNickname: string;
   recipient: string;
+  phone: string;
+  phoneNormalized: string;
+  addressOriginal: string;
+  addressNormalized: string;
   amountCents: number;
   items: ShipmentGroupOrderItem[];
 };
@@ -30,6 +34,8 @@ export type ShipmentGroupItem = {
 
 export type OpenShipmentGroup = {
   id: string;
+  formation: 'automatic' | 'manual';
+  selectedRecipientOrderId: string | null;
   phone: string;
   phoneNormalized: string;
   addressOriginal: string;
@@ -66,6 +72,12 @@ export type ShipmentMatchKey = Readonly<{
 
 export type ShipmentGroupIdFactory = (matchKey: ShipmentMatchKey) => string;
 
+export type ManualShipmentGroupDefinition = {
+  id: string;
+  orderIds: string[];
+  selectedRecipientOrder: OriginalOrder | null;
+};
+
 export function shipmentMatchKeyIdentity(matchKey: ShipmentMatchKey): string {
   return JSON.stringify([
     matchKey.phoneNormalized,
@@ -76,7 +88,12 @@ export function shipmentMatchKeyIdentity(matchKey: ShipmentMatchKey): string {
 export function buildShipmentGroupProjection(
   candidateOrders: readonly OriginalOrder[],
   idFor: ShipmentGroupIdFactory,
+  manualGroups: readonly ManualShipmentGroupDefinition[] = [],
 ): ShipmentGroupProjection {
+  const candidateOrdersById = new Map(candidateOrders.map((order) => [order.id, order]));
+  const manuallyAssignedOrderIds = new Set(
+    manualGroups.flatMap(({ orderIds }) => orderIds),
+  );
   const grouped = new Map<string, {
     matchKey: ShipmentMatchKey;
     orders: OriginalOrder[];
@@ -97,6 +114,7 @@ export function buildShipmentGroupProjection(
       });
       continue;
     }
+    if (manuallyAssignedOrderIds.has(order.id)) continue;
     const matchKey: ShipmentMatchKey = {
       phoneNormalized: order.phoneNormalized,
       addressNormalized: order.addressNormalized,
@@ -108,11 +126,32 @@ export function buildShipmentGroupProjection(
   }
 
   return {
-    groups: [...grouped.values()]
-      .map(({ matchKey, orders }) => openShipmentGroup(matchKey, orders, idFor))
-      .sort((left, right) => (
+    groups: [
+      ...manualGroups.flatMap((manualGroup) => {
+        const orders = manualGroup.orderIds
+          .map((orderId) => candidateOrdersById.get(orderId))
+          .filter((order): order is OriginalOrder => (
+            order !== undefined && isShipmentGroupableOrder(order)
+          ));
+        return orders.length > 0
+          ? [openShipmentGroup(
+            orders,
+            manualGroup.id,
+            'manual',
+            manualGroup.selectedRecipientOrder,
+          )]
+          : [];
+      }),
+      ...[...grouped.values()].map(({ matchKey, orders }) => openShipmentGroup(
+        orders,
+        idFor(matchKey),
+        'automatic',
+        null,
+      )),
+    ].sort((left, right) => (
         left.addressNormalized.localeCompare(right.addressNormalized, 'zh-CN') ||
-        left.phoneNormalized.localeCompare(right.phoneNormalized)
+        left.phoneNormalized.localeCompare(right.phoneNormalized) ||
+        left.id.localeCompare(right.id)
       )),
     attentionOrders: attentionOrders.sort((left, right) => (
       left.orderNumber.localeCompare(right.orderNumber) || left.id.localeCompare(right.id)
@@ -121,24 +160,28 @@ export function buildShipmentGroupProjection(
 }
 
 function openShipmentGroup(
-  matchKey: ShipmentMatchKey,
   sourceOrders: readonly OriginalOrder[],
-  idFor: ShipmentGroupIdFactory,
+  id: string,
+  formation: OpenShipmentGroup['formation'],
+  selectedRecipientOrder: OriginalOrder | null,
 ): OpenShipmentGroup {
   const orders = [...sourceOrders].sort((left, right) => (
     left.orderNumber.localeCompare(right.orderNumber) || left.id.localeCompare(right.id)
   ));
   const first = orders[0];
   if (!first) throw new Error('发货组至少需要一笔订单');
+  const recipientSource = selectedRecipientOrder ?? first;
   const recipients = unique(orders.map(({ recipient }) => recipient));
   const items = aggregateItems(orders);
 
   return {
-    id: idFor(matchKey),
-    phone: first.phone,
-    phoneNormalized: first.phoneNormalized,
-    addressOriginal: first.addressOriginal,
-    addressNormalized: first.addressNormalized,
+    id,
+    formation,
+    selectedRecipientOrderId: selectedRecipientOrder?.id ?? null,
+    phone: recipientSource.phone,
+    phoneNormalized: recipientSource.phoneNormalized,
+    addressOriginal: recipientSource.addressOriginal,
+    addressNormalized: recipientSource.addressNormalized,
     recipients,
     recipientConflict: recipients.length > 1,
     orderCount: orders.length,
@@ -150,6 +193,10 @@ function openShipmentGroup(
       sellerAccount: order.sellerAccount,
       buyerNickname: order.buyerNickname,
       recipient: order.recipient,
+      phone: order.phone,
+      phoneNormalized: order.phoneNormalized,
+      addressOriginal: order.addressOriginal,
+      addressNormalized: order.addressNormalized,
       amountCents: order.amountCents,
       items: order.items.map((item) => ({
         id: item.id,
@@ -200,4 +247,8 @@ function aggregateItems(orders: readonly OriginalOrder[]): ShipmentGroupItem[] {
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function isShipmentGroupableOrder(order: OriginalOrder): boolean {
+  return Boolean(order.phoneNormalized.trim() && order.addressNormalized.trim());
 }

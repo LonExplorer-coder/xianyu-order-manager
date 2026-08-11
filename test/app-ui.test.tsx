@@ -206,6 +206,8 @@ function singleShipmentGroupProjection(
   return {
     groups: [{
       id: 'shipment-group-single000000000000',
+      formation: 'automatic',
+      selectedRecipientOrderId: null,
       phone: order.phone,
       phoneNormalized: order.phoneNormalized,
       addressOriginal: order.addressOriginal,
@@ -221,6 +223,10 @@ function singleShipmentGroupProjection(
         sellerAccount: order.sellerAccount,
         buyerNickname: order.buyerNickname,
         recipient: order.recipient,
+        phone: order.phone,
+        phoneNormalized: order.phoneNormalized,
+        addressOriginal: order.addressOriginal,
+        addressNormalized: order.addressNormalized,
         amountCents: order.amountCents,
         items: order.items.map((item) => ({
           id: item.id,
@@ -297,6 +303,8 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
     queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+    splitShipmentGroup: vi.fn(),
+    mergeShipmentGroups: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
@@ -394,6 +402,8 @@ describe('订单管理工作台', () => {
     const projection: ShipmentGroupProjection = {
       groups: [{
         id: 'shipment-group-abc123abc123abc123abc123',
+        formation: 'automatic',
+        selectedRecipientOrderId: null,
         phone: '13800000000',
         phoneNormalized: '13800000000',
         addressOriginal: '广东省深圳市南山区测试路1号',
@@ -410,6 +420,10 @@ describe('订单管理工作台', () => {
             sellerAccount: '测试闲鱼账号',
             buyerNickname: '测试买家',
             recipient: '人工修正收件人',
+            phone: '13800000000',
+            phoneNormalized: '13800000000',
+            addressOriginal: '广东省深圳市南山区测试路1号',
+            addressNormalized: '广东省深圳市南山区测试路1号',
             amountCents: 800,
             items: [{
               id: 'item-1',
@@ -426,6 +440,10 @@ describe('订单管理工作台', () => {
             sellerAccount: '测试闲鱼账号',
             buyerNickname: '测试买家',
             recipient: '人工修正收件人',
+            phone: '13800000000',
+            phoneNormalized: '13800000000',
+            addressOriginal: '广东省深圳市南山区测试路1号',
+            addressNormalized: '广东省深圳市南山区测试路1号',
             amountCents: 1_600,
             items: [{
               id: 'item-2',
@@ -456,6 +474,20 @@ describe('订单管理工作台', () => {
       }],
     };
     const queryShipmentGroups = vi.fn().mockResolvedValue(projection);
+    const splitShipmentGroup = vi.fn().mockResolvedValue({
+      event: {
+        id: 'adjustment-split-1',
+        operation: 'split',
+        reason: '单独包装',
+        sourceGroupIds: [projection.groups[0].id],
+        sourceOrderIds: ['order-1', 'order-2'],
+        targetGroupId: 'manual-group-split-1',
+        targetOrderIds: ['order-1'],
+        selectedRecipientOrderId: null,
+        createdAt: '2026-08-11T10:00:00.000Z',
+      },
+      projection,
+    });
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -465,6 +497,7 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([orderSummary()]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups,
+      splitShipmentGroup,
     });
 
     render(<App api={api} />);
@@ -490,8 +523,94 @@ describe('订单管理工作台', () => {
     const attentionTable = screen.getByRole('table', { name: '未自动成组订单' });
     expect(attentionTable).toHaveTextContent('XY-SHIPMENT-UI-ATTENTION');
     expect(attentionTable).toHaveTextContent('缺少手机号');
-    expect(screen.queryByRole('button', { name: /拆分|重新组合|标记已发货|导出发货组/u }))
+    expect(screen.getByRole('button', { name: '重新组合' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: '拆分发货组 XY-SHIPMENT-UI-0001、XY-SHIPMENT-UI-0002' }));
+    const dialog = screen.getByRole('dialog', { name: '拆分发货组' });
+    await user.click(within(dialog).getByRole('checkbox', { name: 'XY-SHIPMENT-UI-0001' }));
+    await user.type(within(dialog).getByRole('textbox', { name: '调整原因' }), '单独包装');
+    await user.click(within(dialog).getByRole('button', { name: '确认拆分' }));
+    expect(splitShipmentGroup).toHaveBeenCalledWith({
+      groupId: projection.groups[0].id,
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      splitOrderIds: ['order-1'],
+      reason: '单独包装',
+    });
+    expect(screen.queryByRole('button', { name: /标记已发货|导出发货组/u }))
       .not.toBeInTheDocument();
+  });
+
+  it('重组不同收货信息的发货组时要求选择最终收货信息', async () => {
+    const user = userEvent.setup();
+    const secondOrder: OriginalOrder = {
+      ...confirmedOrder,
+      id: 'order-distinct-recipient',
+      orderNumber: 'XY-SHIPMENT-UI-DISTINCT',
+      recipient: '周宁',
+      phone: '13900000002',
+      phoneNormalized: '13900000002',
+      addressOriginal: '广东省深圳市福田区新风路2号',
+      addressNormalized: '广东省深圳市福田区新风路2号',
+    };
+    const firstProjection = singleShipmentGroupProjection();
+    const secondProjection = singleShipmentGroupProjection(secondOrder);
+    secondProjection.groups[0].id = 'shipment-group-distinct00000000';
+    const projection: ShipmentGroupProjection = {
+      groups: [...firstProjection.groups, ...secondProjection.groups],
+      attentionOrders: [],
+    };
+    const mergeShipmentGroups = vi.fn().mockResolvedValue({
+      event: {
+        id: 'adjustment-merge-1',
+        operation: 'merge',
+        reason: '买家要求一起发货',
+        sourceGroupIds: projection.groups.map(({ id }) => id),
+        sourceOrderIds: [confirmedOrder.id, secondOrder.id],
+        targetGroupId: 'manual-group-merge-1',
+        targetOrderIds: [confirmedOrder.id, secondOrder.id],
+        selectedRecipientOrderId: secondOrder.id,
+        createdAt: '2026-08-11T10:00:00.000Z',
+      },
+      projection,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue(projection),
+      mergeShipmentGroups,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    await user.click(screen.getByRole('checkbox', {
+      name: `选择发货组 ${confirmedOrder.orderNumber}`,
+    }));
+    await user.click(screen.getByRole('checkbox', {
+      name: `选择发货组 ${secondOrder.orderNumber}`,
+    }));
+    await user.click(screen.getByRole('button', { name: '重新组合' }));
+
+    const dialog = screen.getByRole('dialog', { name: '重新组合发货组' });
+    expect(within(dialog).getByText('请选择最终收货信息')).toBeVisible();
+    await user.click(within(dialog).getByRole('radio', {
+      name: `最终收货信息：周宁 13900000002 ${secondOrder.addressOriginal}`,
+    }));
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '调整原因' }),
+      '买家要求一起发货',
+    );
+    await user.click(within(dialog).getByRole('button', { name: '确认重新组合' }));
+
+    expect(mergeShipmentGroups).toHaveBeenCalledWith({
+      groupIds: projection.groups.map(({ id }) => id),
+      expectedMemberOrderIds: [confirmedOrder.id, secondOrder.id],
+      selectedRecipientOrderId: secondOrder.id,
+      reason: '买家要求一起发货',
+    });
   });
 
   it('从发货组追溯原始订单详情后返回发货组', async () => {

@@ -43,6 +43,11 @@ import type {
 import type { OrderExportInput, OrderExportResult } from './order-export';
 import type { ShipmentGroupProjection } from './shipment-groups';
 import type {
+  MergeShipmentGroupsInput,
+  ShipmentGroupAdjustmentResult,
+  SplitShipmentGroupInput,
+} from './shipment-group-adjustments';
+import type {
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -91,6 +96,8 @@ export interface DesktopApi {
     customFieldDefinitionIds?: readonly string[],
   ): Promise<OrderItemWorkbenchResult>;
   queryShipmentGroups(): Promise<ShipmentGroupProjection>;
+  splitShipmentGroup(input: SplitShipmentGroupInput): Promise<ShipmentGroupAdjustmentResult>;
+  mergeShipmentGroups(input: MergeShipmentGroupsInput): Promise<ShipmentGroupAdjustmentResult>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

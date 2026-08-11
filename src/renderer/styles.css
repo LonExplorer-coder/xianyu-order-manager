@@ -1148,7 +1148,7 @@ select:focus-visible {
 }
 
 .table-frame.shipment-groups-table-frame table {
-  min-width: 980px;
+  min-width: 1120px;
 }
 
 .table-frame.shipment-groups-attention-table-frame table {
@@ -1164,20 +1164,56 @@ select:focus-visible {
 }
 
 .shipment-groups-table-frame th:nth-child(1) {
-  min-width: 270px;
+  width: 46px;
+  min-width: 46px;
 }
 
 .shipment-groups-table-frame th:nth-child(2) {
-  min-width: 190px;
+  min-width: 270px;
 }
 
 .shipment-groups-table-frame th:nth-child(3) {
+  min-width: 190px;
+}
+
+.shipment-groups-table-frame th:nth-child(4) {
   min-width: 250px;
 }
 
-.shipment-groups-table-frame td:nth-child(-n + 3),
+.shipment-groups-table-frame td:nth-child(n + 2):nth-child(-n + 4),
 .shipment-groups-attention-table-frame td {
   white-space: normal;
+}
+
+.shipment-groups-table-frame td:first-child input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--navy-900);
+}
+
+.shipment-groups-actions {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 0 34px 10px;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.shipment-groups-actions span {
+  margin-right: auto;
+  color: var(--navy-500);
+  font-size: 10px;
+}
+
+.shipment-group-split-button {
+  min-height: 30px;
+  padding: 6px 10px;
 }
 
 .shipment-group-orders {
@@ -1213,6 +1249,127 @@ select:focus-visible {
 .shipment-groups-table-frame .order-product-summary small {
   color: var(--navy-500);
   font-size: 10px;
+}
+
+.shipment-group-adjustment-dialog {
+  width: min(620px, 100%);
+  min-width: 0;
+  padding: 27px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 30px 90px rgb(8 17 27 / 28%);
+}
+
+.shipment-group-adjustment-dialog header h2 {
+  margin: 7px 0 0;
+  color: var(--navy-950);
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.shipment-group-adjustment-dialog header p {
+  margin: 10px 0 0;
+  color: var(--navy-500);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.shipment-group-adjustment-dialog__summary {
+  margin-top: 22px;
+}
+
+.shipment-group-adjustment-dialog__summary > strong {
+  color: var(--navy-800);
+  font-size: 11px;
+}
+
+.shipment-group-adjustment-dialog__choices {
+  display: grid;
+  gap: 8px;
+  margin: 22px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.shipment-group-adjustment-dialog__choices legend,
+.shipment-group-adjustment-dialog__reason > span {
+  margin-bottom: 8px;
+  color: var(--navy-700);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.shipment-group-adjustment-dialog__choices label {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  cursor: pointer;
+}
+
+.shipment-group-adjustment-dialog__choices input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--navy-900);
+}
+
+.shipment-group-adjustment-dialog__choices label > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.shipment-group-adjustment-dialog__choices strong {
+  color: var(--navy-900);
+  font-size: 10px;
+}
+
+.shipment-group-adjustment-dialog__choices small {
+  color: var(--navy-500);
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.shipment-group-adjustment-dialog__reason {
+  display: grid;
+  margin-top: 20px;
+}
+
+.shipment-group-adjustment-dialog__reason textarea {
+  min-height: 84px;
+  padding: 10px 11px;
+  resize: vertical;
+  border: 1px solid #d5d7d5;
+  border-radius: 7px;
+  color: var(--navy-900);
+  background: #fff;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.shipment-group-adjustment-dialog__error {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 10px;
+}
+
+.shipment-group-adjustment-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 22px;
 }
 
 .order-query {
