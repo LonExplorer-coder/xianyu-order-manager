@@ -1216,6 +1216,19 @@ select:focus-visible {
   padding: 6px 10px;
 }
 
+.shipment-group-row-actions {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shipment-group-row-actions .button {
+  min-height: 30px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
 .shipment-group-orders {
   display: flex;
   min-width: 0;
@@ -1259,6 +1272,364 @@ select:focus-visible {
   border-radius: 12px;
   background: #fff;
   box-shadow: 0 30px 90px rgb(8 17 27 / 28%);
+}
+
+.shipment-confirmation-dialog {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 48px);
+  min-width: 0;
+  padding: 27px;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 30px 90px rgb(8 17 27 / 28%);
+}
+
+.shipment-confirmation-dialog header h2 {
+  margin: 7px 0 0;
+  color: var(--navy-950);
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.shipment-confirmation-dialog header p {
+  margin: 10px 0 0;
+  color: var(--navy-500);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.shipment-confirmation-dialog__recipient {
+  display: grid;
+  gap: 4px;
+  margin-top: 20px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--yellow);
+  background: #fffdf1;
+}
+
+.shipment-confirmation-dialog__recipient strong,
+.shipment-confirmation-dialog__recipient span {
+  color: var(--navy-800);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.shipment-confirmation-dialog__packages {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.shipment-confirmation-dialog__packages fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.shipment-confirmation-dialog__packages legend {
+  padding: 0 5px;
+  color: var(--navy-900);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.shipment-confirmation-dialog__logistics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.shipment-confirmation-dialog__logistics label {
+  display: grid;
+  gap: 5px;
+}
+
+.shipment-confirmation-dialog__logistics span,
+.shipment-confirmation-dialog__items small {
+  color: var(--navy-500);
+  font-size: 9px;
+}
+
+.shipment-confirmation-dialog__logistics input,
+.shipment-confirmation-dialog__items input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #d5d7d5;
+  border-radius: 7px;
+  color: var(--navy-900);
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+}
+
+.shipment-confirmation-dialog__items {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.shipment-confirmation-dialog__items label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px 64px;
+  align-items: center;
+  gap: 10px;
+}
+
+.shipment-confirmation-dialog__items label > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.shipment-confirmation-dialog__items strong {
+  color: var(--navy-900);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.shipment-confirmation-dialog__add-package {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.shipment-confirmation-dialog__hint {
+  margin: 10px 0 0;
+  color: var(--navy-600);
+  font-size: 9px;
+}
+
+.shipment-confirmation-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 22px;
+}
+
+.shipment-records-empty {
+  margin: 0 34px;
+  padding: 24px 0;
+  border-block: 1px solid var(--line-soft);
+  color: var(--navy-500);
+  font-size: 10px;
+}
+
+.shipment-records-list {
+  display: grid;
+  gap: 10px;
+  margin: 0 34px;
+}
+
+.shipment-record-card {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.shipment-record-card > header,
+.shipment-record-card > header > div,
+.shipment-record-card__packages > section > div {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shipment-record-card > header > div {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.shipment-record-card > header strong,
+.shipment-record-card__packages strong {
+  color: var(--navy-900);
+  font-size: 10px;
+}
+
+.shipment-record-card > header small,
+.shipment-record-card > header > span,
+.shipment-record-card__packages span,
+.shipment-record-card__packages p {
+  color: var(--navy-500);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shipment-record-card__packages {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.shipment-record-card__differences {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #b8860b;
+  background: #fffaf0;
+}
+
+.shipment-record-card__differences summary {
+  color: #765700;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.shipment-record-card__differences dl {
+  display: grid;
+  gap: 5px;
+  margin: 9px 0 0;
+}
+
+.shipment-record-card__differences dl > div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.shipment-record-card__differences dt,
+.shipment-record-card__differences dd {
+  margin: 0;
+  color: var(--navy-700);
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.shipment-record-card__differences dt {
+  font-weight: 700;
+}
+
+.shipment-record-card__packages > section {
+  min-width: 0;
+  padding: 11px 12px;
+  background: var(--surface-muted);
+}
+
+.shipment-record-card__packages p {
+  margin: 5px 0 0;
+}
+
+.shipment-record-card__packages ul {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shipment-record-card__packages li {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--navy-700);
+  font-size: 9px;
+}
+
+.shipment-record-card__packages footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.shipment-record-card__packages footer .button {
+  min-height: 28px;
+  padding: 5px 9px;
+  font-size: 9px;
+}
+
+.shipment-record-card__audit {
+  display: block;
+  margin-top: 7px;
+  color: var(--navy-500);
+  font-size: 9px;
+}
+
+.shipment-package-action-dialog {
+  width: min(560px, 100%);
+  min-width: 0;
+  padding: 27px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 30px 90px rgb(8 17 27 / 28%);
+}
+
+.shipment-package-action-dialog header h2 {
+  margin: 7px 0 0;
+  color: var(--navy-950);
+  font-size: 21px;
+}
+
+.shipment-package-action-dialog header p {
+  margin: 10px 0 0;
+  color: var(--navy-500);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.shipment-package-action-dialog > label {
+  display: grid;
+  gap: 7px;
+  margin-top: 20px;
+}
+
+.shipment-package-action-dialog > label > span {
+  color: var(--navy-700);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.shipment-package-action-dialog input,
+.shipment-package-action-dialog textarea {
+  padding: 10px 11px;
+  border: 1px solid #d5d7d5;
+  border-radius: 7px;
+  color: var(--navy-900);
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.shipment-package-action-dialog textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.shipment-package-action-dialog > .shipment-package-action-dialog__confirmation {
+  display: flex;
+  align-items: flex-start;
+  grid-template-columns: none;
+  gap: 9px;
+  color: var(--navy-700);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.shipment-package-action-dialog__confirmation input {
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  padding: 0;
+  flex: 0 0 auto;
+  border: 0;
+  accent-color: var(--navy-900);
+}
+
+.shipment-package-action-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 22px;
 }
 
 .shipment-group-adjustment-dialog header h2 {

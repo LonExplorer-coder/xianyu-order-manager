@@ -63,6 +63,12 @@ import type {
   ShipmentGroupAdjustmentResult,
 } from '../core/shipment-group-adjustments';
 import type {
+  ShipmentCancellationResult,
+  ShipmentConfirmationResult,
+  ShipmentLogisticsCorrectionResult,
+  ShipmentRecord,
+} from '../core/shipment-records';
+import type {
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -390,6 +396,28 @@ export class DesktopSession {
 
   public mergeShipmentGroups(input: unknown): ShipmentGroupAdjustmentResult {
     return this.requireApplication().mergeShipmentGroups(input);
+  }
+
+  public queryShipmentRecords(): ShipmentRecord[] {
+    return this.requireApplication().queryShipmentRecords();
+  }
+
+  public confirmShipment(input: unknown): ShipmentConfirmationResult {
+    const result = this.requireApplication().confirmShipment(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public cancelShipmentPackages(input: unknown): ShipmentCancellationResult {
+    const result = this.requireApplication().cancelShipmentPackages(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public correctShipmentPackageLogistics(
+    input: unknown,
+  ): ShipmentLogisticsCorrectionResult {
+    return this.requireApplication().correctShipmentPackageLogistics(input);
   }
 
   public exportOrdersToWorkbook(

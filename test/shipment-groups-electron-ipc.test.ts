@@ -105,6 +105,77 @@ describe('发货组 Electron IPC', () => {
     expect(splitShipmentGroup).toHaveBeenCalledWith(splitInput);
     expect(mergeShipmentGroups).toHaveBeenCalledWith(mergeInput);
   });
+
+  it('通过受控通道查询发货记录并确认实际发货', async () => {
+    const queryShipmentRecords = vi.fn().mockReturnValue([{ id: 'shipment-record-1' }]);
+    const confirmShipment = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2' },
+      projection: { groups: [], attentionOrders: [] },
+    });
+    registerIpcHandlers({
+      queryShipmentRecords,
+      confirmShipment,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const input = {
+      groupId: 'group-1',
+      expectedRemainingItems: [{
+        orderId: 'order-1',
+        orderItemId: 'item-1',
+        quantity: 2,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF1000000010',
+        items: [{ orderId: 'order-1', orderItemId: 'item-1', quantity: 2 }],
+      }],
+    };
+
+    await expect(invoke('shipment-records:query')).resolves.toEqual([
+      { id: 'shipment-record-1' },
+    ]);
+    await expect(invoke('shipment-records:confirm', input)).resolves.toMatchObject({
+      record: { id: 'shipment-record-2' },
+    });
+    expect(queryShipmentRecords).toHaveBeenCalledTimes(1);
+    expect(confirmShipment).toHaveBeenCalledWith(input);
+  });
+
+  it('通过受控通道撤销未交寄包裹并更正物流', async () => {
+    const cancelShipmentPackages = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-1', status: 'voided' },
+    });
+    const correctShipmentPackageLogistics = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2' },
+    });
+    registerIpcHandlers({
+      cancelShipmentPackages,
+      correctShipmentPackageLogistics,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const cancelInput = {
+      recordId: 'shipment-record-1',
+      packageIds: ['package-1'],
+      reason: '尚未实际交寄',
+    };
+    const correctionInput = {
+      recordId: 'shipment-record-2',
+      packageId: 'package-2',
+      expectedRevision: 1,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT1000000003',
+      reason: '更正录入错误',
+    };
+
+    await expect(invoke('shipment-records:cancel-packages', cancelInput))
+      .resolves.toMatchObject({ record: { status: 'voided' } });
+    await expect(invoke('shipment-records:correct-package-logistics', correctionInput))
+      .resolves.toMatchObject({ record: { id: 'shipment-record-2' } });
+    expect(cancelShipmentPackages).toHaveBeenCalledWith(cancelInput);
+    expect(correctShipmentPackageLogistics).toHaveBeenCalledWith(correctionInput);
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {

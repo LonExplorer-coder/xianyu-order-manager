@@ -74,6 +74,12 @@ import {
   type OpenShipmentGroup,
   type ShipmentGroupProjection,
 } from '../core/shipment-groups';
+import type {
+  ConfirmShipmentPackageInput,
+  ShipmentConfirmationResult,
+  ShipmentItemQuantityInput,
+  ShipmentRecord,
+} from '../core/shipment-records';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -146,6 +152,7 @@ export function App({ api }: AppProps) {
   const [orderItemQueryLoading, setOrderItemQueryLoading] = useState(false);
   const [shipmentGroupProjection, setShipmentGroupProjection] =
     useState<ShipmentGroupProjection | null>(null);
+  const [shipmentRecords, setShipmentRecords] = useState<ShipmentRecord[]>([]);
   const [shipmentGroupLoading, setShipmentGroupLoading] = useState(false);
   const [shipmentGroupError, setShipmentGroupError] = useState('');
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
@@ -229,6 +236,7 @@ export function App({ api }: AppProps) {
     setOrderItemQuery({});
     setOrderItemWorkbench(null);
     setShipmentGroupProjection(null);
+    setShipmentRecords([]);
     setShipmentGroupLoading(false);
     setShipmentGroupError('');
     setOrderQueryRefreshToken(0);
@@ -417,10 +425,11 @@ export function App({ api }: AppProps) {
     const requestVersion = ++shipmentGroupRequestVersion.current;
     setShipmentGroupLoading(true);
     setShipmentGroupError('');
-    void api.queryShipmentGroups()
-      .then((projection) => {
+    void Promise.all([api.queryShipmentGroups(), api.queryShipmentRecords()])
+      .then(([projection, records]) => {
         if (!active || requestVersion !== shipmentGroupRequestVersion.current) return;
         setShipmentGroupProjection(projection);
+        setShipmentRecords(records);
       })
       .catch((error: unknown) => {
         if (active && requestVersion === shipmentGroupRequestVersion.current) {
@@ -1133,10 +1142,12 @@ export function App({ api }: AppProps) {
       <ShipmentGroupsWorkspace
         api={api}
         projection={shipmentGroupProjection}
+        records={shipmentRecords}
         loading={shipmentGroupLoading}
         openingOrder={busyAction === 'detail'}
         error={shipmentGroupError}
         onProjectionChange={setShipmentGroupProjection}
+        onRecordsChange={setShipmentRecords}
         onOpenOrder={(orderId) => void openOrder(orderId)}
       />
     );
@@ -1462,18 +1473,22 @@ function SystemScreen(props: SystemScreenProps) {
 function ShipmentGroupsWorkspace({
   api,
   projection,
+  records,
   loading,
   openingOrder,
   error,
   onProjectionChange,
+  onRecordsChange,
   onOpenOrder,
 }: {
   api: DesktopApi;
   projection: ShipmentGroupProjection | null;
+  records: ShipmentRecord[];
   loading: boolean;
   openingOrder: boolean;
   error: string;
   onProjectionChange: (projection: ShipmentGroupProjection) => void;
+  onRecordsChange: (records: ShipmentRecord[]) => void;
   onOpenOrder: (orderId: string) => void;
 }) {
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
@@ -1482,6 +1497,17 @@ function ShipmentGroupsWorkspace({
     | { kind: 'merge'; groups: OpenShipmentGroup[] }
     | null
   >(null);
+  const [confirmationTarget, setConfirmationTarget] = useState<OpenShipmentGroup | null>(null);
+  const [cancellationTarget, setCancellationTarget] = useState<{
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  } | null>(null);
+  const [logisticsCorrectionTarget, setLogisticsCorrectionTarget] = useState<{
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  } | null>(null);
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
   const pendingOrderCount = groups.reduce(
@@ -1626,7 +1652,16 @@ function ShipmentGroupsWorkspace({
                     <td>{group.totalQuantity}</td>
                     <td className="money-cell"><strong>{formatMoney(group.totalAmountCents)}</strong></td>
                     <td>
-                      {group.orders.length > 1 ? (
+                      <span className="shipment-group-row-actions">
+                        <button
+                          className="button button--primary"
+                          type="button"
+                          aria-label={`确认实际发出 ${group.orders.map(({ orderNumber }) => orderNumber).join('、')}`}
+                          onClick={() => setConfirmationTarget(group)}
+                        >
+                          确认实际发出
+                        </button>
+                        {group.orders.length > 1 && (
                         <button
                           className="button button--quiet shipment-group-split-button"
                           type="button"
@@ -1635,7 +1670,8 @@ function ShipmentGroupsWorkspace({
                         >
                           拆分
                         </button>
-                      ) : '—'}
+                        )}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -1690,6 +1726,55 @@ function ShipmentGroupsWorkspace({
         </section>
       )}
 
+      <ShipmentRecordsSection
+        records={records}
+        onCancelPackage={(record, shipmentPackage, packageIndex) => {
+          setCancellationTarget({ record, shipmentPackage, packageIndex });
+        }}
+        onCorrectLogistics={(record, shipmentPackage, packageIndex) => {
+          setLogisticsCorrectionTarget({ record, shipmentPackage, packageIndex });
+        }}
+      />
+
+      {confirmationTarget && (
+        <ConfirmShipmentDialog
+          api={api}
+          group={confirmationTarget}
+          onApplied={({ record, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            onRecordsChange([record, ...records.filter(({ id }) => id !== record.id)]);
+            setConfirmationTarget(null);
+          }}
+          onClose={() => setConfirmationTarget(null)}
+        />
+      )}
+
+      {cancellationTarget && (
+        <CancelShipmentPackageDialog
+          api={api}
+          target={cancellationTarget}
+          onApplied={({ record, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            onRecordsChange(records.map((current) => current.id === record.id ? record : current));
+            setCancellationTarget(null);
+          }}
+          onClose={() => setCancellationTarget(null)}
+        />
+      )}
+
+      {logisticsCorrectionTarget && (
+        <CorrectShipmentPackageLogisticsDialog
+          api={api}
+          target={logisticsCorrectionTarget}
+          onApplied={({ record, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            onRecordsChange(records.map((current) => current.id === record.id ? record : current));
+            setLogisticsCorrectionTarget(null);
+          }}
+          onClose={() => setLogisticsCorrectionTarget(null)}
+        />
+      )}
+
       {adjustmentTarget && (
         <ShipmentGroupAdjustmentDialog
           api={api}
@@ -1703,6 +1788,610 @@ function ShipmentGroupsWorkspace({
         />
       )}
     </section>
+  );
+}
+
+type ShipmentPackageDraft = {
+  id: string;
+  shippingCarrier: string;
+  trackingNumber: string;
+  quantities: Record<string, number>;
+};
+
+function ConfirmShipmentDialog({
+  api,
+  group,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  group: OpenShipmentGroup;
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+    orderId: order.id,
+    orderItemId: item.id,
+    orderNumber: order.orderNumber,
+    sourceTitle: item.sourceTitle,
+    sourceSpec: item.sourceSpec,
+    quantity: item.quantity,
+  })));
+  const expectedRemainingItems: ShipmentItemQuantityInput[] = remainingItems.map((item) => ({
+    orderId: item.orderId,
+    orderItemId: item.orderItemId,
+    quantity: item.quantity,
+  }));
+  const [nextPackageNumber, setNextPackageNumber] = useState(2);
+  const [packages, setPackages] = useState<ShipmentPackageDraft[]>([{
+    id: 'package-1',
+    shippingCarrier: '',
+    trackingNumber: '',
+    quantities: Object.fromEntries(remainingItems.map((item) => [item.orderItemId, item.quantity])),
+  }]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  const allocatedByItemId = Object.fromEntries(remainingItems.map((item) => [
+    item.orderItemId,
+    packages.reduce((total, shipmentPackage) => (
+      total + (shipmentPackage.quantities[item.orderItemId] ?? 0)
+    ), 0),
+  ]));
+  const hasOverAllocation = remainingItems.some(
+    (item) => allocatedByItemId[item.orderItemId] > item.quantity,
+  );
+  const hasEmptyPackage = packages.some((shipmentPackage) => (
+    remainingItems.every((item) => (shipmentPackage.quantities[item.orderItemId] ?? 0) === 0)
+  ));
+  const hasAllocatedItem = Object.values(allocatedByItemId).some((quantity) => quantity > 0);
+  const canSubmit = hasAllocatedItem && !hasOverAllocation && !hasEmptyPackage;
+
+  function updatePackage(
+    packageId: string,
+    update: (shipmentPackage: ShipmentPackageDraft) => ShipmentPackageDraft,
+  ) {
+    setPackages((current) => current.map((shipmentPackage) => (
+      shipmentPackage.id === packageId ? update(shipmentPackage) : shipmentPackage
+    )));
+  }
+
+  function addPackage() {
+    const packageNumber = nextPackageNumber;
+    setNextPackageNumber(packageNumber + 1);
+    setPackages((current) => [...current, {
+      id: `package-${packageNumber}`,
+      shippingCarrier: '',
+      trackingNumber: '',
+      quantities: Object.fromEntries(remainingItems.map((item) => [item.orderItemId, 0])),
+    }]);
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.confirmShipment({
+        groupId: group.id,
+        expectedRemainingItems,
+        packages: packages.map((shipmentPackage): ConfirmShipmentPackageInput => ({
+          shippingCarrier: shipmentPackage.shippingCarrier,
+          trackingNumber: shipmentPackage.trackingNumber,
+          items: remainingItems.flatMap((item) => {
+            const quantity = shipmentPackage.quantities[item.orderItemId] ?? 0;
+            return quantity > 0 ? [{
+              orderId: item.orderId,
+              orderItemId: item.orderItemId,
+              quantity,
+            }] : [];
+          }),
+        })),
+      });
+      onApplied(result);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-confirmation-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">开放发货组 · 实际交寄</span>
+          <h2 id={headingId}>确认实际发出</h2>
+          <p id={descriptionId}>
+            只登记本次真正发出的商品和数量；未登记的剩余数量继续留在开放发货组。
+          </p>
+        </header>
+
+        <section className="shipment-confirmation-dialog__recipient" aria-label="本次收件信息">
+          <strong>{group.recipient} · {group.phone}</strong>
+          <span>{group.addressOriginal}</span>
+        </section>
+
+        <div className="shipment-confirmation-dialog__packages">
+          {packages.map((shipmentPackage, packageIndex) => (
+            <fieldset key={shipmentPackage.id}>
+              <legend>包裹 {packageIndex + 1}</legend>
+              <div className="shipment-confirmation-dialog__logistics">
+                <label>
+                  <span>承运方</span>
+                  <input
+                    aria-label={`包裹 ${packageIndex + 1} 承运方`}
+                    value={shipmentPackage.shippingCarrier}
+                    disabled={saving}
+                    onChange={(event) => updatePackage(shipmentPackage.id, (current) => ({
+                      ...current,
+                      shippingCarrier: event.target.value,
+                    }))}
+                  />
+                </label>
+                <label>
+                  <span>运单号</span>
+                  <input
+                    aria-label={`包裹 ${packageIndex + 1} 运单号`}
+                    value={shipmentPackage.trackingNumber}
+                    disabled={saving}
+                    onChange={(event) => updatePackage(shipmentPackage.id, (current) => ({
+                      ...current,
+                      trackingNumber: event.target.value,
+                    }))}
+                  />
+                </label>
+              </div>
+              <div className="shipment-confirmation-dialog__items">
+                {remainingItems.map((item) => (
+                  <label key={`${shipmentPackage.id}-${item.orderItemId}`}>
+                    <span>
+                      <strong>{item.sourceTitle}</strong>
+                      <small>{item.orderNumber}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</small>
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={item.quantity}
+                      step={1}
+                      aria-label={`包裹 ${packageIndex + 1} ${item.orderNumber} ${item.sourceTitle} 发出数量`}
+                      value={shipmentPackage.quantities[item.orderItemId] ?? 0}
+                      disabled={saving}
+                      onChange={(event) => updatePackage(shipmentPackage.id, (current) => ({
+                        ...current,
+                        quantities: {
+                          ...current.quantities,
+                          [item.orderItemId]: Math.max(0, Number.parseInt(event.target.value, 10) || 0),
+                        },
+                      }))}
+                    />
+                    <small>剩余 {item.quantity}</small>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+        </div>
+
+        <button
+          className="button button--quiet shipment-confirmation-dialog__add-package"
+          type="button"
+          disabled={saving}
+          onClick={addPackage}
+        >
+          新增包裹
+        </button>
+        {hasOverAllocation && (
+          <p className="shipment-group-adjustment-dialog__error" role="alert">
+            同一商品分配到各包裹的数量不能超过发货组剩余数量。
+          </p>
+        )}
+        {hasEmptyPackage && packages.length > 1 && (
+          <p className="shipment-confirmation-dialog__hint">每个包裹至少分配一件商品。</p>
+        )}
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving ? '正在保存…' : '确认实际发出'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function ShipmentRecordsSection({
+  records,
+  onCancelPackage,
+  onCorrectLogistics,
+}: {
+  records: ShipmentRecord[];
+  onCancelPackage: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onCorrectLogistics: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+}) {
+  return (
+    <section
+      className="shipment-groups-section shipment-records-section"
+      aria-labelledby="shipment-records-title"
+      aria-label="发货记录"
+    >
+      <div className="shipment-groups-section__heading">
+        <div>
+          <h2 id="shipment-records-title">发货记录</h2>
+          <p>实际发出后形成独立记录；包裹与订单商品、数量始终可以相互追溯。</p>
+        </div>
+        <span>{records.length} 条记录</span>
+      </div>
+      {records.length === 0 ? (
+        <div className="shipment-records-empty">尚无发货记录</div>
+      ) : (
+        <div className="shipment-records-list">
+          {records.map((record) => (
+            <article key={record.id} className="shipment-record-card">
+              <header>
+                <div>
+                  <strong>{record.recipient} · {record.phone}</strong>
+                  <small>{record.addressOriginal}</small>
+                </div>
+                <span>{record.status === 'voided' ? '已作废' : `共 ${record.totalQuantity} 件`}</span>
+              </header>
+              {record.sourceDifferences.length > 0 && (
+                <details className="shipment-record-card__differences" open>
+                  <summary>来源订单已有 {record.sourceDifferences.length} 项变化</summary>
+                  <dl>
+                    {record.sourceDifferences.map((difference, index) => (
+                      <div key={`${difference.orderId}-${difference.orderItemId ?? 'order'}-${difference.field}-${index}`}>
+                        <dt>{shipmentSourceDifferenceFieldLabel(difference.field)}</dt>
+                        <dd>
+                          {shipmentSourceDifferenceValue(difference.snapshotValue)}
+                          {' → '}
+                          {shipmentSourceDifferenceValue(difference.currentValue)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
+              )}
+              <div className="shipment-record-card__packages">
+                {record.packages.map((shipmentPackage, packageIndex) => (
+                  <section key={shipmentPackage.id}>
+                    <div>
+                      <strong>包裹 {packageIndex + 1}</strong>
+                      <span>{shipmentPackage.status === 'cancelled' ? '已撤销' : '已登记'}</span>
+                    </div>
+                    <p>
+                      {[shipmentPackage.shippingCarrier, shipmentPackage.trackingNumber]
+                        .filter(Boolean).join(' · ') || '未填写物流信息'}
+                    </p>
+                    <ul>
+                      {shipmentPackage.items.map((item) => (
+                        <li key={item.id}>
+                          <span>{item.orderNumber} · {item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                          <strong>× {item.quantity}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                    {shipmentPackage.status === 'active' && (
+                      <footer>
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          aria-label={`更正物流 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
+                          onClick={() => onCorrectLogistics(record, shipmentPackage, packageIndex)}
+                        >
+                          更正物流
+                        </button>
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          aria-label={`撤销未交寄包裹 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
+                          onClick={() => onCancelPackage(record, shipmentPackage, packageIndex)}
+                        >
+                          撤销未交寄包裹
+                        </button>
+                      </footer>
+                    )}
+                    {shipmentPackage.logisticsChanges.length > 0 && (
+                      <small className="shipment-record-card__audit">
+                        已留痕更正 {shipmentPackage.logisticsChanges.length} 次
+                      </small>
+                    )}
+                  </section>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function shipmentSourceDifferenceFieldLabel(field: string): string {
+  const labels: Record<string, string> = {
+    orderNumber: '订单号',
+    sellerAccount: '卖家账号',
+    buyerNickname: '买家昵称',
+    recipient: '收件人',
+    phone: '手机号',
+    addressOriginal: '收货地址',
+    amountCents: '成交金额',
+    sourceTitle: '商品',
+    sourceSpec: '款式或规格',
+    unitPriceCents: '商品单价',
+    quantity: '商品数量',
+  };
+  return labels[field] ?? field;
+}
+
+function shipmentSourceDifferenceValue(value: string | number | null): string {
+  return value === null || value === '' ? '未填写' : String(value);
+}
+
+function CancelShipmentPackageDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target: {
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  };
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [reason, setReason] = useState('');
+  const [confirmedUnhanded, setConfirmedUnhanded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !reason.trim() || !confirmedUnhanded) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.cancelShipmentPackages({
+        recordId: target.record.id,
+        packageIds: [target.shipmentPackage.id],
+        reason,
+      });
+      onApplied(result);
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
+          <h2 id={headingId}>撤销未交寄包裹</h2>
+          <p id={descriptionId}>
+            仅适用于尚未真实交给承运方的包裹。撤销后记录和原因仍会保留，商品数量退回开放发货组。
+          </p>
+        </header>
+        <label>
+          <span>撤销原因</span>
+          <textarea
+            aria-label="撤销原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        <label className="shipment-package-action-dialog__confirmation">
+          <input
+            type="checkbox"
+            aria-label="我确认包裹尚未实际交寄"
+            checked={confirmedUnhanded}
+            disabled={saving}
+            onChange={(event) => setConfirmedUnhanded(event.target.checked)}
+          />
+          <span>我确认包裹尚未实际交寄；若已经交寄，应进入后续发货拦截流程。</span>
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            type="submit"
+            disabled={saving || !reason.trim() || !confirmedUnhanded}
+          >
+            {saving ? '正在撤销…' : '确认撤销'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function CorrectShipmentPackageLogisticsDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target: {
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  };
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [shippingCarrier, setShippingCarrier] = useState(target.shipmentPackage.shippingCarrier);
+  const [trackingNumber, setTrackingNumber] = useState(target.shipmentPackage.trackingNumber);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const changed = shippingCarrier.trim() !== target.shipmentPackage.shippingCarrier
+    || trackingNumber.trim() !== target.shipmentPackage.trackingNumber;
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !reason.trim() || !changed) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.correctShipmentPackageLogistics({
+        recordId: target.record.id,
+        packageId: target.shipmentPackage.id,
+        expectedRevision: target.shipmentPackage.revision,
+        shippingCarrier,
+        trackingNumber,
+        reason,
+      });
+      onApplied(result);
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
+          <h2 id={headingId}>更正包裹物流</h2>
+          <p id={descriptionId}>更正不会覆盖历史值，系统会保存更正前后内容、原因和时间。</p>
+        </header>
+        <label>
+          <span>承运方</span>
+          <input
+            aria-label="承运方"
+            value={shippingCarrier}
+            disabled={saving}
+            onChange={(event) => setShippingCarrier(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>运单号</span>
+          <input
+            aria-label="运单号"
+            value={trackingNumber}
+            disabled={saving}
+            onChange={(event) => setTrackingNumber(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>更正原因</span>
+          <textarea
+            aria-label="更正原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            type="submit"
+            disabled={saving || !reason.trim() || !changed}
+          >
+            {saving ? '正在更正…' : '确认更正'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
   );
 }
 

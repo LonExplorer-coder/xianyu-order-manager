@@ -48,6 +48,15 @@ import type {
   SplitShipmentGroupInput,
 } from './shipment-group-adjustments';
 import type {
+  CancelShipmentPackagesInput,
+  ConfirmShipmentInput,
+  CorrectShipmentPackageLogisticsInput,
+  ShipmentCancellationResult,
+  ShipmentConfirmationResult,
+  ShipmentLogisticsCorrectionResult,
+  ShipmentRecord,
+} from './shipment-records';
+import type {
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -98,6 +107,14 @@ export interface DesktopApi {
   queryShipmentGroups(): Promise<ShipmentGroupProjection>;
   splitShipmentGroup(input: SplitShipmentGroupInput): Promise<ShipmentGroupAdjustmentResult>;
   mergeShipmentGroups(input: MergeShipmentGroupsInput): Promise<ShipmentGroupAdjustmentResult>;
+  queryShipmentRecords(): Promise<ShipmentRecord[]>;
+  confirmShipment(input: ConfirmShipmentInput): Promise<ShipmentConfirmationResult>;
+  cancelShipmentPackages(
+    input: CancelShipmentPackagesInput,
+  ): Promise<ShipmentCancellationResult>;
+  correctShipmentPackageLogistics(
+    input: CorrectShipmentPackageLogisticsInput,
+  ): Promise<ShipmentLogisticsCorrectionResult>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

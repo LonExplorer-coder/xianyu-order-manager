@@ -159,6 +159,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 15) migrateToVersion15(database);
   if (row.version < 16) migrateToVersion16(database);
   if (row.version < 17) migrateToVersion17(database);
+  if (row.version < 18) migrateToVersion18(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -1610,6 +1611,197 @@ function migrateToVersion17(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (17, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion18(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE shipment_records (
+        id TEXT PRIMARY KEY,
+        source_group_id TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX shipment_records_by_source_group
+      ON shipment_records (source_group_id, created_at, id);
+
+      CREATE TABLE shipment_packages (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        shipping_carrier TEXT NOT NULL,
+        tracking_number TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        UNIQUE (shipment_record_id, position)
+      ) STRICT;
+
+      CREATE TABLE shipment_record_order_snapshots (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        order_id TEXT NOT NULL
+          REFERENCES original_orders(id) ON DELETE RESTRICT,
+        order_number TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        UNIQUE (shipment_record_id, order_id)
+      ) STRICT;
+
+      CREATE TABLE shipment_package_items (
+        id TEXT PRIMARY KEY,
+        package_id TEXT NOT NULL
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        order_id TEXT NOT NULL
+          REFERENCES original_orders(id) ON DELETE RESTRICT,
+        source_order_item_id TEXT NOT NULL,
+        order_number TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        source_title TEXT NOT NULL,
+        source_spec TEXT NOT NULL,
+        unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+        source_item_quantity INTEGER NOT NULL CHECK (source_item_quantity > 0),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (package_id, position),
+        UNIQUE (package_id, source_order_item_id)
+      ) STRICT;
+
+      CREATE INDEX shipment_package_items_by_order_item
+      ON shipment_package_items (source_order_item_id, package_id);
+
+      CREATE TABLE shipment_package_cancellation_events (
+        id TEXT PRIMARY KEY,
+        package_id TEXT NOT NULL UNIQUE
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE shipment_record_void_events (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL UNIQUE
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE shipment_package_logistics_change_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        package_id TEXT NOT NULL
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        before_shipping_carrier TEXT NOT NULL,
+        before_tracking_number TEXT NOT NULL,
+        after_shipping_carrier TEXT NOT NULL,
+        after_tracking_number TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (package_id, result_revision)
+      ) STRICT;
+
+      CREATE TRIGGER shipment_records_are_immutable_on_update
+      BEFORE UPDATE ON shipment_records
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment records are immutable');
+      END;
+
+      CREATE TRIGGER shipment_records_are_immutable_on_delete
+      BEFORE DELETE ON shipment_records
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment records are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_items_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_items
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package items are immutable');
+      END;
+
+      CREATE TRIGGER shipment_order_snapshots_are_immutable_on_update
+      BEFORE UPDATE ON shipment_record_order_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment order snapshots are immutable');
+      END;
+
+      CREATE TRIGGER shipment_order_snapshots_are_immutable_on_delete
+      BEFORE DELETE ON shipment_record_order_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment order snapshots are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_items_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_items
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package items are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_cancellations_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_cancellation_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package cancellations are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_cancellations_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_cancellation_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package cancellations are immutable');
+      END;
+
+      CREATE TRIGGER shipment_record_void_events_are_immutable_on_update
+      BEFORE UPDATE ON shipment_record_void_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment record void events are immutable');
+      END;
+
+      CREATE TRIGGER shipment_record_void_events_are_immutable_on_delete
+      BEFORE DELETE ON shipment_record_void_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment record void events are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_logistics_changes_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_logistics_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics changes are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_logistics_changes_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_logistics_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics changes are immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (18, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

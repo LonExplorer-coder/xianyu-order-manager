@@ -212,6 +212,17 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('shipment-groups:merge', (_event, input: unknown) => (
     desktopSession.mergeShipmentGroups(input)
   ));
+  ipcMain.handle('shipment-records:query', () => desktopSession.queryShipmentRecords());
+  ipcMain.handle('shipment-records:confirm', (_event, input: unknown) => (
+    desktopSession.confirmShipment(input)
+  ));
+  ipcMain.handle('shipment-records:cancel-packages', (_event, input: unknown) => (
+    desktopSession.cancelShipmentPackages(input)
+  ));
+  ipcMain.handle(
+    'shipment-records:correct-package-logistics',
+    (_event, input: unknown) => desktopSession.correctShipmentPackageLogistics(input),
+  );
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

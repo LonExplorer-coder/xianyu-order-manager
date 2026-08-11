@@ -139,6 +139,20 @@ import {
   type ShipmentGroupProjection,
 } from '../core/shipment-groups';
 import {
+  normalizeCancelShipmentPackagesInput,
+  normalizeConfirmShipmentInput,
+  normalizeCorrectShipmentPackageLogisticsInput,
+  type ShipmentCancellationResult,
+  type ShipmentConfirmationResult,
+  type ShipmentItemQuantityInput,
+  type ShipmentLogisticsCorrectionResult,
+  type ShipmentPackage,
+  type ShipmentPackageItem,
+  type ShipmentRecord,
+  type ShipmentSourceDifference,
+  type ShipmentSourceOrderSnapshot,
+} from '../core/shipment-records';
+import {
   DEFAULT_ORDER_TABLE_COLUMNS,
   normalizeCreateTableTemplateInput,
   normalizeStoredTableTemplateInput,
@@ -2698,7 +2712,36 @@ export class LocalApplication {
         if (current.revision !== target.expectedRevision) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
         }
-        const resolvedPatch = resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
+        const shipmentQuantities = current.items.map((item) => ({
+          item,
+          shippedQuantity: this.activeShippedQuantity(item.id),
+        }));
+        const hasActiveShipmentRecord = shipmentQuantities.some(({ shippedQuantity }) => (
+          shippedQuantity > 0
+        ));
+        let resolvedPatch = resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
+        if (hasActiveShipmentRecord) {
+          resolvedPatch = { ...prepared.patch };
+          const requestedFulfillmentStatus = prepared.patch.fulfillmentStatus;
+          const preservesTerminalStatus = (
+            requestedFulfillmentStatus === 'delivered'
+            || requestedFulfillmentStatus === 'returned'
+            || (
+              requestedFulfillmentStatus === undefined
+              && (
+                current.fulfillmentStatus === 'delivered'
+                || current.fulfillmentStatus === 'returned'
+              )
+            )
+          );
+          if (!preservesTerminalStatus) {
+            resolvedPatch.fulfillmentStatus = shipmentQuantities.some(({ item, shippedQuantity }) => (
+              shippedQuantity < item.quantity
+            ))
+              ? 'pending_shipment'
+              : 'shipped';
+          }
+        }
         const changes = diffOrderStatusAndLogistics(current, resolvedPatch);
         if (changes.length === 0) continue;
         const values = {
@@ -2779,7 +2822,21 @@ export class LocalApplication {
         AND platform_transaction_status NOT IN ('cancelled', 'refunded')
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
-    const orders = rows.map((row) => this.getOrder(asString(row.id)).order);
+    const orders = rows.flatMap((row) => {
+      const order = this.getOrder(asString(row.id)).order;
+      const items = order.items.flatMap((item) => {
+        const shippedQuantity = this.activeShippedQuantity(item.id);
+        const remainingQuantity = Math.max(item.quantity - shippedQuantity, 0);
+        return remainingQuantity > 0
+          ? [{
+            ...item,
+            quantity: remainingQuantity,
+            subtotalCents: item.unitPriceCents * remainingQuantity,
+          }]
+          : [];
+      });
+      return items.length > 0 ? [{ ...order, items }] : [];
+    });
     const adjustmentState = replayShipmentGroupAdjustmentEvents(
       this.listShipmentGroupAdjustmentEvents(),
     );
@@ -2818,6 +2875,515 @@ export class LocalApplication {
         .digest('hex')
         .slice(0, 24)}`
     ), manualGroups);
+  }
+
+  public confirmShipment(input: unknown): ShipmentConfirmationResult {
+    const prepared = normalizeConfirmShipmentInput(input);
+    const projection = this.queryShipmentGroups();
+    const group = projection.groups.find(({ id }) => id === prepared.groupId);
+    if (!group) throw new Error('发货组已变化，请刷新后重试');
+    const remainingByItemId = new Map(group.orders.flatMap((order) => (
+      order.items.map((item) => [item.id, { order, item }] as const)
+    )));
+    assertExpectedShipmentItems(prepared.expectedRemainingItems, remainingByItemId);
+    const allocatedByItemId = new Map<string, number>();
+    for (const shipmentPackage of prepared.packages) {
+      const packageItemIds = new Set<string>();
+      for (const item of shipmentPackage.items) {
+        const remaining = remainingByItemId.get(item.orderItemId);
+        if (!remaining || remaining.order.id !== item.orderId) {
+          throw new Error('包裹中包含不属于当前发货组的商品');
+        }
+        if (packageItemIds.has(item.orderItemId)) {
+          throw new Error('同一包裹中的商品不能重复登记');
+        }
+        packageItemIds.add(item.orderItemId);
+        const allocated = (allocatedByItemId.get(item.orderItemId) ?? 0) + item.quantity;
+        if (allocated > remaining.item.quantity) {
+          throw new Error('实际发出数量不能超过当前剩余待发数量');
+        }
+        allocatedByItemId.set(item.orderItemId, allocated);
+      }
+    }
+    const now = new Date().toISOString();
+    const recordId = randomUUID();
+    const sourceOrderById = new Map(group.orders.map(({ id }) => (
+      [id, this.getOrder(id).order] as const
+    )));
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      workspace.database.prepare(`
+        INSERT INTO shipment_records (
+          id, source_group_id,
+          recipient, phone, phone_normalized,
+          address_original, address_normalized, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        recordId,
+        group.id,
+        group.recipient,
+        group.phone,
+        group.phoneNormalized,
+        group.addressOriginal,
+        group.addressNormalized,
+        now,
+      );
+      const allocatedOrderIds = new Set(prepared.packages.flatMap((shipmentPackage) => (
+        shipmentPackage.items.map((item) => item.orderId)
+      )));
+      const insertOrderSnapshot = workspace.database.prepare(`
+        INSERT INTO shipment_record_order_snapshots (
+          id, shipment_record_id, order_id,
+          order_number, seller_account, buyer_nickname,
+          recipient, phone, address_original,
+          amount_cents, revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const orderId of allocatedOrderIds) {
+        const sourceOrder = sourceOrderById.get(orderId);
+        if (!sourceOrder) throw new Error('发货订单来源已变化，请刷新后重试');
+        insertOrderSnapshot.run(
+          randomUUID(),
+          recordId,
+          sourceOrder.id,
+          sourceOrder.orderNumber,
+          sourceOrder.sellerAccount,
+          sourceOrder.buyerNickname,
+          sourceOrder.recipient,
+          sourceOrder.phone,
+          sourceOrder.addressOriginal,
+          sourceOrder.amountCents,
+          sourceOrder.revision,
+          now,
+        );
+      }
+      for (const [packagePosition, shipmentPackage] of prepared.packages.entries()) {
+        const packageId = randomUUID();
+        workspace.database.prepare(`
+          INSERT INTO shipment_packages (
+            id, shipment_record_id, position,
+            shipping_carrier, tracking_number, revision, created_at
+          ) VALUES (?, ?, ?, ?, ?, 1, ?)
+        `).run(
+          packageId,
+          recordId,
+          packagePosition,
+          shipmentPackage.shippingCarrier,
+          shipmentPackage.trackingNumber,
+          now,
+        );
+        for (const [itemPosition, allocation] of shipmentPackage.items.entries()) {
+          const source = remainingByItemId.get(allocation.orderItemId);
+          if (!source) throw new Error('包裹商品来源已变化，请刷新后重试');
+          const sourceItem = sourceOrderById.get(source.order.id)?.items.find(
+            ({ id }) => id === allocation.orderItemId,
+          );
+          if (!sourceItem) throw new Error('包裹商品来源已变化，请刷新后重试');
+          workspace.database.prepare(`
+            INSERT INTO shipment_package_items (
+              id, package_id, position,
+              order_id, source_order_item_id,
+              order_number, seller_account, buyer_nickname,
+              source_title, source_spec,
+              unit_price_cents, source_item_quantity,
+              quantity, subtotal_cents, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            randomUUID(),
+            packageId,
+            itemPosition,
+            source.order.id,
+            source.item.id,
+            source.order.orderNumber,
+            source.order.sellerAccount,
+            source.order.buyerNickname,
+            sourceItem.sourceTitle,
+            sourceItem.sourceSpec,
+            sourceItem.unitPriceCents,
+            sourceItem.quantity,
+            allocation.quantity,
+            sourceItem.unitPriceCents * allocation.quantity,
+            now,
+          );
+        }
+      }
+      for (const orderId of new Set(prepared.packages.flatMap((shipmentPackage) => (
+        shipmentPackage.items.map((item) => item.orderId)
+      )))) {
+        this.synchronizeShipmentOrderFulfillment(orderId, now);
+      }
+    });
+    return {
+      record: this.getShipmentRecord(recordId),
+      projection: this.queryShipmentGroups(),
+    };
+  }
+
+  public queryShipmentRecords(): ShipmentRecord[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT id
+      FROM shipment_records
+      ORDER BY created_at DESC, id DESC
+    `).all() as unknown as SqlRow[];
+    return rows.map((row) => this.getShipmentRecord(asString(row.id)));
+  }
+
+  public cancelShipmentPackages(input: unknown): ShipmentCancellationResult {
+    const prepared = normalizeCancelShipmentPackagesInput(input);
+    const record = this.getShipmentRecord(prepared.recordId);
+    if (record.status === 'voided') throw new Error('发货记录已经作废');
+    const packageById = new Map(record.packages.map((shipmentPackage) => (
+      [shipmentPackage.id, shipmentPackage] as const
+    )));
+    const packages = prepared.packageIds.map((packageId) => {
+      const shipmentPackage = packageById.get(packageId);
+      if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
+      if (shipmentPackage.status === 'cancelled') throw new Error('所选包裹已经撤销');
+      return shipmentPackage;
+    });
+    const now = new Date().toISOString();
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      const insertCancellation = workspace.database.prepare(`
+        INSERT INTO shipment_package_cancellation_events (
+          id, package_id, reason, created_at
+        ) VALUES (?, ?, ?, ?)
+      `);
+      for (const shipmentPackage of packages) {
+        insertCancellation.run(
+          randomUUID(),
+          shipmentPackage.id,
+          prepared.reason,
+          now,
+        );
+      }
+      const remainingRow = workspace.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM shipment_packages AS packages
+        LEFT JOIN shipment_package_cancellation_events AS cancellations
+          ON cancellations.package_id = packages.id
+        WHERE packages.shipment_record_id = ?
+          AND cancellations.id IS NULL
+      `).get(record.id) as SqlRow;
+      if (asNumber(remainingRow.count) === 0) {
+        workspace.database.prepare(`
+          INSERT INTO shipment_record_void_events (
+            id, shipment_record_id, reason, created_at
+          ) VALUES (?, ?, ?, ?)
+        `).run(randomUUID(), record.id, prepared.reason, now);
+      }
+      for (const orderId of new Set(packages.flatMap((shipmentPackage) => (
+        shipmentPackage.items.map((item) => item.orderId)
+      )))) {
+        this.synchronizeShipmentOrderFulfillment(orderId, now);
+      }
+    });
+    return {
+      record: this.getShipmentRecord(record.id),
+      projection: this.queryShipmentGroups(),
+    };
+  }
+
+  public correctShipmentPackageLogistics(
+    input: unknown,
+  ): ShipmentLogisticsCorrectionResult {
+    const prepared = normalizeCorrectShipmentPackageLogisticsInput(input);
+    const record = this.getShipmentRecord(prepared.recordId);
+    if (record.status === 'voided') throw new Error('已作废的发货记录不能更正物流');
+    const shipmentPackage = record.packages.find(({ id }) => id === prepared.packageId);
+    if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
+    if (shipmentPackage.status === 'cancelled') throw new Error('已撤销的包裹不能更正物流');
+    if (shipmentPackage.revision !== prepared.expectedRevision) {
+      throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
+    }
+    if (
+      shipmentPackage.shippingCarrier === prepared.shippingCarrier &&
+      shipmentPackage.trackingNumber === prepared.trackingNumber
+    ) {
+      throw new Error('包裹物流信息没有变化');
+    }
+    const now = new Date().toISOString();
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      const updated = workspace.database.prepare(`
+        UPDATE shipment_packages
+        SET shipping_carrier = ?, tracking_number = ?, revision = revision + 1
+        WHERE id = ? AND shipment_record_id = ? AND revision = ?
+      `).run(
+        prepared.shippingCarrier,
+        prepared.trackingNumber,
+        shipmentPackage.id,
+        record.id,
+        prepared.expectedRevision,
+      );
+      if (updated.changes !== 1) {
+        throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
+      }
+      workspace.database.prepare(`
+        INSERT INTO shipment_package_logistics_change_events (
+          id, package_id, base_revision, result_revision, reason,
+          before_shipping_carrier, before_tracking_number,
+          after_shipping_carrier, after_tracking_number, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        shipmentPackage.id,
+        shipmentPackage.revision,
+        shipmentPackage.revision + 1,
+        prepared.reason,
+        shipmentPackage.shippingCarrier,
+        shipmentPackage.trackingNumber,
+        prepared.shippingCarrier,
+        prepared.trackingNumber,
+        now,
+      );
+    });
+    return {
+      record: this.getShipmentRecord(record.id),
+      projection: this.queryShipmentGroups(),
+    };
+  }
+
+  private getShipmentRecord(recordId: string): ShipmentRecord {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT * FROM shipment_records WHERE id = ?
+    `).get(recordId) as SqlRow | undefined;
+    if (!row) throw new Error('发货记录不存在');
+    const packageRows = workspace.database.prepare(`
+      SELECT *
+      FROM shipment_packages
+      WHERE shipment_record_id = ?
+      ORDER BY position, id
+    `).all(recordId) as unknown as SqlRow[];
+    const sourceOrderRows = workspace.database.prepare(`
+      SELECT *
+      FROM shipment_record_order_snapshots
+      WHERE shipment_record_id = ?
+      ORDER BY order_number, order_id
+    `).all(recordId) as unknown as SqlRow[];
+    const sourceOrders = sourceOrderRows.map((sourceOrderRow): ShipmentSourceOrderSnapshot => ({
+      orderId: asString(sourceOrderRow.order_id),
+      orderNumber: asString(sourceOrderRow.order_number),
+      sellerAccount: asString(sourceOrderRow.seller_account),
+      buyerNickname: asString(sourceOrderRow.buyer_nickname),
+      recipient: asString(sourceOrderRow.recipient),
+      phone: asString(sourceOrderRow.phone),
+      addressOriginal: asString(sourceOrderRow.address_original),
+      amountCents: asNumber(sourceOrderRow.amount_cents),
+      revision: asNumber(sourceOrderRow.revision),
+    }));
+    const voidRow = workspace.database.prepare(`
+      SELECT reason, created_at
+      FROM shipment_record_void_events
+      WHERE shipment_record_id = ?
+    `).get(recordId) as SqlRow | undefined;
+    const packages = packageRows.map((packageRow): ShipmentPackage => {
+      const packageId = asString(packageRow.id);
+      const cancellationRow = workspace.database.prepare(`
+        SELECT reason, created_at
+        FROM shipment_package_cancellation_events
+        WHERE package_id = ?
+      `).get(packageId) as SqlRow | undefined;
+      const itemRows = workspace.database.prepare(`
+        SELECT *
+        FROM shipment_package_items
+        WHERE package_id = ?
+        ORDER BY position, id
+      `).all(packageId) as unknown as SqlRow[];
+      const changeRows = workspace.database.prepare(`
+        SELECT *
+        FROM shipment_package_logistics_change_events
+        WHERE package_id = ?
+        ORDER BY sequence
+      `).all(packageId) as unknown as SqlRow[];
+      const items = itemRows.map((itemRow): ShipmentPackageItem => ({
+        id: asString(itemRow.id),
+        orderId: asString(itemRow.order_id),
+        orderItemId: asString(itemRow.source_order_item_id),
+        orderNumber: asString(itemRow.order_number),
+        sellerAccount: asString(itemRow.seller_account),
+        buyerNickname: asString(itemRow.buyer_nickname),
+        sourceTitle: asString(itemRow.source_title),
+        sourceSpec: asString(itemRow.source_spec),
+        unitPriceCents: asNumber(itemRow.unit_price_cents),
+        sourceItemQuantity: asNumber(itemRow.source_item_quantity),
+        quantity: asNumber(itemRow.quantity),
+        subtotalCents: asNumber(itemRow.subtotal_cents),
+      }));
+      return {
+        id: packageId,
+        position: asNumber(packageRow.position),
+        status: cancellationRow ? 'cancelled' : 'active',
+        shippingCarrier: asString(packageRow.shipping_carrier),
+        trackingNumber: asString(packageRow.tracking_number),
+        revision: asNumber(packageRow.revision),
+        totalQuantity: items.reduce((total, item) => total + item.quantity, 0),
+        items,
+        cancellation: cancellationRow ? {
+          reason: asString(cancellationRow.reason),
+          createdAt: asString(cancellationRow.created_at),
+        } : null,
+        logisticsChanges: changeRows.map((changeRow) => ({
+          baseRevision: asNumber(changeRow.base_revision),
+          resultRevision: asNumber(changeRow.result_revision),
+          reason: asString(changeRow.reason),
+          before: {
+            shippingCarrier: asString(changeRow.before_shipping_carrier),
+            trackingNumber: asString(changeRow.before_tracking_number),
+          },
+          after: {
+            shippingCarrier: asString(changeRow.after_shipping_carrier),
+            trackingNumber: asString(changeRow.after_tracking_number),
+          },
+          createdAt: asString(changeRow.created_at),
+        })),
+        createdAt: asString(packageRow.created_at),
+      };
+    });
+    return {
+      id: asString(row.id),
+      sourceGroupId: asString(row.source_group_id),
+      status: voidRow ? 'voided' : 'active',
+      recipient: asString(row.recipient),
+      phone: asString(row.phone),
+      phoneNormalized: asString(row.phone_normalized),
+      addressOriginal: asString(row.address_original),
+      addressNormalized: asString(row.address_normalized),
+      totalQuantity: packages.reduce((total, shipmentPackage) => (
+        total + shipmentPackage.totalQuantity
+      ), 0),
+      packages,
+      sourceOrders,
+      sourceDifferences: this.shipmentSourceDifferences(sourceOrders, packages),
+      voiding: voidRow ? {
+        reason: asString(voidRow.reason),
+        createdAt: asString(voidRow.created_at),
+      } : null,
+      createdAt: asString(row.created_at),
+    };
+  }
+
+  private activeShippedQuantity(orderItemId: string): number {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT COALESCE(SUM(items.quantity), 0) AS quantity
+      FROM shipment_package_items AS items
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      LEFT JOIN shipment_package_cancellation_events AS cancellations
+        ON cancellations.package_id = packages.id
+      WHERE items.source_order_item_id = ?
+        AND cancellations.id IS NULL
+    `).get(orderItemId) as SqlRow;
+    return asNumber(row.quantity);
+  }
+
+  private shipmentSourceDifferences(
+    sourceOrders: readonly ShipmentSourceOrderSnapshot[],
+    packages: readonly ShipmentPackage[],
+  ): ShipmentSourceDifference[] {
+    const differences: ShipmentSourceDifference[] = [];
+    const currentOrderById = new Map(sourceOrders.map((snapshot) => (
+      [snapshot.orderId, this.getOrder(snapshot.orderId).order] as const
+    )));
+    const orderFields = [
+      ['orderNumber', 'orderNumber'],
+      ['sellerAccount', 'sellerAccount'],
+      ['buyerNickname', 'buyerNickname'],
+      ['recipient', 'recipient'],
+      ['phone', 'phone'],
+      ['addressOriginal', 'addressOriginal'],
+      ['amountCents', 'amountCents'],
+    ] as const;
+    for (const snapshot of sourceOrders) {
+      const current = currentOrderById.get(snapshot.orderId);
+      for (const [field, key] of orderFields) {
+        if (snapshot[key] === current?.[key]) continue;
+        differences.push({
+          orderId: snapshot.orderId,
+          orderItemId: null,
+          field,
+          snapshotValue: snapshot[key],
+          currentValue: current?.[key] ?? null,
+        });
+      }
+    }
+    const itemSnapshots = new Map(packages.flatMap((shipmentPackage) => (
+      shipmentPackage.items.map((item) => [item.orderItemId, item] as const)
+    )));
+    const itemFields = [
+      ['sourceTitle', 'sourceTitle'],
+      ['sourceSpec', 'sourceSpec'],
+      ['unitPriceCents', 'unitPriceCents'],
+      ['quantity', 'sourceItemQuantity'],
+    ] as const;
+    for (const snapshot of itemSnapshots.values()) {
+      const currentItem = currentOrderById.get(snapshot.orderId)?.items.find(
+        ({ id }) => id === snapshot.orderItemId,
+      );
+      for (const [field, snapshotKey] of itemFields) {
+        if (snapshot[snapshotKey] === currentItem?.[field]) continue;
+        differences.push({
+          orderId: snapshot.orderId,
+          orderItemId: snapshot.orderItemId,
+          field,
+          snapshotValue: snapshot[snapshotKey],
+          currentValue: currentItem?.[field] ?? null,
+        });
+      }
+    }
+    return differences;
+  }
+
+  private synchronizeShipmentOrderFulfillment(orderId: string, now: string): void {
+    const workspace = this.requireWorkspace();
+    const current = this.getOrder(orderId).order;
+    if (
+      current.lifecycleStatus !== 'active'
+      || current.platformTransactionStatus === 'cancelled'
+      || current.platformTransactionStatus === 'refunded'
+      || current.fulfillmentStatus === 'delivered'
+      || current.fulfillmentStatus === 'returned'
+    ) {
+      return;
+    }
+    const hasRemainingItems = current.items.some((item) => (
+      this.activeShippedQuantity(item.id) < item.quantity
+    ));
+    const nextStatus = hasRemainingItems ? 'pending_shipment' : 'shipped';
+    if (current.fulfillmentStatus === nextStatus) return;
+    const updated = workspace.database.prepare(`
+      UPDATE original_orders
+      SET fulfillment_status = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(nextStatus, now, current.id, current.revision);
+    if (updated.changes !== 1) {
+      throw new Error('订单已在其他操作中更新，请刷新后重试');
+    }
+    const eventId = randomUUID();
+    workspace.database.prepare(`
+      INSERT INTO order_change_events (
+        id, order_id, source_snapshot_id, source,
+        base_revision, result_revision, created_at
+      ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+    `).run(
+      eventId,
+      current.id,
+      current.revision,
+      current.revision + 1,
+      now,
+    );
+    workspace.database.prepare(`
+      INSERT INTO order_field_changes (
+        id, event_id, field_path, before_json, after_json
+      ) VALUES (?, ?, 'fulfillmentStatus', ?, ?)
+    `).run(
+      randomUUID(),
+      eventId,
+      JSON.stringify(current.fulfillmentStatus),
+      JSON.stringify(nextStatus),
+    );
   }
 
   public splitShipmentGroup(input: unknown): ShipmentGroupAdjustmentResult {
@@ -5439,6 +6005,31 @@ function parseOrderSummaryItems(serialized: string): OrderSummary['items'] {
     throw new Error('数据库订单商品摘要格式错误');
   }
   return parsed as OrderSummary['items'];
+}
+
+function assertExpectedShipmentItems(
+  expectedItems: readonly ShipmentItemQuantityInput[],
+  remainingByItemId: ReadonlyMap<string, {
+    order: { id: string };
+    item: { quantity: number };
+  }>,
+): void {
+  if (expectedItems.length !== remainingByItemId.size) {
+    throw new Error('发货组商品数量已变化，请刷新后重试');
+  }
+  const seenItemIds = new Set<string>();
+  for (const expected of expectedItems) {
+    const remaining = remainingByItemId.get(expected.orderItemId);
+    if (
+      !remaining ||
+      remaining.order.id !== expected.orderId ||
+      remaining.item.quantity !== expected.quantity ||
+      seenItemIds.has(expected.orderItemId)
+    ) {
+      throw new Error('发货组商品数量已变化，请刷新后重试');
+    }
+    seenItemIds.add(expected.orderItemId);
+  }
 }
 
 function parseShipmentGroupAdjustmentEvent(row: SqlRow): ShipmentGroupAdjustmentEvent {

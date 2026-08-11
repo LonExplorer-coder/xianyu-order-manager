@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v17 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v18 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -37,6 +37,7 @@ describe('数据库升级', () => {
       { version: 15 },
       { version: 16 },
       { version: 17 },
+      { version: 18 },
     ]);
     expect(
       first.database
@@ -49,7 +50,14 @@ describe('数据库升级', () => {
               'custom_field_values',
               'table_templates',
               'table_template_custom_field_dependencies',
-              'shipment_group_adjustment_events'
+              'shipment_group_adjustment_events',
+              'shipment_package_cancellation_events',
+              'shipment_package_items',
+              'shipment_package_logistics_change_events',
+              'shipment_packages',
+              'shipment_record_order_snapshots',
+              'shipment_record_void_events',
+              'shipment_records'
             )
           ORDER BY name
         `)
@@ -58,6 +66,13 @@ describe('数据库升级', () => {
       { name: 'custom_field_definitions' },
       { name: 'custom_field_values' },
       { name: 'shipment_group_adjustment_events' },
+      { name: 'shipment_package_cancellation_events' },
+      { name: 'shipment_package_items' },
+      { name: 'shipment_package_logistics_change_events' },
+      { name: 'shipment_packages' },
+      { name: 'shipment_record_order_snapshots' },
+      { name: 'shipment_record_void_events' },
+      { name: 'shipment_records' },
       { name: 'table_template_custom_field_dependencies' },
       { name: 'table_templates' },
     ]);
@@ -407,6 +422,7 @@ describe('数据库升级', () => {
       { version: 15 },
       { version: 16 },
       { version: 17 },
+      { version: 18 },
     ]);
     expect(
       (
@@ -649,6 +665,7 @@ describe('数据库升级', () => {
         { version: 15 },
         { version: 16 },
         { version: 17 },
+        { version: 18 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -847,7 +864,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 17 });
+        .toEqual({ version: 18 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -961,7 +978,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 17 });
+        .toEqual({ version: 18 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -981,10 +998,10 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
-        { version: 17 },
+        { version: 17 }, { version: 18 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1018,7 +1035,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 17 });
+        .toEqual({ version: 18 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1284,8 +1301,15 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
         DROP TABLE IF EXISTS candidate_adjudication_decisions;
         DROP TABLE IF EXISTS candidate_adjudication_runs;
+        DROP TABLE IF EXISTS shipment_package_logistics_change_events;
+        DROP TABLE IF EXISTS shipment_record_void_events;
+        DROP TABLE IF EXISTS shipment_package_cancellation_events;
+        DROP TABLE IF EXISTS shipment_package_items;
+        DROP TABLE IF EXISTS shipment_record_order_snapshots;
+        DROP TABLE IF EXISTS shipment_packages;
+        DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17);
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1313,8 +1337,15 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
       DROP TABLE IF EXISTS candidate_adjudication_decisions;
       DROP TABLE IF EXISTS candidate_adjudication_runs;
+      DROP TABLE IF EXISTS shipment_package_logistics_change_events;
+      DROP TABLE IF EXISTS shipment_record_void_events;
+      DROP TABLE IF EXISTS shipment_package_cancellation_events;
+      DROP TABLE IF EXISTS shipment_package_items;
+      DROP TABLE IF EXISTS shipment_record_order_snapshots;
+      DROP TABLE IF EXISTS shipment_packages;
+      DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17);
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18);
       COMMIT;
     `);
   } finally {
@@ -1339,8 +1370,15 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       ALTER TABLE original_orders DROP COLUMN tracking_number;
       DROP TABLE IF EXISTS candidate_adjudication_decisions;
       DROP TABLE IF EXISTS candidate_adjudication_runs;
+      DROP TABLE IF EXISTS shipment_package_logistics_change_events;
+      DROP TABLE IF EXISTS shipment_record_void_events;
+      DROP TABLE IF EXISTS shipment_package_cancellation_events;
+      DROP TABLE IF EXISTS shipment_package_items;
+      DROP TABLE IF EXISTS shipment_record_order_snapshots;
+      DROP TABLE IF EXISTS shipment_packages;
+      DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17);
+      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18);
       COMMIT;
     `);
   } catch (error) {
@@ -1542,8 +1580,15 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         ALTER TABLE order_drafts DROP COLUMN recognition_conflicts_json;
         DROP TABLE IF EXISTS candidate_adjudication_decisions;
         DROP TABLE IF EXISTS candidate_adjudication_runs;
+        DROP TABLE IF EXISTS shipment_package_logistics_change_events;
+        DROP TABLE IF EXISTS shipment_record_void_events;
+        DROP TABLE IF EXISTS shipment_package_cancellation_events;
+        DROP TABLE IF EXISTS shipment_package_items;
+        DROP TABLE IF EXISTS shipment_record_order_snapshots;
+        DROP TABLE IF EXISTS shipment_packages;
+        DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17);
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18);
       `);
       database.exec('COMMIT;');
     } catch (error) {
