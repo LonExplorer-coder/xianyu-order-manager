@@ -74,6 +74,10 @@ import {
   normalizeCustomFieldValue,
   parseStoredCustomFieldValue,
 } from '../core/custom-fields';
+import {
+  parseStoredShipmentArchiveOrderIds,
+  parseStoredShipmentArchiveRecipientSnapshots,
+} from '../core/shipment-archive-storage';
 import type {
   OrderItemWorkbenchQuery,
   OrderItemWorkbenchResult,
@@ -3180,7 +3184,7 @@ export class LocalApplication {
         this.getShipmentRecord(asString(recordRow.id))
       ));
       const sourceGroupId = asString(row.source_group_id);
-      const orderIds = parseStoredTextArray(
+      const orderIds = parseStoredShipmentArchiveOrderIds(
         asString(row.member_order_ids_json),
         '数据库发货组档案成员订单格式错误',
       );
@@ -3188,6 +3192,7 @@ export class LocalApplication {
       const recipientSnapshotByOrderId = new Map(
         parseStoredShipmentArchiveRecipientSnapshots(
           asString(row.member_recipient_snapshots_json),
+          '数据库发货组档案成员收货快照格式错误',
         ).map((snapshot) => [snapshot.orderId, snapshot] as const),
       );
       if (
@@ -6364,49 +6369,6 @@ function parseStoredTextArray(serialized: string, message: string): string[] {
     throw new Error(message);
   }
   return parsed;
-}
-
-type StoredShipmentArchiveRecipientSnapshot = {
-  orderId: string;
-  recipient: string;
-  phone: string;
-  addressOriginal: string;
-};
-
-function parseStoredShipmentArchiveRecipientSnapshots(
-  serialized: string,
-): StoredShipmentArchiveRecipientSnapshot[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(serialized);
-  } catch (error) {
-    throw new Error('数据库发货组档案成员收货快照格式错误', { cause: error });
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error('数据库发货组档案成员收货快照格式错误');
-  }
-  const snapshots = parsed.map((value) => {
-    if (
-      typeof value !== 'object' || value === null || Array.isArray(value) ||
-      typeof Reflect.get(value, 'orderId') !== 'string' ||
-      asString(Reflect.get(value, 'orderId')).length === 0 ||
-      typeof Reflect.get(value, 'recipient') !== 'string' ||
-      typeof Reflect.get(value, 'phone') !== 'string' ||
-      typeof Reflect.get(value, 'addressOriginal') !== 'string'
-    ) {
-      throw new Error('数据库发货组档案成员收货快照格式错误');
-    }
-    return {
-      orderId: asString(Reflect.get(value, 'orderId')),
-      recipient: asString(Reflect.get(value, 'recipient')),
-      phone: asString(Reflect.get(value, 'phone')),
-      addressOriginal: asString(Reflect.get(value, 'addressOriginal')),
-    };
-  });
-  if (new Set(snapshots.map(({ orderId }) => orderId)).size !== snapshots.length) {
-    throw new Error('数据库发货组档案成员收货快照格式错误');
-  }
-  return snapshots;
 }
 
 function asOptionalStoredMoney(

@@ -3,6 +3,11 @@ import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { normalizedOrderIdentityPart } from '../core/order-comparison';
+import {
+  parseStoredShipmentArchiveOrderIds,
+  parseStoredShipmentArchiveRecipientSnapshots,
+  type StoredShipmentArchiveRecipientSnapshot,
+} from '../core/shipment-archive-storage';
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
@@ -162,6 +167,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 18) migrateToVersion18(database);
   if (row.version < 19) migrateToVersion19(database);
   if (row.version < 20) migrateToVersion20(database);
+  if (row.version < 21) migrateToVersion21(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2058,6 +2064,260 @@ function migrateToVersion20(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+type ShipmentArchiveMergeMigrationRow = {
+  id: string;
+  recipient: string;
+  phone: string;
+  phone_normalized: string;
+  address_original: string;
+  address_normalized: string;
+  member_order_ids_json: string;
+  member_recipient_snapshots_json: string;
+  total_quantity: number;
+  created_at: string;
+  fully_shipped_at: string | null;
+  updated_at: string;
+};
+
+function migrateToVersion21(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    const archiveRows = database.prepare(`
+      SELECT
+        id,
+        recipient,
+        phone,
+        phone_normalized,
+        address_original,
+        address_normalized,
+        member_order_ids_json,
+        member_recipient_snapshots_json,
+        total_quantity,
+        created_at,
+        fully_shipped_at,
+        updated_at
+      FROM shipment_group_archives
+      ORDER BY created_at, id
+    `).all() as unknown as ShipmentArchiveMergeMigrationRow[];
+    const parentByArchiveId = new Map(archiveRows.map(({ id }) => [id, id]));
+
+    function rootOf(archiveId: string): string {
+      const parentId = parentByArchiveId.get(archiveId);
+      if (!parentId) throw new Error('旧版发货组档案归并关系无效');
+      if (parentId === archiveId) return archiveId;
+      const rootId = rootOf(parentId);
+      parentByArchiveId.set(archiveId, rootId);
+      return rootId;
+    }
+
+    function joinArchives(leftId: string, rightId: string): void {
+      const leftRoot = rootOf(leftId);
+      const rightRoot = rootOf(rightId);
+      if (leftRoot === rightRoot) return;
+      parentByArchiveId.set(rightRoot, leftRoot);
+    }
+
+    const firstArchiveIdByOrderId = new Map<string, string>();
+    const orderIdsByArchiveId = new Map<string, string[]>();
+    const snapshotsByArchiveId = new Map<
+      string,
+      StoredShipmentArchiveRecipientSnapshot[]
+    >();
+    for (const archive of archiveRows) {
+      const orderIds = parseStoredShipmentArchiveOrderIds(
+        archive.member_order_ids_json,
+        '旧版发货组档案成员订单格式错误',
+      );
+      const snapshots = parseStoredShipmentArchiveRecipientSnapshots(
+        archive.member_recipient_snapshots_json,
+        '旧版发货组档案成员收货快照格式错误',
+      );
+      const orderIdSet = new Set(orderIds);
+      if (
+        snapshots.length !== orderIds.length ||
+        snapshots.some(({ orderId }) => !orderIdSet.has(orderId))
+      ) {
+        throw new Error('旧版发货组档案成员与收货快照不一致');
+      }
+      orderIdsByArchiveId.set(archive.id, orderIds);
+      snapshotsByArchiveId.set(archive.id, snapshots);
+      for (const orderId of orderIds) {
+        const firstArchiveId = firstArchiveIdByOrderId.get(orderId);
+        if (firstArchiveId) joinArchives(firstArchiveId, archive.id);
+        else firstArchiveIdByOrderId.set(orderId, archive.id);
+      }
+    }
+
+    const archivesByRootId = new Map<string, ShipmentArchiveMergeMigrationRow[]>();
+    for (const archive of archiveRows) {
+      const rootId = rootOf(archive.id);
+      const component = archivesByRootId.get(rootId) ?? [];
+      component.push(archive);
+      archivesByRootId.set(rootId, component);
+    }
+    const legacyConnectedComponents = [...archivesByRootId.values()]
+      .filter((component) => (
+        component.some(({ id }) => (
+          id.startsWith('legacy-shipment-group-archive-')
+        ))
+      ));
+
+    if (legacyConnectedComponents.length > 0) {
+      const reassignsRecords = legacyConnectedComponents.some(
+        (component) => component.length > 1,
+      );
+      if (reassignsRecords) {
+        database.exec('DROP TRIGGER shipment_records_are_immutable_on_update;');
+      }
+      const reassignRecord = database.prepare(`
+        UPDATE shipment_records
+        SET shipment_group_archive_id = ?
+        WHERE shipment_group_archive_id = ?
+      `);
+      const updateCanonicalArchive = database.prepare(`
+        UPDATE shipment_group_archives
+        SET
+          status = ?,
+          recipient = ?,
+          phone = ?,
+          phone_normalized = ?,
+          address_original = ?,
+          address_normalized = ?,
+          member_order_ids_json = ?,
+          member_recipient_snapshots_json = ?,
+          total_quantity = ?,
+          created_at = ?,
+          fully_shipped_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `);
+      const deleteArchive = database.prepare(`
+        DELETE FROM shipment_group_archives
+        WHERE id = ?
+      `);
+      const activeQuantityForArchive = database.prepare(`
+        SELECT COALESCE(SUM(items.quantity), 0) AS quantity
+        FROM shipment_package_items AS items
+        JOIN shipment_packages AS packages ON packages.id = items.package_id
+        JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+        LEFT JOIN shipment_package_cancellation_events AS cancellations
+          ON cancellations.package_id = packages.id
+        WHERE records.shipment_group_archive_id = ?
+          AND cancellations.id IS NULL
+      `);
+
+      for (const component of legacyConnectedComponents) {
+        component.sort((left, right) => (
+          left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)
+        ));
+        const [canonicalArchive, ...duplicateArchives] = component;
+        for (const duplicateArchive of duplicateArchives) {
+          reassignRecord.run(canonicalArchive.id, duplicateArchive.id);
+        }
+
+        const mergedOrderIds = [...new Set(component.flatMap((archive) => {
+          const orderIds = orderIdsByArchiveId.get(archive.id);
+          if (!orderIds) throw new Error('旧版发货组档案成员订单缺失');
+          return orderIds;
+        }))].sort();
+        const preferredFinalArchive = component
+          .filter(({ id }) => !id.startsWith('legacy-shipment-group-archive-'))
+          .reduce<ShipmentArchiveMergeMigrationRow | null>((latest, archive) => {
+            if (!latest) return archive;
+            if (archive.created_at !== latest.created_at) {
+              return archive.created_at > latest.created_at ? archive : latest;
+            }
+            return archive.id > latest.id ? archive : latest;
+          }, null) ?? canonicalArchive;
+        const snapshotByOrderId = new Map<
+          string,
+          StoredShipmentArchiveRecipientSnapshot
+        >();
+        for (const archive of [...component].reverse()) {
+          const snapshots = snapshotsByArchiveId.get(archive.id);
+          if (!snapshots) throw new Error('旧版发货组档案成员收货快照缺失');
+          for (const snapshot of snapshots) {
+            if (!snapshotByOrderId.has(snapshot.orderId)) {
+              snapshotByOrderId.set(snapshot.orderId, snapshot);
+            }
+          }
+        }
+        if (mergedOrderIds.some((orderId) => !snapshotByOrderId.has(orderId))) {
+          throw new Error('旧版发货组档案缺少成员收货快照');
+        }
+        const recordedTotalQuantity = component.reduce(
+          (total, archive) => total + archive.total_quantity,
+          0,
+        );
+        const memberQuantityRow = database.prepare(`
+          SELECT COALESCE(SUM(quantity), 0) AS quantity
+          FROM order_items
+          WHERE order_id IN (${mergedOrderIds.map(() => '?').join(', ')})
+        `).get(...mergedOrderIds) as { quantity: number };
+        const mergedTotalQuantity = Math.max(
+          recordedTotalQuantity,
+          memberQuantityRow.quantity,
+        );
+        const activeQuantityRow = activeQuantityForArchive.get(
+          canonicalArchive.id,
+        ) as { quantity: number };
+        const fullyShipped = activeQuantityRow.quantity >= mergedTotalQuantity;
+        const updatedAt = component.reduce((latest, archive) => (
+          archive.updated_at > latest ? archive.updated_at : latest
+        ), canonicalArchive.updated_at);
+        const fullyShippedAt = fullyShipped
+          ? component.reduce<string | null>((latest, archive) => {
+            const candidate = archive.fully_shipped_at;
+            if (!candidate) return latest;
+            return !latest || candidate > latest ? candidate : latest;
+          }, null) ?? updatedAt
+          : null;
+        updateCanonicalArchive.run(
+          fullyShipped ? 'fully_shipped' : 'partially_shipped',
+          preferredFinalArchive.recipient,
+          preferredFinalArchive.phone,
+          preferredFinalArchive.phone_normalized,
+          preferredFinalArchive.address_original,
+          preferredFinalArchive.address_normalized,
+          JSON.stringify(mergedOrderIds),
+          JSON.stringify(mergedOrderIds.map((orderId) => snapshotByOrderId.get(orderId))),
+          mergedTotalQuantity,
+          canonicalArchive.created_at,
+          fullyShippedAt,
+          updatedAt,
+          canonicalArchive.id,
+        );
+        for (const duplicateArchive of duplicateArchives) {
+          deleteArchive.run(duplicateArchive.id);
+        }
+      }
+
+      if (reassignsRecords) {
+        database.exec(`
+          CREATE TRIGGER shipment_records_are_immutable_on_update
+          BEFORE UPDATE ON shipment_records
+          BEGIN
+            SELECT RAISE(ABORT, 'shipment records are immutable');
+          END;
+        `);
+      }
+    }
+
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (21, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
   }
 }
 

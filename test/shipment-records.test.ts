@@ -732,7 +732,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21);
         COMMIT;
       `);
     } finally {
@@ -759,7 +759,7 @@ describe('发货记录', () => {
     ]);
   });
 
-  it('升级旧版部分发货记录时按该记录数量建立已全部发货档案', async () => {
+  it('升级旧版部分发货记录时按订单完整数量恢复为部分发货档案', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-partial-v18-shipment-migration-'));
     const application = await createApplication(root);
     const group = application.queryShipmentGroups().groups[0];
@@ -787,7 +787,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21);
         COMMIT;
       `);
     } finally {
@@ -798,15 +798,379 @@ describe('发货记录', () => {
     expect(reopened.queryShipmentGroupArchives()).toEqual([
       expect.objectContaining({
         id: `legacy-shipment-group-archive-${confirmation.record.id}`,
-        status: 'fully_shipped',
+        status: 'partially_shipped',
         shippedQuantity: 1,
-        remainingQuantity: 0,
-        totalQuantity: 1,
+        remainingQuantity: 1,
+        totalQuantity: 2,
+        remainingGroup: expect.objectContaining({
+          orderCount: 1,
+          totalQuantity: 1,
+        }),
       }),
     ]);
     expect(reopened.queryShipmentGroups().groups).toEqual([
-      expect.objectContaining({ totalQuantity: 3 }),
+      expect.objectContaining({
+        orderCount: 1,
+        orders: [expect.objectContaining({ id: group.orders[1].id })],
+        totalQuantity: 2,
+      }),
     ]);
+  });
+
+  it('升级旧版同一订单的多条发货记录时归入同一档案并按商品数量去重', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-overlapping-v18-shipment-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V18-SAME-ORDER-1',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    const remainingGroup = first.archive.remainingGroup;
+    if (!remainingGroup) throw new Error('测试要求第一次发货后仍有剩余商品');
+    const second = application.confirmShipment({
+      groupId: remainingGroup.id,
+      archiveId: first.archive.id,
+      expectedRemainingItems: remainingGroup.orders.flatMap((order) => (
+        order.items.map((item) => ({
+          orderId: order.id,
+          orderItemId: item.id,
+          quantity: item.quantity,
+        }))
+      )),
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V18-SAME-ORDER-2',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        DROP TRIGGER shipment_records_require_archive_on_insert;
+        ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
+        DROP TABLE shipment_group_archives;
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21);
+        COMMIT;
+      `);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        status: 'fully_shipped',
+        orderIds: [firstOrder.id],
+        orderNumbers: [firstOrder.orderNumber],
+        shippedQuantity: 2,
+        remainingQuantity: 0,
+        totalQuantity: 2,
+        records: expect.arrayContaining([
+          expect.objectContaining({ id: first.record.id }),
+          expect.objectContaining({ id: second.record.id }),
+        ]),
+      }),
+    ]);
+  });
+
+  it('升级已继续发货的数据时把承接同一订单的新档案归入旧版历史档案', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-overlapping-v20-archive-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V20-LEGACY-PART',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    const remainingGroup = first.archive.remainingGroup;
+    if (!remainingGroup) throw new Error('测试要求第一次发货后仍有剩余商品');
+    const remainingItems = remainingGroup.orders.flatMap((order) => (
+      order.items.map((item) => ({
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+      }))
+    ));
+    const second = application.confirmShipment({
+      groupId: remainingGroup.id,
+      archiveId: first.archive.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V20-CONTINUED',
+        items: remainingItems,
+      }],
+    });
+    application.close();
+
+    const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
+    const version20Database = new DatabaseSync(databasePath);
+    const legacyArchiveId = `legacy-shipment-group-archive-${first.record.id}`;
+    const latestRecipient = {
+      recipient: '新收件人',
+      phone: '13900000002',
+      phoneNormalized: '13900000002',
+      addressOriginal: '广东省深圳市福田区新址路2号',
+      addressNormalized: '广东省深圳市福田区新址路2号',
+    };
+    try {
+      version20Database.exec(`
+        BEGIN IMMEDIATE;
+        DROP TRIGGER shipment_records_are_immutable_on_update;
+      `);
+      version20Database.prepare(`
+        INSERT INTO shipment_group_archives (
+          id, source_group_id, status,
+          recipient, phone, phone_normalized,
+          address_original, address_normalized,
+          member_order_ids_json, member_recipient_snapshots_json,
+          total_quantity, created_at, fully_shipped_at, updated_at
+        ) VALUES (?, ?, 'fully_shipped', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(
+        legacyArchiveId,
+        group.id,
+        firstOrder.recipient,
+        firstOrder.phone,
+        firstOrder.phoneNormalized,
+        firstOrder.addressOriginal,
+        firstOrder.addressNormalized,
+        JSON.stringify([firstOrder.id]),
+        JSON.stringify([{
+          orderId: firstOrder.id,
+          recipient: firstOrder.recipient,
+          phone: firstOrder.phone,
+          addressOriginal: firstOrder.addressOriginal,
+        }]),
+        first.record.createdAt,
+        first.record.createdAt,
+        first.record.createdAt,
+      );
+      version20Database.prepare(`
+        UPDATE shipment_records
+        SET shipment_group_archive_id = ?
+        WHERE id = ?
+      `).run(legacyArchiveId, first.record.id);
+      version20Database.prepare(`
+        UPDATE shipment_group_archives
+        SET
+          recipient = ?,
+          phone = ?,
+          phone_normalized = ?,
+          address_original = ?,
+          address_normalized = ?,
+          total_quantity = 3,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        latestRecipient.recipient,
+        latestRecipient.phone,
+        latestRecipient.phoneNormalized,
+        latestRecipient.addressOriginal,
+        latestRecipient.addressNormalized,
+        second.record.createdAt,
+        first.archive.id,
+      );
+      version20Database.exec(`
+        CREATE TRIGGER shipment_records_are_immutable_on_update
+        BEFORE UPDATE ON shipment_records
+        BEGIN
+          SELECT RAISE(ABORT, 'shipment records are immutable');
+        END;
+        DELETE FROM schema_migrations WHERE version = 21;
+        COMMIT;
+      `);
+    } finally {
+      version20Database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentGroupArchives()).toEqual([
+      expect.objectContaining({
+        status: 'fully_shipped',
+        orderIds: group.orders.map(({ id }) => id).sort(),
+        shippedQuantity: 4,
+        remainingQuantity: 0,
+        totalQuantity: 4,
+        recipient: latestRecipient.recipient,
+        phone: latestRecipient.phone,
+        phoneNormalized: latestRecipient.phoneNormalized,
+        addressOriginal: latestRecipient.addressOriginal,
+        addressNormalized: latestRecipient.addressNormalized,
+        records: expect.arrayContaining([
+          expect.objectContaining({ id: first.record.id }),
+          expect.objectContaining({ id: second.record.id }),
+        ]),
+      }),
+    ]);
+  });
+
+  it('旧版重叠档案证据损坏时整体回滚归并、记录和不可变触发器', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-overlapping-archive-rollback-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const first = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-MERGE-ROLLBACK-1',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    const remainingGroup = first.archive.remainingGroup;
+    if (!remainingGroup) throw new Error('测试要求第一次发货后仍有剩余商品');
+    const remainingItems = remainingGroup.orders.flatMap((order) => (
+      order.items.map((item) => ({
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+      }))
+    ));
+    application.confirmShipment({
+      groupId: remainingGroup.id,
+      archiveId: first.archive.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-MERGE-ROLLBACK-2',
+        items: remainingItems,
+      }],
+    });
+    application.close();
+
+    const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
+    const legacyArchiveId = `legacy-shipment-group-archive-${first.record.id}`;
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec(`
+        BEGIN IMMEDIATE;
+        DROP TRIGGER shipment_records_are_immutable_on_update;
+      `);
+      database.prepare(`
+        INSERT INTO shipment_group_archives (
+          id, source_group_id, status,
+          recipient, phone, phone_normalized,
+          address_original, address_normalized,
+          member_order_ids_json, member_recipient_snapshots_json,
+          total_quantity, created_at, fully_shipped_at, updated_at
+        ) VALUES (?, ?, 'fully_shipped', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(
+        legacyArchiveId,
+        group.id,
+        firstOrder.recipient,
+        firstOrder.phone,
+        firstOrder.phoneNormalized,
+        firstOrder.addressOriginal,
+        firstOrder.addressNormalized,
+        JSON.stringify([firstOrder.id]),
+        JSON.stringify([
+          {
+            orderId: firstOrder.id,
+            recipient: firstOrder.recipient,
+            phone: firstOrder.phone,
+            addressOriginal: firstOrder.addressOriginal,
+          },
+          {
+            orderId: 'unrelated-order-snapshot',
+            recipient: firstOrder.recipient,
+            phone: firstOrder.phone,
+            addressOriginal: firstOrder.addressOriginal,
+          },
+        ]),
+        first.record.createdAt,
+        first.record.createdAt,
+        first.record.createdAt,
+      );
+      database.prepare(`
+        UPDATE shipment_records
+        SET shipment_group_archive_id = ?
+        WHERE id = ?
+      `).run(legacyArchiveId, first.record.id);
+      database.exec(`
+        CREATE TRIGGER shipment_records_are_immutable_on_update
+        BEFORE UPDATE ON shipment_records
+        BEGIN
+          SELECT RAISE(ABORT, 'shipment records are immutable');
+        END;
+        DELETE FROM schema_migrations WHERE version = 21;
+        COMMIT;
+      `);
+    } finally {
+      database.close();
+    }
+
+    expect(() => createApplication(root, false)).rejects.toThrow(
+      '旧版发货组档案成员与收货快照不一致',
+    );
+    const checked = new DatabaseSync(databasePath);
+    try {
+      expect(checked.prepare(`
+        SELECT version FROM schema_migrations WHERE version = 21
+      `).get()).toBeUndefined();
+      expect(checked.prepare(`
+        SELECT shipment_group_archive_id AS archiveId
+        FROM shipment_records
+        WHERE id = ?
+      `).get(first.record.id)).toEqual({ archiveId: legacyArchiveId });
+      expect(checked.prepare(`
+        SELECT COUNT(*) AS count FROM shipment_group_archives
+      `).get()).toEqual({ count: 2 });
+      expect(() => checked.prepare(`
+        UPDATE shipment_records SET source_group_id = source_group_id WHERE id = ?
+      `).run(first.record.id)).toThrow('shipment records are immutable');
+    } finally {
+      checked.close();
+    }
   });
 
   it('把 v19 错标完成的部分发货档案升级并保留包裹、数量与外键', async () => {
@@ -887,7 +1251,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version = 20;
+        DELETE FROM schema_migrations WHERE version IN (20, 21);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -962,7 +1326,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21);
         COMMIT;
       `);
     } finally {
