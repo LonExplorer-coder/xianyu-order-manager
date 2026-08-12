@@ -209,7 +209,7 @@ export function OrderExportDialog({
           />
           <span>
             <strong>附加订单商品明细表</strong>
-            <small>每行对应订单中的一个商品，用“订单号 + 商品序号”定位。</small>
+            <small>每行对应订单中的一个商品，用“系统订单编号 + 商品序号”稳定定位。</small>
           </span>
         </label>
 

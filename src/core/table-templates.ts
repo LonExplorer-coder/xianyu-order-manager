@@ -573,11 +573,19 @@ export function createOrderTableProjectionPlan(
   layout: readonly TableTemplateLayoutItem[],
   orders: readonly OrderSummary[],
   customFieldDefinitions: readonly CustomFieldDefinition[] = [],
+  maximumItemCount?: number,
 ): OrderTableProjectionPlan {
-  const maxItemCount = orders.reduce(
+  const observedMaximumItemCount = orders.reduce(
     (maximum, order) => Math.max(maximum, order.items.length),
     0,
   );
+  if (maximumItemCount !== undefined && (
+    !Number.isSafeInteger(maximumItemCount)
+    || maximumItemCount < observedMaximumItemCount
+  )) {
+    throw new Error('订单商品动态列数无效');
+  }
+  const maxItemCount = maximumItemCount ?? observedMaximumItemCount;
   const columns = layout.flatMap((item): OrderTableProjectionColumn[] => {
     if (!isDynamicProductTableGroup(item)) {
       return [{

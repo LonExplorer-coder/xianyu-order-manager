@@ -1632,15 +1632,22 @@ export class LocalApplication {
   }
 
   public previewOrderExport(input: OrderExportInput): OrderExportPreviewResult {
-    const prepared = this.prepareOrderExport(input);
+    const prepared = this.prepareOrderExport(input, 5);
     return {
       orderCount: prepared.orderCount,
       orderItemCount: prepared.orderItemCount,
-      sheets: createOrderExportPreviewSheets(prepared.plan),
+      sheets: createOrderExportPreviewSheets(prepared.plan, 5, {
+        '订单总表': prepared.orderCount,
+        ...(
+          prepared.orderItemCount === null
+            ? {}
+            : { '订单商品明细表': prepared.orderItemCount }
+        ),
+      }),
     };
   }
 
-  private prepareOrderExport(input: OrderExportInput): {
+  private prepareOrderExport(input: OrderExportInput, previewRowLimit?: number): {
     plan: OrderExportWorkbookPlan;
     orderCount: number;
     orderItemCount: number | null;
@@ -1666,19 +1673,38 @@ export class LocalApplication {
       : [];
     const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
     const orderItemCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderItemColumns);
+    const scopeStats = previewRowLimit === undefined
+      ? null
+      : this.orderExportScopeStats(orderIds);
+    if (scopeStats && scopeStats.orderCount !== orderIds.length) {
+      throw new Error('部分订单已变化，请刷新订单表后重新导出');
+    }
+    const projectedOrderIds = previewRowLimit === undefined
+      ? orderIds
+      : orderIds.slice(0, previewRowLimit);
 
     const orderResult = this.queryOrders(
       { lifecycleStatus: 'all' },
       orderCustomDefinitionIds,
-      orderIds,
+      projectedOrderIds,
     );
-    if (orderResult.orders.length !== orderIds.length) {
+    if (orderResult.orders.length !== projectedOrderIds.length) {
       throw new Error('部分订单已变化，请刷新订单表后重新导出');
     }
-    const orderItemResult = normalizedInput.includeOrderItems
-      ? this.queryOrderItems({}, orderItemCustomDefinitionIds, orderIds, true)
+    const queriedOrderItems = normalizedInput.includeOrderItems
+      ? this.queryOrderItems({}, orderItemCustomDefinitionIds, projectedOrderIds, true)
       : { items: [], customFieldValues: [] };
-    const addressRegions = this.orderExportAddressRegions(orderIds);
+    const orderItemResult = previewRowLimit === undefined
+      ? queriedOrderItems
+      : {
+          items: queriedOrderItems.items.slice(0, previewRowLimit),
+          customFieldValues: queriedOrderItems.customFieldValues.filter((value) => (
+            value.orderItemId !== null
+            && queriedOrderItems.items.slice(0, previewRowLimit)
+              .some((item) => item.id === value.orderItemId)
+          )),
+        };
+    const addressRegions = this.orderExportAddressRegions(projectedOrderIds);
     const plan = createOrderExportWorkbookPlan({
       masking: normalizedInput.masking,
       includeOrderItems: normalizedInput.includeOrderItems,
@@ -1690,11 +1716,40 @@ export class LocalApplication {
       orderCustomFieldValues: orderResult.customFieldValues,
       orderItemCustomFieldValues: orderItemResult.customFieldValues,
       addressRegions,
+      ...(scopeStats ? { orderMaximumItemCount: scopeStats.maximumItemCount } : {}),
     });
     return {
       plan,
-      orderCount: orderResult.orders.length,
-      orderItemCount: normalizedInput.includeOrderItems ? orderItemResult.items.length : null,
+      orderCount: scopeStats?.orderCount ?? orderResult.orders.length,
+      orderItemCount: normalizedInput.includeOrderItems
+        ? scopeStats?.orderItemCount ?? orderItemResult.items.length
+        : null,
+    };
+  }
+
+  private orderExportScopeStats(orderIds: readonly string[]): {
+    orderCount: number;
+    orderItemCount: number;
+    maximumItemCount: number;
+  } {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT
+        COUNT(*) AS order_count,
+        COALESCE(SUM(item_count), 0) AS order_item_count,
+        COALESCE(MAX(item_count), 0) AS maximum_item_count
+      FROM (
+        SELECT orders.id, COUNT(items.id) AS item_count
+        FROM original_orders AS orders
+        LEFT JOIN order_items AS items ON items.order_id = orders.id
+        WHERE orders.id IN (SELECT value FROM json_each(?))
+        GROUP BY orders.id
+      )
+    `).get(JSON.stringify(orderIds)) as SqlRow;
+    return {
+      orderCount: asNumber(row.order_count),
+      orderItemCount: asNumber(row.order_item_count),
+      maximumItemCount: asNumber(row.maximum_item_count),
     };
   }
 

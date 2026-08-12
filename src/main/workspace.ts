@@ -2776,6 +2776,7 @@ function migrateToVersion26(database: DatabaseSync): void {
 
 function migrateToVersion27(database: DatabaseSync): void {
   const migratedAt = new Date().toISOString();
+  database.exec('PRAGMA foreign_keys = OFF;');
   database.exec('BEGIN IMMEDIATE;');
   try {
     database.exec(`
@@ -2798,15 +2799,51 @@ function migrateToVersion27(database: DatabaseSync): void {
       dailySequences.set(dateKey, sequence);
       assignNumber.run(systemOrderNumberForSequence(dateKey, sequence), order.id);
     }
+    const orderCreateSql = storedCreateTableSql(database, 'original_orders');
+    const renamedOrderCreateSql = orderCreateSql.replace(
+      /CREATE TABLE "?original_orders"?/u,
+      'CREATE TABLE original_orders_v27',
+    );
+    if (renamedOrderCreateSql === orderCreateSql) {
+      throw new Error('无法重建原始订单表');
+    }
+    const orderV27Sql = renamedOrderCreateSql.replace(
+      'system_order_number TEXT',
+      `system_order_number TEXT NOT NULL CHECK (
+        system_order_number GLOB
+          '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+        AND substr(system_order_number, 10, 6) <> '000000'
+      )`,
+    );
+    if (orderV27Sql === renamedOrderCreateSql) {
+      throw new Error('无法为系统订单编号建立数据库约束');
+    }
+    database.exec(`${orderV27Sql};`);
+    const orderColumns = storedTableColumnNames(database, 'original_orders');
+    const orderColumnList = orderColumns.map((column) => `"${column}"`).join(', ');
     database.exec(`
+      INSERT INTO original_orders_v27 (${orderColumnList})
+      SELECT ${orderColumnList} FROM original_orders;
+
+      DROP TABLE original_orders;
+      ALTER TABLE original_orders_v27 RENAME TO original_orders;
+
+      CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (
+        platform,
+        seller_account_normalized,
+        platform_order_number_normalized
+      );
+
       CREATE UNIQUE INDEX original_orders_by_system_order_number
       ON original_orders (system_order_number);
 
       CREATE TRIGGER original_orders_require_system_order_number_on_insert
       BEFORE INSERT ON original_orders
       WHEN NEW.system_order_number IS NULL
-        OR length(NEW.system_order_number) <> 15
-        OR substr(NEW.system_order_number, 9, 1) <> '-'
+        OR NEW.system_order_number NOT GLOB
+          '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+        OR substr(NEW.system_order_number, 10, 6) = '000000'
       BEGIN
         SELECT RAISE(ABORT, 'system order number is required');
       END;
@@ -2818,6 +2855,7 @@ function migrateToVersion27(database: DatabaseSync): void {
         SELECT RAISE(ABORT, 'system order number is immutable');
       END;
     `);
+    assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (27, ?)')
       .run(migratedAt);
@@ -2829,6 +2867,8 @@ function migrateToVersion27(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

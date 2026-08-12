@@ -42,6 +42,7 @@ export type OrderExportWorkbookSource = {
   orderCustomFieldValues: CustomFieldValueRecord[];
   orderItemCustomFieldValues: CustomFieldValueRecord[];
   addressRegions: ReadonlyMap<string, OrderExportAddressRegion>;
+  orderMaximumItemCount?: number;
 };
 
 type WorkbookCellValue = string | number | boolean | Date | null;
@@ -64,6 +65,7 @@ export type OrderExportWorkbookPlan = {
 export function createOrderExportPreviewSheets(
   plan: OrderExportWorkbookPlan,
   rowLimit = 5,
+  totalRowCounts: Partial<Record<OrderExportWorksheetPlan['name'], number>> = {},
 ): OrderExportPreviewSheet[] {
   if (!Number.isSafeInteger(rowLimit) || rowLimit < 1) {
     throw new Error('订单导出预览行数无效');
@@ -77,7 +79,7 @@ export function createOrderExportPreviewSheets(
         worksheet.columns[index]?.valueType,
       ))
     )),
-    totalRowCount: worksheet.rows.length,
+    totalRowCount: totalRowCounts[worksheet.name] ?? worksheet.rows.length,
   }));
 }
 
@@ -89,6 +91,7 @@ export function createOrderExportWorkbookPlan(
     source.orderColumns,
     source.orders,
     source.customFieldDefinitions,
+    source.orderMaximumItemCount,
   );
   assertExcelColumnCount('订单总表', orderProjection.columns.length);
 

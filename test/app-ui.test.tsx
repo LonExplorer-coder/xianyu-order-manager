@@ -7187,6 +7187,98 @@ describe('订单管理工作台', () => {
     expect(within(reopened).getByRole('checkbox', { name: /导出时脱敏/u })).toBeChecked();
   });
 
+  it('导出预览只接受最新模板请求，较晚返回的旧结果不会覆盖界面', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-latest-preview',
+      name: '最新预览模板',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '最新表头' }],
+      query: {},
+      createdAt: '2026-08-13T00:00:00.000Z',
+      updatedAt: '2026-08-13T00:00:00.000Z',
+    };
+    type PreviewResult = Awaited<ReturnType<DesktopApi['previewOrderExport']>>;
+    let resolveOld!: (result: PreviewResult) => void;
+    let resolveLatest!: (result: PreviewResult) => void;
+    const oldRequest = new Promise<PreviewResult>((resolve) => {
+      resolveOld = resolve;
+    });
+    const latestRequest = new Promise<PreviewResult>((resolve) => {
+      resolveLatest = resolve;
+    });
+    const previewOrderExport = vi.fn()
+      .mockReturnValueOnce(oldRequest)
+      .mockReturnValueOnce(latestRequest);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      previewOrderExport,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    await within(dialog).findByRole('option', { name: template.name });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '订单总表模板' }),
+      template.id,
+    );
+    await act(async () => resolveLatest({
+      orderCount: 1,
+      orderItemCount: null,
+      sheets: [exportPreviewSheet('订单总表', ['最新表头'], [[summary.orderNumber]])],
+    }));
+    expect(await within(dialog).findByRole('columnheader', { name: '最新表头' })).toBeVisible();
+
+    await act(async () => resolveOld({
+      orderCount: 1,
+      orderItemCount: null,
+      sheets: [exportPreviewSheet('订单总表', ['过期表头'], [['过期值']])],
+    }));
+    expect(within(dialog).queryByRole('columnheader', { name: '过期表头' }))
+      .not.toBeInTheDocument();
+    expect(within(dialog).getByRole('columnheader', { name: '最新表头' })).toBeVisible();
+  });
+
+  it('真实导出预览加载中或失败时禁止保存', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    let rejectPreview!: (reason: Error) => void;
+    const pendingPreview = new Promise<Awaited<ReturnType<DesktopApi['previewOrderExport']>>>(
+      (_resolve, reject) => {
+        rejectPreview = reject;
+      },
+    );
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      previewOrderExport: vi.fn().mockReturnValue(pendingPreview),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
+    const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(within(dialog).getByRole('status')).toHaveTextContent('正在生成真实导出预览');
+    expect(within(dialog).getByRole('button', { name: '保存 Excel' })).toBeDisabled();
+
+    await act(async () => rejectPreview(new Error('导出预览服务不可用')));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('导出预览服务不可用');
+    expect(within(dialog).getByRole('button', { name: '保存 Excel' })).toBeDisabled();
+  });
+
   it('勾选订单后默认仅预览并导出所选订单总表', async () => {
     const user = userEvent.setup();
     const first = orderSummary();

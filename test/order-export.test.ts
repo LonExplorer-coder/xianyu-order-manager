@@ -208,6 +208,13 @@ describe('默认脱敏的订单工作簿导出', () => {
           quantity: 2,
           quantityInferred: false,
         },
+        ...(index === 5 ? [{
+          sourceTitle: '仅最后订单存在的第三件商品',
+          sourceSpec: '绿色',
+          unitPriceCents: 600,
+          quantity: 1,
+          quantityInferred: false,
+        }] : []),
       ],
     }));
     const { application, testRoot } = await createApplicationWithOrders(results);
@@ -236,16 +243,23 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderItemTemplateId: null,
     };
     const preview = application.previewOrderExport(withItemsInput);
+    expect(queryOrderItems).toHaveBeenLastCalledWith(
+      {},
+      [],
+      orderIds.slice(0, 5),
+      true,
+    );
     expect(preview).toMatchObject({
       orderCount: 6,
-      orderItemCount: 12,
+      orderItemCount: 13,
       sheets: [
         { name: '订单总表', totalRowCount: 6 },
-        { name: '订单商品明细表', totalRowCount: 12 },
+        { name: '订单商品明细表', totalRowCount: 13 },
       ],
     });
     expect(preview.sheets[0].rows).toHaveLength(5);
     expect(preview.sheets[1].rows).toHaveLength(5);
+    expect(preview.sheets[0].columns.map(({ header }) => header)).toContain('商品3');
     expect(preview.sheets[1].columns.slice(0, 3).map(({ header }) => header))
       .toEqual(['系统订单编号', '订单号', '商品序号']);
 
@@ -257,12 +271,14 @@ describe('默认脱敏的订单工作簿导出', () => {
       const worksheet = workbook.getWorksheet(sheet.name);
       if (!worksheet) throw new Error(`缺少工作表：${sheet.name}`);
       expect(rowValues(worksheet, 1)).toEqual(sheet.columns.map(({ header }) => header));
-      expect(sheet.rows[0]).toEqual(
-        rowValues(worksheet, 2).map((value, index) => previewCellText(
-          value,
-          sheet.columns[index].valueType,
-        )),
-      );
+      for (const [rowIndex, previewRow] of sheet.rows.entries()) {
+        expect(previewRow).toEqual(
+          sheet.columns.map((column, columnIndex) => previewCellText(
+            worksheet.getRow(rowIndex + 2).getCell(columnIndex + 1).value,
+            column.valueType,
+          )),
+        );
+      }
     }
   });
 
@@ -895,13 +911,15 @@ describe('默认脱敏的订单工作簿导出', () => {
     });
     const destinationPath = join(testRoot, '模板导出.xlsx');
 
-    await application.exportOrdersToWorkbook({
-      scope: { kind: 'selected_orders', orderIds: [second.id, first.id] },
+    const exportInput = {
+      scope: { kind: 'selected_orders' as const, orderIds: [second.id, first.id] },
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'masked',
-    }, destinationPath);
+      masking: 'masked' as const,
+    };
+    const preview = application.previewOrderExport(exportInput);
+    await application.exportOrdersToWorkbook(exportInput, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
@@ -939,6 +957,19 @@ describe('默认脱敏的订单工作簿导出', () => {
       value: true,
       type: ExcelJS.ValueType.Boolean,
     });
+    for (const sheet of preview.sheets) {
+      const worksheet = workbook.getWorksheet(sheet.name);
+      if (!worksheet) throw new Error(`缺少工作表：${sheet.name}`);
+      expect(rowValues(worksheet, 1)).toEqual(sheet.columns.map(({ header }) => header));
+      for (const [rowIndex, previewRow] of sheet.rows.entries()) {
+        expect(previewRow).toEqual(
+          sheet.columns.map((column, columnIndex) => previewCellText(
+            worksheet.getRow(rowIndex + 2).getCell(columnIndex + 1).value,
+            column.valueType,
+          )),
+        );
+      }
+    }
   });
 
   it('回收站订单仍导出全部商品，公式样式的用户文本保持为普通字符串', async () => {

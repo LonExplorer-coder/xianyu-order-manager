@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -132,11 +132,32 @@ describe('永久系统订单编号', () => {
 
     const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
     try {
+      database.prepare(`
+        UPDATE original_orders
+        SET note = '人工备注', lifecycle_status = 'trashed'
+        WHERE id = ?
+      `).run(first.id);
+      expect(database.prepare(`
+        SELECT system_order_number
+        FROM original_orders
+        WHERE id = ?
+      `).get(first.id)).toEqual({ system_order_number: '20260813-000001' });
+      expect((database.prepare(`
+        PRAGMA table_info(original_orders)
+      `).all() as Array<{ name: string; notnull: number }>).find(({ name }) => (
+        name === 'system_order_number'
+      ))?.notnull).toBe(1);
       expect(() => database.prepare(`
         UPDATE original_orders
         SET system_order_number = '20260813-999999'
         WHERE id = ?
       `).run(first.id)).toThrow(/immutable|不可变/u);
+      database.exec('DROP TRIGGER original_orders_system_order_number_is_immutable;');
+      expect(() => database.prepare(`
+        UPDATE original_orders
+        SET system_order_number = 'aaaaaaaa-bbbbbb'
+        WHERE id = ?
+      `).run(first.id)).toThrow(/CHECK constraint failed/u);
     } finally {
       database.close();
     }
@@ -175,10 +196,24 @@ describe('永久系统订单编号', () => {
       legacy.close();
     }
 
+    const copiedDataDirectory = join(dataDirectory, '..', '数据副本');
+    await mkdir(copiedDataDirectory, { recursive: true });
+    await copyFile(
+      databasePath,
+      join(copiedDataDirectory, 'xianyu-order-manager.sqlite3'),
+    );
+
     const reopened = new LocalApplication(new SequenceRecognizer([]));
     applications.push(reopened);
     reopened.openDataDirectory(dataDirectory);
+    const copied = new LocalApplication(new SequenceRecognizer([]));
+    applications.push(copied);
+    copied.openDataDirectory(copiedDataDirectory);
     const migratedDatabase = new DatabaseSync(databasePath);
+    const copiedDatabase = new DatabaseSync(join(
+      copiedDataDirectory,
+      'xianyu-order-manager.sqlite3',
+    ));
     try {
       const migrated = migratedDatabase.prepare(`
         SELECT id, system_order_number
@@ -190,8 +225,14 @@ describe('永久系统订单编号', () => {
         { id: expect.any(String), system_order_number: '20260812-000002' },
         { id: expect.any(String), system_order_number: '20260813-000001' },
       ]);
+      expect(copiedDatabase.prepare(`
+        SELECT id, system_order_number
+        FROM original_orders
+        ORDER BY created_at, id
+      `).all()).toEqual(migrated);
     } finally {
       migratedDatabase.close();
+      copiedDatabase.close();
     }
   });
 });
