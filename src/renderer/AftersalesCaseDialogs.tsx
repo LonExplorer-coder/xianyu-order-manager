@@ -374,19 +374,6 @@ function currentShanghaiDateTimeLocal(): string {
   return new Date(Date.now() + 8 * 60 * 60 * 1_000).toISOString().slice(0, 19);
 }
 
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '发生未知错误';
 }

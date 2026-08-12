@@ -1264,7 +1264,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-1',
       shipmentRecordId: record.id,
       status: 'waiting_return',
-      revision: 2,
+      revision: 3,
       reason: '买家需要退回破损商品',
       occurredAt: '2026-08-13T10:00:00+08:00',
       items: [{
@@ -1300,9 +1300,25 @@ describe('订单管理工作台', () => {
         after: {
           status: 'waiting_return',
           reason: '买家需要退回破损商品',
-          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
         },
         createdAt: '2026-08-13T02:10:00.000Z',
+      }, {
+        kind: 'updated',
+        baseRevision: 2,
+        resultRevision: 3,
+        changeReason: '确认同一商品还有一件受损',
+        before: {
+          status: 'waiting_return',
+          reason: '买家需要退回破损商品',
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        },
+        after: {
+          status: 'waiting_return',
+          reason: '买家需要退回破损商品',
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+        },
+        createdAt: '2026-08-13T02:20:00.000Z',
       }],
       createdAt: '2026-08-13T02:00:00.000Z',
       updatedAt: '2026-08-13T02:10:00.000Z',
@@ -1330,6 +1346,7 @@ describe('订单管理工作台', () => {
     expect(history).toHaveTextContent('× 2');
     expect(history).toHaveTextContent('买家需要退回破损商品');
     expect(history).toHaveTextContent('已与买家确认退回处理');
+    expect(history).toHaveTextContent('售后内容已更新');
     expect(history).toHaveTextContent('问题原因：买家反馈商品破损 → 买家需要退回破损商品');
     expect(history).toHaveTextContent(
       `商品数量：${sourceItem.sourceTitle} · ${sourceItem.sourceSpec} 1 → 2`,
