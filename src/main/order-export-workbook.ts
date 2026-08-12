@@ -32,6 +32,7 @@ import {
 } from '../core/table-templates';
 
 export type OrderExportWorkbookSource = {
+  masking: 'masked' | 'original';
   includeOrderItems: boolean;
   orders: OrderSummary[];
   orderItems: OrderItemWorkbenchItem[];
@@ -108,7 +109,7 @@ export function createOrderExportWorkbookPlan(
         return toWorkbookCellValue(null, column.valueType, rawValue);
       }
       const valueType = requireProjectionValueType(column);
-      const maskedValue = column.field.kind === 'builtin'
+      const maskedValue = source.masking === 'masked' && column.field.kind === 'builtin'
         ? defaultMaskedOrderCell(column.field.key, rawValue, region)
         : rawValue;
       return toWorkbookCellValue(column.field, valueType, maskedValue);

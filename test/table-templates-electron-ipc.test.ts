@@ -174,7 +174,7 @@ describe('表格模板 Electron IPC', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     };
     await expect(invoke('orders:export', { ...valid, destinationPath: '/tmp/leak.xlsx' }))
       .rejects.toThrow(/未知属性/);
@@ -208,6 +208,9 @@ describe('表格模板 Electron IPC', () => {
     electronBoundary.showSaveDialog.mockClear();
     await expect(invoke('orders:preview-export', valid)).resolves.toEqual(preview);
     expect(previewOrderExport).toHaveBeenCalledWith(valid);
+    await expect(invoke('orders:preview-export', { ...valid, masking: 'original' }))
+      .resolves.toEqual(preview);
+    expect(previewOrderExport).toHaveBeenLastCalledWith({ ...valid, masking: 'original' });
     expect(electronBoundary.showSaveDialog).not.toHaveBeenCalled();
     await expect(invoke('orders:preview-export', { ...valid, unknown: true }))
       .rejects.toThrow(/未知属性/);

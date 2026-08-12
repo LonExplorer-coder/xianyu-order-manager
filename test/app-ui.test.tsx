@@ -6498,7 +6498,7 @@ describe('订单管理工作台', () => {
       orderTemplateId: templateA.id,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }));
 
     await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
@@ -7014,12 +7014,18 @@ describe('订单管理工作台', () => {
         ? [
           [
             first.orderNumber,
-            '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+            input.masking === 'masked' ? '测**家' : first.buyerNickname,
+            input.masking === 'masked' ? '人******' : first.recipient,
+            input.masking === 'masked' ? '138****0000' : first.phone,
+            input.masking === 'masked' ? '广东省深圳市南山区***' : first.addressOriginal,
             '脱敏测试商品', '白色', '2', '', '', '', '¥8.00',
           ],
           [
             second.orderNumber,
-            '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+            input.masking === 'masked' ? '测**家' : second.buyerNickname,
+            input.masking === 'masked' ? '人******' : second.recipient,
+            input.masking === 'masked' ? '138****0000' : second.phone,
+            input.masking === 'masked' ? '广东省深圳市南山区***' : second.addressOriginal,
             '同款测试商品', '大号', '1', '同款测试商品', '小号', '2', '¥8.00',
           ],
         ]
@@ -7080,6 +7086,8 @@ describe('订单管理工作台', () => {
     expect(within(dialog).getByText('手机号保留前 3 后 4 位')).toBeVisible();
     expect(within(dialog).getByText('地址仅保留省、市、区县')).toBeVisible();
     expect(within(dialog).getByText('买家昵称仅保留首尾字符')).toBeVisible();
+    const masking = within(dialog).getByRole('checkbox', { name: /导出时脱敏/u });
+    expect(masking).toBeChecked();
     await user.selectOptions(
       within(dialog).getByRole('combobox', { name: '订单总表模板' }),
       orderTemplate.id,
@@ -7115,6 +7123,18 @@ describe('订单管理工作台', () => {
       ]);
     expect(within(dialog).queryByText(confirmedOrder.phone)).not.toBeInTheDocument();
     expect(within(dialog).queryByText(confirmedOrder.addressOriginal)).not.toBeInTheDocument();
+    await user.click(masking);
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      '完整收件人、手机号、收货地址和买家昵称',
+    );
+    const originalPreview = await within(dialog).findByRole('table', {
+      name: '订单总表导出预览',
+    });
+    expect(within(originalPreview).getAllByText(first.phone)).toHaveLength(2);
+    expect(within(originalPreview).getAllByText(first.addressOriginal)).toHaveLength(2);
+    await user.click(masking);
+    expect(within(dialog).queryByText(/隐私提醒/u)).not.toBeInTheDocument();
+    expect(await within(dialog).findAllByText('138****0000')).toHaveLength(2);
     const includeOrderItems = within(dialog).getByRole('checkbox', {
       name: /附加订单商品明细表/u,
     });
@@ -7156,12 +7176,15 @@ describe('订单管理工作台', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'default',
+      masking: 'masked',
     }));
     expect(await screen.findByRole('status')).toHaveTextContent(
       '已导出 2 笔订单、3 条订单商品明细：闲鱼订单-20260731.xlsx',
     );
     expect(screen.queryByRole('dialog', { name: '导出订单 Excel' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '导出当前结果 2 笔' }));
+    const reopened = screen.getByRole('dialog', { name: '导出订单 Excel' });
+    expect(within(reopened).getByRole('checkbox', { name: /导出时脱敏/u })).toBeChecked();
   });
 
   it('勾选订单后默认仅预览并导出所选订单总表', async () => {
@@ -7241,7 +7264,7 @@ describe('订单管理工作台', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }));
   });
 });

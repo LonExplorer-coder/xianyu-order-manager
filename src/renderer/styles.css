@@ -2558,11 +2558,20 @@ select:focus-visible {
   background: #fffdf1;
 }
 
-.order-export-dialog__masking > div {
+.order-export-dialog__masking > label {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: flex-start;
   gap: 12px;
+  cursor: pointer;
+}
+
+.order-export-dialog__masking > label > input {
+  margin-top: 2px;
+}
+
+.order-export-dialog__masking > label > span {
+  display: grid;
+  gap: 3px;
 }
 
 .order-export-dialog__masking strong {
@@ -2570,7 +2579,7 @@ select:focus-visible {
   font-size: 11px;
 }
 
-.order-export-dialog__masking span {
+.order-export-dialog__masking small {
   color: var(--navy-500);
   font-size: 9px;
 }
@@ -2582,6 +2591,16 @@ select:focus-visible {
   margin: 13px 0 0;
   padding-left: 17px;
   color: var(--navy-700);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.order-export-dialog__privacy-warning {
+  margin: 13px 0 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  color: #7a3618;
+  background: #fff0e8;
   font-size: 10px;
   line-height: 1.5;
 }

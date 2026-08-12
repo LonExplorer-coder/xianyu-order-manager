@@ -1680,6 +1680,7 @@ export class LocalApplication {
       : { items: [], customFieldValues: [] };
     const addressRegions = this.orderExportAddressRegions(orderIds);
     const plan = createOrderExportWorkbookPlan({
+      masking: normalizedInput.masking,
       includeOrderItems: normalizedInput.includeOrderItems,
       orders: orderResult.orders,
       orderItems: orderItemResult.items,

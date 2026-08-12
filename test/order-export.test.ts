@@ -118,6 +118,55 @@ describe('默认脱敏的订单工作簿导出', () => {
     ))).toEqual(['待发货', '部分发货', '已发货', '已收货', '未知']);
   });
 
+  it('本次关闭脱敏时让真实预览和最终工作簿一致输出完整隐私字段', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-ORIGINAL-PRIVACY-001' }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    const input = {
+      scope: { kind: 'selected_orders' as const, orderIds: [order.id] },
+      orderTemplateId: null,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+      masking: 'original' as const,
+    };
+
+    const preview = application.previewOrderExport(input);
+    const orderSheet = preview.sheets[0];
+    const values = new Map(orderSheet.columns.map((column, index) => (
+      [column.header, orderSheet.rows[0][index]] as const
+    )));
+    expect({
+      buyer: values.get('买家'),
+      recipient: values.get('收件人'),
+      phone: values.get('手机号'),
+      address: values.get('收货地址'),
+    }).toEqual({
+      buyer: '海棠买家',
+      recipient: '陈海棠',
+      phone: '13800000001',
+      address: '上海市浦东新区海棠路1号',
+    });
+
+    const destinationPath = join(testRoot, '原始隐私字段.xlsx');
+    await application.exportOrdersToWorkbook(input, destinationPath);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    const worksheet = workbook.getWorksheet('订单总表');
+    if (!worksheet) throw new Error('缺少订单总表');
+    expect({
+      buyer: cellByHeader(worksheet, 2, '买家').value,
+      recipient: cellByHeader(worksheet, 2, '收件人').value,
+      phone: cellByHeader(worksheet, 2, '手机号').value,
+      address: cellByHeader(worksheet, 2, '收货地址').value,
+    }).toEqual({
+      buyer: '海棠买家',
+      recipient: '陈海棠',
+      phone: '13800000001',
+      address: '上海市浦东新区海棠路1号',
+    });
+  });
+
   it('默认只导出订单总表，不查询也不生成订单商品明细表', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({ orderNumber: 'XY-ORDER-ONLY-001' }),
@@ -131,7 +180,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: null });
@@ -169,7 +218,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'default' as const,
+      masking: 'masked' as const,
     };
 
     const orderOnly = application.previewOrderExport(baseInput);
@@ -292,7 +341,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: 4 });
@@ -553,7 +602,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, defaultPath);
     const defaultWorkbook = new ExcelJS.Workbook();
     await defaultWorkbook.xlsx.readFile(defaultPath);
@@ -597,7 +646,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'default',
+      masking: 'masked',
     }, customPath);
     const customWorkbook = new ExcelJS.Workbook();
     await customWorkbook.xlsx.readFile(customPath);
@@ -677,7 +726,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, currentPath);
     const currentWorkbook = new ExcelJS.Workbook();
     await currentWorkbook.xlsx.readFile(currentPath);
@@ -700,7 +749,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, selectedPath);
     const selectedWorkbook = new ExcelJS.Workbook();
     await selectedWorkbook.xlsx.readFile(selectedPath);
@@ -851,7 +900,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
@@ -937,7 +986,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: 2 });
@@ -966,7 +1015,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default' as const,
+      masking: 'masked' as const,
     };
 
     await expect(application.exportOrdersToWorkbook({
@@ -1059,7 +1108,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: template.id,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
@@ -1155,7 +1204,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'default',
+      masking: 'masked',
     }, destinationPath))
       .rejects.toThrow('订单总表列数 16385 超过 Excel 上限 16384');
     expect(await readFile(destinationPath)).toEqual(originalContents);

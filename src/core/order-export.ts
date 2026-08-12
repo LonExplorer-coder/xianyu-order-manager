@@ -17,7 +17,7 @@ export type OrderExportInput = {
   orderTemplateId: string | null;
   includeOrderItems: boolean;
   orderItemTemplateId: string | null;
-  masking: 'default';
+  masking: 'masked' | 'original';
 };
 
 export type OrderExportWriteResult = {
@@ -64,7 +64,9 @@ export function normalizeOrderExportInput(value: unknown): OrderExportInput {
   if (scope.kind !== 'current_result' && scope.kind !== 'selected_orders') {
     throw new Error('订单导出范围无效');
   }
-  if (input.masking !== 'default') throw new Error('订单导出脱敏方式无效');
+  if (input.masking !== 'masked' && input.masking !== 'original') {
+    throw new Error('订单导出脱敏方式无效');
+  }
   if (typeof input.includeOrderItems !== 'boolean') {
     throw new Error('订单商品明细表导出选项无效');
   }
@@ -83,7 +85,7 @@ export function normalizeOrderExportInput(value: unknown): OrderExportInput {
     orderTemplateId: optionalTemplateId(input.orderTemplateId, '订单总表模板'),
     includeOrderItems: input.includeOrderItems,
     orderItemTemplateId,
-    masking: 'default',
+    masking: input.masking,
   };
 }
 
