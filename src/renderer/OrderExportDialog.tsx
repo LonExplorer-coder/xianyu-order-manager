@@ -10,35 +10,21 @@ import {
 import { createPortal } from 'react-dom';
 
 import type { OrderSummary } from '../core/contracts';
-import type {
-  CustomFieldDefinition,
-  CustomFieldValueRecord,
-} from '../core/custom-fields';
 import {
-  defaultMaskedOrderCell,
-  orderExportBuiltinTextLabel,
   type OrderExportInput,
+  type OrderExportPreviewResult,
   type OrderExportResult,
 } from '../core/order-export';
 import {
-  createCustomFieldValueIndex,
-  createOrderTableProjectionPlan,
-  DEFAULT_ORDER_TABLE_COLUMNS,
-  projectOrderTableProjectionRow,
-  type OrderTableProjectionColumn,
-  type TableCellValue,
   type TableTemplate,
 } from '../core/table-templates';
-
-const ORDER_EXPORT_PREVIEW_ROW_LIMIT = 5;
 
 export type OrderExportDialogProps = {
   scopeKind: OrderExportInput['scope']['kind'];
   orders: OrderSummary[];
-  customFieldDefinitions: CustomFieldDefinition[];
-  customFieldValues: CustomFieldValueRecord[];
   templates: TableTemplate[];
   initialOrderTemplateId: string | null;
+  onPreview: (input: OrderExportInput) => Promise<OrderExportPreviewResult>;
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
   onSaved: (result: Extract<OrderExportResult, { kind: 'saved' }>) => void;
   onClose: () => void;
@@ -47,10 +33,9 @@ export type OrderExportDialogProps = {
 export function OrderExportDialog({
   scopeKind,
   orders,
-  customFieldDefinitions,
-  customFieldValues,
   templates,
   initialOrderTemplateId,
+  onPreview,
   onExport,
   onSaved,
   onClose,
@@ -66,10 +51,15 @@ export function OrderExportDialog({
   ));
   const [includeOrderItems, setIncludeOrderItems] = useState(false);
   const [orderItemTemplateId, setOrderItemTemplateId] = useState('');
+  const [activePreviewSheet, setActivePreviewSheet] = useState<
+    '订单总表' | '订单商品明细表'
+  >('订单总表');
+  const [preview, setPreview] = useState<OrderExportPreviewResult | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [previewError, setPreviewError] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const orderIds = orders.map(({ id }) => id);
-  const orderItemCount = orders.reduce((total, order) => total + order.items.length, 0);
+  const orderIds = useMemo(() => orders.map(({ id }) => id), [orders]);
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement
@@ -79,22 +69,44 @@ export function OrderExportDialog({
     return () => returnFocus?.focus();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    setPreview(null);
+    setPreviewLoading(true);
+    setPreviewError('');
+    const input = exportInput();
+    void onPreview(input).then((result) => {
+      if (cancelled) return;
+      setPreview(result);
+      setPreviewLoading(false);
+    }).catch((reason: unknown) => {
+      if (cancelled) return;
+      setPreview(null);
+      setPreviewError(errorMessage(reason));
+      setPreviewLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [includeOrderItems, onPreview, orderIds, orderItemTemplateId, orderTemplateId]);
+
+  function exportInput(): OrderExportInput {
+    return {
+      scope: { kind: scopeKind, orderIds },
+      orderTemplateId: orderTemplateId || null,
+      includeOrderItems,
+      orderItemTemplateId: includeOrderItems ? orderItemTemplateId || null : null,
+      masking: 'default',
+    };
+  }
+
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving || orderIds.length === 0) return;
     setSaving(true);
     setError('');
     try {
-      const result = await onExport({
-        scope: {
-          kind: scopeKind,
-          orderIds,
-        },
-        orderTemplateId: orderTemplateId || null,
-        includeOrderItems,
-        orderItemTemplateId: includeOrderItems ? orderItemTemplateId || null : null,
-        masking: 'default',
-      });
+      const result = await onExport(exportInput());
       if (result.kind === 'cancelled') {
         onClose();
         return;
@@ -146,36 +158,9 @@ export function OrderExportDialog({
     () => templates.filter(({ granularity }) => granularity === 'order_item'),
     [templates],
   );
-  const customFieldValueIndex = useMemo(
-    () => createCustomFieldValueIndex(customFieldValues),
-    [customFieldValues],
-  );
-  const orderProjection = useMemo(() => {
-    const template = orderTemplates.find(({ id }) => id === orderTemplateId);
-    try {
-      const plan = createOrderTableProjectionPlan(
-        template?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS,
-        orders,
-        customFieldDefinitions,
-      );
-      return {
-        plan,
-        rows: orders.slice(0, ORDER_EXPORT_PREVIEW_ROW_LIMIT).map((order) => ({
-          order,
-          values: projectOrderTableProjectionRow(plan, order, customFieldValueIndex),
-        })),
-        error: '',
-      };
-    } catch (reason) {
-      return { plan: null, rows: [], error: errorMessage(reason) };
-    }
-  }, [
-    customFieldDefinitions,
-    customFieldValueIndex,
-    orderTemplateId,
-    orderTemplates,
-    orders,
-  ]);
+  const visibleSheets = preview?.sheets ?? [];
+  const activeSheet = visibleSheets.find(({ name }) => name === activePreviewSheet)
+    ?? visibleSheets[0];
 
   return createPortal(
     <div
@@ -203,7 +188,9 @@ export function OrderExportDialog({
 
         <div className="order-export-dialog__counts" aria-label="导出数量">
           <span>{orderIds.length} 笔订单</span>
-          {includeOrderItems && <span>{orderItemCount} 条订单商品明细</span>}
+          {includeOrderItems && preview?.orderItemCount !== null && (
+            <span>{preview?.orderItemCount ?? '—'} 条订单商品明细</span>
+          )}
         </div>
 
         <label className="order-export-dialog__item-option">
@@ -213,7 +200,10 @@ export function OrderExportDialog({
             disabled={saving}
             onChange={(event) => {
               setIncludeOrderItems(event.target.checked);
-              if (!event.target.checked) setOrderItemTemplateId('');
+              if (!event.target.checked) {
+                setOrderItemTemplateId('');
+                setActivePreviewSheet('订单总表');
+              }
             }}
           />
           <span>
@@ -256,38 +246,54 @@ export function OrderExportDialog({
           )}
         </div>
 
-        <section className="order-export-dialog__preview" aria-label="订单总表导出预览区域">
-          <strong>订单总表预览</strong>
-          {orderProjection.error ? (
-            <p className="order-export-dialog__error" role="alert">{orderProjection.error}</p>
-          ) : (
-            <div className="order-table-wrap">
-              <table aria-label="订单总表导出预览">
-                <thead>
-                  <tr>
-                    {orderProjection.plan?.columns.map((column) => (
-                      <th key={column.key}>{column.header}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {orderProjection.rows.map(({ order, values }) => (
-                    <tr key={order.id}>
-                      {orderProjection.plan?.columns.map((column, index) => (
-                        <td key={column.key}>
-                          {orderExportPreviewCellText(order, column, values[index] ?? null)}
-                        </td>
+        <section className="order-export-dialog__preview" aria-label="订单导出预览区域">
+          <div className="order-export-dialog__preview-tabs" role="tablist" aria-label="导出工作表预览">
+            {visibleSheets.map((sheet) => (
+              <button
+                key={sheet.name}
+                type="button"
+                role="tab"
+                aria-selected={sheet.name === activeSheet?.name}
+                onClick={() => setActivePreviewSheet(sheet.name)}
+              >
+                {sheet.name}预览
+              </button>
+            ))}
+          </div>
+          {previewLoading ? (
+            <p className="order-export-dialog__preview-state" role="status">正在生成真实导出预览…</p>
+          ) : previewError ? (
+            <p className="order-export-dialog__error" role="alert">{previewError}</p>
+          ) : activeSheet ? (
+            <>
+              <div className="order-table-wrap">
+                <table aria-label={`${activeSheet.name}导出预览`}>
+                  <thead>
+                    <tr>
+                      {activeSheet.columns.map((column, index) => (
+                        <th key={`${column.header}:${index}`}>{column.header}</th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {orders.length > ORDER_EXPORT_PREVIEW_ROW_LIMIT && (
-            <small>
-              仅预览前 {ORDER_EXPORT_PREVIEW_ROW_LIMIT} 笔，保存时将导出本次范围全部订单。
-            </small>
+                  </thead>
+                  <tbody>
+                    {activeSheet.rows.map((row, rowIndex) => (
+                      <tr key={rowIndex}>
+                        {row.map((value, columnIndex) => (
+                          <td key={columnIndex}>{value}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {activeSheet.totalRowCount > activeSheet.rows.length && (
+                <small>
+                  仅预览前 {activeSheet.rows.length} 行，保存时将导出该工作表全部 {activeSheet.totalRowCount} 行。
+                </small>
+              )}
+            </>
+          ) : (
+            <p className="order-export-dialog__preview-state">没有可预览的工作表。</p>
           )}
         </section>
 
@@ -318,7 +324,7 @@ export function OrderExportDialog({
           <button
             className="button button--primary"
             type="submit"
-            disabled={saving || orderIds.length === 0 || Boolean(orderProjection.error)}
+            disabled={saving || previewLoading || orderIds.length === 0 || Boolean(previewError)}
           >
             {saving ? '正在生成…' : '保存 Excel'}
           </button>
@@ -331,46 +337,4 @@ export function OrderExportDialog({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function orderExportPreviewCellText(
-  order: OrderSummary,
-  column: OrderTableProjectionColumn,
-  value: TableCellValue,
-): string {
-  let displayedValue = value;
-  if (column.kind === 'field' && column.field.kind === 'builtin') {
-    displayedValue = defaultMaskedOrderCell(column.field.key, value, {
-      province: order.province ?? '',
-      city: order.city ?? '',
-      district: order.district ?? '',
-    });
-    if (typeof displayedValue === 'string') {
-      displayedValue = orderExportBuiltinTextLabel(column.field.key, displayedValue)
-        ?? displayedValue;
-    }
-  }
-  if (displayedValue === null || displayedValue === '') return '';
-  if (column.valueType === 'money' && typeof displayedValue === 'number') {
-    return `¥${(displayedValue / 100).toFixed(2)}`;
-  }
-  if (column.valueType === 'datetime' && typeof displayedValue === 'string') {
-    const instant = new Date(displayedValue);
-    if (!Number.isFinite(instant.getTime())) return displayedValue;
-    return new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    }).format(instant);
-  }
-  if (column.valueType === 'checkbox' && typeof displayedValue === 'boolean') {
-    return displayedValue ? '是' : '否';
-  }
-  if (Array.isArray(displayedValue)) return displayedValue.join('、');
-  return String(displayedValue);
 }

@@ -192,6 +192,19 @@ function orderSummary(
   };
 }
 
+function exportPreviewSheet(
+  name: '订单总表' | '订单商品明细表',
+  headers: string[],
+  rows: string[][],
+) {
+  return {
+    name,
+    columns: headers.map((header) => ({ header, valueType: 'text' as const })),
+    rows,
+    totalRowCount: rows.length,
+  };
+}
+
 function workbenchResult(
   orders: OrderSummary[],
   overrides: Partial<OrderWorkbenchResult> = {},
@@ -423,6 +436,11 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     createAftersalesCase: vi.fn(),
     updateAftersalesCase: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
+    previewOrderExport: vi.fn().mockResolvedValue({
+      orderCount: 0,
+      orderItemCount: null,
+      sheets: [],
+    }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
     updateOrder: vi.fn(),
@@ -2363,6 +2381,16 @@ describe('订单管理工作台', () => {
       }),
       listOrders: vi.fn().mockResolvedValue([multiItem, singleItem]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([multiItem, singleItem])),
+      previewOrderExport: vi.fn().mockResolvedValue({
+        orderCount: 2,
+        orderItemCount: null,
+        sheets: [exportPreviewSheet('订单总表', [
+          '系统订单编号', '订单号', '平台', '卖家账号', '买家', '收件人', '手机号',
+          '收货地址', '商品1', '款式或规格1', '数量1', '商品2', '款式或规格2',
+          '数量2', '商品总数量', '成交金额', '初始来源识别状态', '平台交易状态',
+          '履约状态', '生命周期状态', '下单时间',
+        ], [])],
+      }),
     });
 
     render(<App api={api} />);
@@ -2388,7 +2416,7 @@ describe('订单管理工作台', () => {
     await user.click(screen.getByRole('button', { name: '导出当前结果 2 笔' }));
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
     expect(within(dialog).getByRole('combobox', { name: '订单总表模板' })).toHaveValue('');
-    const preview = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    const preview = await within(dialog).findByRole('table', { name: '订单总表导出预览' });
     const previewHeaders = within(preview).getAllByRole('columnheader')
       .map((cell) => cell.textContent);
     expect(previewHeaders).toEqual(headers.slice(1, -1));
@@ -6422,6 +6450,13 @@ describe('订单管理工作台', () => {
       )),
     }));
     const exportOrders = vi.fn().mockResolvedValue({ kind: 'cancelled' as const });
+    const previewOrderExport = vi.fn(async (input: Parameters<DesktopApi['previewOrderExport']>[0]) => ({
+      orderCount: 1,
+      orderItemCount: null,
+      sheets: [input.orderTemplateId === templateB.id
+        ? exportPreviewSheet('订单总表', ['B 跟单', 'A 备用'], [['B 值', 'A 值']])
+        : exportPreviewSheet('订单总表', ['订单号', 'A 跟单'], [[summary.orderNumber, 'A 值']])],
+    }));
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -6432,6 +6467,7 @@ describe('订单管理工作台', () => {
       queryOrders,
       listCustomFieldDefinitions: vi.fn().mockResolvedValue([fieldA, fieldB]),
       listTableTemplates: vi.fn().mockResolvedValue([templateA, templateB]),
+      previewOrderExport,
       exportOrders,
     });
 
@@ -6449,7 +6485,7 @@ describe('订单管理工作台', () => {
       name: '订单总表模板',
     });
     expect(orderTemplateSelect).toHaveValue(templateA.id);
-    const initialPreview = within(dialog).getByRole('table', {
+    const initialPreview = await within(dialog).findByRole('table', {
       name: '订单总表导出预览',
     });
     const initialHeaders = within(initialPreview).getAllByRole('columnheader')
@@ -6471,7 +6507,7 @@ describe('订单管理工作台', () => {
       within(reopenedDialog).getByRole('combobox', { name: '订单总表模板' }),
       templateB.id,
     );
-    const preview = within(reopenedDialog).getByRole('table', { name: '订单总表导出预览' });
+    const preview = await within(reopenedDialog).findByRole('table', { name: '订单总表导出预览' });
     expect(within(preview).getAllByRole('columnheader').map(({ textContent }) => textContent))
       .toEqual(['B 跟单', 'A 备用']);
     expect(within(preview).getByText('B 值')).toBeVisible();
@@ -6967,6 +7003,55 @@ describe('订单管理工作台', () => {
       orderCount: 2,
       orderItemCount: 3,
     });
+    const previewOrderExport = vi.fn(async (input: Parameters<DesktopApi['previewOrderExport']>[0]) => {
+      const orderHeaders = input.orderTemplateId === orderTemplate.id
+        ? [
+          '平台单号', '买家', '收件人', '手机号', '收货地址',
+          '品名1', '规格1', '件数1', '品名2', '规格2', '件数2', '实付',
+        ]
+        : ['系统订单编号', '订单号'];
+      const orderRows = input.orderTemplateId === orderTemplate.id
+        ? [
+          [
+            first.orderNumber,
+            '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+            '脱敏测试商品', '白色', '2', '', '', '', '¥8.00',
+          ],
+          [
+            second.orderNumber,
+            '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+            '同款测试商品', '大号', '1', '同款测试商品', '小号', '2', '¥8.00',
+          ],
+        ]
+        : [
+          [first.systemOrderNumber, first.orderNumber],
+          [second.systemOrderNumber, second.orderNumber],
+        ];
+      return {
+        orderCount: 2,
+        orderItemCount: input.includeOrderItems ? 3 : null,
+        sheets: [
+          exportPreviewSheet('订单总表', orderHeaders, orderRows),
+          ...(input.includeOrderItems ? [exportPreviewSheet(
+            '订单商品明细表',
+            input.orderItemTemplateId === itemTemplate.id
+              ? ['平台单号', '商品']
+              : ['系统订单编号', '订单号', '商品序号'],
+            input.orderItemTemplateId === itemTemplate.id
+              ? [
+                [first.orderNumber, '脱敏测试商品'],
+                [second.orderNumber, '同款测试商品'],
+                [second.orderNumber, '同款测试商品'],
+              ]
+              : [
+                [first.systemOrderNumber, first.orderNumber, '1'],
+                [second.systemOrderNumber, second.orderNumber, '1'],
+                [second.systemOrderNumber, second.orderNumber, '2'],
+              ],
+          )] : []),
+        ],
+      };
+    });
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -6976,6 +7061,7 @@ describe('订单管理工作台', () => {
       listOrders: vi.fn().mockResolvedValue([first, second]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([first, second])),
       listTableTemplates: vi.fn().mockResolvedValue([orderTemplate, itemTemplate]),
+      previewOrderExport,
       exportOrders,
     });
 
@@ -6999,7 +7085,7 @@ describe('订单管理工作台', () => {
       orderTemplate.id,
     );
     expect(within(
-      within(dialog).getByRole('table', { name: '订单总表导出预览' }),
+      await within(dialog).findByRole('table', { name: '订单总表导出预览' }),
     ).getAllByRole('columnheader').map(({ textContent }) => textContent)).toEqual([
       '平台单号',
       '买家', '收件人', '手机号', '收货地址',
@@ -7039,6 +7125,27 @@ describe('订单管理工作台', () => {
       within(dialog).getByRole('combobox', { name: '订单商品明细表模板' }),
       itemTemplate.id,
     );
+    const itemPreviewTab = await within(dialog).findByRole('tab', {
+      name: '订单商品明细表预览',
+    });
+    await user.click(itemPreviewTab);
+    const itemPreview = await within(dialog).findByRole('table', {
+      name: '订单商品明细表导出预览',
+    });
+    expect(within(itemPreview).getAllByRole('columnheader').map(({ textContent }) => textContent))
+      .toEqual(['平台单号', '商品']);
+    expect(within(itemPreview).getAllByRole('row')).toHaveLength(4);
+    await user.click(includeOrderItems);
+    expect(within(dialog).queryByRole('tab', { name: '订单商品明细表预览' }))
+      .not.toBeInTheDocument();
+    expect(await within(dialog).findByRole('tab', { name: '订单总表预览' }))
+      .toHaveAttribute('aria-selected', 'true');
+    await user.click(includeOrderItems);
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '订单商品明细表模板' }),
+      itemTemplate.id,
+    );
+    await within(dialog).findByRole('tab', { name: '订单商品明细表预览' });
     await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
 
     await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({
@@ -7070,6 +7177,11 @@ describe('订单管理工作台', () => {
       itemCount: 3,
     });
     const exportOrders = vi.fn().mockResolvedValue({ kind: 'cancelled' });
+    const selectedHeaders = [
+      '系统订单编号', '订单号',
+      '商品1', '款式或规格1', '数量1',
+      '商品2', '款式或规格2', '数量2',
+    ];
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready',
@@ -7078,6 +7190,16 @@ describe('订单管理工作台', () => {
       }),
       listOrders: vi.fn().mockResolvedValue([first, second]),
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([first, second])),
+      previewOrderExport: vi.fn().mockResolvedValue({
+        orderCount: 1,
+        orderItemCount: null,
+        sheets: [exportPreviewSheet('订单总表', selectedHeaders, [[
+          second.systemOrderNumber,
+          second.orderNumber,
+          '所选商品 A', '大号', '1',
+          '所选商品 B', '小号', '2',
+        ]])],
+      }),
       exportOrders,
     });
 
@@ -7090,7 +7212,9 @@ describe('订单管理工作台', () => {
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
     expect(within(dialog).getByText('1 笔订单')).toBeVisible();
     expect(within(dialog).queryByText('2 条订单商品明细')).not.toBeInTheDocument();
-    const previewTable = within(dialog).getByRole('table', { name: '订单总表导出预览' });
+    const previewTable = await within(dialog).findByRole('table', {
+      name: '订单总表导出预览',
+    });
     const previewHeaders = within(previewTable).getAllByRole('columnheader')
       .map(({ textContent }) => textContent);
     expect(previewHeaders).toEqual(expect.arrayContaining([

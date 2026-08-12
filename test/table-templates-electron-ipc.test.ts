@@ -193,6 +193,25 @@ describe('表格模板 Electron IPC', () => {
     await expect(invoke('orders:export', { ...valid, includeOrderItems: '是' }))
       .rejects.toThrow(/订单商品明细表导出选项/);
 
+    const preview = {
+      orderCount: 1,
+      orderItemCount: null,
+      sheets: [{
+        name: '订单总表' as const,
+        columns: [{ header: '系统订单编号', valueType: 'text' as const }],
+        rows: [['20260813-000001']],
+        totalRowCount: 1,
+      }],
+    };
+    const previewOrderExport = vi.spyOn(session, 'previewOrderExport')
+      .mockReturnValue(preview);
+    electronBoundary.showSaveDialog.mockClear();
+    await expect(invoke('orders:preview-export', valid)).resolves.toEqual(preview);
+    expect(previewOrderExport).toHaveBeenCalledWith(valid);
+    expect(electronBoundary.showSaveDialog).not.toHaveBeenCalled();
+    await expect(invoke('orders:preview-export', { ...valid, unknown: true }))
+      .rejects.toThrow(/未知属性/);
+
     electronBoundary.showSaveDialog.mockResolvedValue({ canceled: true, filePath: '' });
     await expect(invoke('orders:export', valid)).resolves.toEqual({ kind: 'cancelled' });
     expect(electronBoundary.showSaveDialog).toHaveBeenCalledWith(

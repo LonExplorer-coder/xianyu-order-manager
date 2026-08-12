@@ -2471,9 +2471,32 @@ select:focus-visible {
   margin-top: 18px;
 }
 
-.order-export-dialog__preview > strong {
-  color: var(--navy-900);
-  font-size: 11px;
+.order-export-dialog__preview-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.order-export-dialog__preview-tabs button {
+  padding: 8px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  color: var(--navy-600);
+  background: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.order-export-dialog__preview-tabs button[aria-selected='true'] {
+  border-color: var(--navy-900);
+  color: #fff;
+  background: var(--navy-900);
+}
+
+.order-export-dialog__preview-state {
+  margin: 10px 0 0;
+  color: var(--navy-500);
+  font-size: 10px;
 }
 
 .order-export-dialog__preview .order-table-wrap {

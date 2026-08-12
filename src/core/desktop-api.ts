@@ -40,7 +40,11 @@ import type {
   OrderWorkbenchQuery,
   OrderWorkbenchResult,
 } from './order-workbench';
-import type { OrderExportInput, OrderExportResult } from './order-export';
+import type {
+  OrderExportInput,
+  OrderExportPreviewResult,
+  OrderExportResult,
+} from './order-export';
 import type { ShipmentGroupProjection } from './shipment-groups';
 import type {
   MergeShipmentGroupsInput,
@@ -130,6 +134,7 @@ export interface DesktopApi {
   createAftersalesCase(input: CreateAftersalesCaseInput): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
+  previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   updateOrder(input: OrderEditInput): Promise<OrderDetails>;

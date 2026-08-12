@@ -3,6 +3,7 @@ import {
   type TableCellValue,
   type TableTemplateColumn,
 } from './table-templates';
+import type { CustomFieldType } from './custom-fields';
 import type { RecognitionBatchItemStatus } from './contracts';
 import { FULFILLMENT_STATUS_LABELS, isFulfillmentStatus } from './fulfillment-status';
 
@@ -22,6 +23,17 @@ export type OrderExportInput = {
 export type OrderExportWriteResult = {
   orderCount: number;
   orderItemCount: number | null;
+};
+
+export type OrderExportPreviewSheet = {
+  name: '订单总表' | '订单商品明细表';
+  columns: Array<{ header: string; valueType: CustomFieldType }>;
+  rows: string[][];
+  totalRowCount: number;
+};
+
+export type OrderExportPreviewResult = OrderExportWriteResult & {
+  sheets: OrderExportPreviewSheet[];
 };
 
 export type OrderExportResult =

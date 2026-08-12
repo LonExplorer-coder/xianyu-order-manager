@@ -14,6 +14,7 @@ import type {
   Recognizer,
   RecognizerSource,
 } from '../src/core/contracts';
+import type { CustomFieldType } from '../src/core/custom-fields';
 import { LocalApplication } from '../src/main/local-application';
 import {
   orderExportBuiltinTextLabel,
@@ -138,6 +139,82 @@ describe('默认脱敏的订单工作簿导出', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
     expect(workbook.worksheets.map(({ name }) => name)).toEqual(['订单总表']);
+  });
+
+  it('预览与真实导出复用同一双表投影，分别只返回前五行且关闭附表时不查询商品', async () => {
+    const results = Array.from({ length: 6 }, (_, index) => recognition({
+      orderNumber: `XY-PREVIEW-${index + 1}`,
+      items: [
+        {
+          sourceTitle: `预览商品-${index + 1}-A`,
+          sourceSpec: '红色',
+          unitPriceCents: 1_000,
+          quantity: 1,
+          quantityInferred: false,
+        },
+        {
+          sourceTitle: `预览商品-${index + 1}-B`,
+          sourceSpec: '蓝色',
+          unitPriceCents: 800,
+          quantity: 2,
+          quantityInferred: false,
+        },
+      ],
+    }));
+    const { application, testRoot } = await createApplicationWithOrders(results);
+    const orderIds = application.queryOrders({}).orders.map(({ id }) => id);
+    const queryOrderItems = vi.spyOn(application, 'queryOrderItems');
+    const baseInput = {
+      scope: { kind: 'current_result' as const, orderIds },
+      orderTemplateId: null,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+      masking: 'default' as const,
+    };
+
+    const orderOnly = application.previewOrderExport(baseInput);
+    expect(queryOrderItems).not.toHaveBeenCalled();
+    expect(orderOnly).toMatchObject({
+      orderCount: 6,
+      orderItemCount: null,
+      sheets: [{ name: '订单总表', totalRowCount: 6 }],
+    });
+    expect(orderOnly.sheets[0].rows).toHaveLength(5);
+
+    const withItemsInput = {
+      ...baseInput,
+      includeOrderItems: true,
+      orderItemTemplateId: null,
+    };
+    const preview = application.previewOrderExport(withItemsInput);
+    expect(preview).toMatchObject({
+      orderCount: 6,
+      orderItemCount: 12,
+      sheets: [
+        { name: '订单总表', totalRowCount: 6 },
+        { name: '订单商品明细表', totalRowCount: 12 },
+      ],
+    });
+    expect(preview.sheets[0].rows).toHaveLength(5);
+    expect(preview.sheets[1].rows).toHaveLength(5);
+    expect(preview.sheets[1].columns.slice(0, 3).map(({ header }) => header))
+      .toEqual(['系统订单编号', '订单号', '商品序号']);
+
+    const destinationPath = join(testRoot, '双表真实投影.xlsx');
+    await application.exportOrdersToWorkbook(withItemsInput, destinationPath);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    for (const sheet of preview.sheets) {
+      const worksheet = workbook.getWorksheet(sheet.name);
+      if (!worksheet) throw new Error(`缺少工作表：${sheet.name}`);
+      expect(rowValues(worksheet, 1)).toEqual(sheet.columns.map(({ header }) => header));
+      expect(sheet.rows[0]).toEqual(
+        rowValues(worksheet, 2).map((value, index) => previewCellText(
+          value,
+          sheet.columns[index].valueType,
+        )),
+      );
+    }
   });
 
   it('把当前筛选订单导出为一单一行和一商品条目一行，并以正确类型保存默认脱敏值', async () => {
@@ -1102,6 +1179,16 @@ function rowValues(worksheet: ExcelJS.Worksheet, rowNumber: number): unknown[] {
   const values = worksheet.getRow(rowNumber).values;
   if (!Array.isArray(values)) throw new Error('导出行格式无效');
   return values.slice(1);
+}
+
+function previewCellText(value: unknown, valueType: CustomFieldType): string {
+  if (value === null || value === undefined || value === '') return '';
+  if (valueType === 'money' && typeof value === 'number') return `¥${value.toFixed(2)}`;
+  if (valueType === 'datetime' && value instanceof Date) {
+    return value.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  if (valueType === 'checkbox' && typeof value === 'boolean') return value ? '是' : '否';
+  return String(value);
 }
 
 async function readZipText(filePath: string): Promise<string> {

@@ -56,6 +56,7 @@ import type {
 } from '../core/order-workbench';
 import type {
   OrderExportInput,
+  OrderExportPreviewResult,
   OrderExportWriteResult,
 } from '../core/order-export';
 import type { ShipmentGroupProjection } from '../core/shipment-groups';
@@ -447,6 +448,10 @@ export class DesktopSession {
     destinationPath: string,
   ): Promise<OrderExportWriteResult> {
     return this.requireApplication().exportOrdersToWorkbook(input, destinationPath);
+  }
+
+  public previewOrderExport(input: OrderExportInput): OrderExportPreviewResult {
+    return this.requireApplication().previewOrderExport(input);
   }
 
   public getOrder(orderId: string): OrderDetails {

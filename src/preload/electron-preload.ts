@@ -66,6 +66,7 @@ const api: DesktopApi = {
   createAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:create', input),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
+  previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,

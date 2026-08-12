@@ -123,6 +123,7 @@ import {
   normalizeOrderExportOrderIds,
   type OrderExportAddressRegion,
   type OrderExportInput,
+  type OrderExportPreviewResult,
   type OrderExportWriteResult,
 } from '../core/order-export';
 import type {
@@ -176,6 +177,8 @@ import {
 } from '../core/table-templates';
 import {
   createOrderExportWorkbookPlan,
+  createOrderExportPreviewSheets,
+  type OrderExportWorkbookPlan,
   writeOrderExportWorkbook,
 } from './order-export-workbook';
 import {
@@ -1616,11 +1619,34 @@ export class LocalApplication {
     input: OrderExportInput,
     destinationPath: string,
   ): Promise<OrderExportWriteResult> {
-    const normalizedInput = normalizeOrderExportInput(input);
-    const orderIds = normalizedInput.scope.orderIds;
     if (typeof destinationPath !== 'string' || !destinationPath.trim()) {
       throw new Error('订单导出文件路径无效');
     }
+
+    const prepared = this.prepareOrderExport(input);
+    await writeOrderExportWorkbook(destinationPath, prepared.plan);
+    return {
+      orderCount: prepared.orderCount,
+      orderItemCount: prepared.orderItemCount,
+    };
+  }
+
+  public previewOrderExport(input: OrderExportInput): OrderExportPreviewResult {
+    const prepared = this.prepareOrderExport(input);
+    return {
+      orderCount: prepared.orderCount,
+      orderItemCount: prepared.orderItemCount,
+      sheets: createOrderExportPreviewSheets(prepared.plan),
+    };
+  }
+
+  private prepareOrderExport(input: OrderExportInput): {
+    plan: OrderExportWorkbookPlan;
+    orderCount: number;
+    orderItemCount: number | null;
+  } {
+    const normalizedInput = normalizeOrderExportInput(input);
+    const orderIds = normalizedInput.scope.orderIds;
 
     const orderTemplate = normalizedInput.orderTemplateId === null
       ? null
@@ -1664,8 +1690,8 @@ export class LocalApplication {
       orderItemCustomFieldValues: orderItemResult.customFieldValues,
       addressRegions,
     });
-    await writeOrderExportWorkbook(destinationPath, plan);
     return {
+      plan,
       orderCount: orderResult.orders.length,
       orderItemCount: normalizedInput.includeOrderItems ? orderItemResult.items.length : null,
     };

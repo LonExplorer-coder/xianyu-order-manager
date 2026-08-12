@@ -64,7 +64,11 @@ import {
   orderReviewIssueLabel,
   type OrderIntakeSettingsView,
 } from '../core/order-intake';
-import type { OrderExportInput, OrderExportResult } from '../core/order-export';
+import type {
+  OrderExportInput,
+  OrderExportPreviewResult,
+  OrderExportResult,
+} from '../core/order-export';
 import {
   isActiveRecognitionBatchItemStatus,
   MAX_AUTOMATIC_RECOGNITION_RETRIES,
@@ -1299,6 +1303,7 @@ export function App({ api }: AppProps) {
         onManageTableTemplates={() => setActivePage('templates')}
         onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
         onUpdatePlatformTransactionStatus={updateOrderPlatformTransactionStatus}
+        onPreviewExport={(input) => api.previewOrderExport(input)}
         onExport={(input) => api.exportOrders(input)}
       />
     );
@@ -3349,6 +3354,7 @@ type OrdersWorkspaceProps = {
     input: OrderPlatformTransactionStatusUpdateInput,
   ) => Promise<OrderDetails[]>;
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
+  onPreviewExport: (input: OrderExportInput) => Promise<OrderExportPreviewResult>;
 };
 
 function OrdersWorkspace({
@@ -3388,6 +3394,7 @@ function OrdersWorkspace({
   onManageTableTemplates,
   onSaveActiveTableTemplate,
   onUpdatePlatformTransactionStatus,
+  onPreviewExport,
   onExport,
 }: OrdersWorkspaceProps) {
   const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
@@ -4046,10 +4053,9 @@ function OrdersWorkspace({
         <OrderExportDialog
           scopeKind={exportPreview.kind}
           orders={exportPreview.orders}
-          customFieldDefinitions={customFieldDefinitions}
-          customFieldValues={customFieldValues}
           templates={tableTemplates}
           initialOrderTemplateId={orderTemplate?.id ?? null}
+          onPreview={onPreviewExport}
           onExport={onExport}
           onClose={() => setExportPreview(null)}
           onSaved={(result) => {

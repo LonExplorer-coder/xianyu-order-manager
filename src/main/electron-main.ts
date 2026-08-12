@@ -259,6 +259,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       ...outcome,
     };
   });
+  ipcMain.handle('orders:preview-export', (_event, input: unknown) => (
+    desktopSession.previewOrderExport(normalizeOrderExportInput(input))
+  ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('orders:update', (_event, input: unknown) => desktopSession.updateOrder(input));
   ipcMain.handle('orders:update-platform-transaction-status', (_event, input: unknown) => (

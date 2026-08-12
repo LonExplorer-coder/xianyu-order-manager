@@ -13,6 +13,7 @@ import {
   defaultMaskedOrderCell,
   orderExportBuiltinTextLabel,
   type OrderExportAddressRegion,
+  type OrderExportPreviewSheet,
 } from '../core/order-export';
 import type { OrderItemWorkbenchItem } from '../core/order-workbench';
 import {
@@ -58,6 +59,26 @@ export type OrderExportWorksheetPlan = {
 export type OrderExportWorkbookPlan = {
   worksheets: OrderExportWorksheetPlan[];
 };
+
+export function createOrderExportPreviewSheets(
+  plan: OrderExportWorkbookPlan,
+  rowLimit = 5,
+): OrderExportPreviewSheet[] {
+  if (!Number.isSafeInteger(rowLimit) || rowLimit < 1) {
+    throw new Error('订单导出预览行数无效');
+  }
+  return plan.worksheets.map((worksheet) => ({
+    name: worksheet.name,
+    columns: worksheet.columns.map((column) => ({ ...column })),
+    rows: worksheet.rows.slice(0, rowLimit).map((row) => (
+      row.map((value, index) => orderExportPreviewCellText(
+        value,
+        worksheet.columns[index]?.valueType,
+      ))
+    )),
+    totalRowCount: worksheet.rows.length,
+  }));
+}
 
 export function createOrderExportWorkbookPlan(
   source: OrderExportWorkbookSource,
@@ -362,4 +383,27 @@ function numberFormat(valueType: CustomFieldType): string {
   if (valueType === 'datetime') return 'yyyy-mm-dd hh:mm:ss';
   if (valueType === 'number') return '0.########';
   return '@';
+}
+
+function orderExportPreviewCellText(
+  value: WorkbookCellValue,
+  valueType: CustomFieldType | undefined,
+): string {
+  if (!valueType) throw new Error('订单导出预览字段类型缺失');
+  if (value === null) return '';
+  if (valueType === 'money') {
+    if (typeof value !== 'number') throw new Error('订单导出预览金额无效');
+    return `¥${value.toFixed(2)}`;
+  }
+  if (valueType === 'datetime') {
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+      throw new Error('订单导出预览日期时间无效');
+    }
+    return value.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  if (valueType === 'checkbox') {
+    if (typeof value !== 'boolean') throw new Error('订单导出预览勾选值无效');
+    return value ? '是' : '否';
+  }
+  return String(value);
 }
