@@ -1,4 +1,5 @@
 import type { AftersalesCase, AftersalesStatus } from '../core/aftersales-cases';
+import { aftersalesTodoForStatuses } from '../core/order-operations-projection';
 import type { ShipmentRecord } from '../core/shipment-records';
 
 export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
@@ -51,11 +52,5 @@ export function aftersalesCurrentAction(
       recordIds.has(aftersalesCase.shipmentRecordId) && aftersalesCase.status !== 'completed'
     ))
     .map(({ status }) => status));
-  if (statuses.has('waiting_inspection')) return '检查退回商品';
-  if (statuses.has('waiting_refund')) return '确认退款';
-  if (statuses.has('waiting_replacement')) return '安排补发';
-  if (statuses.has('waiting_return')) return '等待买家退回';
-  if (statuses.has('partially_completed')) return '继续处理未完成售后';
-  if (statuses.has('processing')) return '处理售后问题';
-  return null;
+  return aftersalesTodoForStatuses(statuses);
 }

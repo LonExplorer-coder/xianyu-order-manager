@@ -8,17 +8,26 @@ import { aftersalesStatusLabel } from './aftersales-presentation';
 export function AftersalesCasePanel({
   record,
   aftersalesCases,
+  focusedCaseId,
   onUpdate,
 }: {
   record: ShipmentRecord;
   aftersalesCases: readonly AftersalesCase[];
+  focusedCaseId?: string;
   onUpdate: (aftersalesCase: AftersalesCase) => void;
 }) {
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
       {aftersalesCases.map((aftersalesCase) => (
-        <section key={aftersalesCase.id}>
+        <section
+          id={`aftersales-case-${aftersalesCase.id}`}
+          key={aftersalesCase.id}
+          className={focusedCaseId === aftersalesCase.id ? 'is-focused' : undefined}
+          role="region"
+          aria-label={`售后处理单 ${aftersalesCase.id}`}
+          tabIndex={-1}
+        >
           <header>
             <strong>{aftersalesStatusLabel(aftersalesCase.status)}</strong>
             <span>{formatDateTime(aftersalesCase.occurredAt)}</span>

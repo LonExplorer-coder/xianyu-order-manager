@@ -2184,6 +2184,13 @@ describe('发货记录', () => {
     expect(group.orders.map((order) => (
       application.getOrder(order.id).order.fulfillmentStatus
     ))).toEqual(['pending_shipment', 'pending_shipment']);
+    expect(application.getOrder(group.orders[0].id).operations.shipmentRecords).toEqual([
+      expect.objectContaining({
+        id: confirmation.record.id,
+        status: 'voided',
+        packages: [expect.objectContaining({ status: 'cancelled' })],
+      }),
+    ]);
     expect(() => application.cancelShipmentPackages({
       recordId: confirmation.record.id,
       packageIds: [confirmation.record.packages[0].id],
@@ -2622,6 +2629,139 @@ describe('发货记录', () => {
 });
 
 describe('售后处理单', () => {
+  it('原始订单按商品与数量聚合跨订单包裹、撤销包裹和售后待办', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder, secondOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    const [secondItem] = secondOrder.items;
+    const expectedRemainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-ORDER-PROJECTION-A',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }, {
+          orderId: secondOrder.id,
+          orderItemId: secondItem.id,
+          quantity: 2,
+        }],
+      }, {
+        shippingCarrier: '中通快递',
+        trackingNumber: 'ZT-ORDER-PROJECTION-B',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    const [activePackage, cancelledPackage] = shipment.record.packages;
+    application.cancelShipmentPackages({
+      recordId: shipment.record.id,
+      packageIds: [cancelledPackage.id],
+      reason: '第二个包裹尚未交寄，撤销后重新安排',
+    });
+    const createdCase = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T18:00:00+08:00',
+      reason: '已发出的一件商品存在破损',
+      items: [{
+        shipmentPackageItemId: activePackage.items[0].id,
+        quantity: 1,
+      }, {
+        shipmentPackageItemId: activePackage.items[1].id,
+        quantity: 1,
+      }],
+    });
+
+    const firstProjection = application.getOrder(firstOrder.id).operations;
+    expect(firstProjection).toEqual({
+      shipmentRecords: [{
+        id: shipment.record.id,
+        archiveId: shipment.record.archiveId,
+        status: 'active',
+        createdAt: shipment.record.createdAt,
+        packages: [{
+          id: activePackage.id,
+          position: 0,
+          status: 'active',
+          logisticsStatus: 'in_transit',
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-ORDER-PROJECTION-A',
+          cancellationReason: null,
+          items: [{
+            shipmentPackageItemId: activePackage.items[0].id,
+            orderItemId: firstItem.id,
+            sourceTitle: firstItem.sourceTitle,
+            sourceSpec: firstItem.sourceSpec,
+            quantity: 1,
+          }],
+        }, {
+          id: cancelledPackage.id,
+          position: 1,
+          status: 'cancelled',
+          logisticsStatus: 'in_transit',
+          shippingCarrier: '中通快递',
+          trackingNumber: 'ZT-ORDER-PROJECTION-B',
+          cancellationReason: '第二个包裹尚未交寄,撤销后重新安排',
+          items: [{
+            shipmentPackageItemId: cancelledPackage.items[0].id,
+            orderItemId: firstItem.id,
+            sourceTitle: firstItem.sourceTitle,
+            sourceSpec: firstItem.sourceSpec,
+            quantity: 1,
+          }],
+        }],
+      }],
+      aftersalesCases: [{
+        id: createdCase.id,
+        shipmentRecordId: shipment.record.id,
+        status: 'processing',
+        reason: '已发出的一件商品存在破损',
+        occurredAt: '2026-08-13T18:00:00+08:00',
+        currentTodo: '处理售后问题',
+        items: [{
+          shipmentPackageItemId: activePackage.items[0].id,
+          packageId: activePackage.id,
+          orderItemId: firstItem.id,
+          sourceTitle: firstItem.sourceTitle,
+          sourceSpec: firstItem.sourceSpec,
+          quantity: 1,
+        }],
+      }],
+      currentTodo: '处理售后问题',
+    });
+    expect(application.getOrder(secondOrder.id).operations.shipmentRecords[0].packages).toEqual([
+      expect.objectContaining({
+        id: activePackage.id,
+        items: [expect.objectContaining({ orderItemId: secondItem.id, quantity: 2 })],
+      }),
+    ]);
+    expect(application.getOrder(secondOrder.id).operations.aftersalesCases).toEqual([
+      expect.objectContaining({
+        id: createdCase.id,
+        items: [{
+          shipmentPackageItemId: activePackage.items[1].id,
+          packageId: activePackage.id,
+          orderItemId: secondItem.id,
+          sourceTitle: secondItem.sourceTitle,
+          sourceSpec: secondItem.sourceSpec,
+          quantity: 1,
+        }],
+      }),
+    ]);
+  });
+
   it('从发货记录选择部分商品数量建立可追溯的售后处理单', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];

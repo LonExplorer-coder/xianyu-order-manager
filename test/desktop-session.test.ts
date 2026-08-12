@@ -122,6 +122,32 @@ describe('桌面启动状态', () => {
       id: order.id,
       fulfillmentStatus: 'delivered',
     });
+    const aftersalesCase = session.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T19:00:00+08:00',
+      reason: '桌面会话售后投影测试',
+      items: [{
+        shipmentPackageItemId: shipment.record.packages[0].items[0].id,
+        quantity: 1,
+      }],
+    });
+    expect(session.getOrder(order.id).operations).toMatchObject({
+      shipmentRecords: [{
+        id: shipment.record.id,
+        packages: [{
+          logisticsStatus: 'delivered',
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-DESKTOP-SYNC',
+          items: [{ orderItemId: order.items[0].id, quantity: 1 }],
+        }],
+      }],
+      aftersalesCases: [{
+        id: aftersalesCase.id,
+        status: 'processing',
+        currentTodo: '处理售后问题',
+      }],
+      currentTodo: '处理售后问题',
+    });
   });
 
   it('通过桌面会话公开订单工作台查询', async () => {

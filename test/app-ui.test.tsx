@@ -140,6 +140,11 @@ const orderDetails: OrderDetails = {
   changeEvents: [],
   customFieldDefinitions: [],
   customFieldValues: [],
+  operations: {
+    shipmentRecords: [],
+    aftersalesCases: [],
+    currentTodo: '无需物流操作',
+  },
 };
 
 function orderSummary(
@@ -3006,8 +3011,8 @@ describe('订单管理工作台', () => {
       },
     });
     expect(screen.getByText('已取消 · 待发货')).toBeVisible();
-    expect(screen.getByRole('region', { name: '手工物流' })).toHaveTextContent('中通快递');
-    expect(screen.getByRole('region', { name: '手工物流' })).toHaveTextContent('—');
+    expect(screen.getByRole('region', { name: '订单手工物流' })).toHaveTextContent('中通快递');
+    expect(screen.getByRole('region', { name: '订单手工物流' })).toHaveTextContent('—');
   });
 
   it('订单详情展示完整当前值与真实状态，不暴露 OCR 原始响应', async () => {
@@ -3096,6 +3101,120 @@ describe('订单管理工作台', () => {
     expect(recipientSection).toHaveTextContent(confirmedOrder.recipient);
     expect(recipientSection).toHaveTextContent(confirmedOrder.phone);
     expect(recipientSection).toHaveTextContent(confirmedOrder.addressOriginal);
+  });
+
+  it('订单详情分区展示关联包裹物流和售后并定位到对应处理单', async () => {
+    const user = userEvent.setup();
+    const projection = singleShipmentGroupProjection();
+    const archive = shipmentArchiveForGroup(projection.groups[0]);
+    const record = archive.records[0];
+    const shipmentPackage = record.packages[0];
+    const aftersalesCase: AftersalesCase = {
+      id: 'aftersales-order-detail-1',
+      shipmentRecordId: record.id,
+      status: 'waiting_return',
+      revision: 1,
+      reason: '商品表面破损，需要退回检查',
+      occurredAt: '2026-08-13T18:30:00+08:00',
+      items: [{
+        id: 'aftersales-order-detail-item-1',
+        shipmentPackageItemId: shipmentPackage.items[0].id,
+        packageId: shipmentPackage.id,
+        orderId: confirmedOrder.id,
+        orderItemId: confirmedOrder.items[0].id,
+        orderNumber: confirmedOrder.orderNumber,
+        sourceTitle: confirmedOrder.items[0].sourceTitle,
+        sourceSpec: confirmedOrder.items[0].sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: 2,
+      }],
+      timeline: [],
+      createdAt: '2026-08-13T10:30:00.000Z',
+      updatedAt: '2026-08-13T10:30:00.000Z',
+    };
+    const operationalDetails: OrderDetails = {
+      ...orderDetails,
+      operations: {
+        shipmentRecords: [{
+          id: record.id,
+          archiveId: record.archiveId,
+          status: 'active',
+          createdAt: record.createdAt,
+          packages: [{
+            id: shipmentPackage.id,
+            position: 0,
+            status: 'active',
+            logisticsStatus: 'in_transit',
+            shippingCarrier: '顺丰速运',
+            trackingNumber: 'SF1000000020',
+            cancellationReason: null,
+            items: [{
+              shipmentPackageItemId: shipmentPackage.items[0].id,
+              orderItemId: confirmedOrder.items[0].id,
+              sourceTitle: confirmedOrder.items[0].sourceTitle,
+              sourceSpec: confirmedOrder.items[0].sourceSpec,
+              quantity: 2,
+            }],
+          }],
+        }],
+        aftersalesCases: [{
+          id: aftersalesCase.id,
+          shipmentRecordId: record.id,
+          status: 'waiting_return',
+          reason: aftersalesCase.reason,
+          occurredAt: aftersalesCase.occurredAt,
+          currentTodo: '等待买家退回',
+          items: [{
+            shipmentPackageItemId: shipmentPackage.items[0].id,
+            packageId: shipmentPackage.id,
+            orderItemId: confirmedOrder.items[0].id,
+            sourceTitle: confirmedOrder.items[0].sourceTitle,
+            sourceSpec: confirmedOrder.items[0].sourceSpec,
+            quantity: 1,
+          }],
+        }],
+        currentTodo: '等待买家退回',
+      },
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      getOrder: vi.fn().mockResolvedValue(operationalDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([aftersalesCase]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${confirmedOrder.orderNumber}`,
+    }));
+
+    const manualLogistics = await screen.findByRole('region', { name: '订单手工物流' });
+    expect(manualLogistics).toHaveTextContent('独立于关联包裹物流');
+    const shipmentSection = screen.getByRole('region', { name: '关联发货与包裹物流' });
+    expect(shipmentSection).toHaveTextContent('顺丰速运');
+    expect(shipmentSection).toHaveTextContent('SF1000000020');
+    expect(shipmentSection).toHaveTextContent('运输中');
+    expect(shipmentSection).toHaveTextContent('脱敏测试商品');
+    expect(shipmentSection).toHaveTextContent('白色 · × 2');
+    const aftersalesSection = screen.getByRole('region', { name: '关联售后处理' });
+    expect(aftersalesSection).toHaveTextContent('等待退回');
+    expect(aftersalesSection).toHaveTextContent('商品表面破损，需要退回检查');
+    expect(aftersalesSection).toHaveTextContent(/当前待办\s*等待买家退回/u);
+    expect(within(shipmentSection).getByRole('button', { name: '定位发货记录' })).toBeVisible();
+
+    await user.click(within(aftersalesSection).getByRole('button', { name: '定位售后处理单' }));
+    const focusedCase = await screen.findByRole('region', {
+      name: `售后处理单 ${aftersalesCase.id}`,
+    });
+    expect(focusedCase).toHaveClass('is-focused');
+    await waitFor(() => expect(focusedCase).toHaveFocus());
   });
 
   it('订单详情可切换查看全部来源截图并查看字段级修改记录', async () => {

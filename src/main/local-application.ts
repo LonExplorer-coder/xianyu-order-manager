@@ -182,6 +182,7 @@ import {
 } from './order-export-workbook';
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
+import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -4542,6 +4543,7 @@ export class LocalApplication {
         .find((event) => event.source === 'manual_edit')?.createdAt ?? null,
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       customFieldValues: this.listCustomFieldValuesForOrder(orderId),
+      operations: new OrderOperationsProjectionService(workspace.database).get(orderId),
     };
   }
 

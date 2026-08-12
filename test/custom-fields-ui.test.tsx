@@ -196,7 +196,7 @@ const sourceSnapshot = {
     shippingFeeCents: confirmedOrder.shippingFeeCents,
     amountCents: confirmedOrder.amountCents,
     platformTransactionStatus: confirmedOrder.platformTransactionStatus,
-    fulfillmentStatus: confirmedOrder.fulfillmentStatus,
+    fulfillmentStatus: 'pending_shipment' as const,
     items: confirmedOrder.items.map(({ subtotalCents: _subtotalCents, ...item }) => item),
   },
   confirmed: null,
@@ -274,7 +274,12 @@ function details(
     changeEvents: [],
     customFieldDefinitions: definitions,
     customFieldValues: values,
-  } as OrderDetails;
+    operations: {
+      shipmentRecords: [],
+      aftersalesCases: [],
+      currentTodo: '无需物流操作',
+    },
+  };
 }
 
 function createApi(

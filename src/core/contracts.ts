@@ -5,6 +5,7 @@ import type {
 } from './custom-fields';
 import type { QuantitySource } from './quantity-source';
 import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
+import type { OrderOperationsProjection } from './order-operations-projection';
 
 export type RecognitionItem = {
   sourceTitle: string;
@@ -397,6 +398,7 @@ export type OrderDetails = {
   lastManualEditAt?: string | null;
   customFieldDefinitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];
+  operations: OrderOperationsProjection;
 };
 
 export type OrderEditIdentityCorrection = {
