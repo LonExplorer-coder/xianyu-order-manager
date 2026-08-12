@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0018
 ---
 
 # 由手工物流驱动基础履约状态联动

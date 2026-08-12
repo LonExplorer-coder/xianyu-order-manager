@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0018
 ---
 
 # 依据有效发货与包裹事实投影订单履约状态
