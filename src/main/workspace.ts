@@ -168,6 +168,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 19) migrateToVersion19(database);
   if (row.version < 20) migrateToVersion20(database);
   if (row.version < 21) migrateToVersion21(database);
+  if (row.version < 22) migrateToVersion22(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2248,23 +2249,23 @@ function migrateToVersion21(database: DatabaseSync): void {
         if (mergedOrderIds.some((orderId) => !snapshotByOrderId.has(orderId))) {
           throw new Error('旧版发货组档案缺少成员收货快照');
         }
-        const recordedTotalQuantity = component.reduce(
-          (total, archive) => total + archive.total_quantity,
+        const mergedTotalQuantity = deduplicatedShipmentArchiveQuantity(
+          database,
+          canonicalArchive.id,
+          mergedOrderIds,
+        );
+        const preservedComponentQuantity = component.reduce(
+          (largest, archive) => Math.max(largest, archive.total_quantity),
           0,
         );
-        const memberQuantityRow = database.prepare(`
-          SELECT COALESCE(SUM(quantity), 0) AS quantity
-          FROM order_items
-          WHERE order_id IN (${mergedOrderIds.map(() => '?').join(', ')})
-        `).get(...mergedOrderIds) as { quantity: number };
-        const mergedTotalQuantity = Math.max(
-          recordedTotalQuantity,
-          memberQuantityRow.quantity,
+        const finalMergedTotalQuantity = Math.max(
+          mergedTotalQuantity,
+          preservedComponentQuantity,
         );
         const activeQuantityRow = activeQuantityForArchive.get(
           canonicalArchive.id,
         ) as { quantity: number };
-        const fullyShipped = activeQuantityRow.quantity >= mergedTotalQuantity;
+        const fullyShipped = activeQuantityRow.quantity >= finalMergedTotalQuantity;
         const updatedAt = component.reduce((latest, archive) => (
           archive.updated_at > latest ? archive.updated_at : latest
         ), canonicalArchive.updated_at);
@@ -2284,7 +2285,7 @@ function migrateToVersion21(database: DatabaseSync): void {
           preferredFinalArchive.address_normalized,
           JSON.stringify(mergedOrderIds),
           JSON.stringify(mergedOrderIds.map((orderId) => snapshotByOrderId.get(orderId))),
-          mergedTotalQuantity,
+          finalMergedTotalQuantity,
           canonicalArchive.created_at,
           fullyShippedAt,
           updatedAt,
@@ -2319,6 +2320,209 @@ function migrateToVersion21(database: DatabaseSync): void {
     }
     throw error;
   }
+}
+
+type ShipmentArchiveQuantityRepairRow = {
+  id: string;
+  member_order_ids_json: string;
+  total_quantity: number;
+  created_at: string;
+  fully_shipped_at: string | null;
+  updated_at: string;
+};
+
+function migrateToVersion22(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    const version21Migration = database.prepare(`
+      SELECT applied_at
+      FROM schema_migrations
+      WHERE version = 21
+    `).get() as { applied_at: string } | undefined;
+    const version21AppliedAt = version21Migration?.applied_at;
+    if (!version21AppliedAt) {
+      throw new Error('发货组档案去重升级记录缺失');
+    }
+    const archives = database.prepare(`
+      SELECT
+        id,
+        member_order_ids_json,
+        total_quantity,
+        created_at,
+        fully_shipped_at,
+        updated_at
+      FROM shipment_group_archives
+      ORDER BY created_at, id
+    `).all() as unknown as ShipmentArchiveQuantityRepairRow[];
+    const activeQuantityForArchive = database.prepare(`
+      SELECT COALESCE(SUM(items.quantity), 0) AS quantity
+      FROM shipment_package_items AS items
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+      LEFT JOIN shipment_package_cancellation_events AS cancellations
+        ON cancellations.package_id = packages.id
+      WHERE records.shipment_group_archive_id = ?
+        AND cancellations.id IS NULL
+    `);
+    const repairArchive = database.prepare(`
+      UPDATE shipment_group_archives
+      SET status = ?, total_quantity = ?, fully_shipped_at = ?
+      WHERE id = ?
+    `);
+    const recordsAtVersion21 = database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM shipment_records
+      WHERE shipment_group_archive_id = ?
+        AND created_at <= ?
+    `);
+
+    for (const archive of archives) {
+      if (!archive.id.startsWith('legacy-shipment-group-archive-')) continue;
+      const recordCountRow = recordsAtVersion21.get(
+        archive.id,
+        version21AppliedAt,
+      ) as { count: number };
+      if (recordCountRow.count < 2) continue;
+      const orderIds = parseStoredShipmentArchiveOrderIds(
+        archive.member_order_ids_json,
+        '发货组档案成员订单格式错误',
+      );
+      if (shipmentItemIdentityChangedAfter(
+        database,
+        orderIds,
+        archive.created_at,
+      )) continue;
+      const deduplicatedQuantity = deduplicatedShipmentArchiveQuantity(
+        database,
+        archive.id,
+        orderIds,
+        version21AppliedAt,
+      );
+      if (archive.total_quantity <= deduplicatedQuantity) continue;
+      const activeQuantityRow = activeQuantityForArchive.get(
+        archive.id,
+      ) as { quantity: number };
+      const fullyShipped = activeQuantityRow.quantity >= deduplicatedQuantity;
+      repairArchive.run(
+        fullyShipped ? 'fully_shipped' : 'partially_shipped',
+        deduplicatedQuantity,
+        fullyShipped ? archive.fully_shipped_at ?? archive.updated_at : null,
+        archive.id,
+      );
+    }
+
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (22, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function deduplicatedShipmentArchiveQuantity(
+  database: DatabaseSync,
+  archiveId: string,
+  memberOrderIds: string[],
+  asOf?: string,
+): number {
+  const placeholders = memberOrderIds.map(() => '?').join(', ');
+  const memberItems = database.prepare(`
+    SELECT id, order_id, position, quantity
+    FROM order_items
+    WHERE order_id IN (${placeholders})
+    ORDER BY order_id, position
+  `).all(...memberOrderIds) as unknown as Array<{
+    id: string;
+    order_id: string;
+    position: number;
+    quantity: number;
+  }>;
+  const quantityByItemId = new Map(memberItems.map((item) => (
+    [item.id, item.quantity] as const
+  )));
+  if (asOf) {
+    const quantityChanges = database.prepare(`
+      SELECT events.order_id, changes.field_path, changes.before_json
+      FROM order_change_events AS events
+      JOIN order_field_changes AS changes ON changes.event_id = events.id
+      WHERE events.order_id IN (${placeholders})
+        AND events.created_at > ?
+        AND changes.field_path GLOB 'items[[]*[]].quantity'
+      ORDER BY events.result_revision DESC, changes.id DESC
+    `).all(...memberOrderIds, asOf) as unknown as Array<{
+      order_id: string;
+      field_path: string;
+      before_json: string;
+    }>;
+    const itemIdByOrderPosition = new Map(memberItems.map((item) => (
+      [`${item.order_id}\0${item.position}`, item.id] as const
+    )));
+    for (const change of quantityChanges) {
+      const match = /^items\[(\d+)\]\.quantity$/u.exec(change.field_path);
+      if (!match) continue;
+      const itemId = itemIdByOrderPosition.get(`${change.order_id}\0${Number(match[1])}`);
+      const before: unknown = JSON.parse(change.before_json);
+      if (!itemId || !Number.isSafeInteger(before) || (before as number) <= 0) {
+        throw new Error('发货组档案商品数量变更记录无效');
+      }
+      quantityByItemId.set(itemId, before as number);
+    }
+  }
+  const shipmentItems = database.prepare(`
+    SELECT
+      items.source_order_item_id AS order_item_id,
+      MAX(items.source_item_quantity) AS quantity
+    FROM shipment_package_items AS items
+    JOIN shipment_packages AS packages ON packages.id = items.package_id
+    JOIN shipment_records AS records ON records.id = packages.shipment_record_id
+    WHERE records.shipment_group_archive_id = ?
+      AND items.order_id IN (${placeholders})
+    GROUP BY items.source_order_item_id
+  `).all(archiveId, ...memberOrderIds) as unknown as Array<{
+    order_item_id: string;
+    quantity: number;
+  }>;
+  for (const item of shipmentItems) {
+    quantityByItemId.set(
+      item.order_item_id,
+      Math.max(quantityByItemId.get(item.order_item_id) ?? 0, item.quantity),
+    );
+  }
+  const deduplicatedQuantity = [...quantityByItemId.values()].reduce(
+    (total, quantity) => total + quantity,
+    0,
+  );
+  if (deduplicatedQuantity <= 0) {
+    throw new Error('发货组档案没有可恢复的商品数量');
+  }
+  return deduplicatedQuantity;
+}
+
+function shipmentItemIdentityChangedAfter(
+  database: DatabaseSync,
+  memberOrderIds: string[],
+  cutoff: string,
+): boolean {
+  const placeholders = memberOrderIds.map(() => '?').join(', ');
+  const row = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM order_change_events AS events
+    JOIN order_field_changes AS changes ON changes.event_id = events.id
+    WHERE events.order_id IN (${placeholders})
+      AND events.created_at > ?
+      AND (
+        changes.field_path GLOB 'items[[]*[]]'
+        OR changes.field_path GLOB 'items.removed[[]*[]]'
+      )
+  `).get(...memberOrderIds, cutoff) as { count: number };
+  return row.count > 0;
 }
 
 type LegacyTableTemplateRow = {
