@@ -1276,7 +1276,7 @@ describe('订单管理工作台', () => {
         orderNumber: sourceItem.orderNumber,
         sourceTitle: sourceItem.sourceTitle,
         sourceSpec: sourceItem.sourceSpec,
-        quantity: 1,
+        quantity: 2,
         sourceShippedQuantity: sourceItem.quantity,
       }],
       timeline: [{
@@ -1300,7 +1300,7 @@ describe('订单管理工作台', () => {
         after: {
           status: 'waiting_return',
           reason: '买家需要退回破损商品',
-          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
         },
         createdAt: '2026-08-13T02:10:00.000Z',
       }],
@@ -1327,9 +1327,13 @@ describe('订单管理工作台', () => {
     expect(history).toHaveTextContent('售后：等待退回 1');
     expect(history).toHaveTextContent('当前待办：等待买家退回');
     expect(history).toHaveTextContent(sourceItem.sourceTitle);
-    expect(history).toHaveTextContent('× 1');
+    expect(history).toHaveTextContent('× 2');
     expect(history).toHaveTextContent('买家需要退回破损商品');
     expect(history).toHaveTextContent('已与买家确认退回处理');
+    expect(history).toHaveTextContent('问题原因：买家反馈商品破损 → 买家需要退回破损商品');
+    expect(history).toHaveTextContent(
+      `商品数量：${sourceItem.sourceTitle} · ${sourceItem.sourceSpec} 1 → 2`,
+    );
   });
 
   it('从发货记录选择具体商品数量建立售后处理单', async () => {
