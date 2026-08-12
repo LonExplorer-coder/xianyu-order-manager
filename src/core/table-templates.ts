@@ -21,6 +21,7 @@ export const TABLE_TEMPLATE_GRANULARITIES = ['order', 'order_item'] as const;
 export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[number];
 
 export type OrderBuiltinTableFieldId =
+  | 'system_order_number'
   | 'order_number'
   | 'alipay_transaction_number'
   | 'platform'
@@ -40,6 +41,7 @@ export type OrderBuiltinTableFieldId =
   | 'created_at';
 
 export type OrderItemBuiltinTableFieldId =
+  | 'system_order_number'
   | 'order_number'
   | 'item_sequence'
   | 'product_title'
@@ -94,6 +96,7 @@ export const DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP: DynamicProductTableGroup = {
 };
 
 export const DEFAULT_ORDER_TABLE_COLUMNS: TableTemplateLayoutItem[] = [
+  { field: { kind: 'builtin', key: 'system_order_number' }, displayName: '系统订单编号' },
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
   { field: { kind: 'builtin', key: 'platform' }, displayName: '平台' },
   { field: { kind: 'builtin', key: 'seller_account' }, displayName: '卖家账号' },
@@ -112,6 +115,7 @@ export const DEFAULT_ORDER_TABLE_COLUMNS: TableTemplateLayoutItem[] = [
 ];
 
 export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
+  { field: { kind: 'builtin', key: 'system_order_number' }, displayName: '系统订单编号' },
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
   { field: { kind: 'builtin', key: 'item_sequence' }, displayName: '商品序号' },
   { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
@@ -207,6 +211,7 @@ type FixedTableField = AvailableTableField & {
 };
 
 const ORDER_BUILTIN_FIELDS = [
+  fixedField('order', 'builtin', 'system_order_number', '系统订单编号', 'text'),
   fixedField('order', 'builtin', 'order_number', '订单号', 'text'),
   fixedField('order', 'builtin', 'alipay_transaction_number', '支付宝交易号', 'text'),
   fixedField('order', 'builtin', 'platform', '平台', 'text'),
@@ -235,6 +240,7 @@ const ORDER_COMPUTED_FIELDS = [
 ] as const satisfies readonly FixedTableField[];
 
 const ORDER_ITEM_BUILTIN_FIELDS = [
+  fixedField('order_item', 'builtin', 'system_order_number', '系统订单编号', 'text'),
   fixedField('order_item', 'builtin', 'order_number', '订单号', 'text'),
   fixedField('order_item', 'builtin', 'item_sequence', '商品序号', 'number'),
   fixedField('order_item', 'builtin', 'product_title', '原始商品标题', 'text'),
@@ -539,6 +545,7 @@ export function projectOrderTableCell(
     return null;
   }
   switch (reference.key) {
+    case 'system_order_number': return order.systemOrderNumber;
     case 'order_number': return order.orderNumber;
     case 'alipay_transaction_number': return order.alipayTransactionNumber;
     case 'platform': return order.platform;
@@ -645,7 +652,7 @@ export function projectOrderTableProjectionRow(
 }
 
 export function projectOrderItemTableCell(
-  item: OrderItemWorkbenchItem & { orderNumber?: string },
+  item: OrderItemWorkbenchItem & { systemOrderNumber?: string; orderNumber?: string },
   reference: TableFieldReference,
   customFieldValues: CustomFieldValueProjectionSource = [],
 ): TableCellValue {
@@ -660,6 +667,7 @@ export function projectOrderItemTableCell(
     return reference.key === 'item_subtotal' ? item.subtotalCents : null;
   }
   switch (reference.key) {
+    case 'system_order_number': return item.systemOrderNumber ?? null;
     case 'order_number': return item.orderNumber ?? null;
     case 'item_sequence': return item.position + 1;
     case 'product_title': return item.sourceTitle;

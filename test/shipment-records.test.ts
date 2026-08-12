@@ -733,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -788,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -874,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1014,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1213,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1393,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1530,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1657,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1766,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1841,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27);
         COMMIT;
       `);
     } finally {
@@ -1948,7 +1948,7 @@ describe('发货记录', () => {
         SET fulfillment_status = 'pending_shipment'
         WHERE id = ?
       `).run(firstOrder.id);
-      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26)').run();
+      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26, 27)').run();
     } finally {
       database.close();
     }

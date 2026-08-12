@@ -271,6 +271,7 @@ export type OriginalOrder = Omit<
   'items' | 'amountCents' | 'fulfillmentStatus'
 > & {
   id: string;
+  systemOrderNumber: string;
   amountCents: number;
   fulfillmentStatus: FulfillmentStatus;
   note?: string;
@@ -295,6 +296,7 @@ export type OrderDraftConfirmation = {
 
 export type OrderSummary = {
   id: string;
+  systemOrderNumber: string;
   platform: OrderPlatform;
   sellerAccount: string;
   orderNumber: string;

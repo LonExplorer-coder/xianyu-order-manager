@@ -117,6 +117,7 @@ const itemTextField: CustomFieldDefinition = {
 
 const confirmedOrder: OriginalOrder = {
   id: 'order-1',
+  systemOrderNumber: '20260727-000001',
   revision: 1,
   platform: 'xianyu',
   sellerAccount: '测试闲鱼账号',
@@ -205,6 +206,7 @@ const sourceSnapshot = {
 function summary(order: OriginalOrder = confirmedOrder): OrderSummary {
   return {
     id: order.id,
+    systemOrderNumber: order.systemOrderNumber,
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
@@ -258,6 +260,7 @@ function itemWorkbenchResult(): OrderItemWorkbenchResult {
     items: confirmedOrder.items.map((item) => ({
       ...item,
       orderId: confirmedOrder.id,
+      systemOrderNumber: confirmedOrder.systemOrderNumber,
       orderNumber: confirmedOrder.orderNumber,
     })),
     customFieldValues: [],

@@ -178,6 +178,11 @@ import {
   createOrderExportWorkbookPlan,
   writeOrderExportWorkbook,
 } from './order-export-workbook';
+import {
+  shanghaiDateKey,
+  systemOrderNumberForSequence,
+  systemOrderNumberSequence,
+} from '../core/system-order-number';
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
@@ -1918,10 +1923,11 @@ export class LocalApplication {
     }
 
     workspace.transaction(() => {
+      const systemOrderNumber = this.nextSystemOrderNumber(now);
       workspace.database
         .prepare(`
           INSERT INTO original_orders (
-            id, draft_id, screenshot_id, platform,
+            id, system_order_number, draft_id, screenshot_id, platform,
             seller_account, seller_account_normalized,
             platform_order_number, platform_order_number_normalized,
             alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
@@ -1931,12 +1937,13 @@ export class LocalApplication {
             platform_transaction_status, fulfillment_status, lifecycle_status,
             created_at, updated_at
           ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'active', ?, ?
           )
         `)
         .run(
           orderId,
+          systemOrderNumber,
           draft.id,
           persistedDraft.screenshotId,
           draft.platform,
@@ -3806,7 +3813,8 @@ export class LocalApplication {
     if (text) {
       const pattern = containsLikePattern(text);
       where.push(`(
-        orders.platform_order_number LIKE ? ESCAPE '\\'
+        orders.system_order_number LIKE ? ESCAPE '\\'
+        OR orders.platform_order_number LIKE ? ESCAPE '\\'
         OR orders.buyer_nickname LIKE ? ESCAPE '\\'
         OR orders.recipient LIKE ? ESCAPE '\\'
         OR orders.phone LIKE ? ESCAPE '\\'
@@ -3825,7 +3833,7 @@ export class LocalApplication {
             )
         )
       )`);
-      parameters.push(...Array<string>(11).fill(pattern));
+      parameters.push(...Array<string>(12).fill(pattern));
     }
     const buyerText = query.buyerText?.normalize('NFKC').trim();
     if (buyerText) {
@@ -3956,6 +3964,7 @@ export class LocalApplication {
       .prepare(`
         SELECT
           orders.id,
+          orders.system_order_number,
           orders.platform,
           orders.seller_account,
           orders.platform_order_number,
@@ -4021,6 +4030,7 @@ export class LocalApplication {
       if (!operations) throw new Error('订单运营投影缺少查询结果');
       return {
         id,
+        systemOrderNumber: asString(row.system_order_number),
         platform: asOrderPlatform(row.platform),
         sellerAccount: asString(row.seller_account),
         orderNumber: asString(row.platform_order_number),
@@ -4240,7 +4250,10 @@ export class LocalApplication {
     }
 
     const rows = workspace.database.prepare(`
-      SELECT items.*, orders.platform_order_number AS order_number
+      SELECT
+        items.*,
+        orders.system_order_number,
+        orders.platform_order_number AS order_number
       FROM order_items AS items
       JOIN original_orders AS orders ON orders.id = items.order_id
       WHERE ${where.join('\n        AND ')}
@@ -4251,6 +4264,7 @@ export class LocalApplication {
       return {
         id: asString(row.id),
         orderId: asString(row.order_id),
+        systemOrderNumber: asString(row.system_order_number),
         orderNumber: asString(row.order_number),
         position: asNumber(row.position),
         sourceTitle: asString(row.source_title),
@@ -4349,6 +4363,7 @@ export class LocalApplication {
 
     const order: OriginalOrder = {
       id: asString(row.id),
+      systemOrderNumber: asString(row.system_order_number),
       revision: asNumber(row.revision),
       platform: asOrderPlatform(row.platform),
       sellerAccount: asString(row.seller_account),
@@ -5090,6 +5105,22 @@ export class LocalApplication {
 
   private aftersalesService(): AftersalesApplicationService {
     return new AftersalesApplicationService(this.requireWorkspace());
+  }
+
+  private nextSystemOrderNumber(createdAt: string): string {
+    const workspace = this.requireWorkspace();
+    const dateKey = shanghaiDateKey(createdAt);
+    const row = workspace.database.prepare(`
+      SELECT system_order_number
+      FROM original_orders
+      WHERE system_order_number LIKE ?
+      ORDER BY system_order_number DESC
+      LIMIT 1
+    `).get(`${dateKey}-%`) as SqlRow | undefined;
+    const nextSequence = row
+      ? systemOrderNumberSequence(asString(row.system_order_number), dateKey) + 1
+      : 1;
+    return systemOrderNumberForSequence(dateKey, nextSequence);
   }
 
   private requireWorkspace(): Workspace {

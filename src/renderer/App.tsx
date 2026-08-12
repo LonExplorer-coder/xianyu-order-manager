@@ -7990,6 +7990,7 @@ function DetailWorkspace({
               <span>{formatDateTime(order.createdAt)} 入库</span>
             </div>
             <dl className="detail-grid">
+              <DetailTerm label="系统订单编号" value={order.systemOrderNumber} />
               <DetailTerm label="平台" value={platformLabel(order.platform)} />
               <DetailTerm label="卖家账号" value={displayValue(order.sellerAccount)} />
               <DetailTerm label="订单号" value={order.orderNumber} />

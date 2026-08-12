@@ -77,6 +77,7 @@ const draft: OrderDraft = {
 
 const confirmedOrder: OriginalOrder = {
   id: 'order-1',
+  systemOrderNumber: '20260727-000001',
   revision: 1,
   platform: 'xianyu',
   sellerAccount: draft.sellerAccount,
@@ -153,6 +154,7 @@ function orderSummary(
 ): OrderSummary {
   return {
     id: order.id,
+    systemOrderNumber: order.systemOrderNumber,
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
@@ -2367,7 +2369,7 @@ describe('订单管理工作台', () => {
 
     const table = await screen.findByRole('table', { name: '原始订单' });
     const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent);
-    expect(headers.slice(8, 14)).toEqual([
+    expect(headers.slice(9, 15)).toEqual([
       '商品1', '款式或规格1', '数量1', '商品2', '款式或规格2', '数量2',
     ]);
 
@@ -2381,7 +2383,7 @@ describe('订单管理工作台', () => {
       .closest('tr');
     expect(singleRow).not.toBeNull();
     const singleCells = within(singleRow as HTMLTableRowElement).getAllByRole('cell');
-    expect(singleCells.slice(11, 14).map((cell) => cell.textContent)).toEqual(['', '', '']);
+    expect(singleCells.slice(12, 15).map((cell) => cell.textContent)).toEqual(['', '', '']);
 
     await user.click(screen.getByRole('button', { name: '导出当前结果 2 笔' }));
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
@@ -3079,6 +3081,7 @@ describe('订单管理工作台', () => {
 
     const detailPage = (await screen.findByRole('heading', { name: '订单详情' })).closest('section');
     expect(detailPage).not.toBeNull();
+    expect(detailPage).toHaveTextContent(detailedOrder.systemOrderNumber);
     expect(detailPage).toHaveTextContent('闲鱼');
     expect(detailPage).toHaveTextContent('ALI-DETAIL-20260727');
     expect(detailPage).toHaveTextContent('已退款 · 已发货');
@@ -6339,7 +6342,7 @@ describe('订单管理工作台', () => {
     }, [noteField.id]));
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
     expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
-      .toEqual(['订单号', '平台', '卖家账号']);
+      .toEqual(['系统订单编号', '订单号', '平台']);
   });
 
   it('应用订单模板后导出切换到其他模板仍预加载其自定义字段值', async () => {
@@ -6640,7 +6643,7 @@ describe('订单管理工作台', () => {
     await user.click(screen.getByRole('button', { name: '订单' }));
     const table = await screen.findByRole('table', { name: '原始订单' });
     expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
-      .toEqual(['订单号', '平台', '卖家账号']);
+      .toEqual(['系统订单编号', '订单号', '平台']);
     expect(screen.getByRole('combobox', { name: '表格模板' })).toHaveValue('');
   });
 
@@ -6747,6 +6750,7 @@ describe('订单管理工作台', () => {
     const item = {
       ...confirmedOrder.items[0],
       orderId: confirmedOrder.id,
+      systemOrderNumber: confirmedOrder.systemOrderNumber,
       orderNumber: confirmedOrder.orderNumber,
     };
     const api = createApi({
@@ -6766,6 +6770,7 @@ describe('订单管理工作台', () => {
     const table = await screen.findByRole('table', { name: '订单商品明细' });
     expect(within(table).getAllByRole('columnheader').slice(0, -1).map((cell) => cell.textContent))
       .toEqual([
+        '系统订单编号',
         '订单号',
         '商品序号',
         '原始商品标题',

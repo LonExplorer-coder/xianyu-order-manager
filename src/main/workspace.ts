@@ -9,6 +9,10 @@ import {
   type StoredShipmentArchiveRecipientSnapshot,
 } from '../core/shipment-archive-storage';
 import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
+import {
+  shanghaiDateKey,
+  systemOrderNumberForSequence,
+} from '../core/system-order-number';
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
@@ -174,6 +178,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 24) migrateToVersion24(database);
   if (row.version < 25) migrateToVersion25(database);
   if (row.version < 26) migrateToVersion26(database);
+  if (row.version < 27) migrateToVersion27(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2766,6 +2771,64 @@ function migrateToVersion26(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion27(database: DatabaseSync): void {
+  const migratedAt = new Date().toISOString();
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE original_orders ADD COLUMN system_order_number TEXT;
+    `);
+    const orders = database.prepare(`
+      SELECT id, created_at
+      FROM original_orders
+      ORDER BY created_at, id
+    `).all() as unknown as Array<{ id: string; created_at: string }>;
+    const dailySequences = new Map<string, number>();
+    const assignNumber = database.prepare(`
+      UPDATE original_orders
+      SET system_order_number = ?
+      WHERE id = ? AND system_order_number IS NULL
+    `);
+    for (const order of orders) {
+      const dateKey = shanghaiDateKey(order.created_at);
+      const sequence = (dailySequences.get(dateKey) ?? 0) + 1;
+      dailySequences.set(dateKey, sequence);
+      assignNumber.run(systemOrderNumberForSequence(dateKey, sequence), order.id);
+    }
+    database.exec(`
+      CREATE UNIQUE INDEX original_orders_by_system_order_number
+      ON original_orders (system_order_number);
+
+      CREATE TRIGGER original_orders_require_system_order_number_on_insert
+      BEFORE INSERT ON original_orders
+      WHEN NEW.system_order_number IS NULL
+        OR length(NEW.system_order_number) <> 15
+        OR substr(NEW.system_order_number, 9, 1) <> '-'
+      BEGIN
+        SELECT RAISE(ABORT, 'system order number is required');
+      END;
+
+      CREATE TRIGGER original_orders_system_order_number_is_immutable
+      BEFORE UPDATE OF system_order_number ON original_orders
+      WHEN NEW.system_order_number IS NOT OLD.system_order_number
+      BEGIN
+        SELECT RAISE(ABORT, 'system order number is immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (27, ?)')
+      .run(migratedAt);
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
   }
 }
 

@@ -229,9 +229,13 @@ describe('默认脱敏的订单工作簿导出', () => {
     expect(orders?.rowCount).toBe(2);
     expect(items?.rowCount).toBe(5);
     if (!orders || !items) throw new Error('缺少导出工作表');
-    expect(rowValues(items, 1).slice(0, 2)).toEqual(['订单号', '商品序号']);
-    expect(rowValues(items, 2).slice(0, 2)).toEqual(['XY-EXPORT-001', 1]);
-    expect(rowValues(items, 3).slice(0, 2)).toEqual(['XY-EXPORT-001', 2]);
+    const systemOrderNumber = application.getOrder(currentResultIds[0]).order.systemOrderNumber;
+    expect(rowValues(items, 1).slice(0, 3))
+      .toEqual(['系统订单编号', '订单号', '商品序号']);
+    expect(rowValues(items, 2).slice(0, 3))
+      .toEqual([systemOrderNumber, 'XY-EXPORT-001', 1]);
+    expect(rowValues(items, 3).slice(0, 3))
+      .toEqual([systemOrderNumber, 'XY-EXPORT-001', 2]);
 
     const defaultOrderHeaders = rowValues(orders, 1);
     const firstProductColumnIndex = defaultOrderHeaders.indexOf('商品1');
@@ -243,7 +247,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       '商品4', '款式或规格4', '数量4',
     ]);
     expect(defaultOrderHeaders).toEqual([
-      '订单号', '平台', '卖家账号', '买家', '收件人', '手机号', '收货地址',
+      '系统订单编号', '订单号', '平台', '卖家账号', '买家', '收件人', '手机号', '收货地址',
       '商品1', '款式或规格1', '数量1',
       '商品2', '款式或规格2', '数量2',
       '商品3', '款式或规格3', '数量3',
@@ -270,6 +274,7 @@ describe('默认脱敏的订单工作簿导出', () => {
     expect(cellByHeader(orders, 2, '商品4').value).toBe('历史来源杯垫');
 
     expect(rowValues(items, 1)).toEqual([
+      '系统订单编号',
       '订单号',
       '商品序号',
       '原始商品标题',
@@ -300,6 +305,10 @@ describe('默认脱敏的订单工作簿导出', () => {
       value: 'XY-EXPORT-001',
       type: ExcelJS.ValueType.String,
     });
+    expect(cellByHeader(orders, 2, '系统订单编号')).toMatchObject({
+      value: systemOrderNumber,
+      type: ExcelJS.ValueType.String,
+    });
     expect(cellByHeader(orders, 2, '成交金额')).toMatchObject({
       value: 36,
       type: ExcelJS.ValueType.Number,
@@ -314,6 +323,7 @@ describe('默认脱敏的订单工作簿导出', () => {
       value: 'XY-EXPORT-001',
       type: ExcelJS.ValueType.String,
     });
+    expect(cellByHeader(items, 2, '系统订单编号').value).toBe(systemOrderNumber);
     expect(cellByHeader(items, 2, '原始商品标题')).toMatchObject({
       value: '夏日海棠杯',
       type: ExcelJS.ValueType.String,

@@ -98,6 +98,7 @@ function orderSummaryForProjection(
 ): OrderSummary {
   return {
     id,
+    systemOrderNumber: `20260730-${id === 'order-1' ? '000001' : '000002'}`,
     platform: 'xianyu',
     sellerAccount: '主账号',
     orderNumber,
@@ -216,6 +217,11 @@ describe('表格模板核心契约', () => {
     const orderFields = availableTableFields('order', definitions);
     expect(orderFields).toEqual(expect.arrayContaining([
       {
+        reference: { kind: 'builtin', key: 'system_order_number' },
+        defaultLabel: '系统订单编号',
+        valueType: 'text',
+      },
+      {
         reference: { kind: 'builtin', key: 'order_number' },
         defaultLabel: '订单号',
         valueType: 'text',
@@ -261,6 +267,11 @@ describe('表格模板核心契约', () => {
 
     const itemFields = availableTableFields('order_item', definitions);
     expect(itemFields.filter(({ reference }) => reference.kind !== 'custom')).toEqual([
+      {
+        reference: { kind: 'builtin', key: 'system_order_number' },
+        defaultLabel: '系统订单编号',
+        valueType: 'text',
+      },
       {
         reference: { kind: 'builtin', key: 'order_number' },
         defaultLabel: '订单号',
@@ -487,6 +498,7 @@ describe('表格模板核心契约', () => {
   it('把订单字段投影为可复用的原始单元格值', () => {
     const order: OrderSummary = {
       id: 'order-1',
+      systemOrderNumber: '20260730-000001',
       platform: 'xianyu',
       sellerAccount: '主账号',
       orderNumber: 'XY-001',
@@ -528,6 +540,8 @@ describe('表格模板核心契约', () => {
 
     expect(projectOrderTableCell(order, { kind: 'builtin', key: 'order_number' }))
       .toBe('XY-001');
+    expect(projectOrderTableCell(order, { kind: 'builtin', key: 'system_order_number' }))
+      .toBe('20260730-000001');
     expect(projectOrderTableCell(order, { kind: 'builtin', key: 'address' }))
       .toBe(order.addressOriginal);
     expect(projectOrderTableCell(order, { kind: 'builtin', key: 'product_summary' }))
@@ -558,6 +572,7 @@ describe('表格模板核心契约', () => {
     const item: OrderItemWorkbenchItem & { orderNumber: string } = {
       id: 'item-1',
       orderId: 'order-1',
+      systemOrderNumber: '20260730-000001',
       orderNumber: 'XY-001',
       position: 0,
       sourceTitle: '海棠杯',
