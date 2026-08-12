@@ -3493,7 +3493,7 @@ function OrdersWorkspace({
           <h1>订单</h1>
           <p>{view === 'orders'
             ? `显示 ${orders.length} / ${allLifecycleOrderCount} 笔，保留来源截图与来源快照。`
-            : '逐条查看商品明细，并按商品级自定义字段筛选或排序。'}</p>
+            : '逐条查看订单商品明细，并按商品级自定义字段筛选或排序。'}</p>
         </div>
         <div className="upload-action">
           <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
@@ -3531,7 +3531,7 @@ function OrdersWorkspace({
           className={view === 'order_items' ? 'is-active' : ''}
           onClick={() => onViewChange('order_items')}
         >
-          商品
+          订单商品明细
         </button>
       </div>
 
@@ -4054,7 +4054,9 @@ function OrdersWorkspace({
           onClose={() => setExportPreview(null)}
           onSaved={(result) => {
             setExportFeedback(
-              `已导出 ${result.orderCount} 笔订单、${result.orderItemCount} 条商品明细：${result.fileName}`,
+              result.orderItemCount === null
+                ? `已导出 ${result.orderCount} 笔订单：${result.fileName}`
+                : `已导出 ${result.orderCount} 笔订单、${result.orderItemCount} 条订单商品明细：${result.fileName}`,
             );
             setExportPreview(null);
           }}
@@ -4297,13 +4299,13 @@ function OrderItemsWorkbench({
       role="tabpanel"
       aria-labelledby="order-items-view-tab"
     >
-      <section className="order-query order-item-query" aria-label="商品查询">
+      <section className="order-query order-item-query" aria-label="订单商品明细查询">
         <div className="order-item-query__heading">
           <strong>商品级字段</strong>
-          <span>精确筛选原始商品事实，也可组合商品明细粒度的自定义字段。</span>
+          <span>精确筛选原始商品事实，也可组合订单商品明细粒度的自定义字段。</span>
         </div>
         <span className="order-query__result" role="status" aria-live="polite">
-          {loading ? '正在查询…' : `显示 ${items.length} 条商品明细`}
+          {loading ? '正在查询…' : `显示 ${items.length} 条订单商品明细`}
         </span>
         {hasActiveQuery && (
           <button
@@ -4392,7 +4394,7 @@ function OrderItemsWorkbench({
           <label>
             <span>内置排序</span>
             <select
-              aria-label="商品明细内置排序"
+              aria-label="订单商品明细内置排序"
               value={query.sortField
                 ? `${query.sortField}:${query.sortDirection ?? 'asc'}`
                 : ''}
@@ -4496,19 +4498,19 @@ function OrderItemsWorkbench({
 
       {items.length === 0 ? (
         <div className="order-no-results">
-          <h2>没有符合条件的商品明细</h2>
+          <h2>没有符合条件的订单商品明细</h2>
           <p>试试更换字段值，或清除当前筛选。</p>
         </div>
       ) : (
         <>
-          <div className="table-toolbar" aria-label="商品表概况">
-            <span><strong>{items.length}</strong> 条商品明细</span>
+          <div className="table-toolbar" aria-label="订单商品明细表概况">
+            <span><strong>{items.length}</strong> 条订单商品明细</span>
             <span><strong>{items.reduce((total, item) => total + item.quantity, 0)}</strong> 件商品</span>
             <span><strong>{formatMoney(items.reduce((total, item) => total + item.subtotalCents, 0))}</strong> 商品小计</span>
           </div>
 
           <div className="table-frame order-items-table-frame">
-            <table aria-label="商品明细">
+            <table aria-label="订单商品明细">
               <thead>
                 <tr>
                   {columns.map((column) => (
@@ -6721,10 +6723,10 @@ function ReviewWorkspace({
             </div>
           </FormSection>
 
-          <FormSection title={`商品明细 · ${draft.items.length}`} description="没有识别到明确数量时，系统默认为 1。">
+          <FormSection title={`订单商品明细 · ${draft.items.length}`} description="没有识别到明确数量时，系统默认为 1。">
             <div className="item-list">
               {draft.items.length === 0 && (
-                <div className="empty-items">暂无商品明细</div>
+                <div className="empty-items">暂无订单商品明细</div>
               )}
               {draft.items.map((item, index) => (
                 <div className="item-editor" key={item.id}>
@@ -7543,7 +7545,7 @@ function OrderEditWorkspace({
               </div>
             </FormSection>
 
-            <FormSection title={`商品明细 · ${input.items.length}`} description="可增加、修改或删除商品，订单至少保留一件商品。">
+            <FormSection title={`订单商品明细 · ${input.items.length}`} description="可增加、修改或删除商品，订单至少保留一件商品。">
               <div className="item-list">
                 {input.items.map((item, index) => (
                   <div className="item-editor" key={`${item.id ?? 'new'}-${index}`}>
@@ -8186,7 +8188,7 @@ function DetailWorkspace({
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h2>商品明细</h2>
+              <h2>订单商品明细</h2>
               <span>{order.items.length} 项</span>
             </div>
             <div className="detail-items">

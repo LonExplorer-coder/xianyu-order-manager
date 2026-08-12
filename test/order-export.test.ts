@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import ExcelJS from 'exceljs';
 import yauzl from 'yauzl';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   OrderEditInput,
@@ -104,7 +104,7 @@ afterEach(() => {
   for (const application of openedApplications.splice(0)) application.close();
 });
 
-describe('默认脱敏的两表工作簿导出', () => {
+describe('默认脱敏的订单工作簿导出', () => {
   it('导出将当前履约五态显示为中文标签', () => {
     expect([
       'pending_shipment',
@@ -115,6 +115,29 @@ describe('默认脱敏的两表工作簿导出', () => {
     ].map((status) => (
       orderExportBuiltinTextLabel('fulfillment_status', status)
     ))).toEqual(['待发货', '部分发货', '已发货', '已收货', '未知']);
+  });
+
+  it('默认只导出订单总表，不查询也不生成订单商品明细表', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-ORDER-ONLY-001' }),
+    ]);
+    const orderId = application.queryOrders({}).orders[0].id;
+    const destinationPath = join(testRoot, '默认订单总表.xlsx');
+    const queryOrderItems = vi.spyOn(application, 'queryOrderItems');
+
+    const outcome = await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [orderId] },
+      orderTemplateId: null,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }, destinationPath);
+
+    expect(outcome).toEqual({ orderCount: 1, orderItemCount: null });
+    expect(queryOrderItems).not.toHaveBeenCalled();
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    expect(workbook.worksheets.map(({ name }) => name)).toEqual(['订单总表']);
   });
 
   it('把当前筛选订单导出为一单一行和一商品条目一行，并以正确类型保存默认脱敏值', async () => {
@@ -190,6 +213,7 @@ describe('默认脱敏的两表工作簿导出', () => {
         orderIds: currentResultIds,
       },
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, destinationPath);
@@ -198,13 +222,16 @@ describe('默认脱敏的两表工作簿导出', () => {
 
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
-    expect(workbook.worksheets.map(({ name }) => name)).toEqual(['订单总表', '商品明细']);
+    expect(workbook.worksheets.map(({ name }) => name)).toEqual(['订单总表', '订单商品明细表']);
 
     const orders = workbook.getWorksheet('订单总表');
-    const items = workbook.getWorksheet('商品明细');
+    const items = workbook.getWorksheet('订单商品明细表');
     expect(orders?.rowCount).toBe(2);
     expect(items?.rowCount).toBe(5);
     if (!orders || !items) throw new Error('缺少导出工作表');
+    expect(rowValues(items, 1).slice(0, 2)).toEqual(['订单号', '商品序号']);
+    expect(rowValues(items, 2).slice(0, 2)).toEqual(['XY-EXPORT-001', 1]);
+    expect(rowValues(items, 3).slice(0, 2)).toEqual(['XY-EXPORT-001', 2]);
 
     const defaultOrderHeaders = rowValues(orders, 1);
     const firstProductColumnIndex = defaultOrderHeaders.indexOf('商品1');
@@ -244,6 +271,7 @@ describe('默认脱敏的两表工作簿导出', () => {
 
     expect(rowValues(items, 1)).toEqual([
       '订单号',
+      '商品序号',
       '原始商品标题',
       '原始款式／规格',
       '商品单价',
@@ -436,13 +464,14 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [before.id] },
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, defaultPath);
     const defaultWorkbook = new ExcelJS.Workbook();
     await defaultWorkbook.xlsx.readFile(defaultPath);
     const defaultOrders = defaultWorkbook.getWorksheet('订单总表');
-    const defaultItems = defaultWorkbook.getWorksheet('商品明细');
+    const defaultItems = defaultWorkbook.getWorksheet('订单商品明细表');
     if (!defaultOrders || !defaultItems) throw new Error('缺少默认导出工作表');
     expect(rowValues(defaultOrders, 1)).not.toContain('备注');
     expect(cellByHeader(defaultOrders, 2, '商品1').value).toBe('人工商品一');
@@ -479,13 +508,14 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [before.id] },
       orderTemplateId: orderTemplate.id,
+      includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
       masking: 'default',
     }, customPath);
     const customWorkbook = new ExcelJS.Workbook();
     await customWorkbook.xlsx.readFile(customPath);
     const customOrders = customWorkbook.getWorksheet('订单总表');
-    const customItems = customWorkbook.getWorksheet('商品明细');
+    const customItems = customWorkbook.getWorksheet('订单商品明细表');
     if (!customOrders || !customItems) throw new Error('缺少自定义导出工作表');
     expect(rowValues(customOrders, 1)).toEqual([
       '当前备注',
@@ -558,13 +588,14 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'current_result', orderIds: [wide.id, narrow.id] },
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, currentPath);
     const currentWorkbook = new ExcelJS.Workbook();
     await currentWorkbook.xlsx.readFile(currentPath);
     const currentOrders = currentWorkbook.getWorksheet('订单总表');
-    const currentItems = currentWorkbook.getWorksheet('商品明细');
+    const currentItems = currentWorkbook.getWorksheet('订单商品明细表');
     if (!currentOrders || !currentItems) throw new Error('缺少导出工作表');
     expect(cellByHeader(currentOrders, 2, '商品1').value).toBe('同款海棠杯');
     expect(cellByHeader(currentOrders, 2, '款式或规格1').value).toBe('红色');
@@ -580,6 +611,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [narrow.id] },
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, selectedPath);
@@ -730,6 +762,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [second.id, first.id] },
       orderTemplateId: orderTemplate.id,
+      includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
       masking: 'default',
     }, destinationPath);
@@ -737,7 +770,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
     const orders = workbook.getWorksheet('订单总表');
-    const items = workbook.getWorksheet('商品明细');
+    const items = workbook.getWorksheet('订单商品明细表');
     if (!orders || !items) throw new Error('缺少导出工作表');
     expect(rowValues(orders, 1)).toEqual([
       '补差金额',
@@ -815,6 +848,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     const outcome = await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [order.id] },
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, destinationPath);
@@ -822,7 +856,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: 2 });
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(destinationPath);
-    const items = workbook.getWorksheet('商品明细');
+    const items = workbook.getWorksheet('订单商品明细表');
     const orders = workbook.getWorksheet('订单总表');
     if (!orders || !items) throw new Error('缺少导出工作表');
     expect(cellByHeader(orders, 2, '订单号').value).toBe('XY-TRASHED-EXPORT-001');
@@ -843,6 +877,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     const orderId = application.queryOrders({}).orders[0].id;
     const baseInput = {
       orderTemplateId: null,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default' as const,
     };
@@ -935,6 +970,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     await application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [order.id] },
       orderTemplateId: template.id,
+      includeOrderItems: true,
       orderItemTemplateId: null,
       masking: 'default',
     }, destinationPath);
@@ -973,7 +1009,7 @@ describe('默认脱敏的两表工作簿导出', () => {
           rows: [[new Date(Number.NaN)]],
         },
         {
-          name: '商品明细',
+          name: '订单商品明细表',
           columns: [{ header: '订单号', valueType: 'text' }],
           rows: [],
         },
@@ -1030,6 +1066,7 @@ describe('默认脱敏的两表工作簿导出', () => {
     await expect(application.exportOrdersToWorkbook({
       scope: { kind: 'selected_orders', orderIds: [order.id] },
       orderTemplateId: orderTemplate.id,
+      includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
       masking: 'default',
     }, destinationPath))

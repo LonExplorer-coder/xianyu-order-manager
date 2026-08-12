@@ -159,7 +159,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
     setEditingTemplateId(null);
     setDraft({
       ...newDraft('order_item', props.customFieldDefinitions, props.orderItemQuery),
-      name: '商品明细默认模板副本',
+      name: '订单商品明细默认模板副本',
     });
     setFeedback('已复制内置默认模板；保存后才会创建用户模板。');
   }
@@ -325,7 +325,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
           className={libraryGranularity === 'order_item' ? 'is-active' : ''}
           onClick={() => openTemplateLibrary('order_item')}
         >
-          商品明细表模板
+          订单商品明细表模板
         </button>
       </div>
 
@@ -354,17 +354,17 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
           {!props.loading && showBuiltInOrderItemDefault ? (
             <article
               className="template-card"
-              aria-label="内置商品明细默认模板"
+              aria-label="内置订单商品明细默认模板"
             >
-              <strong>内置商品明细默认模板</strong>
-              <span>商品明细 · {DEFAULT_FIELD_KEYS.order_item.length} 列 · 只读</span>
+              <strong>内置订单商品明细默认模板</strong>
+              <span>订单商品明细 · {DEFAULT_FIELD_KEYS.order_item.length} 列 · 只读</span>
               <p>由系统维护，不会在工作区中创建或删除。</p>
               <div className="template-card__actions">
                 <button
                   className="button button--quiet"
                   type="button"
                   disabled={props.saving}
-                  aria-label="复制内置商品明细默认模板"
+                  aria-label="复制内置订单商品明细默认模板"
                   onClick={copyBuiltInOrderItemTemplate}
                 >
                   复制后编辑
@@ -452,7 +452,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
               onChange={(event) => changeGranularity(event.target.value as TableTemplateGranularity)}
             >
               <option value="order">订单总表模板</option>
-              <option value="order_item">商品明细表模板</option>
+              <option value="order_item">订单商品明细表模板</option>
             </select>
           </label>
 
@@ -742,7 +742,7 @@ function querySummary(query: OrderWorkbenchQuery | OrderItemWorkbenchQuery): str
 }
 
 function granularityLabel(granularity: TableTemplateGranularity): string {
-  return granularity === 'order' ? '订单' : '商品明细';
+  return granularity === 'order' ? '订单' : '订单商品明细';
 }
 
 function fieldKindLabel(kind: TableTemplateColumn['field']['kind']): string {

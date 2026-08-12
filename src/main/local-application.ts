@@ -1620,17 +1620,19 @@ export class LocalApplication {
     const orderTemplate = normalizedInput.orderTemplateId === null
       ? null
       : this.getTableTemplate(normalizedInput.orderTemplateId);
-    const orderItemTemplate = normalizedInput.orderItemTemplateId === null
+    const orderItemTemplate = !normalizedInput.includeOrderItems || normalizedInput.orderItemTemplateId === null
       ? null
       : this.getTableTemplate(normalizedInput.orderItemTemplateId);
     if (orderTemplate && orderTemplate.granularity !== 'order') {
       throw new Error('订单总表必须使用订单粒度模板');
     }
     if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
-      throw new Error('商品明细表必须使用商品明细粒度模板');
+      throw new Error('订单商品明细表必须使用订单商品明细粒度模板');
     }
     const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS;
-    const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
+    const orderItemColumns = normalizedInput.includeOrderItems
+      ? orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS
+      : [];
     const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
     const orderItemCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderItemColumns);
 
@@ -1642,14 +1644,12 @@ export class LocalApplication {
     if (orderResult.orders.length !== orderIds.length) {
       throw new Error('部分订单已变化，请刷新订单表后重新导出');
     }
-    const orderItemResult = this.queryOrderItems(
-      {},
-      orderItemCustomDefinitionIds,
-      orderIds,
-      true,
-    );
+    const orderItemResult = normalizedInput.includeOrderItems
+      ? this.queryOrderItems({}, orderItemCustomDefinitionIds, orderIds, true)
+      : { items: [], customFieldValues: [] };
     const addressRegions = this.orderExportAddressRegions(orderIds);
     const plan = createOrderExportWorkbookPlan({
+      includeOrderItems: normalizedInput.includeOrderItems,
       orders: orderResult.orders,
       orderItems: orderItemResult.items,
       orderColumns,
@@ -1662,7 +1662,7 @@ export class LocalApplication {
     await writeOrderExportWorkbook(destinationPath, plan);
     return {
       orderCount: orderResult.orders.length,
-      orderItemCount: orderItemResult.items.length,
+      orderItemCount: normalizedInput.includeOrderItems ? orderItemResult.items.length : null,
     };
   }
 
@@ -4206,7 +4206,7 @@ export class LocalApplication {
     let sortExpression = 'orders.created_at DESC, orders.id DESC, items.position';
     let sortDirection = '';
     if (query.sortField && query.customFieldSort) {
-      throw new Error('商品明细一次只能使用一种排序');
+      throw new Error('订单商品明细一次只能使用一种排序');
     }
     if (query.sortField) {
       const expressions = {

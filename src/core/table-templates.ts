@@ -41,6 +41,7 @@ export type OrderBuiltinTableFieldId =
 
 export type OrderItemBuiltinTableFieldId =
   | 'order_number'
+  | 'item_sequence'
   | 'product_title'
   | 'product_spec'
   | 'unit_price'
@@ -112,6 +113,7 @@ export const DEFAULT_ORDER_TABLE_COLUMNS: TableTemplateLayoutItem[] = [
 
 export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+  { field: { kind: 'builtin', key: 'item_sequence' }, displayName: '商品序号' },
   { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
   { field: { kind: 'builtin', key: 'product_spec' }, displayName: '原始款式／规格' },
   { field: { kind: 'builtin', key: 'unit_price' }, displayName: '商品单价' },
@@ -234,6 +236,7 @@ const ORDER_COMPUTED_FIELDS = [
 
 const ORDER_ITEM_BUILTIN_FIELDS = [
   fixedField('order_item', 'builtin', 'order_number', '订单号', 'text'),
+  fixedField('order_item', 'builtin', 'item_sequence', '商品序号', 'number'),
   fixedField('order_item', 'builtin', 'product_title', '原始商品标题', 'text'),
   fixedField('order_item', 'builtin', 'product_spec', '原始款式／规格', 'text'),
   fixedField('order_item', 'builtin', 'unit_price', '商品单价', 'money'),
@@ -658,6 +661,7 @@ export function projectOrderItemTableCell(
   }
   switch (reference.key) {
     case 'order_number': return item.orderNumber ?? null;
+    case 'item_sequence': return item.position + 1;
     case 'product_title': return item.sourceTitle;
     case 'product_spec': return item.sourceSpec;
     case 'unit_price': return item.unitPriceCents;
@@ -837,11 +841,11 @@ function normalizeQuery(
       'sortField',
       record.sortField,
       ORDER_ITEM_SORT_FIELDS,
-      '商品明细排序字段',
+      '订单商品明细排序字段',
     );
     assignOptionalEnum(query, 'sortDirection', record.sortDirection, SORT_DIRECTIONS, '排序方向');
     if (query.sortField && query.customFieldSort) {
-      throw new Error('商品明细一次只能使用一种排序');
+      throw new Error('订单商品明细一次只能使用一种排序');
     }
     return query;
   }

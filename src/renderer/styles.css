@@ -2386,9 +2386,40 @@ select:focus-visible {
 
 .order-export-dialog__counts {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
   margin-top: 22px;
+}
+
+.order-export-dialog__item-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--navy-900);
+  background: var(--surface-muted);
+}
+
+.order-export-dialog__item-option input {
+  margin-top: 2px;
+}
+
+.order-export-dialog__item-option span {
+  display: grid;
+  gap: 4px;
+}
+
+.order-export-dialog__item-option strong {
+  font-size: 11px;
+}
+
+.order-export-dialog__item-option small {
+  color: var(--navy-500);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .order-export-dialog__counts span {
@@ -2408,7 +2439,7 @@ select:focus-visible {
 
 .order-export-dialog__templates {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
   margin-top: 18px;
 }

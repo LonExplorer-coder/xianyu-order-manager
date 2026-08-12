@@ -31,6 +31,7 @@ import {
 } from '../core/table-templates';
 
 export type OrderExportWorkbookSource = {
+  includeOrderItems: boolean;
   orders: OrderSummary[];
   orderItems: OrderItemWorkbenchItem[];
   orderColumns: TableTemplateLayoutItem[];
@@ -46,7 +47,7 @@ type WorkbookCellValue = string | number | boolean | Date | null;
 const EXCEL_MAX_COLUMNS = 16_384;
 
 export type OrderExportWorksheetPlan = {
-  name: '订单总表' | '商品明细';
+  name: '订单总表' | '订单商品明细表';
   columns: Array<{
     header: string;
     valueType: CustomFieldType;
@@ -55,22 +56,19 @@ export type OrderExportWorksheetPlan = {
 };
 
 export type OrderExportWorkbookPlan = {
-  worksheets: [OrderExportWorksheetPlan, OrderExportWorksheetPlan];
+  worksheets: OrderExportWorksheetPlan[];
 };
 
 export function createOrderExportWorkbookPlan(
   source: OrderExportWorkbookSource,
 ): OrderExportWorkbookPlan {
-  const orderItemCatalog = availableTableFields('order_item', source.customFieldDefinitions);
   const orderCustomValues = createCustomFieldValueIndex(source.orderCustomFieldValues);
-  const orderItemCustomValues = createCustomFieldValueIndex(source.orderItemCustomFieldValues);
   const orderProjection = createOrderTableProjectionPlan(
     source.orderColumns,
     source.orders,
     source.customFieldDefinitions,
   );
   assertExcelColumnCount('订单总表', orderProjection.columns.length);
-  assertExcelColumnCount('商品明细', source.orderItemColumns.length);
 
   const orderRows = source.orders.map((order) => {
     const projectedValues = projectOrderTableProjectionRow(
@@ -95,36 +93,38 @@ export function createOrderExportWorkbookPlan(
       return toWorkbookCellValue(column.field, valueType, maskedValue);
     });
   });
-  const orderItemRows = source.orderItems.map((item) => (
-    source.orderItemColumns.map((column) => {
-      const descriptor = requireDescriptor(orderItemCatalog, column.field);
-      const value = projectOrderItemTableCell(item, column.field, orderItemCustomValues);
-      return toWorkbookCellValue(column.field, descriptor.valueType, value);
-    })
-  ));
+  const worksheets: OrderExportWorksheetPlan[] = [{
+    name: '订单总表',
+    columns: orderProjection.columns.map((column) => ({
+      header: column.header,
+      valueType: column.kind === 'dynamic_product'
+        ? column.valueType
+        : requireProjectionValueType(column),
+    })),
+    rows: orderRows,
+  }];
+  if (source.includeOrderItems) {
+    assertExcelColumnCount('订单商品明细表', source.orderItemColumns.length);
+    const orderItemCatalog = availableTableFields('order_item', source.customFieldDefinitions);
+    const orderItemCustomValues = createCustomFieldValueIndex(source.orderItemCustomFieldValues);
+    const orderItemRows = source.orderItems.map((item) => (
+      source.orderItemColumns.map((column) => {
+        const descriptor = requireDescriptor(orderItemCatalog, column.field);
+        const value = projectOrderItemTableCell(item, column.field, orderItemCustomValues);
+        return toWorkbookCellValue(column.field, descriptor.valueType, value);
+      })
+    ));
+    worksheets.push({
+      name: '订单商品明细表',
+      columns: source.orderItemColumns.map((column) => ({
+        header: column.displayName,
+        valueType: requireDescriptor(orderItemCatalog, column.field).valueType,
+      })),
+      rows: orderItemRows,
+    });
+  }
 
-  return {
-    worksheets: [
-      {
-        name: '订单总表',
-        columns: orderProjection.columns.map((column) => ({
-          header: column.header,
-          valueType: column.kind === 'dynamic_product'
-            ? column.valueType
-            : requireProjectionValueType(column),
-        })),
-        rows: orderRows,
-      },
-      {
-        name: '商品明细',
-        columns: source.orderItemColumns.map((column) => ({
-          header: column.displayName,
-          valueType: requireDescriptor(orderItemCatalog, column.field).valueType,
-        })),
-        rows: orderItemRows,
-      },
-    ],
-  };
+  return { worksheets };
 }
 
 function requireProjectionValueType(

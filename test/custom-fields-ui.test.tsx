@@ -673,7 +673,7 @@ describe('自定义字段界面', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('tab', { name: '商品' }));
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
 
     await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith({}, []));
     const fieldFilter = await screen.findByRole('combobox', {

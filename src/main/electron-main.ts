@@ -461,16 +461,16 @@ const ORDER_ITEM_WORKBENCH_QUERY_KEYS = new Set([
 ]);
 
 function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
-  if (!isRecord(input)) throw new Error('商品工作台查询格式无效');
-  rejectUnknownKeys(input, ORDER_ITEM_WORKBENCH_QUERY_KEYS, '商品工作台查询');
+  if (!isRecord(input)) throw new Error('订单商品明细工作台查询格式无效');
+  rejectUnknownKeys(input, ORDER_ITEM_WORKBENCH_QUERY_KEYS, '订单商品明细工作台查询');
   const sortField = optionalWorkbenchEnum(
     input.sortField,
     ['source_title', 'source_spec', 'unit_price', 'quantity', 'quantity_source'] as const,
-    '商品明细排序字段',
+    '订单商品明细排序字段',
   );
   const customFieldSort = parseCustomFieldSort(input.customFieldSort);
   if (sortField && customFieldSort) {
-    throw new Error('商品明细一次只能使用一种排序');
+    throw new Error('订单商品明细一次只能使用一种排序');
   }
   return {
     sourceTitle: optionalWorkbenchSourceText(input.sourceTitle, 20_000),
@@ -486,7 +486,7 @@ function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
     sortDirection: optionalWorkbenchEnum(
       input.sortDirection,
       ['asc', 'desc'] as const,
-      '商品明细排序方向',
+      '订单商品明细排序方向',
     ),
     customFieldFilter: parseCustomFieldFilter(input.customFieldFilter),
     customFieldSort,

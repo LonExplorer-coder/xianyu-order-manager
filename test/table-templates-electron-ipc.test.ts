@@ -172,6 +172,7 @@ describe('表格模板 Electron IPC', () => {
     const valid = {
       scope: { kind: 'current_result', orderIds: ['order-1'] },
       orderTemplateId: null,
+      includeOrderItems: false,
       orderItemTemplateId: null,
       masking: 'default',
     };
@@ -189,6 +190,8 @@ describe('表格模板 Electron IPC', () => {
       .rejects.toThrow(/模板/);
     await expect(invoke('orders:export', { ...valid, masking: 'none' }))
       .rejects.toThrow(/脱敏/);
+    await expect(invoke('orders:export', { ...valid, includeOrderItems: '是' }))
+      .rejects.toThrow(/订单商品明细表导出选项/);
 
     electronBoundary.showSaveDialog.mockResolvedValue({ canceled: true, filePath: '' });
     await expect(invoke('orders:export', valid)).resolves.toEqual({ kind: 'cancelled' });

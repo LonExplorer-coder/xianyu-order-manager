@@ -267,6 +267,11 @@ describe('表格模板核心契约', () => {
         valueType: 'text',
       },
       {
+        reference: { kind: 'builtin', key: 'item_sequence' },
+        defaultLabel: '商品序号',
+        valueType: 'number',
+      },
+      {
         reference: { kind: 'builtin', key: 'product_title' },
         defaultLabel: '原始商品标题',
         valueType: 'text',
@@ -574,6 +579,8 @@ describe('表格模板核心契约', () => {
 
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'order_number' }))
       .toBe('XY-001');
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'item_sequence' }))
+      .toBe(1);
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'unit_price' }))
       .toBe(1_800);
     const quantitySourceLabels: Array<[QuantitySource, string]> = [

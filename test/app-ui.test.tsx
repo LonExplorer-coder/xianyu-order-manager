@@ -2132,12 +2132,12 @@ describe('订单管理工作台', () => {
     expect(await screen.findByText('数量来源：系统默认 1')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '删除商品 1' }));
 
-    expect(screen.getByRole('heading', { name: '商品明细 · 0' })).toBeVisible();
-    expect(screen.getByText('暂无商品明细')).toBeVisible();
+    expect(screen.getByRole('heading', { name: '订单商品明细 · 0' })).toBeVisible();
+    expect(screen.getByText('暂无订单商品明细')).toBeVisible();
     expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
 
     await user.click(screen.getByRole('button', { name: '添加商品' }));
-    expect(screen.getByRole('heading', { name: '商品明细 · 1' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: '订单商品明细 · 1' })).toBeVisible();
     expect(screen.getByText('数量来源：人工修改')).toBeVisible();
     expect(screen.getByRole('spinbutton', { name: '数量' })).toHaveValue(1);
 
@@ -6457,6 +6457,7 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(exportOrders).toHaveBeenCalledWith({
       scope: { kind: 'current_result', orderIds: [summary.id] },
       orderTemplateId: templateA.id,
+      includeOrderItems: false,
       orderItemTemplateId: null,
       masking: 'default',
     }));
@@ -6740,7 +6741,7 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('table', { name: '原始订单' })).toBeVisible();
   });
 
-  it('默认商品明细视图以一个商品条目一行展示完整原始字段', async () => {
+  it('默认订单商品明细视图以一个商品条目一行展示完整原始字段', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
     const item = {
@@ -6760,12 +6761,13 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('tab', { name: '商品' }));
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
 
-    const table = await screen.findByRole('table', { name: '商品明细' });
+    const table = await screen.findByRole('table', { name: '订单商品明细' });
     expect(within(table).getAllByRole('columnheader').slice(0, -1).map((cell) => cell.textContent))
       .toEqual([
         '订单号',
+        '商品序号',
         '原始商品标题',
         '原始款式／规格',
         '商品单价',
@@ -6784,7 +6786,7 @@ describe('订单管理工作台', () => {
     expect(row).toHaveTextContent('已明确（历史来源不明）');
   });
 
-  it('商品明细视图从内置控件发起精确事实筛选和排序', async () => {
+  it('订单商品明细视图从内置控件发起精确事实筛选和排序', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
     const item = {
@@ -6808,8 +6810,8 @@ describe('订单管理工作台', () => {
     });
 
     render(<App api={api} />);
-    await user.click(await screen.findByRole('tab', { name: '商品' }));
-    await screen.findByRole('table', { name: '商品明细' });
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
+    await screen.findByRole('table', { name: '订单商品明细' });
 
     await user.type(screen.getByRole('searchbox', { name: '原始商品标题精确筛选' }), '脱敏测试商品');
     await user.type(screen.getByRole('searchbox', { name: '原始款式／规格精确筛选' }), '白色');
@@ -6820,7 +6822,7 @@ describe('订单管理工作台', () => {
       'manual',
     );
     await user.selectOptions(
-      screen.getByRole('combobox', { name: '商品明细内置排序' }),
+      screen.getByRole('combobox', { name: '订单商品明细内置排序' }),
       'unit_price:desc',
     );
 
@@ -6896,19 +6898,20 @@ describe('订单管理工作台', () => {
 
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '表格模板' }));
-    await user.click(await screen.findByRole('tab', { name: '商品明细表模板' }));
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细表模板' }));
     await user.click(await screen.findByRole('button', { name: '应用 商品拣货' }));
 
     await waitFor(() => expect(queryOrderItems).toHaveBeenCalledWith(template.query, [binField.id]));
-    expect(screen.getByRole('tab', { name: '商品' })).toHaveAttribute('aria-selected', 'true');
-    const table = await screen.findByRole('table', { name: '商品明细' });
+    expect(screen.getByRole('tab', { name: '订单商品明细' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const table = await screen.findByRole('table', { name: '订单商品明细' });
     expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
       .toEqual(['关联单号', '货位', '行金额']);
     expect(within(table).getByText('A-01')).toBeVisible();
     expect(within(table).getByText('¥16.00')).toBeVisible();
   });
 
-  it('导出前展示当前结果数量、两种模板和默认脱敏摘要，确认后保存两表工作簿', async () => {
+  it('默认只导出订单总表，勾选后才保存订单商品明细表', async () => {
     const user = userEvent.setup();
     const first = orderSummary();
     const second = orderSummary(confirmedOrder, {
@@ -6978,7 +6981,10 @@ describe('订单管理工作台', () => {
     expect(dialog.parentElement).toBe(document.body);
     expect(dialog.closest('.workspace-enter')).toBeNull();
     expect(within(dialog).getByText('2 笔订单')).toBeVisible();
-    expect(within(dialog).getByText('3 条商品明细')).toBeVisible();
+    expect(within(dialog).queryByText('3 条订单商品明细')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('combobox', {
+      name: '订单商品明细表模板',
+    })).not.toBeInTheDocument();
     expect(within(dialog).getByText('收件人仅保留姓氏')).toBeVisible();
     expect(within(dialog).getByText('手机号保留前 3 后 4 位')).toBeVisible();
     expect(within(dialog).getByText('地址仅保留省、市、区县')).toBeVisible();
@@ -7018,8 +7024,14 @@ describe('订单管理工作台', () => {
       ]);
     expect(within(dialog).queryByText(confirmedOrder.phone)).not.toBeInTheDocument();
     expect(within(dialog).queryByText(confirmedOrder.addressOriginal)).not.toBeInTheDocument();
+    const includeOrderItems = within(dialog).getByRole('checkbox', {
+      name: /附加订单商品明细表/u,
+    });
+    expect(includeOrderItems).not.toBeChecked();
+    await user.click(includeOrderItems);
+    expect(within(dialog).getByText('3 条订单商品明细')).toBeVisible();
     await user.selectOptions(
-      within(dialog).getByRole('combobox', { name: '商品明细表模板' }),
+      within(dialog).getByRole('combobox', { name: '订单商品明细表模板' }),
       itemTemplate.id,
     );
     await user.click(within(dialog).getByRole('button', { name: '保存 Excel' }));
@@ -7030,16 +7042,17 @@ describe('订单管理工作台', () => {
         orderIds: [first.id, second.id],
       },
       orderTemplateId: orderTemplate.id,
+      includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
       masking: 'default',
     }));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      '已导出 2 笔订单、3 条商品明细：闲鱼订单-20260731.xlsx',
+      '已导出 2 笔订单、3 条订单商品明细：闲鱼订单-20260731.xlsx',
     );
     expect(screen.queryByRole('dialog', { name: '导出订单 Excel' })).not.toBeInTheDocument();
   });
 
-  it('勾选订单后仅预览并导出所选订单及其商品明细', async () => {
+  it('勾选订单后默认仅预览并导出所选订单总表', async () => {
     const user = userEvent.setup();
     const first = orderSummary();
     const second = orderSummary(confirmedOrder, {
@@ -7071,7 +7084,7 @@ describe('订单管理工作台', () => {
 
     const dialog = screen.getByRole('dialog', { name: '导出订单 Excel' });
     expect(within(dialog).getByText('1 笔订单')).toBeVisible();
-    expect(within(dialog).getByText('2 条商品明细')).toBeVisible();
+    expect(within(dialog).queryByText('2 条订单商品明细')).not.toBeInTheDocument();
     const previewTable = within(dialog).getByRole('table', { name: '订单总表导出预览' });
     const previewHeaders = within(previewTable).getAllByRole('columnheader')
       .map(({ textContent }) => textContent);
@@ -7097,6 +7110,7 @@ describe('订单管理工作台', () => {
         orderIds: [second.id],
       },
       orderTemplateId: null,
+      includeOrderItems: false,
       orderItemTemplateId: null,
       masking: 'default',
     }));

@@ -64,6 +64,7 @@ export function OrderExportDialog({
       id === initialOrderTemplateId && granularity === 'order'
     )) ? initialOrderTemplateId ?? '' : ''
   ));
+  const [includeOrderItems, setIncludeOrderItems] = useState(false);
   const [orderItemTemplateId, setOrderItemTemplateId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -90,7 +91,8 @@ export function OrderExportDialog({
           orderIds,
         },
         orderTemplateId: orderTemplateId || null,
-        orderItemTemplateId: orderItemTemplateId || null,
+        includeOrderItems,
+        orderItemTemplateId: includeOrderItems ? orderItemTemplateId || null : null,
         masking: 'default',
       });
       if (result.kind === 'cancelled') {
@@ -194,15 +196,31 @@ export function OrderExportDialog({
           <h2 id={headingId}>导出订单 Excel</h2>
           <p id={descriptionId}>
             {scopeKind === 'selected_orders'
-              ? '仅导出已勾选订单，生成“订单总表”和“商品明细”。'
-              : '导出当前筛选结果，生成“订单总表”和“商品明细”。'}
+              ? '仅导出已勾选订单，默认生成“订单总表”。'
+              : '导出当前筛选结果，默认生成“订单总表”。'}
           </p>
         </header>
 
         <div className="order-export-dialog__counts" aria-label="导出数量">
           <span>{orderIds.length} 笔订单</span>
-          <span>{orderItemCount} 条商品明细</span>
+          {includeOrderItems && <span>{orderItemCount} 条订单商品明细</span>}
         </div>
+
+        <label className="order-export-dialog__item-option">
+          <input
+            type="checkbox"
+            checked={includeOrderItems}
+            disabled={saving}
+            onChange={(event) => {
+              setIncludeOrderItems(event.target.checked);
+              if (!event.target.checked) setOrderItemTemplateId('');
+            }}
+          />
+          <span>
+            <strong>附加订单商品明细表</strong>
+            <small>每行对应订单中的一个商品，用“订单号 + 商品序号”定位。</small>
+          </span>
+        </label>
 
         <div className="order-export-dialog__templates">
           <label>
@@ -220,20 +238,22 @@ export function OrderExportDialog({
               ))}
             </select>
           </label>
-          <label>
-            <span>商品明细表模板</span>
-            <select
-              aria-label="商品明细表模板"
-              value={orderItemTemplateId}
-              disabled={saving}
-              onChange={(event) => setOrderItemTemplateId(event.target.value)}
-            >
-              <option value="">系统默认字段</option>
-              {orderItemTemplates.map((template) => (
-                <option value={template.id} key={template.id}>{template.name}</option>
-              ))}
-            </select>
-          </label>
+          {includeOrderItems && (
+            <label>
+              <span>订单商品明细表模板</span>
+              <select
+                aria-label="订单商品明细表模板"
+                value={orderItemTemplateId}
+                disabled={saving}
+                onChange={(event) => setOrderItemTemplateId(event.target.value)}
+              >
+                <option value="">系统默认字段</option>
+                {orderItemTemplates.map((template) => (
+                  <option value={template.id} key={template.id}>{template.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <section className="order-export-dialog__preview" aria-label="订单总表导出预览区域">

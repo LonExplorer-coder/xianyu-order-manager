@@ -14,13 +14,14 @@ export type OrderExportScope = {
 export type OrderExportInput = {
   scope: OrderExportScope;
   orderTemplateId: string | null;
+  includeOrderItems: boolean;
   orderItemTemplateId: string | null;
   masking: 'default';
 };
 
 export type OrderExportWriteResult = {
   orderCount: number;
-  orderItemCount: number;
+  orderItemCount: number | null;
 };
 
 export type OrderExportResult =
@@ -45,20 +46,31 @@ export function normalizeOrderExportInput(value: unknown): OrderExportInput {
   const input = strictRecord(
     value,
     '订单导出请求',
-    ['scope', 'orderTemplateId', 'orderItemTemplateId', 'masking'],
+    ['scope', 'orderTemplateId', 'includeOrderItems', 'orderItemTemplateId', 'masking'],
   );
   const scope = strictRecord(input.scope, '订单导出范围', ['kind', 'orderIds']);
   if (scope.kind !== 'current_result' && scope.kind !== 'selected_orders') {
     throw new Error('订单导出范围无效');
   }
   if (input.masking !== 'default') throw new Error('订单导出脱敏方式无效');
+  if (typeof input.includeOrderItems !== 'boolean') {
+    throw new Error('订单商品明细表导出选项无效');
+  }
+  const orderItemTemplateId = optionalTemplateId(
+    input.orderItemTemplateId,
+    '订单商品明细表模板',
+  );
+  if (!input.includeOrderItems && orderItemTemplateId !== null) {
+    throw new Error('未导出订单商品明细表时不能选择其模板');
+  }
   return {
     scope: {
       kind: scope.kind,
       orderIds: normalizeOrderExportOrderIds(scope.orderIds),
     },
     orderTemplateId: optionalTemplateId(input.orderTemplateId, '订单总表模板'),
-    orderItemTemplateId: optionalTemplateId(input.orderItemTemplateId, '商品明细表模板'),
+    includeOrderItems: input.includeOrderItems,
+    orderItemTemplateId,
     masking: 'default',
   };
 }
