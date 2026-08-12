@@ -5,7 +5,10 @@ import type {
 } from './custom-fields';
 import type { QuantitySource } from './quantity-source';
 import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
-import type { OrderOperationsProjection } from './order-operations-projection';
+import type {
+  OrderOperationsOverview,
+  OrderOperationsProjection,
+} from './order-operations-projection';
 
 export type RecognitionItem = {
   sourceTitle: string;
@@ -322,6 +325,7 @@ export type OrderSummary = {
   paidAtNormalized: string;
   createdAt: string;
   items: Array<Pick<OrderItem, 'sourceTitle' | 'sourceSpec' | 'quantity'>>;
+  operations: OrderOperationsOverview;
 };
 
 export type SourceScreenshot = {

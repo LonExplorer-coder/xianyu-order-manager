@@ -1,23 +1,20 @@
-import type { AftersalesCase, AftersalesStatus } from '../core/aftersales-cases';
-import { aftersalesTodoForStatuses } from '../core/order-operations-projection';
+import {
+  AFTERSALES_STATUSES,
+  type AftersalesCase,
+  type AftersalesStatus,
+} from '../core/aftersales-cases';
+import {
+  aftersalesStatusLabel,
+  aftersalesTodoForStatuses,
+} from '../core/order-operations-projection';
 import type { ShipmentRecord } from '../core/shipment-records';
 
 export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
   value: AftersalesStatus;
   label: string;
-}> = [
-  { value: 'processing', label: '处理中' },
-  { value: 'waiting_return', label: '等待退回' },
-  { value: 'waiting_inspection', label: '等待检查' },
-  { value: 'waiting_refund', label: '等待退款' },
-  { value: 'waiting_replacement', label: '等待补发' },
-  { value: 'partially_completed', label: '部分完成' },
-  { value: 'completed', label: '已完成' },
-];
+}> = AFTERSALES_STATUSES.map((value) => ({ value, label: aftersalesStatusLabel(value) }));
 
-export function aftersalesStatusLabel(status: AftersalesStatus): string {
-  return AFTERSALES_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
-}
+export { aftersalesStatusLabel };
 
 export function shipmentRecordsAftersalesSummary(
   records: readonly ShipmentRecord[],

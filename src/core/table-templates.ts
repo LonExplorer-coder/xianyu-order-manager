@@ -54,7 +54,11 @@ export type BuiltinTableFieldId =
 export type ComputedTableFieldId =
   | 'item_quantity_total'
   | 'order_total'
-  | 'item_subtotal';
+  | 'item_subtotal'
+  | 'shipment_summary'
+  | 'logistics_summary'
+  | 'aftersales_summary'
+  | 'current_todo';
 
 export type TableFieldReference =
   | { kind: 'builtin'; key: BuiltinTableFieldId }
@@ -222,6 +226,10 @@ const ORDER_BUILTIN_FIELDS = [
 const ORDER_COMPUTED_FIELDS = [
   fixedField('order', 'computed', 'item_quantity_total', '商品总数量', 'number'),
   fixedField('order', 'computed', 'order_total', '订单总额', 'money'),
+  fixedField('order', 'computed', 'shipment_summary', '发货概况', 'text'),
+  fixedField('order', 'computed', 'logistics_summary', '物流概况', 'text'),
+  fixedField('order', 'computed', 'aftersales_summary', '售后概况', 'text'),
+  fixedField('order', 'computed', 'current_todo', '当前待办', 'text'),
 ] as const satisfies readonly FixedTableField[];
 
 const ORDER_ITEM_BUILTIN_FIELDS = [
@@ -521,6 +529,10 @@ export function projectOrderTableCell(
   if (reference.kind === 'computed') {
     if (reference.key === 'item_quantity_total') return order.itemCount;
     if (reference.key === 'order_total') return order.amountCents;
+    if (reference.key === 'shipment_summary') return order.operations.shipmentSummary;
+    if (reference.key === 'logistics_summary') return order.operations.logisticsSummary;
+    if (reference.key === 'aftersales_summary') return order.operations.aftersalesSummary;
+    if (reference.key === 'current_todo') return order.operations.currentTodo;
     return null;
   }
   switch (reference.key) {

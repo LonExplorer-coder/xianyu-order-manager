@@ -20,32 +20,27 @@ export class OrderOperationsProjectionService {
   public constructor(private readonly database: DatabaseSync) {}
 
   public get(orderId: string): OrderOperationsProjection {
-    const shipmentRecords = this.shipmentRecords(orderId);
-    const aftersalesCases = this.aftersalesCases(orderId);
-    const aftersalesTodo = aftersalesTodoForStatuses(new Set(
-      aftersalesCases
-        .filter(({ status }) => status !== 'completed')
-        .map(({ status }) => status),
-    ));
-    const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
-    for (const record of shipmentRecords) {
-      if (record.status === 'voided') continue;
-      for (const shipmentPackage of record.packages) {
-        if (shipmentPackage.status === 'active') {
-          logisticsStatuses.add(shipmentPackage.logisticsStatus);
-        }
-      }
-    }
-    return {
-      shipmentRecords,
-      aftersalesCases,
-      currentTodo: aftersalesTodo ?? shipmentTodoForStatuses(logisticsStatuses),
-    };
+    return this.getMany([orderId]).get(orderId) ?? emptyProjection();
   }
 
-  private shipmentRecords(orderId: string): OrderOperationsShipmentRecord[] {
+  public getMany(orderIds: readonly string[]): ReadonlyMap<string, OrderOperationsProjection> {
+    const uniqueOrderIds = [...new Set(orderIds)];
+    if (uniqueOrderIds.length === 0) return new Map();
+    const shipmentRecordsByOrder = this.shipmentRecords(uniqueOrderIds);
+    const aftersalesCasesByOrder = this.aftersalesCases(uniqueOrderIds);
+    return new Map(uniqueOrderIds.map((orderId) => {
+      const shipmentRecords = shipmentRecordsByOrder.get(orderId) ?? [];
+      const aftersalesCases = aftersalesCasesByOrder.get(orderId) ?? [];
+      return [orderId, buildProjection(shipmentRecords, aftersalesCases)] as const;
+    }));
+  }
+
+  private shipmentRecords(
+    orderIds: readonly string[],
+  ): ReadonlyMap<string, OrderOperationsShipmentRecord[]> {
     const rows = this.database.prepare(`
       SELECT
+        items.order_id,
         records.id AS record_id,
         records.shipment_group_archive_id AS archive_id,
         records.created_at AS record_created_at,
@@ -70,18 +65,25 @@ export class OrderOperationsProjectionService {
         ON voids.shipment_record_id = records.id
       LEFT JOIN shipment_package_cancellation_events AS cancellations
         ON cancellations.package_id = packages.id
-      WHERE items.order_id = ?
+      WHERE items.order_id IN (SELECT value FROM json_each(?))
       ORDER BY
+        items.order_id,
         records.created_at DESC,
         records.id DESC,
         packages.position,
         packages.id,
         items.position,
         items.id
-    `).all(orderId) as unknown as SqlRow[];
-    const records = new Map<string, OrderOperationsShipmentRecord>();
-    const packages = new Map<string, OrderOperationsPackage>();
+    `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
+    const result = new Map<string, OrderOperationsShipmentRecord[]>();
+    const recordsByOrder = new Map<string, Map<string, OrderOperationsShipmentRecord>>();
+    const packagesByOrder = new Map<string, Map<string, OrderOperationsPackage>>();
     for (const row of rows) {
+      const orderId = asString(row.order_id);
+      const records = recordsByOrder.get(orderId) ?? new Map();
+      const packages = packagesByOrder.get(orderId) ?? new Map();
+      recordsByOrder.set(orderId, records);
+      packagesByOrder.set(orderId, packages);
       const recordId = asString(row.record_id);
       let record = records.get(recordId);
       if (!record) {
@@ -120,12 +122,16 @@ export class OrderOperationsProjectionService {
         quantity: asNumber(row.quantity),
       });
     }
-    return [...records.values()];
+    for (const [orderId, records] of recordsByOrder) result.set(orderId, [...records.values()]);
+    return result;
   }
 
-  private aftersalesCases(orderId: string): OrderOperationsAftersalesCase[] {
+  private aftersalesCases(
+    orderIds: readonly string[],
+  ): ReadonlyMap<string, OrderOperationsAftersalesCase[]> {
     const rows = this.database.prepare(`
       SELECT
+        shipment_items.order_id,
         cases.id AS case_id,
         cases.shipment_record_id,
         cases.status,
@@ -143,16 +149,21 @@ export class OrderOperationsProjectionService {
       JOIN aftersales_cases AS cases ON cases.id = case_items.case_id
       JOIN shipment_package_items AS shipment_items
         ON shipment_items.id = case_items.shipment_package_item_id
-      WHERE shipment_items.order_id = ?
+      WHERE shipment_items.order_id IN (SELECT value FROM json_each(?))
       ORDER BY
+        shipment_items.order_id,
         cases.occurred_at DESC,
         cases.created_at DESC,
         cases.id DESC,
         shipment_items.position,
         shipment_items.id
-    `).all(orderId) as unknown as SqlRow[];
-    const cases = new Map<string, OrderOperationsAftersalesCase>();
+    `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
+    const result = new Map<string, OrderOperationsAftersalesCase[]>();
+    const casesByOrder = new Map<string, Map<string, OrderOperationsAftersalesCase>>();
     for (const row of rows) {
+      const orderId = asString(row.order_id);
+      const cases = casesByOrder.get(orderId) ?? new Map();
+      casesByOrder.set(orderId, cases);
       const caseId = asString(row.case_id);
       let aftersalesCase = cases.get(caseId);
       if (!aftersalesCase) {
@@ -179,8 +190,38 @@ export class OrderOperationsProjectionService {
         quantity: asNumber(row.quantity),
       });
     }
-    return [...cases.values()];
+    for (const [orderId, cases] of casesByOrder) result.set(orderId, [...cases.values()]);
+    return result;
   }
+}
+
+function buildProjection(
+  shipmentRecords: OrderOperationsShipmentRecord[],
+  aftersalesCases: OrderOperationsAftersalesCase[],
+): OrderOperationsProjection {
+  const aftersalesTodo = aftersalesTodoForStatuses(new Set(
+    aftersalesCases
+      .filter(({ status }) => status !== 'completed')
+      .map(({ status }) => status),
+  ));
+  const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
+  for (const record of shipmentRecords) {
+    if (record.status === 'voided') continue;
+    for (const shipmentPackage of record.packages) {
+      if (shipmentPackage.status === 'active') {
+        logisticsStatuses.add(shipmentPackage.logisticsStatus);
+      }
+    }
+  }
+  return {
+    shipmentRecords,
+    aftersalesCases,
+    currentTodo: aftersalesTodo ?? shipmentTodoForStatuses(logisticsStatuses),
+  };
+}
+
+function emptyProjection(): OrderOperationsProjection {
+  return buildProjection([], []);
 }
 
 function asString(value: unknown): string {

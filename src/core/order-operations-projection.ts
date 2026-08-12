@@ -53,6 +53,88 @@ export type OrderOperationsProjection = {
   currentTodo: string;
 };
 
+export type OrderOperationsOverview = {
+  shipmentSummary: string;
+  logisticsSummary: string;
+  aftersalesSummary: string;
+  currentTodo: string;
+};
+
+const AFTERSALES_STATUS_LABELS: Record<AftersalesStatus, string> = {
+  processing: '处理中',
+  waiting_return: '等待退回',
+  waiting_inspection: '等待检查',
+  waiting_refund: '等待退款',
+  waiting_replacement: '等待补发',
+  partially_completed: '部分完成',
+  completed: '已完成',
+};
+
+const SHIPMENT_LOGISTICS_STATUS_LABELS: Record<ShipmentLogisticsStatus, string> = {
+  awaiting_carrier: '待承运方接收',
+  in_transit: '运输中',
+  delivered: '已签收',
+  intercepting: '拦截处理中',
+  intercepted_returned: '已拦截退回',
+  lost: '丢件',
+  exception: '其他物流异常',
+};
+
+export function orderOperationsOverview(
+  projection: OrderOperationsProjection,
+  orderedQuantity: number,
+): OrderOperationsOverview {
+  const activePackages = projection.shipmentRecords
+    .filter(({ status }) => status === 'active')
+    .flatMap(({ packages }) => packages)
+    .filter(({ status }) => status === 'active');
+  const shippedQuantity = activePackages
+    .flatMap(({ items }) => items)
+    .reduce((total, { quantity }) => total + quantity, 0);
+  const shipmentSummary = shippedQuantity === 0
+    ? '无发货'
+    : shippedQuantity < orderedQuantity
+      ? `部分发货（已发 ${shippedQuantity} / 共 ${orderedQuantity} 件）`
+      : `已全部发货（${shippedQuantity} 件）`;
+  const logisticsSummary = activePackages.length === 0
+    ? '无物流'
+    : countLabels(
+      activePackages.map(({ logisticsStatus }) => logisticsStatus),
+      shipmentLogisticsStatusLabel,
+    );
+  const aftersalesSummary = projection.aftersalesCases.length === 0
+    ? '无售后'
+    : `${countLabels(
+      projection.aftersalesCases.map(({ status }) => status),
+      aftersalesStatusLabel,
+    )}（${projection.aftersalesCases.length === 1
+      ? `${aftersalesQuantity(projection)} 件`
+      : `${projection.aftersalesCases.length} 张处理单 / ${aftersalesQuantity(projection)} 件`
+    }）`;
+  return {
+    shipmentSummary,
+    logisticsSummary,
+    aftersalesSummary,
+    currentTodo: projection.currentTodo === '无需物流操作'
+      ? '无需处理'
+      : projection.currentTodo,
+  };
+}
+
+function aftersalesQuantity(projection: OrderOperationsProjection): number {
+  return projection.aftersalesCases
+    .flatMap(({ items }) => items)
+    .reduce((total, { quantity }) => total + quantity, 0);
+}
+
+export function aftersalesStatusLabel(status: AftersalesStatus): string {
+  return AFTERSALES_STATUS_LABELS[status];
+}
+
+export function shipmentLogisticsStatusLabel(status: ShipmentLogisticsStatus): string {
+  return SHIPMENT_LOGISTICS_STATUS_LABELS[status];
+}
+
 export function aftersalesTodoForStatuses(
   statuses: ReadonlySet<AftersalesStatus>,
 ): string | null {
@@ -77,4 +159,15 @@ export function shipmentTodoForStatuses(
   if (statuses.has('intercepted_returned')) return '确认退回货物';
   if (statuses.has('awaiting_carrier')) return '确认承运方接收';
   return '跟进运输进度';
+}
+
+function countLabels<T extends string>(
+  values: readonly T[],
+  label: (value: T) => string,
+): string {
+  const counts = new Map<T, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts].map(([value, count]) => (
+    values.length === 1 ? label(value) : `${label(value)} ${count}`
+  )).join('、');
 }

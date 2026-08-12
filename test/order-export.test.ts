@@ -862,6 +862,105 @@ describe('默认脱敏的两表工作簿导出', () => {
     }, join(testRoot, '过期范围.xlsx'))).rejects.toThrow('部分订单已变化');
   });
 
+  it('自定义订单模板只导出所选运营概况且与订单列表投影一致', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-OPERATIONS-EXPORT-001',
+        productTotalCents: 3_000,
+        amountCents: 3_000,
+        items: [{
+          sourceTitle: '运营概况商品',
+          sourceSpec: '标准款',
+          unitPriceCents: 1_000,
+          quantity: 3,
+          quantityInferred: false,
+        }],
+      }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    expect(order.operations).toEqual({
+      shipmentSummary: '无发货',
+      logisticsSummary: '无物流',
+      aftersalesSummary: '无售后',
+      currentTodo: '无需处理',
+    });
+    const group = application.queryShipmentGroups().groups[0];
+    const item = group.orders[0].items[0];
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [{
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: 3,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-OPERATIONS-A',
+        items: [{ orderId: order.id, orderItemId: item.id, quantity: 1 }],
+      }, {
+        shippingCarrier: '中通快递',
+        trackingNumber: 'ZT-OPERATIONS-B',
+        items: [{ orderId: order.id, orderItemId: item.id, quantity: 1 }],
+      }],
+    });
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipment.record.packages[1].id,
+      expectedRevision: shipment.record.packages[1].revision,
+      logisticsStatus: 'delivered',
+      reason: '第二个包裹已签收',
+    });
+    application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T20:00:00+08:00',
+      reason: '其中一件商品等待买家退回',
+      items: [{
+        shipmentPackageItemId: shipment.record.packages[0].items[0].id,
+        quantity: 1,
+      }],
+    });
+    const projected = application.queryOrders({}).orders[0];
+    const template = application.createTableTemplate({
+      name: '订单运营概况',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'computed', key: 'shipment_summary' }, displayName: '发货概况' },
+        { field: { kind: 'computed', key: 'logistics_summary' }, displayName: '物流概况' },
+        { field: { kind: 'computed', key: 'aftersales_summary' }, displayName: '售后概况' },
+        { field: { kind: 'computed', key: 'current_todo' }, displayName: '当前待办' },
+      ],
+      query: {},
+    });
+    const destinationPath = join(testRoot, '订单运营概况.xlsx');
+
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [order.id] },
+      orderTemplateId: template.id,
+      orderItemTemplateId: null,
+      masking: 'default',
+    }, destinationPath);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    const orders = workbook.getWorksheet('订单总表');
+    if (!orders) throw new Error('缺少订单总表');
+    expect(rowValues(orders, 1)).toEqual([
+      '发货概况', '物流概况', '售后概况', '当前待办',
+    ]);
+    expect(rowValues(orders, 2)).toEqual([
+      projected.operations.shipmentSummary,
+      projected.operations.logisticsSummary,
+      projected.operations.aftersalesSummary,
+      projected.operations.currentTodo,
+    ]);
+    expect(rowValues(orders, 2)).toEqual([
+      '部分发货（已发 2 / 共 3 件）',
+      '运输中 1、已签收 1',
+      '处理中（1 件）',
+      '处理售后问题',
+    ]);
+  });
+
   it('生成或复验失败时保留已有文件并清理同目录临时文件', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-order-export-atomic-'));
     const destinationPath = join(testRoot, '已有订单.xlsx');

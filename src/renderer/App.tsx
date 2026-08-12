@@ -75,8 +75,9 @@ import {
   type OpenShipmentGroup,
   type ShipmentGroupProjection,
 } from '../core/shipment-groups';
-import type {
-  ConfirmShipmentPackageInput,
+import {
+  SHIPMENT_LOGISTICS_STATUSES,
+  type ConfirmShipmentPackageInput,
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentItemQuantityInput,
@@ -122,7 +123,10 @@ import {
   shipmentRecordAftersalesSummary,
   shipmentRecordsAftersalesSummary,
 } from './aftersales-presentation';
-import { shipmentTodoForStatuses } from '../core/order-operations-projection';
+import {
+  shipmentLogisticsStatusLabel,
+  shipmentTodoForStatuses,
+} from '../core/order-operations-projection';
 import { OrderExportDialog } from './OrderExportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 
@@ -2712,19 +2716,10 @@ function shipmentSourceDifferenceValue(value: string | number | null): string {
 const SHIPMENT_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
   value: ShipmentLogisticsStatus;
   label: string;
-}> = [
-  { value: 'awaiting_carrier', label: '待承运方接收' },
-  { value: 'in_transit', label: '运输中' },
-  { value: 'delivered', label: '已签收' },
-  { value: 'intercepting', label: '拦截处理中' },
-  { value: 'intercepted_returned', label: '已拦截退回' },
-  { value: 'lost', label: '丢件' },
-  { value: 'exception', label: '其他物流异常' },
-];
-
-function shipmentLogisticsStatusLabel(status: ShipmentLogisticsStatus): string {
-  return SHIPMENT_LOGISTICS_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
-}
+}> = SHIPMENT_LOGISTICS_STATUSES.map((value) => ({
+  value,
+  label: shipmentLogisticsStatusLabel(value),
+}));
 
 function activeShipmentLogisticsStatuses(records: readonly ShipmentRecord[]): ShipmentLogisticsStatus[] {
   return records.flatMap((record) => record.packages

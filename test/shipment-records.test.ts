@@ -2760,6 +2760,20 @@ describe('售后处理单', () => {
         }],
       }),
     ]);
+    const summaries = new Map(application.queryOrders({ lifecycleStatus: 'all' }).orders
+      .map((order) => [order.id, order.operations]));
+    expect(summaries.get(firstOrder.id)).toEqual({
+      shipmentSummary: '部分发货（已发 1 / 共 2 件）',
+      logisticsSummary: '运输中',
+      aftersalesSummary: '处理中（1 件）',
+      currentTodo: '处理售后问题',
+    });
+    expect(summaries.get(secondOrder.id)).toEqual({
+      shipmentSummary: '已全部发货（2 件）',
+      logisticsSummary: '运输中',
+      aftersalesSummary: '处理中（1 件）',
+      currentTodo: '处理售后问题',
+    });
   });
 
   it('从发货记录选择部分商品数量建立可追溯的售后处理单', async () => {

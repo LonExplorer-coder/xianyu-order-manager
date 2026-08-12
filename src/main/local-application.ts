@@ -58,6 +58,7 @@ import {
   type ResolvedOrderStatusAndLogisticsPatch,
 } from '../core/order-fulfillment';
 import { isFulfillmentStatus } from '../core/fulfillment-status';
+import { orderOperationsOverview } from '../core/order-operations-projection';
 import type {
   ConfirmDraftCustomFieldOptions,
   CreateCustomFieldDefinitionInput,
@@ -4064,42 +4065,51 @@ export class LocalApplication {
       `)
       .all(...parameters, ...sortParameters) as unknown as SqlRow[];
 
-    const orders = rows.map((row) => ({
-      id: asString(row.id),
-      platform: asOrderPlatform(row.platform),
-      sellerAccount: asString(row.seller_account),
-      orderNumber: asString(row.platform_order_number),
-      alipayTransactionNumber: asString(row.alipay_transaction_number),
-      buyerNickname: asString(row.buyer_nickname),
-      recipient: asString(row.recipient),
-      phone: asString(row.phone),
-      addressOriginal: asString(row.address_original),
-      province: asString(row.province),
-      city: asString(row.city),
-      district: asString(row.district),
-      amountCents: asNumber(row.amount_cents),
-      note: asString(row.note),
-      shippingCarrier: asString(row.shipping_carrier),
-      trackingNumber: asString(row.tracking_number),
-      revision: asNumber(row.revision),
-      updatedAt: asString(row.updated_at),
-      lastManualEditAt: row.last_manual_edit_at === null
-        ? null
-        : asString(row.last_manual_edit_at),
-      itemCount: asNumber(row.item_count),
-      initialSourceRecognitionStatus: asRecognitionBatchItemStatus(
-        row.initial_source_recognition_status,
-      ),
-      platformTransactionStatus: asPlatformTransactionStatus(
-        row.platform_transaction_status,
-      ),
-      fulfillmentStatus: asFulfillmentStatus(row.fulfillment_status),
-      lifecycleStatus: asLifecycleStatus(row.lifecycle_status),
-      orderedAtNormalized: asString(row.ordered_at_normalized),
-      paidAtNormalized: asString(row.paid_at_normalized),
-      createdAt: asString(row.created_at),
-      items: parseOrderSummaryItems(asString(row.items_json)),
-    }));
+    const operationsByOrder = new OrderOperationsProjectionService(workspace.database)
+      .getMany(rows.map((row) => asString(row.id)));
+    const orders = rows.map((row) => {
+      const id = asString(row.id);
+      const itemCount = asNumber(row.item_count);
+      const operations = operationsByOrder.get(id);
+      if (!operations) throw new Error('订单运营投影缺少查询结果');
+      return {
+        id,
+        platform: asOrderPlatform(row.platform),
+        sellerAccount: asString(row.seller_account),
+        orderNumber: asString(row.platform_order_number),
+        alipayTransactionNumber: asString(row.alipay_transaction_number),
+        buyerNickname: asString(row.buyer_nickname),
+        recipient: asString(row.recipient),
+        phone: asString(row.phone),
+        addressOriginal: asString(row.address_original),
+        province: asString(row.province),
+        city: asString(row.city),
+        district: asString(row.district),
+        amountCents: asNumber(row.amount_cents),
+        note: asString(row.note),
+        shippingCarrier: asString(row.shipping_carrier),
+        trackingNumber: asString(row.tracking_number),
+        revision: asNumber(row.revision),
+        updatedAt: asString(row.updated_at),
+        lastManualEditAt: row.last_manual_edit_at === null
+          ? null
+          : asString(row.last_manual_edit_at),
+        itemCount,
+        initialSourceRecognitionStatus: asRecognitionBatchItemStatus(
+          row.initial_source_recognition_status,
+        ),
+        platformTransactionStatus: asPlatformTransactionStatus(
+          row.platform_transaction_status,
+        ),
+        fulfillmentStatus: asFulfillmentStatus(row.fulfillment_status),
+        lifecycleStatus: asLifecycleStatus(row.lifecycle_status),
+        orderedAtNormalized: asString(row.ordered_at_normalized),
+        paidAtNormalized: asString(row.paid_at_normalized),
+        createdAt: asString(row.created_at),
+        items: parseOrderSummaryItems(asString(row.items_json)),
+        operations: orderOperationsOverview(operations, itemCount),
+      };
+    });
     if (normalizedScopedOrderIds) {
       const positionById = new Map(
         normalizedScopedOrderIds.map((id, index) => [id, index]),

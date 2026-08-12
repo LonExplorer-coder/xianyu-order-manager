@@ -118,6 +118,12 @@ function orderSummaryForProjection(
     paidAtNormalized: '2026-07-30T09:31:00+08:00',
     createdAt: '2026-07-30T01:32:00.000Z',
     items,
+    operations: {
+      shipmentSummary: '部分发货（已发 1 / 共 2 件）',
+      logisticsSummary: '运输中 1、已签收 1',
+      aftersalesSummary: '等待退回 1',
+      currentTodo: '等待买家退回',
+    },
   };
 }
 
@@ -223,6 +229,26 @@ describe('表格模板核心契约', () => {
         reference: { kind: 'computed', key: 'order_total' },
         defaultLabel: '订单总额',
         valueType: 'money',
+      },
+      {
+        reference: { kind: 'computed', key: 'shipment_summary' },
+        defaultLabel: '发货概况',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'computed', key: 'logistics_summary' },
+        defaultLabel: '物流概况',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'computed', key: 'aftersales_summary' },
+        defaultLabel: '售后概况',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'computed', key: 'current_todo' },
+        defaultLabel: '当前待办',
+        valueType: 'text',
       },
       {
         reference: { kind: 'custom', definitionId: orderField.id },
@@ -479,6 +505,12 @@ describe('表格模板核心契约', () => {
         { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
         { sourceTitle: '杯盖', sourceSpec: '', quantity: 1 },
       ],
+      operations: {
+        shipmentSummary: '无发货',
+        logisticsSummary: '无物流',
+        aftersalesSummary: '无售后',
+        currentTodo: '无需处理',
+      },
     };
     const customValues: CustomFieldValueRecord[] = [{
       definitionId: orderField.id,
@@ -499,6 +531,12 @@ describe('表格模板核心契约', () => {
       .toBe(3);
     expect(projectOrderTableCell(order, { kind: 'computed', key: 'order_total' }))
       .toBe(3_600);
+    expect([
+      projectOrderTableCell(order, { kind: 'computed', key: 'shipment_summary' }),
+      projectOrderTableCell(order, { kind: 'computed', key: 'logistics_summary' }),
+      projectOrderTableCell(order, { kind: 'computed', key: 'aftersales_summary' }),
+      projectOrderTableCell(order, { kind: 'computed', key: 'current_todo' }),
+    ]).toEqual(['无发货', '无物流', '无售后', '无需处理']);
     expect(projectOrderTableCell(
       order,
       { kind: 'custom', definitionId: orderField.id },

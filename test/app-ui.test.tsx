@@ -180,6 +180,12 @@ function orderSummary(
       sourceSpec,
       quantity,
     })),
+    operations: {
+      shipmentSummary: '无发货',
+      logisticsSummary: '无物流',
+      aftersalesSummary: '无售后',
+      currentTodo: '无需处理',
+    },
     ...overrides,
   };
 }
@@ -6452,6 +6458,59 @@ describe('订单管理工作台', () => {
     expect(within(preview).getAllByRole('columnheader').map(({ textContent }) => textContent))
       .toEqual(['B 跟单', 'A 备用']);
     expect(within(preview).getByText('B 值')).toBeVisible();
+  });
+
+  it('订单模板字段库提供四项运营概况并在订单表按投影值显示', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary(confirmedOrder, {
+      operations: {
+        shipmentSummary: '部分发货（已发 1 / 共 2 件）',
+        logisticsSummary: '运输中',
+        aftersalesSummary: '等待退回',
+        currentTodo: '等待买家退回',
+      },
+    });
+    const template: TableTemplate = {
+      id: 'template-order-operations',
+      name: '订单运营看板',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'computed', key: 'shipment_summary' }, displayName: '发货概况' },
+        { field: { kind: 'computed', key: 'logistics_summary' }, displayName: '物流概况' },
+        { field: { kind: 'computed', key: 'aftersales_summary' }, displayName: '售后概况' },
+        { field: { kind: 'computed', key: 'current_todo' }, displayName: '当前待办' },
+      ],
+      query: {},
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '表格模板' }));
+    for (const fieldName of ['发货概况', '物流概况', '售后概况', '当前待办']) {
+      expect(await screen.findByRole('checkbox', { name: fieldName })).toBeVisible();
+    }
+    await user.click(screen.getByRole('button', { name: '应用 订单运营看板' }));
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(within(table).getAllByRole('columnheader').slice(1, 5).map(({ textContent }) => (
+      textContent
+    ))).toEqual(['发货概况', '物流概况', '售后概况', '当前待办']);
+    const row = within(table).getAllByRole('row')[1];
+    expect(row).toHaveTextContent('部分发货（已发 1 / 共 2 件）');
+    expect(row).toHaveTextContent('运输中');
+    expect(row).toHaveTextContent('等待退回');
+    expect(row).toHaveTextContent('等待买家退回');
   });
 
   it('模板不包含订单号时仍保留独立的订单详情入口', async () => {

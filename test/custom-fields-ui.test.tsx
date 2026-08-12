@@ -229,6 +229,12 @@ function summary(order: OriginalOrder = confirmedOrder): OrderSummary {
       sourceSpec,
       quantity,
     })),
+    operations: {
+      shipmentSummary: '无发货',
+      logisticsSummary: '无物流',
+      aftersalesSummary: '无售后',
+      currentTodo: '无需处理',
+    },
   };
 }
 
