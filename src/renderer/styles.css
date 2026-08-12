@@ -1626,11 +1626,30 @@ select:focus-visible {
 }
 
 .shipment-archive-card__records > summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 0 0;
   color: var(--navy-700);
   font-size: 9px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.shipment-archive-card__record-overview {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px 12px;
+  color: var(--navy-500);
+  font-weight: 400;
+}
+
+.shipment-archive-card__record-overview strong {
+  color: var(--navy-700);
 }
 
 .shipment-records-embedded .shipment-records-list {

@@ -62,8 +62,7 @@ export type ShipmentPackage = {
   totalQuantity: number;
   items: ShipmentPackageItem[];
   cancellation: ShipmentCancellation | null;
-  logisticsChanges: ShipmentPackageLogisticsChange[];
-  logisticsStatusChanges: ShipmentPackageLogisticsStatusChange[];
+  timeline: ShipmentPackageTimelineEvent[];
   createdAt: string;
 };
 
@@ -82,6 +81,7 @@ export type ShipmentPackageLogistics = {
 };
 
 export type ShipmentPackageLogisticsChange = {
+  kind: 'logistics_corrected';
   baseRevision: number;
   resultRevision: number;
   reason: string;
@@ -91,6 +91,7 @@ export type ShipmentPackageLogisticsChange = {
 };
 
 export type ShipmentPackageLogisticsStatusChange = {
+  kind: 'status_changed';
   baseRevision: number;
   resultRevision: number;
   beforeStatus: ShipmentLogisticsStatus;
@@ -98,6 +99,10 @@ export type ShipmentPackageLogisticsStatusChange = {
   reason: string;
   createdAt: string;
 };
+
+export type ShipmentPackageTimelineEvent =
+  | ShipmentPackageLogisticsChange
+  | ShipmentPackageLogisticsStatusChange;
 
 export type ShipmentCancellation = {
   reason: string;

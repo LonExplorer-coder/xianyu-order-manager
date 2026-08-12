@@ -145,6 +145,7 @@ import {
   type ShipmentGroupProjection,
 } from '../core/shipment-groups';
 import {
+  isShipmentLogisticsStatus,
   normalizeCancelShipmentPackagesInput,
   normalizeConfirmShipmentInput,
   normalizeCorrectShipmentPackageLogisticsInput,
@@ -158,6 +159,7 @@ import {
   type ShipmentLogisticsStatus,
   type ShipmentPackage,
   type ShipmentPackageItem,
+  type ShipmentPackageTimelineEvent,
   type ShipmentRecord,
   type ShipmentSourceDifference,
   type ShipmentSourceOrderSnapshot,
@@ -3567,6 +3569,35 @@ export class LocalApplication {
         quantity: asNumber(itemRow.quantity),
         subtotalCents: asNumber(itemRow.subtotal_cents),
       }));
+      const timeline: ShipmentPackageTimelineEvent[] = [
+        ...changeRows.map((changeRow): ShipmentPackageTimelineEvent => ({
+          kind: 'logistics_corrected',
+          baseRevision: asNumber(changeRow.base_revision),
+          resultRevision: asNumber(changeRow.result_revision),
+          reason: asString(changeRow.reason),
+          before: {
+            shippingCarrier: asString(changeRow.before_shipping_carrier),
+            trackingNumber: asString(changeRow.before_tracking_number),
+          },
+          after: {
+            shippingCarrier: asString(changeRow.after_shipping_carrier),
+            trackingNumber: asString(changeRow.after_tracking_number),
+          },
+          createdAt: asString(changeRow.created_at),
+        })),
+        ...statusChangeRows.map((changeRow): ShipmentPackageTimelineEvent => ({
+          kind: 'status_changed',
+          baseRevision: asNumber(changeRow.base_revision),
+          resultRevision: asNumber(changeRow.result_revision),
+          beforeStatus: asShipmentLogisticsStatus(changeRow.before_status),
+          afterStatus: asShipmentLogisticsStatus(changeRow.after_status),
+          reason: asString(changeRow.reason),
+          createdAt: asString(changeRow.created_at),
+        })),
+      ].sort((left, right) => (
+        left.resultRevision - right.resultRevision ||
+        left.createdAt.localeCompare(right.createdAt)
+      ));
       return {
         id: packageId,
         position: asNumber(packageRow.position),
@@ -3581,28 +3612,7 @@ export class LocalApplication {
           reason: asString(cancellationRow.reason),
           createdAt: asString(cancellationRow.created_at),
         } : null,
-        logisticsChanges: changeRows.map((changeRow) => ({
-          baseRevision: asNumber(changeRow.base_revision),
-          resultRevision: asNumber(changeRow.result_revision),
-          reason: asString(changeRow.reason),
-          before: {
-            shippingCarrier: asString(changeRow.before_shipping_carrier),
-            trackingNumber: asString(changeRow.before_tracking_number),
-          },
-          after: {
-            shippingCarrier: asString(changeRow.after_shipping_carrier),
-            trackingNumber: asString(changeRow.after_tracking_number),
-          },
-          createdAt: asString(changeRow.created_at),
-        })),
-        logisticsStatusChanges: statusChangeRows.map((changeRow) => ({
-          baseRevision: asNumber(changeRow.base_revision),
-          resultRevision: asNumber(changeRow.result_revision),
-          beforeStatus: asShipmentLogisticsStatus(changeRow.before_status),
-          afterStatus: asShipmentLogisticsStatus(changeRow.after_status),
-          reason: asString(changeRow.reason),
-          createdAt: asString(changeRow.created_at),
-        })),
+        timeline,
         createdAt: asString(packageRow.created_at),
       };
     });
@@ -6074,15 +6084,7 @@ function asNumber(value: string | number | null | undefined): number {
 function asShipmentLogisticsStatus(
   value: string | number | null | undefined,
 ): ShipmentLogisticsStatus {
-  if (
-    value === 'awaiting_carrier' ||
-    value === 'in_transit' ||
-    value === 'delivered' ||
-    value === 'intercepting' ||
-    value === 'intercepted_returned' ||
-    value === 'lost' ||
-    value === 'exception'
-  ) return value;
+  if (isShipmentLogisticsStatus(value)) return value;
   throw new Error('数据库包裹物流状态错误');
 }
 

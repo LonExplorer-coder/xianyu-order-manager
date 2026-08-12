@@ -2218,7 +2218,8 @@ describe('发货记录', () => {
       shippingCarrier: '中通快递',
       trackingNumber: 'ZT1000000002',
       revision: 2,
-      logisticsChanges: [{
+      timeline: [{
+        kind: 'logistics_corrected',
         baseRevision: 1,
         resultRevision: 2,
         reason: '发货时录入了错误的运单信息',
@@ -2256,24 +2257,41 @@ describe('发货记录', () => {
     const shipmentPackage = confirmation.record.packages[0];
     const sourceOrders = structuredClone(confirmation.record.sourceOrders);
 
-    const result = application.updateShipmentPackageLogisticsStatus({
+    const corrected = application.correctShipmentPackageLogistics({
       recordId: confirmation.record.id,
       packageId: shipmentPackage.id,
       expectedRevision: shipmentPackage.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-LOGISTICS-STATUS-001',
+      reason: '原运单号录入错误',
+    });
+    const result = application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: corrected.record.packages[0].revision,
       logisticsStatus: 'delivered',
       reason: '买家确认包裹已经签收',
     });
 
     expect(result.record.packages[0]).toMatchObject({
       logisticsStatus: 'delivered',
-      revision: 2,
-      logisticsStatusChanges: [{
-        baseRevision: 1,
-        resultRevision: 2,
-        beforeStatus: 'in_transit',
-        afterStatus: 'delivered',
-        reason: '买家确认包裹已经签收',
-      }],
+      revision: 3,
+      timeline: [
+        {
+          kind: 'logistics_corrected',
+          baseRevision: 1,
+          resultRevision: 2,
+          reason: '原运单号录入错误',
+        },
+        {
+          kind: 'status_changed',
+          baseRevision: 2,
+          resultRevision: 3,
+          beforeStatus: 'in_transit',
+          afterStatus: 'delivered',
+          reason: '买家确认包裹已经签收',
+        },
+      ],
     });
     expect(result.record.sourceOrders).toEqual(sourceOrders);
     expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))

@@ -2337,7 +2337,11 @@ function ShipmentArchiveSection({
                 </div>
                 <details className="shipment-archive-card__records">
                   <summary role="button" aria-label={`查看 ${archive.records.length} 条发货记录`}>
-                    查看 {archive.records.length} 条发货记录
+                    <span>查看 {archive.records.length} 条发货记录</span>
+                    <span className="shipment-archive-card__record-overview">
+                      <span><strong>物流：</strong>{shipmentRecordsLogisticsSummary(archive.records)}</span>
+                      <span><strong>当前待办：</strong>{shipmentRecordsCurrentAction(archive.records)}</span>
+                    </span>
                   </summary>
                   <ShipmentRecordsSection
                     embedded
@@ -2465,21 +2469,15 @@ function ShipmentRecordsSection({
                     </button>
                   </footer>
                 )}
-                {(shipmentPackage.logisticsChanges.length > 0 ||
-                  shipmentPackage.logisticsStatusChanges.length > 0) && (
+                {shipmentPackage.timeline.length > 0 && (
                   <details className="shipment-record-card__timeline">
                     <summary>物流时间线</summary>
                     <ol>
-                      {shipmentPackage.logisticsStatusChanges.map((change) => (
-                        <li key={`status-${change.resultRevision}`}>
-                          <strong>{shipmentLogisticsStatusLabel(change.beforeStatus)} → {shipmentLogisticsStatusLabel(change.afterStatus)}</strong>
-                          <span>{change.reason}</span>
-                          <small>{formatDateTime(change.createdAt)}</small>
-                        </li>
-                      ))}
-                      {shipmentPackage.logisticsChanges.map((change) => (
-                        <li key={`logistics-${change.resultRevision}`}>
-                          <strong>承运方或运单号已更正</strong>
+                      {shipmentPackage.timeline.map((change) => (
+                        <li key={`${change.kind}-${change.resultRevision}`}>
+                          <strong>{change.kind === 'status_changed'
+                            ? `${shipmentLogisticsStatusLabel(change.beforeStatus)} → ${shipmentLogisticsStatusLabel(change.afterStatus)}`
+                            : `${shipmentPackageLogisticsLabel(change.before)} → ${shipmentPackageLogisticsLabel(change.after)}`}</strong>
                           <span>{change.reason}</span>
                           <small>{formatDateTime(change.createdAt)}</small>
                         </li>
@@ -2553,10 +2551,14 @@ function shipmentLogisticsStatusLabel(status: ShipmentLogisticsStatus): string {
   return SHIPMENT_LOGISTICS_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
 }
 
-function shipmentRecordLogisticsSummary(record: ShipmentRecord): string {
-  const statuses = record.packages
+function activeShipmentLogisticsStatuses(records: readonly ShipmentRecord[]): ShipmentLogisticsStatus[] {
+  return records.flatMap((record) => record.packages
     .filter(({ status }) => status === 'active')
-    .map(({ logisticsStatus }) => logisticsStatus);
+    .map(({ logisticsStatus }) => logisticsStatus));
+}
+
+function shipmentRecordsLogisticsSummary(records: readonly ShipmentRecord[]): string {
+  const statuses = activeShipmentLogisticsStatuses(records);
   if (statuses.length === 0) return '无有效包裹';
   const counts = statuses.reduce((summary, status) => {
     summary.set(status, (summary.get(status) ?? 0) + 1);
@@ -2569,10 +2571,12 @@ function shipmentRecordLogisticsSummary(record: ShipmentRecord): string {
   )).join('、');
 }
 
-function shipmentRecordCurrentAction(record: ShipmentRecord): string {
-  const statuses = new Set(record.packages
-    .filter(({ status }) => status === 'active')
-    .map(({ logisticsStatus }) => logisticsStatus));
+function shipmentRecordLogisticsSummary(record: ShipmentRecord): string {
+  return shipmentRecordsLogisticsSummary([record]);
+}
+
+function shipmentRecordsCurrentAction(records: readonly ShipmentRecord[]): string {
+  const statuses = new Set(activeShipmentLogisticsStatuses(records));
   if (statuses.size === 0 || [...statuses].every((status) => status === 'delivered')) {
     return '无需物流操作';
   }
@@ -2582,6 +2586,18 @@ function shipmentRecordCurrentAction(record: ShipmentRecord): string {
   if (statuses.has('intercepted_returned')) return '确认退回货物';
   if (statuses.has('awaiting_carrier')) return '确认承运方接收';
   return '跟进运输进度';
+}
+
+function shipmentRecordCurrentAction(record: ShipmentRecord): string {
+  return shipmentRecordsCurrentAction([record]);
+}
+
+function shipmentPackageLogisticsLabel(logistics: {
+  shippingCarrier: string;
+  trackingNumber: string;
+}): string {
+  return [logistics.shippingCarrier, logistics.trackingNumber]
+    .filter(Boolean).join(' · ') || '未填写物流信息';
 }
 
 function UpdateShipmentPackageLogisticsStatusDialog({

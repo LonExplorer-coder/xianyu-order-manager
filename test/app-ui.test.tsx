@@ -292,8 +292,7 @@ function shipmentRecordForGroup(
       totalQuantity: items.reduce((total, item) => total + item.quantity, 0),
       items,
       cancellation: null,
-      logisticsChanges: [],
-      logisticsStatusChanges: [],
+      timeline: [],
       createdAt,
     }],
     sourceOrders: group.orders.map((order) => ({
@@ -1012,6 +1011,14 @@ describe('订单管理工作台', () => {
 
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const archiveCard = await screen.findByRole('article', {
+      name: `发货组档案 ${confirmedOrder.orderNumber}`,
+    });
+    const recordSummary = within(archiveCard).getByRole('button', {
+      name: /1 条发货记录/,
+    });
+    expect(recordSummary).toHaveTextContent('物流：运输中');
+    expect(recordSummary).toHaveTextContent('当前待办：跟进运输进度');
     const history = await screen.findByRole('region', { name: '发货记录' });
     await user.click(within(history).getByRole('button', {
       name: '撤销未交寄包裹 包裹 1 SF1000000020',
@@ -1055,7 +1062,8 @@ describe('订单管理工作台', () => {
         revision: 2,
         shippingCarrier: '中通快递',
         trackingNumber: 'ZT2000000030',
-        logisticsChanges: [{
+        timeline: [{
+          kind: 'logistics_corrected',
           baseRevision: 1,
           resultRevision: 2,
           reason: '原单号录入错误',
@@ -1134,7 +1142,8 @@ describe('订单管理工作台', () => {
         ...shipmentPackage,
         revision: 2,
         logisticsStatus: 'delivered',
-        logisticsStatusChanges: [{
+        timeline: [{
+          kind: 'status_changed',
           baseRevision: 1,
           resultRevision: 2,
           beforeStatus: 'in_transit',
