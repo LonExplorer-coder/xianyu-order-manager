@@ -55,6 +55,8 @@ import type {
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
+  ShipmentLogisticsStatusUpdateResult,
+  UpdateShipmentPackageLogisticsStatusInput,
 } from './shipment-records';
 import type {
   CreateTableTemplateInput,
@@ -115,6 +117,9 @@ export interface DesktopApi {
   correctShipmentPackageLogistics(
     input: CorrectShipmentPackageLogisticsInput,
   ): Promise<ShipmentLogisticsCorrectionResult>;
+  updateShipmentPackageLogisticsStatus(
+    input: UpdateShipmentPackageLogisticsStatusInput,
+  ): Promise<ShipmentLogisticsStatusUpdateResult>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

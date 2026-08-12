@@ -59,6 +59,9 @@ const api: DesktopApi = {
   correctShipmentPackageLogistics: (input) => (
     ipcRenderer.invoke('shipment-records:correct-package-logistics', input)
   ),
+  updateShipmentPackageLogisticsStatus: (input) => (
+    ipcRenderer.invoke('shipment-records:update-package-logistics-status', input)
+  ),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   onOrdersChanged: (listener) => {
     const ipcListener = (

@@ -148,16 +148,20 @@ describe('发货组 Electron IPC', () => {
     expect(confirmShipment).toHaveBeenCalledWith(input);
   });
 
-  it('通过受控通道撤销未交寄包裹并更正物流', async () => {
+  it('通过受控通道撤销未交寄包裹、更正物流并更新时间线状态', async () => {
     const cancelShipmentPackages = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-1', status: 'voided' },
     });
     const correctShipmentPackageLogistics = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-2' },
     });
+    const updateShipmentPackageLogisticsStatus = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2', logisticsStatus: 'delivered' },
+    });
     registerIpcHandlers({
       cancelShipmentPackages,
       correctShipmentPackageLogistics,
+      updateShipmentPackageLogisticsStatus,
       onRecognitionBatchesChanged: vi.fn(),
       onOrdersChanged: vi.fn(),
     } as unknown as DesktopSession);
@@ -174,13 +178,23 @@ describe('发货组 Electron IPC', () => {
       trackingNumber: 'ZT1000000003',
       reason: '更正录入错误',
     };
+    const statusInput = {
+      recordId: 'shipment-record-2',
+      packageId: 'package-2',
+      expectedRevision: 2,
+      logisticsStatus: 'delivered',
+      reason: '买家确认签收',
+    };
 
     await expect(invoke('shipment-records:cancel-packages', cancelInput))
       .resolves.toMatchObject({ record: { status: 'voided' } });
     await expect(invoke('shipment-records:correct-package-logistics', correctionInput))
       .resolves.toMatchObject({ record: { id: 'shipment-record-2' } });
+    await expect(invoke('shipment-records:update-package-logistics-status', statusInput))
+      .resolves.toMatchObject({ record: { logisticsStatus: 'delivered' } });
     expect(cancelShipmentPackages).toHaveBeenCalledWith(cancelInput);
     expect(correctShipmentPackageLogistics).toHaveBeenCalledWith(correctionInput);
+    expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(statusInput);
   });
 });
 

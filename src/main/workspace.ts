@@ -169,6 +169,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 20) migrateToVersion20(database);
   if (row.version < 21) migrateToVersion21(database);
   if (row.version < 22) migrateToVersion22(database);
+  if (row.version < 23) migrateToVersion23(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2414,6 +2415,74 @@ function migrateToVersion22(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (22, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion23(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    const packageColumns = database.prepare('PRAGMA table_info(shipment_packages)').all() as unknown as Array<{
+      name: string;
+    }>;
+    if (!packageColumns.some(({ name }) => name === 'logistics_status')) {
+      database.exec(`
+        ALTER TABLE shipment_packages
+        ADD COLUMN logistics_status TEXT NOT NULL DEFAULT 'in_transit'
+          CHECK (logistics_status IN (
+            'awaiting_carrier',
+            'in_transit',
+            'delivered',
+            'intercepting',
+            'intercepted_returned',
+            'lost',
+            'exception'
+          ));
+      `);
+    }
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS shipment_package_logistics_status_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        package_id TEXT NOT NULL
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        before_status TEXT NOT NULL CHECK (before_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+          'intercepted_returned', 'lost', 'exception'
+        )),
+        after_status TEXT NOT NULL CHECK (after_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+          'intercepted_returned', 'lost', 'exception'
+        )),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        UNIQUE (package_id, result_revision)
+      ) STRICT;
+
+      CREATE TRIGGER IF NOT EXISTS shipment_package_logistics_status_events_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_logistics_status_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS shipment_package_logistics_status_events_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_logistics_status_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (23, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

@@ -285,6 +285,7 @@ function shipmentRecordForGroup(
       id: 'shipment-package-ui-1',
       position: 0,
       status: 'active',
+      logisticsStatus: 'in_transit',
       shippingCarrier: '顺丰速运',
       trackingNumber: 'SF1000000020',
       revision: 1,
@@ -292,6 +293,7 @@ function shipmentRecordForGroup(
       items,
       cancellation: null,
       logisticsChanges: [],
+      logisticsStatusChanges: [],
       createdAt,
     }],
     sourceOrders: group.orders.map((order) => ({
@@ -403,6 +405,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     confirmShipment: vi.fn(),
     cancelShipmentPackages: vi.fn(),
     correctShipmentPackageLogistics: vi.fn(),
+    updateShipmentPackageLogisticsStatus: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
@@ -1119,6 +1122,123 @@ describe('订单管理工作台', () => {
       reason: '原单号录入错误',
     });
     expect(history).toHaveTextContent('中通快递 · ZT2000000030');
+  });
+
+  it('在发货记录中更新物流状态并展示独立时间线和当前待办', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const record = shipmentRecordForGroup(group);
+    const deliveredRecord: ShipmentRecord = {
+      ...record,
+      packages: record.packages.map((shipmentPackage) => ({
+        ...shipmentPackage,
+        revision: 2,
+        logisticsStatus: 'delivered',
+        logisticsStatusChanges: [{
+          baseRevision: 1,
+          resultRevision: 2,
+          beforeStatus: 'in_transit',
+          afterStatus: 'delivered',
+          reason: '买家确认已经收到包裹',
+          createdAt: '2026-08-12T10:12:00.000Z',
+        }],
+      })),
+    };
+    const updateShipmentPackageLogisticsStatus = vi.fn().mockResolvedValue({
+      record: deliveredRecord,
+      archive: {
+        ...shipmentArchiveForGroup(group),
+        records: [deliveredRecord],
+      },
+      projection: { groups: [], attentionOrders: [] },
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([
+        shipmentArchiveForGroup(group),
+      ]),
+      updateShipmentPackageLogisticsStatus,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    expect(history).toHaveTextContent('物流：运输中');
+    expect(history).toHaveTextContent('售后：无售后');
+    expect(history).toHaveTextContent('当前待办：跟进运输进度');
+    await user.click(within(history).getByRole('button', {
+      name: '更新物流状态 包裹 1 运输中',
+    }));
+    const dialog = screen.getByRole('dialog', { name: '更新包裹物流状态' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '物流状态' }), 'delivered');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '状态更新原因' }),
+      '买家确认已经收到包裹',
+    );
+    await user.click(within(dialog).getByRole('button', { name: '确认更新' }));
+
+    expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith({
+      recordId: record.id,
+      packageId: record.packages[0].id,
+      expectedRevision: 1,
+      logisticsStatus: 'delivered',
+      reason: '买家确认已经收到包裹',
+    });
+    expect(history).toHaveTextContent('物流：已签收');
+    expect(history).toHaveTextContent('当前待办：无需物流操作');
+    expect(history).toHaveTextContent('运输中 → 已签收');
+    expect(history).toHaveTextContent('买家确认已经收到包裹');
+  });
+
+  it('按物流状态筛选发货组档案而不改变发货情况分组', async () => {
+    const user = userEvent.setup();
+    const firstGroup = singleShipmentGroupProjection().groups[0];
+    const secondGroup = structuredClone(firstGroup);
+    secondGroup.id = 'shipment-group-ui-filter-delivered';
+    secondGroup.orders[0].id = 'order-ui-filter-delivered';
+    secondGroup.orders[0].orderNumber = 'XY-SHIPMENT-UI-DELIVERED';
+    secondGroup.orders[0].items[0].id = 'item-ui-filter-delivered';
+    const inTransitArchive = shipmentArchiveForGroup(firstGroup);
+    const deliveredArchive = shipmentArchiveForGroup(secondGroup);
+    deliveredArchive.id = 'shipment-archive-ui-filter-delivered';
+    deliveredArchive.records[0].archiveId = deliveredArchive.id;
+    deliveredArchive.records[0].packages[0].logisticsStatus = 'delivered';
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([
+        inTransitArchive,
+        deliveredArchive,
+      ]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    expect(await screen.findByRole('tab', { name: '已全部发货 2' }))
+      .toHaveAttribute('aria-selected', 'true');
+    await user.selectOptions(screen.getByRole('combobox', { name: '物流状态筛选' }), 'delivered');
+
+    expect(screen.getByRole('article', {
+      name: `发货组档案 ${secondGroup.orders[0].orderNumber}`,
+    })).toBeVisible();
+    expect(screen.queryByRole('article', {
+      name: `发货组档案 ${firstGroup.orders[0].orderNumber}`,
+    })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '已全部发货 2' }))
+      .toHaveAttribute('aria-selected', 'true');
   });
 
   it('发货后原订单变化时在发货记录中显示快照差异提醒', async () => {

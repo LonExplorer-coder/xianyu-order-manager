@@ -222,6 +222,7 @@ describe('发货记录', () => {
       packages: [{
         position: 0,
         status: 'active',
+        logisticsStatus: 'in_transit',
         shippingCarrier: '顺丰速运',
         trackingNumber: 'SF1000000001',
         totalQuantity: 4,
@@ -732,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -787,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -873,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -1013,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -1212,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version = 22;
+        DELETE FROM schema_migrations WHERE version IN (22, 23);
         COMMIT;
       `);
     } finally {
@@ -1392,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version = 22;
+        DELETE FROM schema_migrations WHERE version IN (22, 23);
         COMMIT;
       `);
     } finally {
@@ -1529,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -1656,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -1765,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1840,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
         COMMIT;
       `);
     } finally {
@@ -2232,6 +2233,55 @@ describe('发货记录', () => {
       }],
     });
     expect(application.queryShipmentRecords()).toEqual([result.record]);
+  });
+
+  it('更新包裹物流状态时保留不可变时间线并跨重启读取', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-logistics-status-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-LOGISTICS-STATUS-001',
+        items: remainingItems,
+      }],
+    });
+    const shipmentPackage = confirmation.record.packages[0];
+    const sourceOrders = structuredClone(confirmation.record.sourceOrders);
+
+    const result = application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'delivered',
+      reason: '买家确认包裹已经签收',
+    });
+
+    expect(result.record.packages[0]).toMatchObject({
+      logisticsStatus: 'delivered',
+      revision: 2,
+      logisticsStatusChanges: [{
+        baseRevision: 1,
+        resultRevision: 2,
+        beforeStatus: 'in_transit',
+        afterStatus: 'delivered',
+        reason: '买家确认包裹已经签收',
+      }],
+    });
+    expect(result.record.sourceOrders).toEqual(sourceOrders);
+    expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))
+      .toEqual(['shipped', 'shipped']);
+    application.close();
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentRecords()).toEqual([result.record]);
   });
 
   it('原订单后来改变时保留发货快照并列出差异', async () => {

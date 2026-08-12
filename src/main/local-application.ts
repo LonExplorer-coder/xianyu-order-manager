@@ -148,11 +148,14 @@ import {
   normalizeCancelShipmentPackagesInput,
   normalizeConfirmShipmentInput,
   normalizeCorrectShipmentPackageLogisticsInput,
+  normalizeUpdateShipmentPackageLogisticsStatusInput,
   type ShipmentCancellationResult,
   type ShipmentConfirmationResult,
   type ShipmentGroupArchive,
   type ShipmentItemQuantityInput,
   type ShipmentLogisticsCorrectionResult,
+  type ShipmentLogisticsStatusUpdateResult,
+  type ShipmentLogisticsStatus,
   type ShipmentPackage,
   type ShipmentPackageItem,
   type ShipmentRecord,
@@ -3436,6 +3439,61 @@ export class LocalApplication {
     };
   }
 
+  public updateShipmentPackageLogisticsStatus(
+    input: unknown,
+  ): ShipmentLogisticsStatusUpdateResult {
+    const prepared = normalizeUpdateShipmentPackageLogisticsStatusInput(input);
+    const record = this.getShipmentRecord(prepared.recordId);
+    if (record.status === 'voided') throw new Error('已作废的发货记录不能更新物流状态');
+    const shipmentPackage = record.packages.find(({ id }) => id === prepared.packageId);
+    if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
+    if (shipmentPackage.status === 'cancelled') throw new Error('已撤销的包裹不能更新物流状态');
+    if (shipmentPackage.revision !== prepared.expectedRevision) {
+      throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
+    }
+    if (shipmentPackage.logisticsStatus === prepared.logisticsStatus) {
+      throw new Error('包裹物流状态没有变化');
+    }
+    const now = new Date().toISOString();
+    const workspace = this.requireWorkspace();
+    workspace.transaction(() => {
+      const updated = workspace.database.prepare(`
+        UPDATE shipment_packages
+        SET logistics_status = ?, revision = revision + 1
+        WHERE id = ? AND shipment_record_id = ? AND revision = ?
+      `).run(
+        prepared.logisticsStatus,
+        shipmentPackage.id,
+        record.id,
+        prepared.expectedRevision,
+      );
+      if (updated.changes !== 1) {
+        throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
+      }
+      workspace.database.prepare(`
+        INSERT INTO shipment_package_logistics_status_events (
+          id, package_id, base_revision, result_revision,
+          before_status, after_status, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        shipmentPackage.id,
+        shipmentPackage.revision,
+        shipmentPackage.revision + 1,
+        shipmentPackage.logisticsStatus,
+        prepared.logisticsStatus,
+        prepared.reason,
+        now,
+      );
+    });
+    const updatedRecord = this.getShipmentRecord(record.id);
+    return {
+      record: updatedRecord,
+      archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
+      projection: this.queryShipmentGroups(),
+    };
+  }
+
   private getShipmentRecord(recordId: string): ShipmentRecord {
     const workspace = this.requireWorkspace();
     const row = workspace.database.prepare(`
@@ -3489,6 +3547,12 @@ export class LocalApplication {
         WHERE package_id = ?
         ORDER BY sequence
       `).all(packageId) as unknown as SqlRow[];
+      const statusChangeRows = workspace.database.prepare(`
+        SELECT *
+        FROM shipment_package_logistics_status_events
+        WHERE package_id = ?
+        ORDER BY sequence
+      `).all(packageId) as unknown as SqlRow[];
       const items = itemRows.map((itemRow): ShipmentPackageItem => ({
         id: asString(itemRow.id),
         orderId: asString(itemRow.order_id),
@@ -3507,6 +3571,7 @@ export class LocalApplication {
         id: packageId,
         position: asNumber(packageRow.position),
         status: cancellationRow ? 'cancelled' : 'active',
+        logisticsStatus: asShipmentLogisticsStatus(packageRow.logistics_status),
         shippingCarrier: asString(packageRow.shipping_carrier),
         trackingNumber: asString(packageRow.tracking_number),
         revision: asNumber(packageRow.revision),
@@ -3528,6 +3593,14 @@ export class LocalApplication {
             shippingCarrier: asString(changeRow.after_shipping_carrier),
             trackingNumber: asString(changeRow.after_tracking_number),
           },
+          createdAt: asString(changeRow.created_at),
+        })),
+        logisticsStatusChanges: statusChangeRows.map((changeRow) => ({
+          baseRevision: asNumber(changeRow.base_revision),
+          resultRevision: asNumber(changeRow.result_revision),
+          beforeStatus: asShipmentLogisticsStatus(changeRow.before_status),
+          afterStatus: asShipmentLogisticsStatus(changeRow.after_status),
+          reason: asString(changeRow.reason),
           createdAt: asString(changeRow.created_at),
         })),
         createdAt: asString(packageRow.created_at),
@@ -5996,6 +6069,21 @@ function asString(value: string | number | null | undefined): string {
 function asNumber(value: string | number | null | undefined): number {
   if (typeof value !== 'number') throw new Error('数据库数字字段格式错误');
   return value;
+}
+
+function asShipmentLogisticsStatus(
+  value: string | number | null | undefined,
+): ShipmentLogisticsStatus {
+  if (
+    value === 'awaiting_carrier' ||
+    value === 'in_transit' ||
+    value === 'delivered' ||
+    value === 'intercepting' ||
+    value === 'intercepted_returned' ||
+    value === 'lost' ||
+    value === 'exception'
+  ) return value;
+  throw new Error('数据库包裹物流状态错误');
 }
 
 function asQuantitySource(

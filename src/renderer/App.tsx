@@ -79,6 +79,7 @@ import type {
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentItemQuantityInput,
+  ShipmentLogisticsStatus,
   ShipmentRecord,
 } from '../core/shipment-records';
 import {
@@ -1517,6 +1518,11 @@ function ShipmentGroupsWorkspace({
     shipmentPackage: ShipmentRecord['packages'][number];
     packageIndex: number;
   } | null>(null);
+  const [logisticsStatusTarget, setLogisticsStatusTarget] = useState<{
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  } | null>(null);
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
   const partiallyShippedArchives = archives.filter(
@@ -1810,6 +1816,9 @@ function ShipmentGroupsWorkspace({
           onCorrectLogistics={(record, shipmentPackage, packageIndex) => {
             setLogisticsCorrectionTarget({ record, shipmentPackage, packageIndex });
           }}
+          onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
+            setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
+          }}
         />
       )}
 
@@ -1827,6 +1836,9 @@ function ShipmentGroupsWorkspace({
           }}
           onCorrectLogistics={(record, shipmentPackage, packageIndex) => {
             setLogisticsCorrectionTarget({ record, shipmentPackage, packageIndex });
+          }}
+          onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
+            setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
           }}
         />
       )}
@@ -1869,6 +1881,19 @@ function ShipmentGroupsWorkspace({
             setLogisticsCorrectionTarget(null);
           }}
           onClose={() => setLogisticsCorrectionTarget(null)}
+        />
+      )}
+
+      {logisticsStatusTarget && (
+        <UpdateShipmentPackageLogisticsStatusDialog
+          api={api}
+          target={logisticsStatusTarget}
+          onApplied={({ archive, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            replaceArchive(archive);
+            setLogisticsStatusTarget(null);
+          }}
+          onClose={() => setLogisticsStatusTarget(null)}
         />
       )}
 
@@ -2152,6 +2177,7 @@ function ShipmentArchiveSection({
   onOpenOrder,
   onCancelPackage,
   onCorrectLogistics,
+  onUpdateLogisticsStatus,
 }: {
   label: string;
   emptyMessage: string;
@@ -2172,17 +2198,51 @@ function ShipmentArchiveSection({
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
   ) => void;
+  onUpdateLogisticsStatus: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
 }) {
+  const [logisticsFilter, setLogisticsFilter] = useState<'all' | ShipmentLogisticsStatus>('all');
+  const visibleArchives = logisticsFilter === 'all'
+    ? archives
+    : archives.filter((archive) => archive.records.some((record) => (
+      record.packages.some((shipmentPackage) => (
+        shipmentPackage.status === 'active' &&
+        shipmentPackage.logisticsStatus === logisticsFilter
+      ))
+    )));
   return (
     <section
       className="shipment-groups-section shipment-archive-section"
       aria-label={label}
     >
-      {archives.length === 0 ? (
+      {archives.length > 0 && (
+        <div className="shipment-archive-filters">
+          <label>
+            <span>物流状态</span>
+            <select
+              aria-label="物流状态筛选"
+              value={logisticsFilter}
+              onChange={(event) => setLogisticsFilter(
+                event.target.value as 'all' | ShipmentLogisticsStatus,
+              )}
+            >
+              <option value="all">全部物流状态</option>
+              {SHIPMENT_LOGISTICS_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <span>{visibleArchives.length} / {archives.length} 个发货组档案</span>
+        </div>
+      )}
+      {visibleArchives.length === 0 ? (
         <div className="shipment-records-empty">{emptyMessage}</div>
       ) : (
         <div className="shipment-archive-list">
-          {archives.map((archive) => {
+          {visibleArchives.map((archive) => {
             const currentGroup = archive.remainingGroup;
             const shippedItems = [...archive.records
               .flatMap((record) => record.packages)
@@ -2284,6 +2344,7 @@ function ShipmentArchiveSection({
                     records={archive.records}
                     onCancelPackage={onCancelPackage}
                     onCorrectLogistics={onCorrectLogistics}
+                    onUpdateLogisticsStatus={onUpdateLogisticsStatus}
                   />
                 </details>
               </article>
@@ -2299,6 +2360,7 @@ function ShipmentRecordsSection({
   records,
   onCancelPackage,
   onCorrectLogistics,
+  onUpdateLogisticsStatus,
   embedded = false,
 }: {
   records: ShipmentRecord[];
@@ -2308,6 +2370,11 @@ function ShipmentRecordsSection({
     packageIndex: number,
   ) => void;
   onCorrectLogistics: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onUpdateLogisticsStatus: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
@@ -2327,6 +2394,11 @@ function ShipmentRecordsSection({
             </div>
             <span>{record.status === 'voided' ? '已作废' : `共 ${record.totalQuantity} 件`}</span>
           </header>
+          <div className="shipment-record-card__status-summary">
+            <span><strong>物流：</strong>{shipmentRecordLogisticsSummary(record)}</span>
+            <span><strong>售后：</strong>无售后</span>
+            <span><strong>当前待办：</strong>{shipmentRecordCurrentAction(record)}</span>
+          </div>
           {record.sourceDifferences.length > 0 && (
             <details className="shipment-record-card__differences" open>
               <summary>来源订单已有 {record.sourceDifferences.length} 项变化</summary>
@@ -2349,7 +2421,9 @@ function ShipmentRecordsSection({
               <section key={shipmentPackage.id}>
                 <div>
                   <strong>包裹 {packageIndex + 1}</strong>
-                  <span>{shipmentPackage.status === 'cancelled' ? '已撤销' : '已登记'}</span>
+                  <span>{shipmentPackage.status === 'cancelled'
+                    ? '已撤销'
+                    : shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}</span>
                 </div>
                 <p>
                   {[shipmentPackage.shippingCarrier, shipmentPackage.trackingNumber]
@@ -2368,6 +2442,14 @@ function ShipmentRecordsSection({
                     <button
                       className="button button--quiet"
                       type="button"
+                      aria-label={`更新物流状态 包裹 ${packageIndex + 1} ${shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}`}
+                      onClick={() => onUpdateLogisticsStatus(record, shipmentPackage, packageIndex)}
+                    >
+                      更新状态
+                    </button>
+                    <button
+                      className="button button--quiet"
+                      type="button"
                       aria-label={`更正物流 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
                       onClick={() => onCorrectLogistics(record, shipmentPackage, packageIndex)}
                     >
@@ -2383,10 +2465,27 @@ function ShipmentRecordsSection({
                     </button>
                   </footer>
                 )}
-                {shipmentPackage.logisticsChanges.length > 0 && (
-                  <small className="shipment-record-card__audit">
-                    已留痕更正 {shipmentPackage.logisticsChanges.length} 次
-                  </small>
+                {(shipmentPackage.logisticsChanges.length > 0 ||
+                  shipmentPackage.logisticsStatusChanges.length > 0) && (
+                  <details className="shipment-record-card__timeline">
+                    <summary>物流时间线</summary>
+                    <ol>
+                      {shipmentPackage.logisticsStatusChanges.map((change) => (
+                        <li key={`status-${change.resultRevision}`}>
+                          <strong>{shipmentLogisticsStatusLabel(change.beforeStatus)} → {shipmentLogisticsStatusLabel(change.afterStatus)}</strong>
+                          <span>{change.reason}</span>
+                          <small>{formatDateTime(change.createdAt)}</small>
+                        </li>
+                      ))}
+                      {shipmentPackage.logisticsChanges.map((change) => (
+                        <li key={`logistics-${change.resultRevision}`}>
+                          <strong>承运方或运单号已更正</strong>
+                          <span>{change.reason}</span>
+                          <small>{formatDateTime(change.createdAt)}</small>
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
                 )}
               </section>
             ))}
@@ -2435,6 +2534,170 @@ function shipmentSourceDifferenceFieldLabel(field: string): string {
 
 function shipmentSourceDifferenceValue(value: string | number | null): string {
   return value === null || value === '' ? '未填写' : String(value);
+}
+
+const SHIPMENT_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
+  value: ShipmentLogisticsStatus;
+  label: string;
+}> = [
+  { value: 'awaiting_carrier', label: '待承运方接收' },
+  { value: 'in_transit', label: '运输中' },
+  { value: 'delivered', label: '已签收' },
+  { value: 'intercepting', label: '拦截处理中' },
+  { value: 'intercepted_returned', label: '已拦截退回' },
+  { value: 'lost', label: '丢件' },
+  { value: 'exception', label: '其他物流异常' },
+];
+
+function shipmentLogisticsStatusLabel(status: ShipmentLogisticsStatus): string {
+  return SHIPMENT_LOGISTICS_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
+}
+
+function shipmentRecordLogisticsSummary(record: ShipmentRecord): string {
+  const statuses = record.packages
+    .filter(({ status }) => status === 'active')
+    .map(({ logisticsStatus }) => logisticsStatus);
+  if (statuses.length === 0) return '无有效包裹';
+  const counts = statuses.reduce((summary, status) => {
+    summary.set(status, (summary.get(status) ?? 0) + 1);
+    return summary;
+  }, new Map<ShipmentLogisticsStatus, number>());
+  return [...counts].map(([status, count]) => (
+    statuses.length === 1
+      ? shipmentLogisticsStatusLabel(status)
+      : `${shipmentLogisticsStatusLabel(status)} ${count}`
+  )).join('、');
+}
+
+function shipmentRecordCurrentAction(record: ShipmentRecord): string {
+  const statuses = new Set(record.packages
+    .filter(({ status }) => status === 'active')
+    .map(({ logisticsStatus }) => logisticsStatus));
+  if (statuses.size === 0 || [...statuses].every((status) => status === 'delivered')) {
+    return '无需物流操作';
+  }
+  if (statuses.has('lost')) return '处理丢件';
+  if (statuses.has('exception')) return '处理物流异常';
+  if (statuses.has('intercepting')) return '跟进拦截结果';
+  if (statuses.has('intercepted_returned')) return '确认退回货物';
+  if (statuses.has('awaiting_carrier')) return '确认承运方接收';
+  return '跟进运输进度';
+}
+
+function UpdateShipmentPackageLogisticsStatusDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target: {
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  };
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [logisticsStatus, setLogisticsStatus] = useState<ShipmentLogisticsStatus>(
+    target.shipmentPackage.logisticsStatus,
+  );
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus;
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !changed || !reason.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.updateShipmentPackageLogisticsStatus({
+        recordId: target.record.id,
+        packageId: target.shipmentPackage.id,
+        expectedRevision: target.shipmentPackage.revision,
+        logisticsStatus,
+        reason,
+      });
+      onApplied(result);
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
+          <h2 id={headingId}>更新包裹物流状态</h2>
+          <p id={descriptionId}>只记录运输进展；不会改写发货快照、订单履约状态或售后状态。</p>
+        </header>
+        <label>
+          <span>物流状态</span>
+          <select
+            aria-label="物流状态"
+            value={logisticsStatus}
+            disabled={saving}
+            onChange={(event) => setLogisticsStatus(event.target.value as ShipmentLogisticsStatus)}
+          >
+            {SHIPMENT_LOGISTICS_STATUS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>状态更新原因</span>
+          <textarea
+            aria-label="状态更新原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            type="submit"
+            disabled={saving || !changed || !reason.trim()}
+          >
+            {saving ? '正在更新…' : '确认更新'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
 }
 
 function CancelShipmentPackageDialog({

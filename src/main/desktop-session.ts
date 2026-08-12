@@ -67,6 +67,7 @@ import type {
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
+  ShipmentLogisticsStatusUpdateResult,
 } from '../core/shipment-records';
 import type {
   CreateTableTemplateInput,
@@ -418,6 +419,12 @@ export class DesktopSession {
     input: unknown,
   ): ShipmentLogisticsCorrectionResult {
     return this.requireApplication().correctShipmentPackageLogistics(input);
+  }
+
+  public updateShipmentPackageLogisticsStatus(
+    input: unknown,
+  ): ShipmentLogisticsStatusUpdateResult {
+    return this.requireApplication().updateShipmentPackageLogisticsStatus(input);
   }
 
   public exportOrdersToWorkbook(

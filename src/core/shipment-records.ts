@@ -55,6 +55,7 @@ export type ShipmentPackage = {
   id: string;
   position: number;
   status: 'active' | 'cancelled';
+  logisticsStatus: ShipmentLogisticsStatus;
   shippingCarrier: string;
   trackingNumber: string;
   revision: number;
@@ -62,8 +63,18 @@ export type ShipmentPackage = {
   items: ShipmentPackageItem[];
   cancellation: ShipmentCancellation | null;
   logisticsChanges: ShipmentPackageLogisticsChange[];
+  logisticsStatusChanges: ShipmentPackageLogisticsStatusChange[];
   createdAt: string;
 };
+
+export type ShipmentLogisticsStatus =
+  | 'awaiting_carrier'
+  | 'in_transit'
+  | 'delivered'
+  | 'intercepting'
+  | 'intercepted_returned'
+  | 'lost'
+  | 'exception';
 
 export type ShipmentPackageLogistics = {
   shippingCarrier: string;
@@ -76,6 +87,15 @@ export type ShipmentPackageLogisticsChange = {
   reason: string;
   before: ShipmentPackageLogistics;
   after: ShipmentPackageLogistics;
+  createdAt: string;
+};
+
+export type ShipmentPackageLogisticsStatusChange = {
+  baseRevision: number;
+  resultRevision: number;
+  beforeStatus: ShipmentLogisticsStatus;
+  afterStatus: ShipmentLogisticsStatus;
+  reason: string;
   createdAt: string;
 };
 
@@ -158,6 +178,26 @@ export type CorrectShipmentPackageLogisticsInput = ShipmentPackageLogistics & {
 };
 
 export type ShipmentLogisticsCorrectionResult = ShipmentConfirmationResult;
+
+export type UpdateShipmentPackageLogisticsStatusInput = {
+  recordId: string;
+  packageId: string;
+  expectedRevision: number;
+  logisticsStatus: ShipmentLogisticsStatus;
+  reason: string;
+};
+
+export type ShipmentLogisticsStatusUpdateResult = ShipmentConfirmationResult;
+
+export const SHIPMENT_LOGISTICS_STATUSES = [
+  'awaiting_carrier',
+  'in_transit',
+  'delivered',
+  'intercepting',
+  'intercepted_returned',
+  'lost',
+  'exception',
+] as const satisfies readonly ShipmentLogisticsStatus[];
 
 export function normalizeConfirmShipmentInput(input: unknown): ConfirmShipmentInput {
   const record = asRecord(input, '确认发货参数无效');
@@ -245,6 +285,37 @@ export function normalizeCorrectShipmentPackageLogisticsInput(
     trackingNumber: optionalText(record.trackingNumber, 200, '运单号过长'),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的更正原因'),
   };
+}
+
+export function normalizeUpdateShipmentPackageLogisticsStatusInput(
+  input: unknown,
+): UpdateShipmentPackageLogisticsStatusInput {
+  const record = asRecord(input, '更新包裹物流状态参数无效');
+  rejectUnknownKeys(
+    record,
+    ['recordId', 'packageId', 'expectedRevision', 'logisticsStatus', 'reason'],
+    '更新包裹物流状态参数',
+  );
+  const expectedRevision = record.expectedRevision;
+  if (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 1) {
+    throw new Error('包裹版本无效');
+  }
+  if (!isShipmentLogisticsStatus(record.logisticsStatus)) {
+    throw new Error('包裹物流状态无效');
+  }
+  return {
+    recordId: boundedText(record.recordId, 200, '发货记录标识无效'),
+    packageId: boundedText(record.packageId, 200, '包裹标识无效'),
+    expectedRevision: Number(expectedRevision),
+    logisticsStatus: record.logisticsStatus,
+    reason: boundedText(record.reason, 500, '请填写 1 至 500 字的状态更新原因'),
+  };
+}
+
+export function isShipmentLogisticsStatus(value: unknown): value is ShipmentLogisticsStatus {
+  return typeof value === 'string' && (
+    SHIPMENT_LOGISTICS_STATUSES as readonly string[]
+  ).includes(value);
 }
 
 function itemQuantities(value: unknown, message: string): ShipmentItemQuantityInput[] {

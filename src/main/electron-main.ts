@@ -225,6 +225,10 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     'shipment-records:correct-package-logistics',
     (_event, input: unknown) => desktopSession.correctShipmentPackageLogistics(input),
   );
+  ipcMain.handle(
+    'shipment-records:update-package-logistics-status',
+    (_event, input: unknown) => desktopSession.updateShipmentPackageLogisticsStatus(input),
+  );
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
