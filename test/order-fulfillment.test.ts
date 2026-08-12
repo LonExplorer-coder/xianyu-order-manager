@@ -242,7 +242,7 @@ describe('订单状态与手工物流', () => {
       `).run();
       expect(workspace.database.prepare(`
         SELECT MAX(version) AS version FROM schema_migrations
-      `).get()).toEqual({ version: 24 });
+      `).get()).toEqual({ version: 25 });
       expect(workspace.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       workspace.close();
@@ -368,6 +368,10 @@ describe('订单状态与手工物流', () => {
     expect(() => application.updateOrderStatusAndLogistics({
       targets,
       patch: { fulfillmentStatus: 'in_transit' },
+    })).toThrow('履约状态格式无效');
+    expect(() => application.updateOrderStatusAndLogistics({
+      targets,
+      patch: { fulfillmentStatus: 'partially_shipped' },
     })).toThrow('履约状态格式无效');
     expect(() => application.updateOrderStatusAndLogistics({
       targets,

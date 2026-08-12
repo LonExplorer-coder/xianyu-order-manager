@@ -8,6 +8,7 @@ import {
   parseStoredShipmentArchiveRecipientSnapshots,
   type StoredShipmentArchiveRecipientSnapshot,
 } from '../core/shipment-archive-storage';
+import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
@@ -171,6 +172,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 22) migrateToVersion22(database);
   if (row.version < 23) migrateToVersion23(database);
   if (row.version < 24) migrateToVersion24(database);
+  if (row.version < 25) migrateToVersion25(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2575,6 +2577,158 @@ function migrateToVersion24(database: DatabaseSync): void {
       // Preserve migration failure.
     }
     throw error;
+  }
+}
+
+function migrateToVersion25(database: DatabaseSync): void {
+  const migratedAt = new Date().toISOString();
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE original_orders_v25 (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        screenshot_id TEXT NOT NULL REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        platform TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        platform_order_number TEXT NOT NULL,
+        alipay_transaction_number TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        province TEXT NOT NULL,
+        city TEXT NOT NULL,
+        district TEXT NOT NULL,
+        ordered_at_original TEXT NOT NULL,
+        ordered_at_normalized TEXT NOT NULL,
+        paid_at_original TEXT NOT NULL,
+        paid_at_normalized TEXT NOT NULL,
+        product_total_cents INTEGER CHECK (product_total_cents >= 0),
+        shipping_fee_cents INTEGER CHECK (shipping_fee_cents >= 0),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        platform_transaction_status TEXT NOT NULL
+          CHECK (platform_transaction_status IN ('paid', 'cancelled', 'refunded', 'unknown')),
+        fulfillment_status TEXT NOT NULL
+          CHECK (fulfillment_status IN (
+            'pending_shipment', 'partially_shipped', 'shipped',
+            'delivered', 'returned', 'unknown'
+          )),
+        lifecycle_status TEXT NOT NULL
+          CHECK (lifecycle_status IN ('active', 'trashed', 'deleted')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        seller_account_normalized TEXT NOT NULL DEFAULT '',
+        platform_order_number_normalized TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        shipping_carrier TEXT NOT NULL DEFAULT '',
+        tracking_number TEXT NOT NULL DEFAULT '',
+        UNIQUE (platform, seller_account, platform_order_number)
+      ) STRICT;
+
+      INSERT INTO original_orders_v25 (
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number
+      )
+      SELECT
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number
+      FROM original_orders;
+
+      DROP TABLE original_orders;
+      ALTER TABLE original_orders_v25 RENAME TO original_orders;
+
+      CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (
+        platform,
+        seller_account_normalized,
+        platform_order_number_normalized
+      );
+    `);
+    const orderChangeEventsTable = database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'order_change_events'
+    `).get();
+    if (orderChangeEventsTable) database.exec(`
+      CREATE TABLE order_change_events_v25 (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE RESTRICT,
+        source_snapshot_id TEXT UNIQUE
+          REFERENCES source_snapshots(id) ON DELETE RESTRICT,
+        source TEXT NOT NULL
+          CHECK (source IN ('source_update', 'manual_edit', 'shipment_sync')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO order_change_events_v25 (
+        id, order_id, source_snapshot_id, source,
+        base_revision, result_revision, created_at
+      )
+      SELECT
+        id, order_id, source_snapshot_id, source,
+        base_revision, result_revision, created_at
+      FROM order_change_events;
+
+      DROP TABLE order_change_events;
+      ALTER TABLE order_change_events_v25 RENAME TO order_change_events;
+
+      CREATE INDEX order_change_events_by_order
+      ON order_change_events (order_id, created_at DESC, id DESC);
+
+      CREATE TRIGGER order_change_events_are_immutable_on_update
+      BEFORE UPDATE ON order_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order change events are immutable');
+      END;
+
+      CREATE TRIGGER order_change_events_are_immutable_on_delete
+      BEFORE DELETE ON order_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order change events are immutable');
+      END;
+    `);
+    const shipmentItemsTable = database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'shipment_package_items'
+    `).get();
+    if (orderChangeEventsTable && shipmentItemsTable) {
+      new OrderFulfillmentProjectionService(database)
+        .synchronizeExistingShipmentOrders(migratedAt);
+    }
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (25, ?)')
+      .run(migratedAt);
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

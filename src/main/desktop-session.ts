@@ -425,7 +425,9 @@ export class DesktopSession {
   public updateShipmentPackageLogisticsStatus(
     input: unknown,
   ): ShipmentLogisticsStatusUpdateResult {
-    return this.requireApplication().updateShipmentPackageLogisticsStatus(input);
+    const result = this.requireApplication().updateShipmentPackageLogisticsStatus(input);
+    this.refreshOrders();
+    return result;
   }
 
   public queryAftersalesCases(input?: unknown): AftersalesCase[] {

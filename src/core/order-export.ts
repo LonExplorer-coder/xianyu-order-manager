@@ -4,6 +4,7 @@ import {
   type TableTemplateColumn,
 } from './table-templates';
 import type { RecognitionBatchItemStatus } from './contracts';
+import { FULFILLMENT_STATUS_LABELS, isFulfillmentStatus } from './fulfillment-status';
 
 export type OrderExportScope = {
   kind: 'current_result' | 'selected_orders';
@@ -132,13 +133,7 @@ export function orderExportBuiltinTextLabel(
     }[value];
   }
   if (key === 'fulfillment_status') {
-    return {
-      pending_shipment: '待发货',
-      shipped: '已发货',
-      delivered: '已收货',
-      returned: '已退货',
-      unknown: '未知',
-    }[value];
+    return isFulfillmentStatus(value) ? FULFILLMENT_STATUS_LABELS[value] : undefined;
   }
   if (key === 'lifecycle_status') {
     return {

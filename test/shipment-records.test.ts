@@ -733,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -788,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -874,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1014,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1213,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1393,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1530,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1657,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1766,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1841,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
         COMMIT;
       `);
     } finally {
@@ -1903,7 +1903,7 @@ describe('发货记录', () => {
       ]),
     });
     expect(application.getOrder(firstOrder.id).order.fulfillmentStatus)
-      .toBe('pending_shipment');
+      .toBe('partially_shipped');
 
     const partialOrder = application.getOrder(firstOrder.id).order;
     application.updateOrderStatusAndLogistics({
@@ -1912,7 +1912,57 @@ describe('发货记录', () => {
     });
     expect(application.getOrder(firstOrder.id).order).toMatchObject({
       trackingNumber: 'ORDER-LEVEL-TRACKING',
-      fulfillmentStatus: 'pending_shipment',
+      fulfillmentStatus: 'partially_shipped',
+    });
+  });
+
+  it('升级到履约投影版本时依据既有发货事实回算旧订单状态', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-fulfillment-projection-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: group.orders.flatMap((order) => order.items.map((item) => ({
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+      }))),
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-MIGRATE-FULFILLMENT-PROJECTION',
+        items: [{
+          orderId: firstOrder.id,
+          orderItemId: firstItem.id,
+          quantity: 1,
+        }],
+      }],
+    });
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.prepare(`
+        UPDATE original_orders
+        SET fulfillment_status = 'pending_shipment'
+        WHERE id = ?
+      `).run(firstOrder.id);
+      database.prepare('DELETE FROM schema_migrations WHERE version = 25').run();
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.getOrder(firstOrder.id).order.fulfillmentStatus)
+      .toBe('partially_shipped');
+    expect(reopened.getOrder(firstOrder.id).changeEvents[0]).toMatchObject({
+      source: 'shipment_sync',
+      changes: [{
+        path: 'fulfillmentStatus',
+        before: 'pending_shipment',
+        after: 'partially_shipped',
+      }],
     });
   });
 
@@ -2179,7 +2229,7 @@ describe('发货记录', () => {
       .some(({ id }) => id === firstOrder.id)).toBe(false);
     expect(application.getOrder(firstOrder.id).order).toMatchObject({
       platformTransactionStatus: 'cancelled',
-      fulfillmentStatus: 'shipped',
+      fulfillmentStatus: 'pending_shipment',
     });
   });
 
@@ -2295,11 +2345,137 @@ describe('发货记录', () => {
     });
     expect(result.record.sourceOrders).toEqual(sourceOrders);
     expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))
-      .toEqual(['shipped', 'shipped']);
+      .toEqual(['delivered', 'delivered']);
+    expect(group.orders.map((order) => application.getOrder(order.id).changeEvents[0])).toEqual([
+      expect.objectContaining({
+        source: 'shipment_sync',
+        changes: [expect.objectContaining({
+          path: 'fulfillmentStatus',
+          before: 'shipped',
+          after: 'delivered',
+        })],
+      }),
+      expect.objectContaining({
+        source: 'shipment_sync',
+        changes: [expect.objectContaining({
+          path: 'fulfillmentStatus',
+          before: 'shipped',
+          after: 'delivered',
+        })],
+      }),
+    ]);
     application.close();
 
     const reopened = await createApplication(root, false);
     expect(reopened.queryShipmentRecords()).toEqual([result.record]);
+  });
+
+  it('自动签收随物流更正回退但保留人工确认的终态', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AUTO-DELIVERED-ROLLBACK',
+        items: remainingItems,
+      }],
+    });
+    const shipmentPackage = confirmation.record.packages[0];
+    const delivered = application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'delivered',
+      reason: '承运商首次回传签收',
+    });
+    const automaticallyDeliveredOrder = application.getOrder(group.orders[0].id).order;
+    application.updateOrderStatusAndLogistics({
+      targets: [{
+        orderId: automaticallyDeliveredOrder.id,
+        expectedRevision: automaticallyDeliveredOrder.revision,
+      }],
+      patch: { fulfillmentStatus: 'delivered' },
+    });
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: delivered.record.packages[0].revision,
+      logisticsStatus: 'in_transit',
+      reason: '承运商更正误报签收',
+    });
+
+    expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))
+      .toEqual(['delivered', 'shipped']);
+
+    expect(application.getOrder(automaticallyDeliveredOrder.id).order.fulfillmentStatus)
+      .toBe('delivered');
+    expect(application.getOrder(automaticallyDeliveredOrder.id).changeEvents[0]).toMatchObject({
+      source: 'manual_edit',
+      changes: [{
+        path: 'fulfillmentStatusConfirmation',
+        before: 'delivered',
+        after: 'delivered',
+      }],
+    });
+  });
+
+  it('同一订单的全部有效包裹签收后才同步为已签收', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder, secondOrder] = group.orders;
+    const [firstItem] = firstOrder.items;
+    const [secondItem] = secondOrder.items;
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [
+        { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: 2 },
+        { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: 2 },
+      ],
+      packages: [
+        {
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-MULTI-PACKAGE-1',
+          items: [{ orderId: firstOrder.id, orderItemId: firstItem.id, quantity: 1 }],
+        },
+        {
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-MULTI-PACKAGE-2',
+          items: [
+            { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: 1 },
+            { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: 2 },
+          ],
+        },
+      ],
+    });
+    const [firstPackage, secondPackage] = confirmation.record.packages;
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: firstPackage.id,
+      expectedRevision: firstPackage.revision,
+      logisticsStatus: 'delivered',
+      reason: '第一个包裹签收',
+    });
+
+    expect(application.getOrder(firstOrder.id).order.fulfillmentStatus).toBe('shipped');
+    expect(application.getOrder(secondOrder.id).order.fulfillmentStatus).toBe('shipped');
+
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: secondPackage.id,
+      expectedRevision: secondPackage.revision,
+      logisticsStatus: 'delivered',
+      reason: '第二个包裹签收',
+    });
+
+    expect(application.getOrder(firstOrder.id).order.fulfillmentStatus).toBe('delivered');
+    expect(application.getOrder(secondOrder.id).order.fulfillmentStatus).toBe('delivered');
   });
 
   it('原订单后来改变时保留发货快照并列出差异', async () => {
@@ -2326,6 +2502,17 @@ describe('发货记录', () => {
     edit.recipient = '林青（新收件人）';
     edit.items[0].quantity = 3;
     application.confirmOrderEdit(edit);
+
+    expect(application.getOrder(sourceOrder.id).order.fulfillmentStatus)
+      .toBe('partially_shipped');
+    expect(application.getOrder(sourceOrder.id).changeEvents[0]).toMatchObject({
+      source: 'shipment_sync',
+      changes: [{
+        path: 'fulfillmentStatus',
+        before: 'shipped',
+        after: 'partially_shipped',
+      }],
+    });
 
     const record = application.queryShipmentRecords()[0];
 
@@ -2362,6 +2549,75 @@ describe('发货记录', () => {
       },
     ]));
     expect(confirmation.record.sourceDifferences).toEqual([]);
+  });
+
+  it('截图确认更新商品数量后按发货事实追加独立履约同步', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-source-update-fulfillment-sync-'));
+    const sourceDirectory = join(root, '上传');
+    await mkdir(sourceDirectory, { recursive: true });
+    const initial = recognition('XY-SOURCE-UPDATE-SHIPMENT', [{
+      sourceTitle: '分批商品',
+      sourceSpec: '标准款',
+      unitPriceCents: 1_000,
+      quantity: 2,
+      quantityInferred: false,
+    }]);
+    const changed: RecognitionResult = {
+      ...initial,
+      productTotalCents: 3_000,
+      amountCents: 3_000,
+      items: [{ ...initial.items[0], quantity: 3 }],
+    };
+    const application = new LocalApplication(new SequenceRecognizer([initial, changed]));
+    openedApplications.push(application);
+    application.openDataDirectory(join(root, '数据'));
+    const firstPath = join(sourceDirectory, '首次截图.png');
+    await writeFile(firstPath, 'source-update-fulfillment-initial');
+    const firstBatch = await application.submitRecognitionBatch([firstPath]);
+    const order = application.confirmDraft(firstBatch.drafts[0]);
+    const group = application.queryShipmentGroups().groups[0];
+    application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [{
+        orderId: order.id,
+        orderItemId: order.items[0].id,
+        quantity: 2,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-SOURCE-UPDATE-SHIPMENT',
+        items: [{
+          orderId: order.id,
+          orderItemId: order.items[0].id,
+          quantity: 2,
+        }],
+      }],
+    });
+    const shippedOrder = application.getOrder(order.id).order;
+    const changedPath = join(sourceDirectory, '更新截图.png');
+    await writeFile(changedPath, 'source-update-fulfillment-changed');
+    const changedBatch = await application.submitRecognitionBatch([changedPath]);
+    expect(() => application.confirmDraft(changedBatch.drafts[0])).toThrow(
+      '该订单身份已存在，已转为订单更新',
+    );
+
+    const result = application.confirmOrderUpdate(
+      application.getDraft(changedBatch.drafts[0].id),
+      shippedOrder.revision,
+    );
+
+    expect(result.order.fulfillmentStatus).toBe('partially_shipped');
+    expect(application.getOrder(order.id).changeEvents.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        source: 'shipment_sync',
+        changes: [{
+          path: 'fulfillmentStatus',
+          before: 'pending_shipment',
+          after: 'partially_shipped',
+        }],
+      }),
+      expect.objectContaining({ source: 'source_update' }),
+    ]);
   });
 });
 

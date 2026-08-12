@@ -27,6 +27,7 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from '../core/order-workbench';
+import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeCreateTableTemplateInput,
@@ -420,7 +421,7 @@ function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
     ),
     fulfillmentStatus: optionalWorkbenchEnum(
       input.fulfillmentStatus,
-      ['pending_shipment', 'shipped', 'delivered', 'returned', 'unknown'] as const,
+      FULFILLMENT_STATUSES,
       '履约状态',
     ),
     lifecycleStatus: optionalWorkbenchEnum(

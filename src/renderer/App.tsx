@@ -38,6 +38,7 @@ import type {
   RecognitionBatchItemStatus,
 } from '../core/contracts';
 import { reviewOrderEdit } from '../core/order-edit';
+import { FULFILLMENT_STATUS_LABELS } from '../core/fulfillment-status';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
@@ -3729,6 +3730,7 @@ function OrdersWorkspace({
             >
               <option value="">全部履约状态</option>
               <option value="pending_shipment">待发货</option>
+              <option value="partially_shipped">部分发货</option>
               <option value="shipped">已发货</option>
               <option value="delivered">已收货</option>
               <option value="returned">已退货</option>
@@ -4263,9 +4265,9 @@ function OrderStatusAndLogisticsDialog({
         </div>
 
         <p className="order-status-logistics-dialog__notice">
-          填写有效运单号时，待发货会自动同步为已发货；清空运单号时，已发货会退回待发货。
-          已收货、已退货等终态不会被自动覆盖。已取消或已退款的订单仍保留在系统中，但不进入待发货视图；
-          平台交易状态不会自动改写履约状态。
+          没有有效发货记录时，填写运单号可把待发货联动为已发货，清空运单号可退回待发货。
+          有发货记录后，待发货、部分发货、已发货和自动已收货由有效商品数量与包裹物流计算；
+          人工确认的已收货、已退货不会被较低阶段自动覆盖。平台交易状态不会参与履约计算。
         </p>
         {error && <p className="order-status-logistics-dialog__error" role="alert">{error}</p>}
         <footer className="order-status-logistics-dialog__actions">
@@ -6963,6 +6965,7 @@ const ORDER_CHANGE_FIELD_LABELS: Record<string, string> = {
   note: '备注',
   platformTransactionStatus: '平台交易状态',
   fulfillmentStatus: '履约状态',
+  fulfillmentStatusConfirmation: '人工确认履约状态',
   shippingCarrier: '快递公司',
   trackingNumber: '运单号',
 };
@@ -7001,7 +7004,7 @@ function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
     if (path === 'platformTransactionStatus') {
       return platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus']);
     }
-    if (path === 'fulfillmentStatus') {
+    if (path === 'fulfillmentStatus' || path === 'fulfillmentStatusConfirmation') {
       return fulfillmentStatusLabel(value as OrderDraft['fulfillmentStatus']);
     }
     return value || '—';
@@ -8285,7 +8288,11 @@ function DetailWorkspace({
                           <span>
                             <strong>v{event.baseRevision} → v{event.resultRevision}</strong>
                             <small>
-                              {event.source === 'source_update' ? '截图确认更新' : '手动修改'}
+                              {{
+                                source_update: '截图确认更新',
+                                manual_edit: '手动修改',
+                                shipment_sync: '发货同步',
+                              }[event.source]}
                               {' · '}
                               {eventSource ? (
                                 <button
@@ -8621,18 +8628,12 @@ function platformTransactionStatusLabel(status: OrderDraft['platformTransactionS
 }
 
 function fulfillmentStatusLabel(status: FulfillmentStatus): string {
-  const labels: Record<FulfillmentStatus, string> = {
-    pending_shipment: '待发货',
-    shipped: '已发货',
-    delivered: '已收货',
-    returned: '已退货',
-    unknown: '未知',
-  };
-  return labels[status];
+  return FULFILLMENT_STATUS_LABELS[status];
 }
 
 function hasShipmentHistory(status: FulfillmentStatus): boolean {
-  return status === 'shipped' || status === 'delivered' || status === 'returned';
+  return status === 'partially_shipped' || status === 'shipped' ||
+    status === 'delivered' || status === 'returned';
 }
 
 function recognitionStatusLabel(status: RecognitionBatchItemStatus): string {

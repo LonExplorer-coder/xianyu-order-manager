@@ -236,6 +236,7 @@ export function prepareOrderEdit(
       input: normalizedInput,
       changes,
       shippedSnapshotWarning: [
+        'partially_shipped',
         'shipped',
         'delivered',
         'returned',

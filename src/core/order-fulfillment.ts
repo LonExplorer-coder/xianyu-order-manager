@@ -1,13 +1,22 @@
 import type {
+  FulfillmentStatus,
   OrderFieldChange,
   OrderStatusAndLogisticsPatch,
   OrderStatusAndLogisticsTarget,
   OrderStatusAndLogisticsUpdateInput,
   OriginalOrder,
 } from './contracts';
+import { isManualFulfillmentStatus } from './fulfillment-status';
 
 export type PreparedOrderStatusAndLogisticsUpdate = {
   input: OrderStatusAndLogisticsUpdateInput;
+};
+
+export type ResolvedOrderStatusAndLogisticsPatch = Omit<
+  OrderStatusAndLogisticsPatch,
+  'fulfillmentStatus'
+> & {
+  fulfillmentStatus?: FulfillmentStatus;
 };
 
 export function prepareOrderStatusAndLogisticsUpdate(
@@ -72,13 +81,7 @@ function normalizePatch(record: Record<string, unknown>): OrderStatusAndLogistic
   }
   if (Object.hasOwn(record, 'fulfillmentStatus')) {
     const value = record.fulfillmentStatus;
-    if (
-      value !== 'pending_shipment' &&
-      value !== 'shipped' &&
-      value !== 'delivered' &&
-      value !== 'returned' &&
-      value !== 'unknown'
-    ) {
+    if (!isManualFulfillmentStatus(value)) {
       throw new Error('履约状态格式无效');
     }
     patch.fulfillmentStatus = value;
@@ -124,8 +127,8 @@ function normalizeTarget(value: unknown, index: number): OrderStatusAndLogistics
 export function resolveOrderStatusAndLogisticsPatch(
   current: OriginalOrder,
   patch: OrderStatusAndLogisticsPatch,
-): OrderStatusAndLogisticsPatch {
-  const resolved = { ...patch };
+): ResolvedOrderStatusAndLogisticsPatch {
+  const resolved: ResolvedOrderStatusAndLogisticsPatch = { ...patch };
   const fulfillmentStatus = patch.fulfillmentStatus ?? current.fulfillmentStatus;
   const trackingNumber = Object.hasOwn(patch, 'trackingNumber')
     ? patch.trackingNumber ?? current.trackingNumber
@@ -141,7 +144,7 @@ export function resolveOrderStatusAndLogisticsPatch(
 
 export function diffOrderStatusAndLogistics(
   current: OriginalOrder,
-  patch: OrderStatusAndLogisticsPatch,
+  patch: ResolvedOrderStatusAndLogisticsPatch,
 ): OrderFieldChange[] {
   const changes: OrderFieldChange[] = [];
   for (const field of [

@@ -2636,7 +2636,7 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
   });
 
-  it('履约状态筛选可以选择已收货和已退货', async () => {
+  it('履约状态筛选可以选择部分发货、已收货和已退货', async () => {
     const summary = orderSummary();
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
@@ -2650,6 +2650,8 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
 
     const fulfillmentFilter = await screen.findByRole('combobox', { name: '履约状态' });
+    expect(within(fulfillmentFilter).getByRole('option', { name: '部分发货' }))
+      .toHaveValue('partially_shipped');
     expect(within(fulfillmentFilter).getByRole('option', { name: '已收货' }))
       .toHaveValue('delivered');
     expect(within(fulfillmentFilter).getByRole('option', { name: '已退货' }))
@@ -2880,13 +2882,16 @@ describe('订单管理工作台', () => {
 
     const dialog = screen.getByRole('dialog', { name: '维护状态与物流' });
     const fulfillmentSelect = within(dialog).getByRole('combobox', { name: '履约状态' });
+    expect(within(fulfillmentSelect).queryByRole('option', { name: '部分发货' }))
+      .not.toBeInTheDocument();
     expect(within(fulfillmentSelect).getByRole('option', { name: '已收货' }))
       .toHaveValue('delivered');
     expect(within(fulfillmentSelect).getByRole('option', { name: '已退货' }))
       .toHaveValue('returned');
-    expect(dialog).toHaveTextContent('填写有效运单号时，待发货会自动同步为已发货');
-    expect(dialog).toHaveTextContent('清空运单号时，已发货会退回待发货');
-    expect(dialog).toHaveTextContent('已收货、已退货等终态不会被自动覆盖');
+    expect(dialog).toHaveTextContent('没有有效发货记录时');
+    expect(dialog).toHaveTextContent('部分发货');
+    expect(dialog).toHaveTextContent('人工确认的已收货、已退货不会被较低阶段自动覆盖');
+    expect(dialog).toHaveTextContent('平台交易状态不会参与履约计算');
   });
 
   it('批量登记运单号时只提交用户补丁并展示后端最终履约状态', async () => {
@@ -3254,6 +3259,56 @@ describe('订单管理工作台', () => {
     expect(await screen.findByText('已付款 · 已退货')).toBeVisible();
     const history = screen.getByRole('region', { name: '来源与修改记录' });
     expect(history).toHaveTextContent('履约状态已收货→已退货');
+  });
+
+  it('订单列表与详情把发货同步的部分发货状态明确标注出来', async () => {
+    const user = userEvent.setup();
+    const partiallyShippedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 2,
+      fulfillmentStatus: 'partially_shipped',
+    };
+    const partiallyShippedDetails: OrderDetails = {
+      ...orderDetails,
+      order: partiallyShippedOrder,
+      changeEvents: [{
+        id: 'event-partially-shipped',
+        sourceSnapshotId: null,
+        source: 'shipment_sync',
+        baseRevision: 1,
+        resultRevision: 2,
+        createdAt: '2026-07-27T12:00:00.000Z',
+        changes: [{
+          path: 'fulfillmentStatus',
+          before: 'pending_shipment',
+          after: 'partially_shipped',
+        }],
+      }],
+    };
+    const summary = orderSummary(partiallyShippedOrder);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(partiallyShippedDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+
+    const table = await screen.findByRole('table', { name: '原始订单' });
+    expect(table).toHaveTextContent('部分发货');
+    await user.click(within(table).getByRole('button', {
+      name: `查看订单 ${summary.orderNumber}`,
+    }));
+
+    expect(await screen.findByText('已付款 · 部分发货')).toBeVisible();
+    const history = screen.getByRole('region', { name: '来源与修改记录' });
+    expect(history).toHaveTextContent('发货同步');
+    expect(history).toHaveTextContent('履约状态待发货→部分发货');
   });
 
   it('从订单详情显式编辑普通字段与多商品，预览差异后才保存', async () => {

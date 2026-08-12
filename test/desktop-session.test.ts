@@ -51,6 +51,79 @@ afterEach(() => {
 });
 
 describe('桌面启动状态', () => {
+  it('包裹物流状态同步订单后立即通知桌面订单列表刷新', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-shipment-sync-'));
+    const sourcePath = join(testRoot, '待发货订单.png');
+    await writeFile(sourcePath, 'desktop-shipment-sync');
+    const recognition: RecognitionResult = {
+      ...unusedRecognition,
+      orderNumber: 'XY-DESKTOP-SHIPMENT-SYNC',
+      buyerNickname: '桌面同步买家',
+      recipient: '桌面同步收件人',
+      phone: '13800000000',
+      phoneNormalized: '13800000000',
+      addressOriginal: '广东省深圳市南山区测试路1号',
+      addressNormalized: '广东省深圳市南山区测试路1号',
+      province: '广东省',
+      city: '深圳市',
+      district: '南山区',
+      amountCents: 800,
+      productTotalCents: 800,
+      items: [{
+        sourceTitle: '桌面同步商品',
+        sourceSpec: '标准款',
+        unitPriceCents: 800,
+        quantity: 1,
+        quantityInferred: false,
+      }],
+    };
+    const session = new DesktopSession(
+      new Preferences(join(testRoot, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(testRoot, '订单数据'));
+    await session.submitSourceScreenshots([sourcePath]);
+    await session.waitForCurrentRecognitionWork();
+    const draftId = session.listRecognitionBatches()[0].items[0].draftId;
+    if (!draftId) throw new Error('测试要求识别草稿');
+    const order = session.confirmDraft(session.getDraft(draftId)).order;
+    const group = session.queryShipmentGroups().groups[0];
+    const shipment = session.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [{
+        orderId: order.id,
+        orderItemId: order.items[0].id,
+        quantity: 1,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-DESKTOP-SYNC',
+        items: [{
+          orderId: order.id,
+          orderItemId: order.items[0].id,
+          quantity: 1,
+        }],
+      }],
+    });
+    const notifications: Array<ReturnType<DesktopSession['listOrders']>> = [];
+    session.onOrdersChanged((orders) => notifications.push(orders));
+
+    session.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipment.record.packages[0].id,
+      expectedRevision: shipment.record.packages[0].revision,
+      logisticsStatus: 'delivered',
+      reason: '买家确认签收',
+    });
+
+    expect(notifications.at(-1)?.[0]).toMatchObject({
+      id: order.id,
+      fulfillmentStatus: 'delivered',
+    });
+  });
+
   it('通过桌面会话公开订单工作台查询', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-workbench-'));
     const session = new DesktopSession(

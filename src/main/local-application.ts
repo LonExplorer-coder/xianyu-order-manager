@@ -55,7 +55,9 @@ import {
   diffOrderStatusAndLogistics,
   prepareOrderStatusAndLogisticsUpdate,
   resolveOrderStatusAndLogisticsPatch,
+  type ResolvedOrderStatusAndLogisticsPatch,
 } from '../core/order-fulfillment';
+import { isFulfillmentStatus } from '../core/fulfillment-status';
 import type {
   ConfirmDraftCustomFieldOptions,
   CreateCustomFieldDefinitionInput,
@@ -179,6 +181,7 @@ import {
   writeOrderExportWorkbook,
 } from './order-export-workbook';
 import { AftersalesApplicationService } from './aftersales-application-service';
+import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -2449,6 +2452,9 @@ export class LocalApplication {
           JSON.stringify(change.after),
         );
       }
+      if (this.orderFulfillmentProjection().hasShipmentHistory(orderId)) {
+        this.synchronizeShipmentOrderFulfillment(orderId, now);
+      }
 
       const resolvedDraft = workspace.database
         .prepare(`
@@ -2702,6 +2708,9 @@ export class LocalApplication {
             JSON.stringify(change.after),
           );
         }
+        if (this.orderFulfillmentProjection().hasShipmentHistory(current.id)) {
+          this.synchronizeShipmentOrderFulfillment(current.id, now);
+        }
       });
     } catch (error) {
       if (
@@ -2726,14 +2735,11 @@ export class LocalApplication {
         if (current.revision !== target.expectedRevision) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
         }
-        const shipmentQuantities = current.items.map((item) => ({
-          item,
-          shippedQuantity: this.activeShippedQuantity(item.id),
-        }));
-        const hasActiveShipmentRecord = shipmentQuantities.some(({ shippedQuantity }) => (
-          shippedQuantity > 0
-        ));
-        let resolvedPatch = resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
+        const fulfillmentProjection = this.orderFulfillmentProjection();
+        const hasActiveShipmentRecord = fulfillmentProjection
+          .hasActiveShipmentQuantity(current.id);
+        let resolvedPatch: ResolvedOrderStatusAndLogisticsPatch =
+          resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
         if (hasActiveShipmentRecord) {
           resolvedPatch = { ...prepared.patch };
           const requestedFulfillmentStatus = prepared.patch.fulfillmentStatus;
@@ -2743,20 +2749,37 @@ export class LocalApplication {
             || (
               requestedFulfillmentStatus === undefined
               && (
-                current.fulfillmentStatus === 'delivered'
-                || current.fulfillmentStatus === 'returned'
+                current.fulfillmentStatus === 'returned'
+                || (
+                  current.fulfillmentStatus === 'delivered'
+                  && !fulfillmentProjection.isAutomaticallySynchronized(
+                    current.id,
+                    current.fulfillmentStatus,
+                  )
+                )
               )
             )
           );
           if (!preservesTerminalStatus) {
-            resolvedPatch.fulfillmentStatus = shipmentQuantities.some(({ item, shippedQuantity }) => (
-              shippedQuantity < item.quantity
-            ))
-              ? 'pending_shipment'
-              : 'shipped';
+            resolvedPatch.fulfillmentStatus = fulfillmentProjection.project(current.id);
           }
         }
-        const changes = diffOrderStatusAndLogistics(current, resolvedPatch);
+        const changes = [...diffOrderStatusAndLogistics(current, resolvedPatch)];
+        const confirmsAutomaticallyDelivered = (
+          prepared.patch.fulfillmentStatus === 'delivered'
+          && current.fulfillmentStatus === 'delivered'
+          && fulfillmentProjection.isAutomaticallySynchronized(
+            current.id,
+            current.fulfillmentStatus,
+          )
+        );
+        if (confirmsAutomaticallyDelivered) {
+          changes.push({
+            path: 'fulfillmentStatusConfirmation',
+            before: 'delivered',
+            after: 'delivered',
+          });
+        }
         if (changes.length === 0) continue;
         const values = {
           platformTransactionStatus:
@@ -2832,7 +2855,7 @@ export class LocalApplication {
       SELECT id
       FROM original_orders
       WHERE lifecycle_status = 'active'
-        AND fulfillment_status = 'pending_shipment'
+        AND fulfillment_status IN ('pending_shipment', 'partially_shipped')
         AND platform_transaction_status NOT IN ('cancelled', 'refunded')
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
@@ -3492,6 +3515,9 @@ export class LocalApplication {
         prepared.reason,
         now,
       );
+      for (const orderId of new Set(shipmentPackage.items.map(({ orderId }) => orderId))) {
+        this.synchronizeShipmentOrderFulfillment(orderId, now);
+      }
     });
     const updatedRecord = this.getShipmentRecord(record.id);
     return {
@@ -3729,53 +3755,11 @@ export class LocalApplication {
   }
 
   private synchronizeShipmentOrderFulfillment(orderId: string, now: string): void {
-    const workspace = this.requireWorkspace();
-    const current = this.getOrder(orderId).order;
-    if (
-      current.lifecycleStatus !== 'active'
-      || current.platformTransactionStatus === 'cancelled'
-      || current.platformTransactionStatus === 'refunded'
-      || current.fulfillmentStatus === 'delivered'
-      || current.fulfillmentStatus === 'returned'
-    ) {
-      return;
-    }
-    const hasRemainingItems = current.items.some((item) => (
-      this.activeShippedQuantity(item.id) < item.quantity
-    ));
-    const nextStatus = hasRemainingItems ? 'pending_shipment' : 'shipped';
-    if (current.fulfillmentStatus === nextStatus) return;
-    const updated = workspace.database.prepare(`
-      UPDATE original_orders
-      SET fulfillment_status = ?, revision = revision + 1, updated_at = ?
-      WHERE id = ? AND revision = ?
-    `).run(nextStatus, now, current.id, current.revision);
-    if (updated.changes !== 1) {
-      throw new Error('订单已在其他操作中更新，请刷新后重试');
-    }
-    const eventId = randomUUID();
-    workspace.database.prepare(`
-      INSERT INTO order_change_events (
-        id, order_id, source_snapshot_id, source,
-        base_revision, result_revision, created_at
-      ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
-    `).run(
-      eventId,
-      current.id,
-      current.revision,
-      current.revision + 1,
-      now,
-    );
-    workspace.database.prepare(`
-      INSERT INTO order_field_changes (
-        id, event_id, field_path, before_json, after_json
-      ) VALUES (?, ?, 'fulfillmentStatus', ?, ?)
-    `).run(
-      randomUUID(),
-      eventId,
-      JSON.stringify(current.fulfillmentStatus),
-      JSON.stringify(nextStatus),
-    );
+    this.orderFulfillmentProjection().synchronize(orderId, now);
+  }
+
+  private orderFulfillmentProjection(): OrderFulfillmentProjectionService {
+    return new OrderFulfillmentProjectionService(this.requireWorkspace().database);
   }
 
   public splitShipmentGroup(input: unknown): ShipmentGroupAdjustmentResult {
@@ -4131,7 +4115,7 @@ export class LocalApplication {
         COALESCE(SUM(lifecycle_status = 'active'), 0) AS active_order_count,
         COALESCE(SUM(
           lifecycle_status = 'active'
-          AND fulfillment_status = 'pending_shipment'
+          AND fulfillment_status IN ('pending_shipment', 'partially_shipped')
           AND platform_transaction_status NOT IN ('cancelled', 'refunded')
         ), 0) AS pending_shipment_count
       FROM original_orders
@@ -4519,7 +4503,11 @@ export class LocalApplication {
       let event = eventsById.get(eventId);
       if (!event) {
         const source = asString(changeRow.source);
-        if (source !== 'source_update' && source !== 'manual_edit') {
+        if (
+          source !== 'source_update'
+          && source !== 'manual_edit'
+          && source !== 'shipment_sync'
+        ) {
           throw new Error('数据库订单修改来源格式错误');
         }
         event = {
@@ -5623,11 +5611,6 @@ function asOrderPlatform(
 ): OriginalOrder['platform'] {
   if (value !== 'xianyu') throw new Error('数据库订单平台格式错误');
   return value;
-}
-
-function isFulfillmentStatus(value: unknown): value is OriginalOrder['fulfillmentStatus'] {
-  return value === 'pending_shipment' || value === 'shipped' || value === 'delivered' ||
-    value === 'returned' || value === 'unknown';
 }
 
 function isRecognitionFulfillmentStatus(

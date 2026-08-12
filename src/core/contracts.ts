@@ -20,7 +20,12 @@ export type PlatformTransactionStatus = 'paid' | 'cancelled' | 'refunded' | 'unk
 
 export type RecognitionFulfillmentStatus = 'pending_shipment' | 'shipped' | 'unknown';
 
-export type FulfillmentStatus = RecognitionFulfillmentStatus | 'delivered' | 'returned';
+export type FulfillmentStatus = RecognitionFulfillmentStatus
+  | 'partially_shipped'
+  | 'delivered'
+  | 'returned';
+
+export type ManualFulfillmentStatus = Exclude<FulfillmentStatus, 'partially_shipped'>;
 
 export type OrderPlatform = 'xianyu';
 
@@ -355,7 +360,7 @@ export type OrderFieldChange = {
 export type OrderChangeEvent = {
   id: string;
   sourceSnapshotId: string | null;
-  source: 'source_update' | 'manual_edit';
+  source: 'source_update' | 'manual_edit' | 'shipment_sync';
   baseRevision: number;
   resultRevision: number;
   createdAt: string;
@@ -449,7 +454,7 @@ export type OrderStatusAndLogisticsTarget = {
 
 export type OrderStatusAndLogisticsPatch = {
   platformTransactionStatus?: PlatformTransactionStatus;
-  fulfillmentStatus?: FulfillmentStatus;
+  fulfillmentStatus?: ManualFulfillmentStatus;
   /** An empty string clears the manually maintained carrier. */
   shippingCarrier?: string;
   /** An empty string clears the manually maintained tracking number. */
