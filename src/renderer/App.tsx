@@ -29,8 +29,8 @@ import type {
   OrderDraftReview,
   OrderEditInput,
   OrderEditReview,
-  OrderStatusAndLogisticsPatch,
-  OrderStatusAndLogisticsUpdateInput,
+  OrderPlatformTransactionStatusPatch,
+  OrderPlatformTransactionStatusUpdateInput,
   OriginalOrder,
   OrderSummary,
   RecognitionConflictDetail,
@@ -992,13 +992,13 @@ export function App({ api }: AppProps) {
     }
   }
 
-  async function updateOrderStatusAndLogistics(
-    input: OrderStatusAndLogisticsUpdateInput,
+  async function updateOrderPlatformTransactionStatus(
+    input: OrderPlatformTransactionStatusUpdateInput,
   ): Promise<OrderDetails[]> {
     setBusyAction('status-logistics');
     setOperationError('');
     try {
-      const details = await api.updateOrderStatusAndLogistics(input);
+      const details = await api.updateOrderPlatformTransactionStatus(input);
       setOrderDetails((current) => (
         details.find(({ order }) => order.id === current?.order.id) ?? current
       ));
@@ -1231,9 +1231,10 @@ export function App({ api }: AppProps) {
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
         onSaveCustomFieldValues={saveOrderCustomFieldValues}
         onUpdateOrder={updateExistingOrder}
-        onUpdateStatusAndLogistics={updateOrderStatusAndLogistics}
+        onUpdatePlatformTransactionStatus={updateOrderPlatformTransactionStatus}
         onRefreshOrder={refreshOrderForEdit}
         onLocateShipment={locateShipment}
+        onOpenShipmentGroups={() => navigateTo('shipments')}
       />
     );
   } else if (activePage === 'batches') {
@@ -1297,7 +1298,7 @@ export function App({ api }: AppProps) {
         onClearTableTemplate={clearTableTemplate}
         onManageTableTemplates={() => setActivePage('templates')}
         onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
-        onUpdateStatusAndLogistics={updateOrderStatusAndLogistics}
+        onUpdatePlatformTransactionStatus={updateOrderPlatformTransactionStatus}
         onExport={(input) => api.exportOrders(input)}
       />
     );
@@ -3344,8 +3345,8 @@ type OrdersWorkspaceProps = {
   onClearTableTemplate: (granularity: TableTemplate['granularity']) => void;
   onManageTableTemplates: () => void;
   onSaveActiveTableTemplate: () => void;
-  onUpdateStatusAndLogistics: (
-    input: OrderStatusAndLogisticsUpdateInput,
+  onUpdatePlatformTransactionStatus: (
+    input: OrderPlatformTransactionStatusUpdateInput,
   ) => Promise<OrderDetails[]>;
   onExport: (input: OrderExportInput) => Promise<OrderExportResult>;
 };
@@ -3386,7 +3387,7 @@ function OrdersWorkspace({
   onClearTableTemplate,
   onManageTableTemplates,
   onSaveActiveTableTemplate,
-  onUpdateStatusAndLogistics,
+  onUpdatePlatformTransactionStatus,
   onExport,
 }: OrdersWorkspaceProps) {
   const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
@@ -3776,7 +3777,6 @@ function OrdersWorkspace({
               <option value="partially_shipped">部分发货</option>
               <option value="shipped">已发货</option>
               <option value="delivered">已收货</option>
-              <option value="returned">已退货</option>
               <option value="unknown">未知</option>
             </select>
           </label>
@@ -3889,7 +3889,7 @@ function OrdersWorkspace({
                 setStatusLogisticsOrders(selectedOrders);
               }}
             >
-              {`维护已选 ${selectedOrders.length} 笔`}
+              {`修改已选 ${selectedOrders.length} 笔交易状态`}
             </button>
           )}
           <button
@@ -3912,7 +3912,7 @@ function OrdersWorkspace({
       </div>
 
       {statusLogisticsFeedback && (
-        <p className="status-logistics-feedback" role="status" aria-label="状态与物流维护结果">
+        <p className="status-logistics-feedback" role="status" aria-label="平台交易状态维护结果">
           {statusLogisticsFeedback}
         </p>
       )}
@@ -4008,14 +4008,14 @@ function OrdersWorkspace({
                     <button
                       className="order-link"
                       type="button"
-                      aria-label={`维护订单状态与物流 ${order.orderNumber}`}
+                      aria-label={`维护订单平台交易状态 ${order.orderNumber}`}
                       onClick={() => {
                         setStatusLogisticsFeedback('');
                         setStatusLogisticsOrders([order]);
                       }}
                       disabled={statusLogisticsSaving}
                     >
-                      状态与物流
+                      交易状态
                     </button>
                     <button
                       className="order-link"
@@ -4062,11 +4062,11 @@ function OrdersWorkspace({
       )}
 
       {statusLogisticsOrders && (
-        <OrderStatusAndLogisticsDialog
+        <OrderPlatformTransactionStatusDialog
           orders={statusLogisticsOrders}
           saving={statusLogisticsSaving}
           onClose={() => setStatusLogisticsOrders(null)}
-          onSave={onUpdateStatusAndLogistics}
+          onSave={onUpdatePlatformTransactionStatus}
           onSaved={() => {
             const updatedCount = statusLogisticsOrders.length;
             setStatusLogisticsOrders(null);
@@ -4095,27 +4095,23 @@ function OrdersWorkspace({
   );
 }
 
-type StatusAndLogisticsOrder = Pick<
+type PlatformTransactionStatusOrder = Pick<
   OrderSummary,
   | 'id'
   | 'orderNumber'
   | 'revision'
-  | 'platformTransactionStatus'
-  | 'fulfillmentStatus'
-  | 'shippingCarrier'
-  | 'trackingNumber'
 >;
 
-function OrderStatusAndLogisticsDialog({
+function OrderPlatformTransactionStatusDialog({
   orders,
   saving,
   onSave,
   onSaved,
   onClose,
 }: {
-  orders: StatusAndLogisticsOrder[];
+  orders: PlatformTransactionStatusOrder[];
   saving: boolean;
-  onSave: (input: OrderStatusAndLogisticsUpdateInput) => Promise<OrderDetails[]>;
+  onSave: (input: OrderPlatformTransactionStatusUpdateInput) => Promise<OrderDetails[]>;
   onSaved: () => void;
   onClose: () => void;
 }) {
@@ -4124,26 +4120,9 @@ function OrderStatusAndLogisticsDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLSelectElement>(null);
   const [platformTransactionStatus, setPlatformTransactionStatus] = useState<
-    '' | NonNullable<OrderStatusAndLogisticsPatch['platformTransactionStatus']>
+    '' | OrderPlatformTransactionStatusPatch['platformTransactionStatus']
   >('');
-  const [fulfillmentStatus, setFulfillmentStatus] = useState<
-    '' | NonNullable<OrderStatusAndLogisticsPatch['fulfillmentStatus']>
-  >('');
-  const [shippingCarrierEnabled, setShippingCarrierEnabled] = useState(false);
-  const [trackingNumberEnabled, setTrackingNumberEnabled] = useState(false);
-  const [shippingCarrier, setShippingCarrier] = useState(() => commonOrderText(
-    orders,
-    'shippingCarrier',
-  ));
-  const [trackingNumber, setTrackingNumber] = useState(() => commonOrderText(
-    orders,
-    'trackingNumber',
-  ));
   const [error, setError] = useState('');
-  const hasPatch = Boolean(
-    platformTransactionStatus || fulfillmentStatus ||
-    shippingCarrierEnabled || trackingNumberEnabled,
-  );
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement
@@ -4155,12 +4134,7 @@ function OrderStatusAndLogisticsDialog({
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || !hasPatch || orders.length === 0) return;
-    const patch: OrderStatusAndLogisticsPatch = {};
-    if (platformTransactionStatus) patch.platformTransactionStatus = platformTransactionStatus;
-    if (fulfillmentStatus) patch.fulfillmentStatus = fulfillmentStatus;
-    if (shippingCarrierEnabled) patch.shippingCarrier = shippingCarrier;
-    if (trackingNumberEnabled) patch.trackingNumber = trackingNumber;
+    if (saving || !platformTransactionStatus || orders.length === 0) return;
     setError('');
     try {
       await onSave({
@@ -4168,7 +4142,7 @@ function OrderStatusAndLogisticsDialog({
           orderId: order.id,
           expectedRevision: order.revision ?? 1,
         })),
-        patch,
+        patch: { platformTransactionStatus },
       });
       onSaved();
     } catch (reason) {
@@ -4219,12 +4193,12 @@ function OrderStatusAndLogisticsDialog({
     >
       <form className="order-status-logistics-dialog" onSubmit={(event) => void save(event)}>
         <header>
-          <span className="section-kicker">订单当前值 · 人工维护</span>
-          <h2 id={headingId}>维护状态与物流</h2>
+          <span className="section-kicker">平台记录 · 人工维护</span>
+          <h2 id={headingId}>维护平台交易状态</h2>
           <p id={descriptionId}>
             {orders.length === 1
-              ? `仅修改订单 ${orders[0].orderNumber}；未选择的字段保持不变。`
-              : `相同值将应用到已选 ${orders.length} 笔订单；未选择的字段保持不变。`}
+              ? `仅修改订单 ${orders[0].orderNumber} 的平台交易状态。`
+              : `相同平台交易状态将应用到已选 ${orders.length} 笔订单。`}
           </p>
         </header>
 
@@ -4247,77 +4221,18 @@ function OrderStatusAndLogisticsDialog({
               <option value="unknown">未知</option>
             </select>
           </label>
-          <label className="order-status-logistics-dialog__field">
-            <span>履约状态</span>
-            <select
-              aria-label="履约状态"
-              value={fulfillmentStatus}
-              disabled={saving}
-              onChange={(event) => setFulfillmentStatus(
-                event.target.value as typeof fulfillmentStatus,
-              )}
-            >
-              <option value="">不修改</option>
-              <option value="pending_shipment">待发货</option>
-              <option value="shipped">已发货</option>
-              <option value="delivered">已收货</option>
-              <option value="returned">已退货</option>
-              <option value="unknown">未知</option>
-            </select>
-          </label>
-          <div className="order-status-logistics-dialog__field">
-            <label className="order-status-logistics-dialog__toggle">
-              <input
-                type="checkbox"
-                aria-label="修改快递公司"
-                checked={shippingCarrierEnabled}
-                disabled={saving}
-                onChange={(event) => setShippingCarrierEnabled(event.target.checked)}
-              />
-              <span>修改快递公司</span>
-            </label>
-            <input
-              type="text"
-              aria-label="快递公司"
-              value={shippingCarrier}
-              disabled={saving || !shippingCarrierEnabled}
-              placeholder="留空并提交即清空"
-              onChange={(event) => setShippingCarrier(event.target.value)}
-            />
-          </div>
-          <div className="order-status-logistics-dialog__field">
-            <label className="order-status-logistics-dialog__toggle">
-              <input
-                type="checkbox"
-                aria-label="修改运单号"
-                checked={trackingNumberEnabled}
-                disabled={saving}
-                onChange={(event) => setTrackingNumberEnabled(event.target.checked)}
-              />
-              <span>修改运单号</span>
-            </label>
-            <input
-              type="text"
-              aria-label="运单号"
-              value={trackingNumber}
-              disabled={saving || !trackingNumberEnabled}
-              placeholder="留空并提交即清空"
-              onChange={(event) => setTrackingNumber(event.target.value)}
-            />
-          </div>
         </div>
 
         <p className="order-status-logistics-dialog__notice">
-          没有有效发货记录时，填写运单号可把待发货联动为已发货，清空运单号可退回待发货。
-          有发货记录后，待发货、部分发货、已发货和自动已收货由有效商品数量与包裹物流计算；
-          人工确认的已收货、已退货不会被较低阶段自动覆盖。平台交易状态不会参与履约计算。
+          履约状态由发货记录、包裹商品数量和包裹物流自动计算；
+          快递公司与运单号请在对应发货记录中维护。平台交易状态不会参与履约计算。
         </p>
         {error && <p className="order-status-logistics-dialog__error" role="alert">{error}</p>}
         <footer className="order-status-logistics-dialog__actions">
           <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
             取消
           </button>
-          <button className="button button--primary" type="submit" disabled={saving || !hasPatch}>
+          <button className="button button--primary" type="submit" disabled={saving || !platformTransactionStatus}>
             {saving ? '正在保存…' : `确认修改 ${orders.length} 笔`}
           </button>
         </footer>
@@ -4325,14 +4240,6 @@ function OrderStatusAndLogisticsDialog({
     </div>,
     document.body,
   );
-}
-
-function commonOrderText(
-  orders: StatusAndLogisticsOrder[],
-  field: 'shippingCarrier' | 'trackingNumber',
-): string {
-  const first = orders[0]?.[field] ?? '';
-  return orders.every((order) => order[field] === first) ? first : '';
 }
 
 type OrderItemsWorkbenchProps = {
@@ -6660,8 +6567,6 @@ function ReviewWorkspace({
                 >
                   <option value="pending_shipment">待发货</option>
                   <option value="shipped">已发货</option>
-                  <option value="delivered">已收货</option>
-                  <option value="returned">已退货</option>
                   <option value="unknown">未知</option>
                 </select>
               </Field>
@@ -7835,9 +7740,10 @@ function DetailWorkspace({
   onSelectSource,
   onSaveCustomFieldValues,
   onUpdateOrder,
-  onUpdateStatusAndLogistics,
+  onUpdatePlatformTransactionStatus,
   onRefreshOrder,
   onLocateShipment,
+  onOpenShipmentGroups,
 }: {
   details: OrderDetails;
   screenshotUrl: string;
@@ -7853,11 +7759,12 @@ function DetailWorkspace({
   onSelectSource: (screenshotId: string) => void;
   onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
   onUpdateOrder: (input: OrderEditInput) => Promise<OrderDetails>;
-  onUpdateStatusAndLogistics: (
-    input: OrderStatusAndLogisticsUpdateInput,
+  onUpdatePlatformTransactionStatus: (
+    input: OrderPlatformTransactionStatusUpdateInput,
   ) => Promise<OrderDetails[]>;
   onRefreshOrder: (orderId: string) => Promise<OrderDetails>;
   onLocateShipment: (recordId: string, aftersalesCaseId?: string) => void;
+  onOpenShipmentGroups: () => void;
 }) {
   const { order } = details;
   const [editing, setEditing] = useState(false);
@@ -8035,7 +7942,7 @@ function DetailWorkspace({
               setMaintainingStatusAndLogistics(true);
             }}
           >
-            状态与物流
+            交易状态
           </button>
           <button
             className="button button--primary"
@@ -8054,7 +7961,7 @@ function DetailWorkspace({
 
       <InlineError message={error} />
       {statusLogisticsFeedback && (
-        <p className="status-logistics-feedback status-logistics-feedback--detail" role="status" aria-label="状态与物流维护结果">
+        <p className="status-logistics-feedback status-logistics-feedback--detail" role="status" aria-label="平台交易状态维护结果">
           {statusLogisticsFeedback}
         </p>
       )}
@@ -8111,10 +8018,10 @@ function DetailWorkspace({
             </dl>
           </section>
 
-          <section className="detail-section" aria-label="订单手工物流">
+          <section className="detail-section" aria-label="历史订单级物流">
             <div className="detail-section-title">
-              <h2>订单手工物流</h2>
-              <span>独立于关联包裹物流</span>
+              <h2>历史订单级物流</h2>
+              <span>只读参考，不作为当前发货依据</span>
             </div>
             <dl className="detail-grid">
               <DetailTerm label="快递公司" value={displayValue(order.shippingCarrier)} />
@@ -8128,7 +8035,12 @@ function DetailWorkspace({
               <span>{details.operations.shipmentRecords.length} 条发货记录 · 当前待办 {details.operations.currentTodo}</span>
             </div>
             {details.operations.shipmentRecords.length === 0 ? (
-              <p className="order-operations-empty">暂无关联发货记录。</p>
+              <div className="order-operations-empty">
+                <p>暂无关联发货记录；履约状态暂以订单来源为基础。</p>
+                <button className="button button--quiet" type="button" onClick={onOpenShipmentGroups}>
+                  前往发货组
+                </button>
+              </div>
             ) : (
               <div className="order-operations-list">
                 {details.operations.shipmentRecords.map((record) => (
@@ -8475,11 +8387,11 @@ function DetailWorkspace({
         </div>
       </div>
       {maintainingStatusAndLogistics && (
-        <OrderStatusAndLogisticsDialog
+        <OrderPlatformTransactionStatusDialog
           orders={[order]}
           saving={statusLogisticsSaving}
           onClose={() => setMaintainingStatusAndLogistics(false)}
-          onSave={onUpdateStatusAndLogistics}
+          onSave={onUpdatePlatformTransactionStatus}
           onSaved={() => {
             setMaintainingStatusAndLogistics(false);
             setStatusLogisticsFeedback('已更新 1 笔订单。');
@@ -8776,7 +8688,7 @@ function fulfillmentStatusLabel(status: FulfillmentStatus): string {
 
 function hasShipmentHistory(status: FulfillmentStatus): boolean {
   return status === 'partially_shipped' || status === 'shipped' ||
-    status === 'delivered' || status === 'returned';
+    status === 'delivered';
 }
 
 function recognitionStatusLabel(status: RecognitionBatchItemStatus): string {

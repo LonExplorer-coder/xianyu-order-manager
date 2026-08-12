@@ -628,11 +628,7 @@ function recognitionResultFromDraft(draft: OrderDraft): RecognitionResult {
     shippingFeeCents: draft.shippingFeeCents,
     amountCents: draft.amountCents,
     platformTransactionStatus: draft.platformTransactionStatus,
-    fulfillmentStatus: (
-      draft.fulfillmentStatus === 'partially_shipped'
-      || draft.fulfillmentStatus === 'delivered'
-      || draft.fulfillmentStatus === 'returned'
-    ) ? 'shipped' : draft.fulfillmentStatus,
+    fulfillmentStatus: draft.fulfillmentStatus,
     items: draft.items.map((item) => ({
       sourceTitle: item.sourceTitle,
       sourceSpec: item.sourceSpec,

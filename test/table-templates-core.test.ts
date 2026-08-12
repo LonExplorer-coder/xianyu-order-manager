@@ -443,8 +443,8 @@ describe('表格模板核心契约', () => {
     expect(() => normalizeCreateTableTemplateInput(input, definitions)).toThrow();
   });
 
-  it.each(['delivered', 'returned'] as const)(
-    '订单模板查询接受完整履约终态 %s',
+  it.each(['partially_shipped', 'delivered'] as const)(
+    '订单模板查询接受自动投影履约状态 %s',
     (fulfillmentStatus) => {
       const base = validOrderInput() as { query: Record<string, unknown> };
       const normalized = normalizeCreateTableTemplateInput({

@@ -99,7 +99,7 @@ describe('表格模板 Electron IPC', () => {
     await expect(invoke('orders:query', { fulfillmentStatus: 'delivered' }, []))
       .resolves.toEqual(expect.objectContaining({ orders: [] }));
     await expect(invoke('orders:query', { fulfillmentStatus: 'returned' }, []))
-      .resolves.toEqual(expect.objectContaining({ orders: [] }));
+      .rejects.toThrow('订单工作台履约状态格式无效');
     await expect(invoke('orders:query', {}, 'field-1'))
       .rejects.toThrow(/自定义字段/);
     await expect(invoke('orders:query', {}, ['']))

@@ -79,7 +79,7 @@ describe('已入库原始订单人工修改', () => {
       expectedRevision: 1,
       shippedSnapshotWarning: true,
     });
-    for (const fulfillmentStatus of ['partially_shipped', 'delivered', 'returned'] as const) {
+    for (const fulfillmentStatus of ['partially_shipped', 'delivered'] as const) {
       expect(reviewOrderEdit(
         { ...before.order, fulfillmentStatus },
         input,

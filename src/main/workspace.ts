@@ -173,6 +173,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 23) migrateToVersion23(database);
   if (row.version < 24) migrateToVersion24(database);
   if (row.version < 25) migrateToVersion25(database);
+  if (row.version < 26) migrateToVersion26(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2615,7 +2616,7 @@ function migrateToVersion25(database: DatabaseSync): void {
         fulfillment_status TEXT NOT NULL
           CHECK (fulfillment_status IN (
             'pending_shipment', 'partially_shipped', 'shipped',
-            'delivered', 'returned', 'unknown'
+            'delivered', 'unknown'
           )),
         lifecycle_status TEXT NOT NULL
           CHECK (lifecycle_status IN ('active', 'trashed', 'deleted')),
@@ -2647,7 +2648,9 @@ function migrateToVersion25(database: DatabaseSync): void {
         address_original, address_normalized, province, city, district,
         ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
         product_total_cents, shipping_fee_cents, amount_cents,
-        platform_transaction_status, fulfillment_status, lifecycle_status,
+        platform_transaction_status,
+        CASE fulfillment_status WHEN 'returned' THEN 'unknown' ELSE fulfillment_status END,
+        lifecycle_status,
         created_at, updated_at, revision,
         seller_account_normalized, platform_order_number_normalized,
         note, shipping_carrier, tracking_number
@@ -2730,6 +2733,146 @@ function migrateToVersion25(database: DatabaseSync): void {
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
   }
+}
+
+function migrateToVersion26(database: DatabaseSync): void {
+  const migratedAt = new Date().toISOString();
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    rebuildFulfillmentStatusTablesForVersion26(database);
+    database.exec(`
+      UPDATE table_templates
+      SET configuration_json = json_remove(
+        configuration_json,
+        '$.query.fulfillmentStatus'
+      )
+      WHERE granularity = 'order'
+        AND json_extract(configuration_json, '$.query.fulfillmentStatus') = 'returned';
+    `);
+    new OrderFulfillmentProjectionService(database)
+      .synchronizeExistingShipmentOrders(migratedAt);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (26, ?)')
+      .run(migratedAt);
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function rebuildFulfillmentStatusTablesForVersion26(database: DatabaseSync): void {
+  const draftCreateSql = storedCreateTableSql(database, 'order_drafts');
+  const orderCreateSql = storedCreateTableSql(database, 'original_orders');
+  const draftV26Sql = replaceFulfillmentStatusConstraint(
+    draftCreateSql,
+    'order_drafts',
+    'order_drafts_v26',
+    ['pending_shipment', 'shipped', 'unknown'],
+  );
+  const orderV26Sql = replaceFulfillmentStatusConstraint(
+    orderCreateSql,
+    'original_orders',
+    'original_orders_v26',
+    ['pending_shipment', 'partially_shipped', 'shipped', 'delivered', 'unknown'],
+  );
+  database.exec(`${draftV26Sql}; ${orderV26Sql};`);
+
+  const draftColumns = storedTableColumnNames(database, 'order_drafts');
+  const orderColumns = storedTableColumnNames(database, 'original_orders');
+  const draftProjection = draftColumns.map((column) => column === 'fulfillment_status'
+    ? `CASE
+        WHEN fulfillment_status IN ('pending_shipment', 'shipped', 'unknown')
+          THEN fulfillment_status
+        WHEN json_extract(recognition_json, '$.fulfillmentStatus')
+          IN ('pending_shipment', 'shipped', 'unknown')
+          THEN json_extract(recognition_json, '$.fulfillmentStatus')
+        ELSE 'unknown'
+      END`
+    : `"${column}"`);
+  const orderProjection = orderColumns.map((column) => column === 'fulfillment_status'
+    ? `CASE
+        WHEN fulfillment_status NOT IN ('delivered', 'returned') THEN fulfillment_status
+        ELSE COALESCE((
+          SELECT CASE
+            WHEN json_extract(snapshots.confirmed_json, '$.fulfillmentStatus')
+              IN ('pending_shipment', 'shipped', 'unknown')
+              THEN json_extract(snapshots.confirmed_json, '$.fulfillmentStatus')
+            WHEN json_extract(snapshots.recognition_json, '$.fulfillmentStatus')
+              IN ('pending_shipment', 'shipped', 'unknown')
+              THEN json_extract(snapshots.recognition_json, '$.fulfillmentStatus')
+            ELSE 'unknown'
+          END
+          FROM source_snapshots AS snapshots
+          WHERE snapshots.order_id = original_orders.id
+          ORDER BY snapshots.created_at DESC, snapshots.id DESC
+          LIMIT 1
+        ), 'unknown')
+      END`
+    : `"${column}"`);
+  const draftColumnList = draftColumns.map((column) => `"${column}"`).join(', ');
+  const orderColumnList = orderColumns.map((column) => `"${column}"`).join(', ');
+  database.exec(`
+    INSERT INTO order_drafts_v26 (${draftColumnList})
+    SELECT ${draftProjection.join(', ')} FROM order_drafts;
+
+    INSERT INTO original_orders_v26 (${orderColumnList})
+    SELECT ${orderProjection.join(', ')} FROM original_orders;
+
+    DROP TABLE original_orders;
+    DROP TABLE order_drafts;
+    ALTER TABLE order_drafts_v26 RENAME TO order_drafts;
+    ALTER TABLE original_orders_v26 RENAME TO original_orders;
+
+    CREATE UNIQUE INDEX original_orders_by_normalized_identity
+    ON original_orders (
+      platform,
+      seller_account_normalized,
+      platform_order_number_normalized
+    );
+  `);
+}
+
+function storedCreateTableSql(database: DatabaseSync, tableName: string): string {
+  const row = database.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
+  `).get(tableName) as { sql: string } | undefined;
+  if (!row?.sql) throw new Error(`数据库缺少表：${tableName}`);
+  return row.sql;
+}
+
+function storedTableColumnNames(database: DatabaseSync, tableName: string): string[] {
+  return (database.prepare(`PRAGMA table_info("${tableName}")`).all() as unknown as Array<{
+    name: string;
+  }>).map(({ name }) => name);
+}
+
+function replaceFulfillmentStatusConstraint(
+  createSql: string,
+  currentTableName: string,
+  nextTableName: string,
+  statuses: readonly string[],
+): string {
+  const renamed = createSql.replace(
+    new RegExp(`^CREATE TABLE\\s+"?${currentTableName}"?`, 'u'),
+    `CREATE TABLE ${nextTableName}`,
+  );
+  const constraintPattern = /CHECK\s*\(\s*fulfillment_status\s+IN\s*\([^)]*\)\s*\)/u;
+  if (!constraintPattern.test(renamed)) {
+    throw new Error(`数据库表 ${currentTableName} 缺少履约状态约束`);
+  }
+  return renamed.replace(
+    constraintPattern,
+    `CHECK (fulfillment_status IN (${statuses.map((status) => `'${status}'`).join(', ')}))`,
+  );
 }
 
 function deduplicatedShipmentArchiveQuantity(

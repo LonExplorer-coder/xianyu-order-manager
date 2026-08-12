@@ -474,9 +474,10 @@ describe('批量来源截图识别队列', () => {
     });
   });
 
-  it.each(['delivered', 'returned'] as const)(
-    '人工终态 %s 不被后续 OCR 基础履约态回退，且新来源仅记录真实变化',
-    async (terminalStatus) => {
+  it(
+    '平台交易状态独立修改后，后续来源更新按基础履约事实记录真实变化',
+    async () => {
+      const terminalStatus = 'pending_shipment' as const;
       const firstRecognition = {
         ...recognition,
         orderNumber: `TERMINAL-SOURCE-UPDATE-${terminalStatus}`,
@@ -484,6 +485,7 @@ describe('批量来源截图识别队列', () => {
       const changedRecognition = {
         ...firstRecognition,
         recipient: `${terminalStatus} 的新收件人`,
+        platformTransactionStatus: 'cancelled' as const,
         fulfillmentStatus: 'pending_shipment' as const,
       };
       const manuallyChangedRecognition = {
@@ -511,12 +513,13 @@ describe('批量来源截图识别队列', () => {
       });
       const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
       const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
-      const [terminalOrder] = session.updateOrderStatusAndLogistics({
+      const [terminalOrder] = session.updateOrderPlatformTransactionStatus({
         targets: [{ orderId: originalOrder.id, expectedRevision: originalOrder.revision }],
-        patch: { fulfillmentStatus: terminalStatus },
+        patch: { platformTransactionStatus: 'cancelled' },
       });
       expect(terminalOrder.order).toMatchObject({
         fulfillmentStatus: terminalStatus,
+        platformTransactionStatus: 'cancelled',
         revision: 2,
       });
 
@@ -601,7 +604,7 @@ describe('批量来源截图识别队列', () => {
       const manualDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
       const manualReview = session.getDraftReview(manualDraftId);
       if (manualReview.kind !== 'order_update') throw new Error('预期订单更新校对');
-      const nextTerminalStatus = terminalStatus === 'delivered' ? 'returned' : 'delivered';
+      const nextTerminalStatus = 'shipped' as const;
       const manuallyConfirmed = session.confirmOrderUpdate({
         ...manualReview.draft,
         fulfillmentStatus: nextTerminalStatus,
@@ -638,9 +641,10 @@ describe('批量来源截图识别队列', () => {
     },
   );
 
-  it.each(['delivered', 'returned'] as const)(
-    '人工终态 %s 与内容等价的 OCR 基础态截图自动合并为重复来源',
-    async (terminalStatus) => {
+  it(
+    '内容等价的 OCR 基础态截图自动合并为重复来源',
+    async () => {
+      const terminalStatus = 'pending_shipment' as const;
       const equivalentRecognition = {
         ...recognition,
         orderNumber: `TERMINAL-EQUIVALENT-${terminalStatus}`,
@@ -663,13 +667,10 @@ describe('批量来源截图识别队列', () => {
       });
       const firstDraftId = session.listRecognitionBatches()[0].items[0].draftId!;
       const originalOrder = session.confirmDraft(session.getDraft(firstDraftId)).order;
-      const [terminalOrder] = session.updateOrderStatusAndLogistics({
-        targets: [{ orderId: originalOrder.id, expectedRevision: originalOrder.revision }],
-        patch: { fulfillmentStatus: terminalStatus },
-      });
+      const terminalOrder = session.getOrder(originalOrder.id);
       expect(terminalOrder.order).toMatchObject({
         fulfillmentStatus: terminalStatus,
-        revision: 2,
+        revision: 1,
       });
       expect(terminalOrder.sources).toHaveLength(1);
 
@@ -690,7 +691,7 @@ describe('批量来源截图识别队列', () => {
       const details = session.getOrder(originalOrder.id);
       expect(details.order).toMatchObject({
         fulfillmentStatus: terminalStatus,
-        revision: 2,
+        revision: 1,
       });
       expect(details.sources).toHaveLength(2);
       expect(details.sources[0]).toMatchObject({
@@ -698,12 +699,7 @@ describe('批量来源截图识别队列', () => {
           recognition: { fulfillmentStatus: 'pending_shipment' },
         },
       });
-      expect(details.changeEvents).toHaveLength(1);
-      expect(details.changeEvents[0]).toMatchObject({
-        source: 'manual_edit',
-        baseRevision: 1,
-        resultRevision: 2,
-      });
+      expect(details.changeEvents).toHaveLength(0);
     },
   );
 

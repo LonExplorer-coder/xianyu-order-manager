@@ -52,11 +52,9 @@ import {
 } from '../core/contracts';
 import { orderEditTargetId, prepareOrderEdit } from '../core/order-edit';
 import {
-  diffOrderStatusAndLogistics,
-  prepareOrderStatusAndLogisticsUpdate,
-  resolveOrderStatusAndLogisticsPatch,
-  type ResolvedOrderStatusAndLogisticsPatch,
-} from '../core/order-fulfillment';
+  diffOrderPlatformTransactionStatus,
+  prepareOrderPlatformTransactionStatusUpdate,
+} from '../core/order-platform-transaction-status';
 import { isFulfillmentStatus } from '../core/fulfillment-status';
 import { orderOperationsOverview } from '../core/order-operations-projection';
 import type {
@@ -94,7 +92,6 @@ import {
   hasEquivalentOrderContent,
   hasSameOrderIdentity,
   normalizedOrderIdentityPart,
-  shouldPreserveManualTerminalFulfillment,
 } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import {
@@ -904,7 +901,7 @@ export class LocalApplication {
       platformTransactionStatus: asPlatformTransactionStatus(
         row.platform_transaction_status,
       ),
-      fulfillmentStatus: asFulfillmentStatus(row.fulfillment_status),
+      fulfillmentStatus: asRecognitionFulfillmentStatus(row.fulfillment_status),
       status: row.review_cancelled_at === null
         ? asString(row.status) as OrderDraft['status']
         : 'cancelled',
@@ -2132,11 +2129,11 @@ export class LocalApplication {
       throw new Error('订单已在其他操作中更新，请刷新对比后重试');
     }
     draft = withHigherPriorityCurrentQuantities(existing, draft);
-    const changes = diffOrderCurrentValues(existing, draft);
-    const fulfillmentStatus = shouldPreserveManualTerminalFulfillment(
-      existing.fulfillmentStatus,
-      draft.fulfillmentStatus,
-    )
+    const hasShipmentHistory = this.orderFulfillmentProjection().hasShipmentHistory(orderId);
+    const changes = diffOrderCurrentValues(existing, draft).filter((change) => (
+      !hasShipmentHistory || change.path !== 'fulfillmentStatus'
+    ));
+    const fulfillmentStatus = hasShipmentHistory
       ? existing.fulfillmentStatus
       : draft.fulfillmentStatus;
 
@@ -2149,7 +2146,7 @@ export class LocalApplication {
       platform: existing.platform,
       sellerAccount: existing.sellerAccount,
       orderNumber: existing.orderNumber,
-      fulfillmentStatus,
+      fulfillmentStatus: draft.fulfillmentStatus,
     });
     const preparedCustomValues = this.prepareDraftCustomFieldValues(
       draft,
@@ -2454,7 +2451,7 @@ export class LocalApplication {
           JSON.stringify(change.after),
         );
       }
-      if (this.orderFulfillmentProjection().hasShipmentHistory(orderId)) {
+      if (hasShipmentHistory) {
         this.synchronizeShipmentOrderFulfillment(orderId, now);
       }
 
@@ -2727,9 +2724,9 @@ export class LocalApplication {
     return this.getOrder(current.id);
   }
 
-  public updateOrderStatusAndLogistics(input: unknown): OrderDetails[] {
+  public updateOrderPlatformTransactionStatus(input: unknown): OrderDetails[] {
     const workspace = this.requireWorkspace();
-    const prepared = prepareOrderStatusAndLogisticsUpdate(input).input;
+    const prepared = prepareOrderPlatformTransactionStatusUpdate(input).input;
     const now = new Date().toISOString();
     workspace.transaction(() => {
       for (const target of prepared.targets) {
@@ -2737,77 +2734,17 @@ export class LocalApplication {
         if (current.revision !== target.expectedRevision) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
         }
-        const fulfillmentProjection = this.orderFulfillmentProjection();
-        const hasActiveShipmentRecord = fulfillmentProjection
-          .hasActiveShipmentQuantity(current.id);
-        let resolvedPatch: ResolvedOrderStatusAndLogisticsPatch =
-          resolveOrderStatusAndLogisticsPatch(current, prepared.patch);
-        if (hasActiveShipmentRecord) {
-          resolvedPatch = { ...prepared.patch };
-          const requestedFulfillmentStatus = prepared.patch.fulfillmentStatus;
-          const preservesTerminalStatus = (
-            requestedFulfillmentStatus === 'delivered'
-            || requestedFulfillmentStatus === 'returned'
-            || (
-              requestedFulfillmentStatus === undefined
-              && (
-                current.fulfillmentStatus === 'returned'
-                || (
-                  current.fulfillmentStatus === 'delivered'
-                  && !fulfillmentProjection.isAutomaticallySynchronized(
-                    current.id,
-                    current.fulfillmentStatus,
-                  )
-                )
-              )
-            )
-          );
-          if (!preservesTerminalStatus) {
-            resolvedPatch.fulfillmentStatus = fulfillmentProjection.project(current.id);
-          }
-        }
-        const changes = [...diffOrderStatusAndLogistics(current, resolvedPatch)];
-        const confirmsAutomaticallyDelivered = (
-          prepared.patch.fulfillmentStatus === 'delivered'
-          && current.fulfillmentStatus === 'delivered'
-          && fulfillmentProjection.isAutomaticallySynchronized(
-            current.id,
-            current.fulfillmentStatus,
-          )
-        );
-        if (confirmsAutomaticallyDelivered) {
-          changes.push({
-            path: 'fulfillmentStatusConfirmation',
-            before: 'delivered',
-            after: 'delivered',
-          });
-        }
+        const changes = diffOrderPlatformTransactionStatus(current, prepared.patch);
         if (changes.length === 0) continue;
-        const values = {
-          platformTransactionStatus:
-            resolvedPatch.platformTransactionStatus ?? current.platformTransactionStatus,
-          fulfillmentStatus:
-            resolvedPatch.fulfillmentStatus ?? current.fulfillmentStatus,
-          shippingCarrier:
-            resolvedPatch.shippingCarrier ?? current.shippingCarrier,
-          trackingNumber:
-            resolvedPatch.trackingNumber ?? current.trackingNumber,
-        };
         const updated = workspace.database.prepare(`
           UPDATE original_orders
           SET
             platform_transaction_status = ?,
-            fulfillment_status = ?,
-            shipping_carrier = ?,
-            tracking_number = ?,
             revision = revision + 1,
             updated_at = ?
           WHERE id = ? AND revision = ?
         `).run(
-          values.platformTransactionStatus,
-          values.fulfillmentStatus,
-          values.shippingCarrier,
-          values.trackingNumber,
+          prepared.patch.platformTransactionStatus,
           now,
           current.id,
           target.expectedRevision,
@@ -2857,7 +2794,17 @@ export class LocalApplication {
       SELECT id
       FROM original_orders
       WHERE lifecycle_status = 'active'
-        AND fulfillment_status IN ('pending_shipment', 'partially_shipped')
+        AND (
+          fulfillment_status IN ('pending_shipment', 'partially_shipped')
+          OR (
+            fulfillment_status IN ('shipped', 'unknown')
+            AND NOT EXISTS (
+              SELECT 1
+              FROM shipment_package_items
+              WHERE shipment_package_items.order_id = original_orders.id
+            )
+          )
+        )
         AND platform_transaction_status NOT IN ('cancelled', 'refunded')
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
@@ -5356,8 +5303,6 @@ function validateValues(
   if (![
     'pending_shipment',
     'shipped',
-    'delivered',
-    'returned',
     'unknown',
   ].includes(value.fulfillmentStatus)) {
     throw new Error('履约状态格式错误');
@@ -5635,6 +5580,15 @@ function asFulfillmentStatus(
   value: string | number | null | undefined,
 ): OriginalOrder['fulfillmentStatus'] {
   if (!isFulfillmentStatus(value)) throw new Error('数据库履约状态格式错误');
+  return value;
+}
+
+function asRecognitionFulfillmentStatus(
+  value: string | number | null | undefined,
+): RecognitionFulfillmentStatus {
+  if (!isRecognitionFulfillmentStatus(value)) {
+    throw new Error('数据库草稿履约状态格式错误');
+  }
   return value;
 }
 

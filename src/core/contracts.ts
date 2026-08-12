@@ -26,10 +26,7 @@ export type RecognitionFulfillmentStatus = 'pending_shipment' | 'shipped' | 'unk
 
 export type FulfillmentStatus = RecognitionFulfillmentStatus
   | 'partially_shipped'
-  | 'delivered'
-  | 'returned';
-
-export type ManualFulfillmentStatus = Exclude<FulfillmentStatus, 'partially_shipped'>;
+  | 'delivered';
 
 export type OrderPlatform = 'xianyu';
 
@@ -209,7 +206,7 @@ export type OrderDraft = Omit<RecognitionResult, 'items' | 'fulfillmentStatus'> 
   id: string;
   batchId: string;
   screenshotId: string;
-  fulfillmentStatus: FulfillmentStatus;
+  fulfillmentStatus: RecognitionFulfillmentStatus;
   status: 'awaiting_review' | 'confirmed' | 'cancelled';
   reviewIssues?: OrderReviewIssueCode[];
   recognitionConflicts?: RecognitionConflictDetail[];
@@ -453,21 +450,16 @@ export type OrderEditReview = {
   shippedSnapshotWarning: boolean;
 };
 
-export type OrderStatusAndLogisticsTarget = {
+export type OrderPlatformTransactionStatusTarget = {
   orderId: string;
   expectedRevision: number;
 };
 
-export type OrderStatusAndLogisticsPatch = {
-  platformTransactionStatus?: PlatformTransactionStatus;
-  fulfillmentStatus?: ManualFulfillmentStatus;
-  /** An empty string clears the manually maintained carrier. */
-  shippingCarrier?: string;
-  /** An empty string clears the manually maintained tracking number. */
-  trackingNumber?: string;
+export type OrderPlatformTransactionStatusPatch = {
+  platformTransactionStatus: PlatformTransactionStatus;
 };
 
-export type OrderStatusAndLogisticsUpdateInput = {
-  targets: OrderStatusAndLogisticsTarget[];
-  patch: OrderStatusAndLogisticsPatch;
+export type OrderPlatformTransactionStatusUpdateInput = {
+  targets: OrderPlatformTransactionStatusTarget[];
+  patch: OrderPlatformTransactionStatusPatch;
 };

@@ -41,8 +41,8 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
 });
 
-describe('订单状态与手工物流 Electron IPC', () => {
-  it('通过受校验通道批量保存并广播最新订单摘要', async () => {
+describe('订单平台交易状态 Electron IPC', () => {
+  it('通过受校验窄通道批量保存并广播最新订单摘要', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-fulfillment-ipc-'));
     const dataDirectory = join(root, '数据');
     const sourcePath = join(root, '待发货订单.png');
@@ -65,18 +65,14 @@ describe('订单状态与手工物流 Electron IPC', () => {
     session.onOrdersChanged(ordersChanged);
     registerIpcHandlers(session);
 
-    await expect(invoke('orders:update-status-and-logistics', {
+    await expect(invoke('orders:update-platform-transaction-status', {
       targets: [{ orderId: order.id, expectedRevision: order.revision }],
-      patch: { fulfillmentStatus: 'shipped', hidden: true },
-    })).rejects.toThrow('订单状态与物流修改内容包含未知字段：hidden');
+      patch: { fulfillmentStatus: 'shipped' },
+    })).rejects.toThrow('订单交易状态修改内容包含未知字段：fulfillmentStatus');
 
-    const result = await invoke('orders:update-status-and-logistics', {
+    const result = await invoke('orders:update-platform-transaction-status', {
       targets: [{ orderId: order.id, expectedRevision: order.revision }],
-      patch: {
-        fulfillmentStatus: 'shipped',
-        shippingCarrier: '圆通速递',
-        trackingNumber: 'YT001',
-      },
+      patch: { platformTransactionStatus: 'cancelled' },
     });
 
     expect(result).toEqual([
@@ -84,9 +80,10 @@ describe('订单状态与手工物流 Electron IPC', () => {
         order: expect.objectContaining({
           id: order.id,
           revision: 2,
-          fulfillmentStatus: 'shipped',
-          shippingCarrier: '圆通速递',
-          trackingNumber: 'YT001',
+          platformTransactionStatus: 'cancelled',
+          fulfillmentStatus: 'pending_shipment',
+          shippingCarrier: '',
+          trackingNumber: '',
         }),
       }),
     ]);
@@ -94,9 +91,10 @@ describe('订单状态与手工物流 Electron IPC', () => {
       expect.objectContaining({
         id: order.id,
         revision: 2,
-        fulfillmentStatus: 'shipped',
-        shippingCarrier: '圆通速递',
-        trackingNumber: 'YT001',
+        platformTransactionStatus: 'cancelled',
+        fulfillmentStatus: 'pending_shipment',
+        shippingCarrier: '',
+        trackingNumber: '',
       }),
     ]);
   });

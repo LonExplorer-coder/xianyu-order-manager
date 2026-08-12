@@ -459,8 +459,8 @@ export class DesktopSession {
     return details;
   }
 
-  public updateOrderStatusAndLogistics(input: unknown): OrderDetails[] {
-    const details = this.requireApplication().updateOrderStatusAndLogistics(input);
+  public updateOrderPlatformTransactionStatus(input: unknown): OrderDetails[] {
+    const details = this.requireApplication().updateOrderPlatformTransactionStatus(input);
     this.refreshOrders();
     return details;
   }

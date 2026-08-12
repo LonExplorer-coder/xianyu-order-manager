@@ -270,10 +270,10 @@ describe('发货记录', () => {
     ))).toEqual(['shipped', 'shipped']);
 
     const shippedOrder = application.getOrder(group.orders[0].id).order;
-    application.updateOrderStatusAndLogistics({
+    expect(() => application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: shippedOrder.id, expectedRevision: shippedOrder.revision }],
       patch: { fulfillmentStatus: 'pending_shipment' },
-    });
+    })).toThrow('订单交易状态修改内容包含未知字段：fulfillmentStatus');
     expect(application.getOrder(shippedOrder.id).order.fulfillmentStatus).toBe('shipped');
   });
 
@@ -409,7 +409,7 @@ describe('发货记录', () => {
 
     for (const member of group.orders) {
       const current = application.getOrder(member.id).order;
-      application.updateOrderStatusAndLogistics({
+      application.updateOrderPlatformTransactionStatus({
         targets: [{ orderId: member.id, expectedRevision: current.revision }],
         patch: { platformTransactionStatus: 'cancelled' },
       });
@@ -483,7 +483,7 @@ describe('发货记录', () => {
     });
 
     const cancelledOrder = application.getOrder(group.orders[1].id).order;
-    application.updateOrderStatusAndLogistics({
+    application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: cancelledOrder.id, expectedRevision: cancelledOrder.revision }],
       patch: { platformTransactionStatus: 'cancelled' },
     });
@@ -733,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -788,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -874,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1014,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1213,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1393,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1530,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1657,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1709,7 +1709,7 @@ describe('发货记录', () => {
     });
     for (const member of group.orders) {
       const current = application.getOrder(member.id).order;
-      application.updateOrderStatusAndLogistics({
+      application.updateOrderPlatformTransactionStatus({
         targets: [{ orderId: member.id, expectedRevision: current.revision }],
         patch: { platformTransactionStatus: 'cancelled' },
       });
@@ -1766,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1841,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26);
         COMMIT;
       `);
     } finally {
@@ -1906,12 +1906,12 @@ describe('发货记录', () => {
       .toBe('partially_shipped');
 
     const partialOrder = application.getOrder(firstOrder.id).order;
-    application.updateOrderStatusAndLogistics({
+    expect(() => application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: partialOrder.id, expectedRevision: partialOrder.revision }],
       patch: { trackingNumber: 'ORDER-LEVEL-TRACKING' },
-    });
+    })).toThrow('订单交易状态修改内容包含未知字段：trackingNumber');
     expect(application.getOrder(firstOrder.id).order).toMatchObject({
-      trackingNumber: 'ORDER-LEVEL-TRACKING',
+      trackingNumber: '',
       fulfillmentStatus: 'partially_shipped',
     });
   });
@@ -1948,7 +1948,7 @@ describe('发货记录', () => {
         SET fulfillment_status = 'pending_shipment'
         WHERE id = ?
       `).run(firstOrder.id);
-      database.prepare('DELETE FROM schema_migrations WHERE version = 25').run();
+      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26)').run();
     } finally {
       database.close();
     }
@@ -2221,7 +2221,7 @@ describe('发货记录', () => {
       }],
     });
     const shippedOrder = application.getOrder(firstOrder.id).order;
-    application.updateOrderStatusAndLogistics({
+    application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: firstOrder.id, expectedRevision: shippedOrder.revision }],
       patch: { platformTransactionStatus: 'cancelled' },
     });
@@ -2377,7 +2377,7 @@ describe('发货记录', () => {
     expect(reopened.queryShipmentRecords()).toEqual([result.record]);
   });
 
-  it('自动签收随物流更正回退但保留人工确认的终态', async () => {
+  it('自动签收随物流更正回退，订单不再保留独立人工终态', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
     const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
@@ -2403,13 +2403,6 @@ describe('发货记录', () => {
       reason: '承运商首次回传签收',
     });
     const automaticallyDeliveredOrder = application.getOrder(group.orders[0].id).order;
-    application.updateOrderStatusAndLogistics({
-      targets: [{
-        orderId: automaticallyDeliveredOrder.id,
-        expectedRevision: automaticallyDeliveredOrder.revision,
-      }],
-      patch: { fulfillmentStatus: 'delivered' },
-    });
     application.updateShipmentPackageLogisticsStatus({
       recordId: confirmation.record.id,
       packageId: shipmentPackage.id,
@@ -2419,16 +2412,16 @@ describe('发货记录', () => {
     });
 
     expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))
-      .toEqual(['delivered', 'shipped']);
+      .toEqual(['shipped', 'shipped']);
 
     expect(application.getOrder(automaticallyDeliveredOrder.id).order.fulfillmentStatus)
-      .toBe('delivered');
+      .toBe('shipped');
     expect(application.getOrder(automaticallyDeliveredOrder.id).changeEvents[0]).toMatchObject({
-      source: 'manual_edit',
+      source: 'shipment_sync',
       changes: [{
-        path: 'fulfillmentStatusConfirmation',
+        path: 'fulfillmentStatus',
         before: 'delivered',
-        after: 'delivered',
+        after: 'shipped',
       }],
     });
   });
@@ -2614,16 +2607,24 @@ describe('发货记录', () => {
     );
 
     expect(result.order.fulfillmentStatus).toBe('partially_shipped');
-    expect(application.getOrder(order.id).changeEvents.slice(0, 2)).toEqual([
+    const updatedDetails = application.getOrder(order.id);
+    expect(updatedDetails.sources[0].sourceSnapshot.confirmed?.fulfillmentStatus)
+      .toBe('pending_shipment');
+    expect(updatedDetails.changeEvents.slice(0, 2)).toEqual([
       expect.objectContaining({
         source: 'shipment_sync',
         changes: [{
           path: 'fulfillmentStatus',
-          before: 'pending_shipment',
+          before: 'shipped',
           after: 'partially_shipped',
         }],
       }),
-      expect.objectContaining({ source: 'source_update' }),
+      expect.objectContaining({
+        source: 'source_update',
+        changes: expect.not.arrayContaining([
+          expect.objectContaining({ path: 'fulfillmentStatus' }),
+        ]),
+      }),
     ]);
   });
 });

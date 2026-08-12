@@ -239,7 +239,6 @@ export function prepareOrderEdit(
         'partially_shipped',
         'shipped',
         'delivered',
-        'returned',
       ].includes(current.fulfillmentStatus),
     },
     identity,

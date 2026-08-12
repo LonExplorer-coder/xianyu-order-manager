@@ -310,9 +310,9 @@ const RECOGNITION_STATUSES = [
 const PLATFORM_TRANSACTION_STATUSES = ['paid', 'cancelled', 'refunded', 'unknown'] as const;
 const FULFILLMENT_STATUSES = [
   'pending_shipment',
+  'partially_shipped',
   'shipped',
   'delivered',
-  'returned',
   'unknown',
 ] as const;
 const LIFECYCLE_STATUSES = ['active', 'trashed', 'deleted', 'all'] as const;

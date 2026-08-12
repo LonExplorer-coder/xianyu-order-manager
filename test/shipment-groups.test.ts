@@ -204,12 +204,13 @@ describe('保守的合并发货组', () => {
     ))).size).toBe(3);
   });
 
-  it('只投影正常待发货订单，缺少匹配信息时给出提示', async () => {
+  it('投影正常待发货及无本地发货事实的来源已发货订单，缺少匹配信息时给出提示', async () => {
     const recognitions = [
       recognition({ orderNumber: 'XY-ELIGIBLE-PAID' }),
       recognition({
         orderNumber: 'XY-ELIGIBLE-UNKNOWN',
         platformTransactionStatus: 'unknown',
+        fulfillmentStatus: 'unknown',
       }),
       recognition({
         orderNumber: 'XY-ELIGIBLE-SINGLE',
@@ -225,7 +226,7 @@ describe('保守的合并发货组', () => {
         platformTransactionStatus: 'refunded',
       }),
       recognition({
-        orderNumber: 'XY-INELIGIBLE-SHIPPED',
+        orderNumber: 'XY-SOURCE-SHIPPED-WITHOUT-LOCAL-FACT',
         fulfillmentStatus: 'shipped',
       }),
       recognition({ orderNumber: 'XY-INELIGIBLE-TRASHED' }),
@@ -260,13 +261,14 @@ describe('保守的合并发货组', () => {
     const projection = application.queryShipmentGroups();
 
     expect(projection.groups).toHaveLength(2);
-    expect(projection.groups.map(({ orderCount }) => orderCount).sort()).toEqual([1, 2]);
+    expect(projection.groups.map(({ orderCount }) => orderCount).sort()).toEqual([1, 3]);
     expect(projection.groups.flatMap(({ orders }) => (
       orders.map(({ orderNumber }) => orderNumber)
     )).sort()).toEqual([
       'XY-ELIGIBLE-PAID',
       'XY-ELIGIBLE-SINGLE',
       'XY-ELIGIBLE-UNKNOWN',
+      'XY-SOURCE-SHIPPED-WITHOUT-LOCAL-FACT',
     ]);
     expect(projection.attentionOrders).toEqual([
       expect.objectContaining({
@@ -340,7 +342,7 @@ describe('保守的合并发货组', () => {
     expect(afterMove.groups.find((group) => group.orders.some(({ id }) => id === moved.id))?.id)
       .not.toBe(stableGroupId);
 
-    application.updateOrderStatusAndLogistics({
+    application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: moved.id, expectedRevision: moved.revision }],
       patch: { platformTransactionStatus: 'cancelled' },
     });
@@ -349,7 +351,7 @@ describe('保守的合并发货组', () => {
       orders: [{ id: first.id }],
     }]);
 
-    application.updateOrderStatusAndLogistics({
+    application.updateOrderPlatformTransactionStatus({
       targets: [{ orderId: first.id, expectedRevision: first.revision }],
       patch: { platformTransactionStatus: 'refunded' },
     });

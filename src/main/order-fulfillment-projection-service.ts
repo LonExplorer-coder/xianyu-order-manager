@@ -102,23 +102,6 @@ export class OrderFulfillmentProjectionService {
       : 'shipped';
   }
 
-  public isAutomaticallySynchronized(
-    orderId: string,
-    currentStatus: FulfillmentStatus,
-  ): boolean {
-    const row = this.database.prepare(`
-      SELECT events.source, changes.after_json
-      FROM order_change_events AS events
-      JOIN order_field_changes AS changes ON changes.event_id = events.id
-      WHERE events.order_id = ?
-        AND changes.field_path IN ('fulfillmentStatus', 'fulfillmentStatusConfirmation')
-      ORDER BY events.result_revision DESC, events.id DESC
-      LIMIT 1
-    `).get(orderId) as { source: string; after_json: string } | undefined;
-    return row?.source === 'shipment_sync'
-      && row.after_json === JSON.stringify(currentStatus);
-  }
-
   public synchronize(orderId: string, now: string): boolean {
     const current = this.database.prepare(`
       SELECT fulfillment_status, revision
@@ -127,14 +110,6 @@ export class OrderFulfillmentProjectionService {
     `).get(orderId) as OrderStatusRow | undefined;
     if (!current) throw new Error('订单不存在');
     const currentStatus = current.fulfillment_status as FulfillmentStatus;
-    if (
-      currentStatus === 'returned'
-      || (
-        currentStatus === 'delivered'
-        && !this.isAutomaticallySynchronized(orderId, currentStatus)
-      )
-    ) return false;
-
     const nextStatus = this.project(orderId);
     if (currentStatus === nextStatus) return false;
     const updated = this.database.prepare(`

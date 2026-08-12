@@ -271,15 +271,33 @@ describe('手工发货组调整', () => {
       reason: '原计划一起发货',
     });
 
-    application.updateOrderStatusAndLogistics({
-      targets: [{ orderId: selectedOrderId, expectedRevision: selectedOrder.revision }],
-      patch: { fulfillmentStatus: 'shipped', trackingNumber: 'YT-LEAVES-001' },
+    const mergedGroup = application.queryShipmentGroups().groups.find(
+      (group) => group.orders.some(({ id }) => id === selectedOrderId),
+    );
+    if (!mergedGroup) throw new Error('预期合并后的发货组存在');
+    application.confirmShipment({
+      groupId: mergedGroup.id,
+      expectedRemainingItems: mergedGroup.orders.flatMap((order) => order.items.map((item) => ({
+        orderId: order.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+      }))),
+      packages: [{
+        shippingCarrier: '圆通速递',
+        trackingNumber: 'YT-LEAVES-001',
+        items: selectedOrder.items.map((item) => ({
+          orderId: selectedOrderId,
+          orderItemId: item.id,
+          quantity: item.quantity,
+        })),
+      }],
     });
 
     const after = application.queryShipmentGroups();
-    expect(after.groups).toHaveLength(2);
-    expect(after.groups.every(({ formation }) => formation === 'automatic')).toBe(true);
-    expect(after.groups.flatMap((group) => group.orders)).toHaveLength(2);
+    expect(after.groups).toEqual([]);
+    const [archive] = application.queryShipmentGroupArchives();
+    expect(archive.remainingGroup?.orders).toHaveLength(2);
+    expect(archive.remainingGroup?.orders.some(({ id }) => id === selectedOrderId)).toBe(false);
     expect(application.listShipmentGroupAdjustmentEvents()).toHaveLength(1);
   });
 
