@@ -722,7 +722,7 @@ flowchart TD
 
 当前 [Issue #52](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/52) 已完成包裹、部分发货与作废边界决策；[Issue #18](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/18) 可以据此实施发货记录、包裹商品明细和发货快照。
 
-截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线。物流状态不会同步覆盖订单履约状态；售后仍显示为独立的“无售后”占位，待后续售后处理单交付后接入真实汇总与筛选。
+截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线；[Issue #57](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/57) 已交付按发货快照商品与数量建立、修改和查询的售后处理单、售后概览、可处理数量校验与不可变处理时间线。物流状态和售后状态分别保存，彼此不会自动推进；仅退款、退货、补发、库存和资金事实仍由后续任务承接。
 
 ## 18. 推荐的渐进实施顺序
 

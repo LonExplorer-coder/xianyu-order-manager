@@ -1730,6 +1730,19 @@ select:focus-visible {
   color: var(--navy-900);
 }
 
+.shipment-record-card__aftersales-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.shipment-record-card__aftersales-actions .button,
+.shipment-record-card__aftersales > section > .button {
+  min-height: 28px;
+  padding: 5px 9px;
+  font-size: 9px;
+}
+
 .shipment-record-card__differences {
   margin-top: 12px;
   padding: 10px 12px;
@@ -1847,6 +1860,53 @@ select:focus-visible {
   color: var(--navy-500);
 }
 
+.shipment-record-card__aftersales {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.shipment-record-card__aftersales > section {
+  min-width: 0;
+  padding: 12px;
+  border-left: 3px solid var(--yellow);
+  background: #fffaf0;
+}
+
+.shipment-record-card__aftersales > section > header,
+.shipment-record-card__aftersales li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shipment-record-card__aftersales header strong {
+  color: var(--navy-900);
+  font-size: 10px;
+}
+
+.shipment-record-card__aftersales header span,
+.shipment-record-card__aftersales p,
+.shipment-record-card__aftersales li {
+  color: var(--navy-600);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shipment-record-card__aftersales p {
+  margin: 6px 0 0;
+}
+
+.shipment-record-card__aftersales ul {
+  display: grid;
+  gap: 4px;
+  margin: 9px 0;
+  padding: 0;
+  list-style: none;
+}
+
 .shipment-package-action-dialog {
   width: min(560px, 100%);
   min-width: 0;
@@ -1929,6 +1989,57 @@ select:focus-visible {
   justify-content: flex-end;
   gap: 9px;
   margin-top: 22px;
+}
+
+.aftersales-case-dialog {
+  max-height: min(820px, calc(100vh - 40px));
+  overflow-y: auto;
+}
+
+.aftersales-case-dialog fieldset {
+  margin: 20px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.aftersales-case-dialog legend {
+  color: var(--navy-700);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.aftersales-case-dialog__items {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.aftersales-case-dialog__items > label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 78px 88px;
+  align-items: center;
+  gap: 9px;
+  padding: 9px;
+  background: var(--surface-muted);
+}
+
+.aftersales-case-dialog__items > label > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.aftersales-case-dialog__items strong,
+.aftersales-case-dialog__items small {
+  color: var(--navy-700);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.aftersales-case-dialog__items > label > small {
+  color: var(--navy-500);
+  text-align: right;
 }
 
 .shipment-group-adjustment-dialog header h2 {

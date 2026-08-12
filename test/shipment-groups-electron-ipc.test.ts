@@ -196,6 +196,43 @@ describe('发货组 Electron IPC', () => {
     expect(correctShipmentPackageLogistics).toHaveBeenCalledWith(correctionInput);
     expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(statusInput);
   });
+
+  it('通过受控通道建立、更新并查询售后处理单', async () => {
+    const created = { id: 'aftersales-1', status: 'processing', revision: 1 };
+    const updated = { id: 'aftersales-1', status: 'waiting_return', revision: 2 };
+    const createAftersalesCase = vi.fn().mockReturnValue(created);
+    const updateAftersalesCase = vi.fn().mockReturnValue(updated);
+    const queryAftersalesCases = vi.fn().mockReturnValue([updated]);
+    registerIpcHandlers({
+      createAftersalesCase,
+      updateAftersalesCase,
+      queryAftersalesCases,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const createInput = {
+      shipmentRecordId: 'shipment-record-1',
+      occurredAt: '2026-08-13T10:00:00+08:00',
+      reason: '商品破损',
+      items: [{ shipmentPackageItemId: 'shipment-item-1', quantity: 1 }],
+    };
+    const updateInput = {
+      caseId: 'aftersales-1',
+      expectedRevision: 1,
+      status: 'waiting_return',
+      reason: '等待买家退回',
+      items: [{ shipmentPackageItemId: 'shipment-item-1', quantity: 1 }],
+      changeReason: '与买家确认退回处理',
+    };
+    const query = { status: 'waiting_return' };
+
+    await expect(invoke('aftersales-cases:create', createInput)).resolves.toEqual(created);
+    await expect(invoke('aftersales-cases:update', updateInput)).resolves.toEqual(updated);
+    await expect(invoke('aftersales-cases:query', query)).resolves.toEqual([updated]);
+    expect(createAftersalesCase).toHaveBeenCalledWith(createInput);
+    expect(updateAftersalesCase).toHaveBeenCalledWith(updateInput);
+    expect(queryAftersalesCases).toHaveBeenCalledWith(query);
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {

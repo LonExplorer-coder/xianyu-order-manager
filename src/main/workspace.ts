@@ -170,6 +170,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 21) migrateToVersion21(database);
   if (row.version < 22) migrateToVersion22(database);
   if (row.version < 23) migrateToVersion23(database);
+  if (row.version < 24) migrateToVersion24(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2483,6 +2484,88 @@ function migrateToVersion23(database: DatabaseSync): void {
     `);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (23, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function migrateToVersion24(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS aftersales_cases (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN (
+          'processing', 'waiting_return', 'waiting_inspection', 'waiting_refund',
+          'waiting_replacement', 'partially_completed', 'completed'
+        )),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS aftersales_cases_by_record_and_status
+      ON aftersales_cases (shipment_record_id, status, occurred_at, id);
+
+      CREATE TABLE IF NOT EXISTS aftersales_case_items (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        shipment_package_item_id TEXT NOT NULL
+          REFERENCES shipment_package_items(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        UNIQUE (case_id, shipment_package_item_id)
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS aftersales_case_items_by_shipment_item
+      ON aftersales_case_items (shipment_package_item_id, case_id);
+
+      CREATE TABLE IF NOT EXISTS aftersales_case_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('created', 'updated')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        before_snapshot_json TEXT CHECK (
+          before_snapshot_json IS NULL OR json_valid(before_snapshot_json)
+        ),
+        after_snapshot_json TEXT NOT NULL CHECK (json_valid(after_snapshot_json)),
+        change_reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (case_id, result_revision),
+        CHECK (
+          (kind = 'created' AND base_revision = 0 AND before_snapshot_json IS NULL)
+          OR (kind = 'updated' AND base_revision >= 1 AND before_snapshot_json IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_case_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_case_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_case_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_case_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case events are immutable');
+      END;
+    `);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (24, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

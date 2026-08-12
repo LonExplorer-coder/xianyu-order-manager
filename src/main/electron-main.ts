@@ -229,6 +229,15 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     'shipment-records:update-package-logistics-status',
     (_event, input: unknown) => desktopSession.updateShipmentPackageLogisticsStatus(input),
   );
+  ipcMain.handle('aftersales-cases:query', (_event, input: unknown) => (
+    desktopSession.queryAftersalesCases(input)
+  ));
+  ipcMain.handle('aftersales-cases:create', (_event, input: unknown) => (
+    desktopSession.createAftersalesCase(input)
+  ));
+  ipcMain.handle('aftersales-cases:update', (_event, input: unknown) => (
+    desktopSession.updateAftersalesCase(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

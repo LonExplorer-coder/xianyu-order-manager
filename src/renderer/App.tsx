@@ -82,6 +82,7 @@ import type {
   ShipmentLogisticsStatus,
   ShipmentRecord,
 } from '../core/shipment-records';
+import type { AftersalesCase, AftersalesStatus } from '../core/aftersales-cases';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -155,6 +156,7 @@ export function App({ api }: AppProps) {
   const [shipmentGroupProjection, setShipmentGroupProjection] =
     useState<ShipmentGroupProjection | null>(null);
   const [shipmentGroupArchives, setShipmentGroupArchives] = useState<ShipmentGroupArchive[]>([]);
+  const [aftersalesCases, setAftersalesCases] = useState<AftersalesCase[]>([]);
   const [shipmentGroupLoading, setShipmentGroupLoading] = useState(false);
   const [shipmentGroupError, setShipmentGroupError] = useState('');
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
@@ -239,6 +241,7 @@ export function App({ api }: AppProps) {
     setOrderItemWorkbench(null);
     setShipmentGroupProjection(null);
     setShipmentGroupArchives([]);
+    setAftersalesCases([]);
     setShipmentGroupLoading(false);
     setShipmentGroupError('');
     setOrderQueryRefreshToken(0);
@@ -427,11 +430,16 @@ export function App({ api }: AppProps) {
     const requestVersion = ++shipmentGroupRequestVersion.current;
     setShipmentGroupLoading(true);
     setShipmentGroupError('');
-    void Promise.all([api.queryShipmentGroups(), api.queryShipmentGroupArchives()])
-      .then(([projection, archives]) => {
+    void Promise.all([
+      api.queryShipmentGroups(),
+      api.queryShipmentGroupArchives(),
+      api.queryAftersalesCases(),
+    ])
+      .then(([projection, archives, cases]) => {
         if (!active || requestVersion !== shipmentGroupRequestVersion.current) return;
         setShipmentGroupProjection(projection);
         setShipmentGroupArchives(archives);
+        setAftersalesCases(cases);
       })
       .catch((error: unknown) => {
         if (active && requestVersion === shipmentGroupRequestVersion.current) {
@@ -1145,11 +1153,13 @@ export function App({ api }: AppProps) {
         api={api}
         projection={shipmentGroupProjection}
         archives={shipmentGroupArchives}
+        aftersalesCases={aftersalesCases}
         loading={shipmentGroupLoading}
         openingOrder={busyAction === 'detail'}
         error={shipmentGroupError}
         onProjectionChange={setShipmentGroupProjection}
         onArchivesChange={setShipmentGroupArchives}
+        onAftersalesCasesChange={setAftersalesCases}
         onOpenOrder={(orderId) => void openOrder(orderId)}
       />
     );
@@ -1476,21 +1486,25 @@ function ShipmentGroupsWorkspace({
   api,
   projection,
   archives,
+  aftersalesCases,
   loading,
   openingOrder,
   error,
   onProjectionChange,
   onArchivesChange,
+  onAftersalesCasesChange,
   onOpenOrder,
 }: {
   api: DesktopApi;
   projection: ShipmentGroupProjection | null;
   archives: ShipmentGroupArchive[];
+  aftersalesCases: AftersalesCase[];
   loading: boolean;
   openingOrder: boolean;
   error: string;
   onProjectionChange: (projection: ShipmentGroupProjection) => void;
   onArchivesChange: (archives: ShipmentGroupArchive[]) => void;
+  onAftersalesCasesChange: (cases: AftersalesCase[]) => void;
   onOpenOrder: (orderId: string) => void;
 }) {
   const [activeView, setActiveView] = useState<
@@ -1522,6 +1536,11 @@ function ShipmentGroupsWorkspace({
     record: ShipmentRecord;
     shipmentPackage: ShipmentRecord['packages'][number];
     packageIndex: number;
+  } | null>(null);
+  const [aftersalesCreateTarget, setAftersalesCreateTarget] = useState<ShipmentRecord | null>(null);
+  const [aftersalesUpdateTarget, setAftersalesUpdateTarget] = useState<{
+    record: ShipmentRecord;
+    aftersalesCase: AftersalesCase;
   } | null>(null);
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
@@ -1806,6 +1825,7 @@ function ShipmentGroupsWorkspace({
           label="部分发货组"
           emptyMessage="没有部分发货的发货组"
           archives={partiallyShippedArchives}
+          aftersalesCases={aftersalesCases}
           onContinueShipment={(archiveId, group, recipientDifferences) => {
             setConfirmationTarget({ archiveId, group, recipientDifferences });
           }}
@@ -1818,6 +1838,10 @@ function ShipmentGroupsWorkspace({
           }}
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
+          }}
+          onCreateAftersales={setAftersalesCreateTarget}
+          onUpdateAftersales={(record, aftersalesCase) => {
+            setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
         />
       )}
@@ -1827,6 +1851,7 @@ function ShipmentGroupsWorkspace({
           label="已全部发货的发货组"
           emptyMessage="尚无已全部发货的发货组档案"
           archives={fullyShippedArchives}
+          aftersalesCases={aftersalesCases}
           onContinueShipment={(archiveId, group, recipientDifferences) => {
             setConfirmationTarget({ archiveId, group, recipientDifferences });
           }}
@@ -1839,6 +1864,10 @@ function ShipmentGroupsWorkspace({
           }}
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
+          }}
+          onCreateAftersales={setAftersalesCreateTarget}
+          onUpdateAftersales={(record, aftersalesCase) => {
+            setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
         />
       )}
@@ -1894,6 +1923,36 @@ function ShipmentGroupsWorkspace({
             setLogisticsStatusTarget(null);
           }}
           onClose={() => setLogisticsStatusTarget(null)}
+        />
+      )}
+
+      {aftersalesCreateTarget && (
+        <CreateAftersalesCaseDialog
+          api={api}
+          record={aftersalesCreateTarget}
+          existingCases={aftersalesCases}
+          onApplied={(created) => {
+            onAftersalesCasesChange([created, ...aftersalesCases]);
+            setAftersalesCreateTarget(null);
+          }}
+          onClose={() => setAftersalesCreateTarget(null)}
+        />
+      )}
+
+      {aftersalesUpdateTarget && (
+        <UpdateAftersalesCaseDialog
+          api={api}
+          record={aftersalesUpdateTarget.record}
+          aftersalesCase={aftersalesUpdateTarget.aftersalesCase}
+          existingCases={aftersalesCases}
+          onApplied={(updated) => {
+            onAftersalesCasesChange([
+              updated,
+              ...aftersalesCases.filter(({ id }) => id !== updated.id),
+            ]);
+            setAftersalesUpdateTarget(null);
+          }}
+          onClose={() => setAftersalesUpdateTarget(null)}
         />
       )}
 
@@ -2173,15 +2232,19 @@ function ShipmentArchiveSection({
   label,
   emptyMessage,
   archives,
+  aftersalesCases,
   onContinueShipment,
   onOpenOrder,
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onCreateAftersales,
+  onUpdateAftersales,
 }: {
   label: string;
   emptyMessage: string;
   archives: ShipmentGroupArchive[];
+  aftersalesCases: AftersalesCase[];
   onContinueShipment: (
     archiveId: string,
     group: OpenShipmentGroup,
@@ -2203,6 +2266,8 @@ function ShipmentArchiveSection({
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
   ) => void;
+  onCreateAftersales: (record: ShipmentRecord) => void;
+  onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
 }) {
   const [logisticsFilter, setLogisticsFilter] = useState<'all' | ShipmentLogisticsStatus>('all');
   const visibleArchives = logisticsFilter === 'all'
@@ -2340,15 +2405,25 @@ function ShipmentArchiveSection({
                     <span>查看 {archive.records.length} 条发货记录</span>
                     <span className="shipment-archive-card__record-overview">
                       <span><strong>物流：</strong>{shipmentRecordsLogisticsSummary(archive.records)}</span>
-                      <span><strong>当前待办：</strong>{shipmentRecordsCurrentAction(archive.records)}</span>
+                      <span><strong>售后：</strong>{shipmentRecordsAftersalesSummary(
+                        archive.records,
+                        aftersalesCases,
+                      )}</span>
+                      <span><strong>当前待办：</strong>{shipmentRecordsCurrentAction(
+                        archive.records,
+                        aftersalesCases,
+                      )}</span>
                     </span>
                   </summary>
                   <ShipmentRecordsSection
                     embedded
                     records={archive.records}
+                    aftersalesCases={aftersalesCases}
                     onCancelPackage={onCancelPackage}
                     onCorrectLogistics={onCorrectLogistics}
                     onUpdateLogisticsStatus={onUpdateLogisticsStatus}
+                    onCreateAftersales={onCreateAftersales}
+                    onUpdateAftersales={onUpdateAftersales}
                   />
                 </details>
               </article>
@@ -2362,12 +2437,16 @@ function ShipmentArchiveSection({
 
 function ShipmentRecordsSection({
   records,
+  aftersalesCases,
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onCreateAftersales,
+  onUpdateAftersales,
   embedded = false,
 }: {
   records: ShipmentRecord[];
+  aftersalesCases: AftersalesCase[];
   onCancelPackage: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
@@ -2383,13 +2462,19 @@ function ShipmentRecordsSection({
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
   ) => void;
+  onCreateAftersales: (record: ShipmentRecord) => void;
+  onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
   embedded?: boolean;
 }) {
   const content = records.length === 0 ? (
     <div className="shipment-records-empty">尚无发货记录</div>
   ) : (
     <div className="shipment-records-list">
-      {records.map((record) => (
+      {records.map((record) => {
+        const recordAftersalesCases = aftersalesCases.filter(
+          ({ shipmentRecordId }) => shipmentRecordId === record.id,
+        );
+        return (
         <article key={record.id} className="shipment-record-card">
           <header>
             <div>
@@ -2400,9 +2485,26 @@ function ShipmentRecordsSection({
           </header>
           <div className="shipment-record-card__status-summary">
             <span><strong>物流：</strong>{shipmentRecordLogisticsSummary(record)}</span>
-            <span><strong>售后：</strong>无售后</span>
-            <span><strong>当前待办：</strong>{shipmentRecordCurrentAction(record)}</span>
+            <span><strong>售后：</strong>{shipmentRecordAftersalesSummary(
+              record,
+              aftersalesCases,
+            )}</span>
+            <span><strong>当前待办：</strong>{shipmentRecordCurrentAction(
+              record,
+              aftersalesCases,
+            )}</span>
           </div>
+          {record.status === 'active' && (
+            <div className="shipment-record-card__aftersales-actions">
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={() => onCreateAftersales(record)}
+              >
+                建立售后处理单
+              </button>
+            </div>
+          )}
           {record.sourceDifferences.length > 0 && (
             <details className="shipment-record-card__differences" open>
               <summary>来源订单已有 {record.sourceDifferences.length} 项变化</summary>
@@ -2488,8 +2590,56 @@ function ShipmentRecordsSection({
               </section>
             ))}
           </div>
+          {recordAftersalesCases.length > 0 && (
+            <div className="shipment-record-card__aftersales" aria-label="售后处理单">
+              {recordAftersalesCases.map((aftersalesCase) => (
+                <section key={aftersalesCase.id}>
+                  <header>
+                    <strong>{aftersalesStatusLabel(aftersalesCase.status)}</strong>
+                    <span>{formatDateTime(aftersalesCase.occurredAt)}</span>
+                  </header>
+                  <p>{aftersalesCase.reason}</p>
+                  <ul>
+                    {aftersalesCase.items.map((item) => (
+                      <li key={item.id}>
+                        <span>{item.orderNumber} · {item.sourceTitle}
+                          {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                        <strong>× {item.quantity}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                  {aftersalesCase.status === 'completed' ? (
+                    <small>后续独立问题请另行建立售后处理单</small>
+                  ) : (
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      onClick={() => onUpdateAftersales(record, aftersalesCase)}
+                    >
+                      更新售后处理
+                    </button>
+                  )}
+                  <details className="shipment-record-card__timeline">
+                    <summary>售后处理时间线</summary>
+                    <ol>
+                      {aftersalesCase.timeline.map((event) => (
+                        <li key={`${event.kind}-${event.resultRevision}`}>
+                          <strong>{event.kind === 'created'
+                            ? `建立售后处理单 · ${aftersalesStatusLabel(event.status)}`
+                            : `${aftersalesStatusLabel(event.before.status)} → ${aftersalesStatusLabel(event.after.status)}`}</strong>
+                          <span>{event.kind === 'created' ? event.reason : event.changeReason}</span>
+                          <small>{formatDateTime(event.createdAt)}</small>
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                </section>
+              ))}
+            </div>
+          )}
         </article>
-      ))}
+        );
+      })}
     </div>
   );
   if (embedded) {
@@ -2511,6 +2661,364 @@ function ShipmentRecordsSection({
       {content}
     </section>
   );
+}
+
+function CreateAftersalesCaseDialog({
+  api,
+  record,
+  existingCases,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  record: ShipmentRecord;
+  existingCases: AftersalesCase[];
+  onApplied: (created: AftersalesCase) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const sourceItems = activeShipmentRecordItems(record);
+  const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
+  const [reason, setReason] = useState('');
+  const [quantities, setQuantities] = useState<Record<string, number>>(
+    Object.fromEntries(sourceItems.map(({ id }) => [id, 0])),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const selectedItems = sourceItems.flatMap((item) => {
+    const quantity = quantities[item.id] ?? 0;
+    return quantity > 0 ? [{ shipmentPackageItemId: item.id, quantity }] : [];
+  });
+  const canSubmit = Boolean(
+    reason.trim() &&
+    occurredAt &&
+    selectedItems.length > 0,
+  );
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    setError('');
+    try {
+      const localOccurredAt = occurredAt.length === 16 ? `${occurredAt}:00` : occurredAt;
+      const normalizedOccurredAt = normalizeShanghaiDateTime(localOccurredAt.replace('T', ' '));
+      if (!normalizedOccurredAt) throw new Error('请填写有效的售后发生时间');
+      const created = await api.createAftersalesCase({
+        shipmentRecordId: record.id,
+        occurredAt: normalizedOccurredAt,
+        reason,
+        items: selectedItems,
+      });
+      onApplied(created);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog aftersales-case-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 商品与数量</span>
+          <h2 id={headingId}>建立售后处理单</h2>
+          <p id={descriptionId}>只选择本次问题涉及的商品和数量；不会改写原发货记录或物流状态。</p>
+        </header>
+        <label>
+          <span>售后发生时间</span>
+          <input
+            type="datetime-local"
+            step={1}
+            aria-label="售后发生时间"
+            value={occurredAt}
+            disabled={saving}
+            onChange={(event) => setOccurredAt(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>问题原因</span>
+          <textarea
+            aria-label="问题原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        <fieldset>
+          <legend>涉及商品与数量</legend>
+          <div className="aftersales-case-dialog__items">
+            {sourceItems.map((item) => {
+              const available = availableAftersalesQuantity(
+                item.id,
+                item.quantity,
+                existingCases,
+              );
+              return (
+                <label key={item.id}>
+                  <span>
+                    <strong>{item.sourceTitle}</strong>
+                    <small>{item.orderNumber}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</small>
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={available}
+                    step={1}
+                    aria-label={`${item.orderNumber} ${item.sourceTitle} 售后数量`}
+                    value={quantities[item.id] ?? 0}
+                    disabled={saving || available === 0}
+                    onChange={(event) => setQuantities((current) => ({
+                      ...current,
+                      [item.id]: Math.min(
+                        available,
+                        Math.max(0, Number.parseInt(event.target.value, 10) || 0),
+                      ),
+                    }))}
+                  />
+                  <small>最多可处理 {available}</small>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving ? '正在建立…' : '确认建立'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function UpdateAftersalesCaseDialog({
+  api,
+  record,
+  aftersalesCase,
+  existingCases,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  record: ShipmentRecord;
+  aftersalesCase: AftersalesCase;
+  existingCases: AftersalesCase[];
+  onApplied: (updated: AftersalesCase) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const sourceItems = activeShipmentRecordItems(record);
+  const [status, setStatus] = useState<AftersalesStatus>(aftersalesCase.status);
+  const [reason, setReason] = useState(aftersalesCase.reason);
+  const [changeReason, setChangeReason] = useState('');
+  const [quantities, setQuantities] = useState<Record<string, number>>(
+    Object.fromEntries(sourceItems.map((item) => [
+      item.id,
+      aftersalesCase.items.find(({ shipmentPackageItemId }) => (
+        shipmentPackageItemId === item.id
+      ))?.quantity ?? 0,
+    ])),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const selectedItems = sourceItems.flatMap((item) => {
+    const quantity = quantities[item.id] ?? 0;
+    return quantity > 0 ? [{ shipmentPackageItemId: item.id, quantity }] : [];
+  });
+  const canSubmit = Boolean(reason.trim() && changeReason.trim() && selectedItems.length > 0);
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await api.updateAftersalesCase({
+        caseId: aftersalesCase.id,
+        expectedRevision: aftersalesCase.revision,
+        status,
+        reason,
+        items: selectedItems,
+        changeReason,
+      });
+      onApplied(updated);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog aftersales-case-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">售后处理单 · 第 {aftersalesCase.revision} 版</span>
+          <h2 id={headingId}>更新售后处理</h2>
+          <p id={descriptionId}>状态、问题原因与商品数量的变化会作为新事件保留。</p>
+        </header>
+        <label>
+          <span>售后状态</span>
+          <select
+            aria-label="售后状态"
+            value={status}
+            disabled={saving}
+            onChange={(event) => setStatus(event.target.value as AftersalesStatus)}
+          >
+            {AFTERSALES_STATUS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>问题原因</span>
+          <textarea
+            aria-label="问题原因"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        <fieldset>
+          <legend>涉及商品与数量</legend>
+          <div className="aftersales-case-dialog__items">
+            {sourceItems.map((item) => {
+              const available = status === 'completed'
+                ? item.quantity
+                : availableAftersalesQuantity(
+                  item.id,
+                  item.quantity,
+                  existingCases,
+                  aftersalesCase.id,
+                );
+              return (
+                <label key={item.id}>
+                  <span>
+                    <strong>{item.sourceTitle}</strong>
+                    <small>{item.orderNumber}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</small>
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={available}
+                    step={1}
+                    aria-label={`${item.orderNumber} ${item.sourceTitle} 售后数量`}
+                    value={quantities[item.id] ?? 0}
+                    disabled={saving}
+                    onChange={(event) => setQuantities((current) => ({
+                      ...current,
+                      [item.id]: Math.min(
+                        available,
+                        Math.max(0, Number.parseInt(event.target.value, 10) || 0),
+                      ),
+                    }))}
+                  />
+                  <small>最多可处理 {available}</small>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        <label>
+          <span>本次变更原因</span>
+          <textarea
+            aria-label="本次变更原因"
+            value={changeReason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setChangeReason(event.target.value)}
+          />
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving ? '正在更新…' : '确认更新'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function activeShipmentRecordItems(record: ShipmentRecord): ShipmentRecord['packages'][number]['items'] {
+  return record.packages
+    .filter(({ status }) => status === 'active')
+    .flatMap(({ items }) => items);
+}
+
+function availableAftersalesQuantity(
+  shipmentPackageItemId: string,
+  sourceQuantity: number,
+  cases: readonly AftersalesCase[],
+  excludedCaseId?: string,
+): number {
+  const allocated = cases
+    .filter((aftersalesCase) => (
+      aftersalesCase.id !== excludedCaseId && aftersalesCase.status !== 'completed'
+    ))
+    .flatMap(({ items }) => items)
+    .filter((item) => item.shipmentPackageItemId === shipmentPackageItemId)
+    .reduce((total, item) => total + item.quantity, 0);
+  return Math.max(sourceQuantity - allocated, 0);
+}
+
+function currentShanghaiDateTimeLocal(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1_000).toISOString().slice(0, 19);
 }
 
 function shipmentSourceDifferenceFieldLabel(field: string): string {
@@ -2547,6 +3055,23 @@ const SHIPMENT_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
   { value: 'exception', label: '其他物流异常' },
 ];
 
+const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
+  value: AftersalesStatus;
+  label: string;
+}> = [
+  { value: 'processing', label: '处理中' },
+  { value: 'waiting_return', label: '等待退回' },
+  { value: 'waiting_inspection', label: '等待检查' },
+  { value: 'waiting_refund', label: '等待退款' },
+  { value: 'waiting_replacement', label: '等待补发' },
+  { value: 'partially_completed', label: '部分完成' },
+  { value: 'completed', label: '已完成' },
+];
+
+function aftersalesStatusLabel(status: AftersalesStatus): string {
+  return AFTERSALES_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
+}
+
 function shipmentLogisticsStatusLabel(status: ShipmentLogisticsStatus): string {
   return SHIPMENT_LOGISTICS_STATUS_OPTIONS.find(({ value }) => value === status)?.label ?? status;
 }
@@ -2575,7 +3100,45 @@ function shipmentRecordLogisticsSummary(record: ShipmentRecord): string {
   return shipmentRecordsLogisticsSummary([record]);
 }
 
-function shipmentRecordsCurrentAction(records: readonly ShipmentRecord[]): string {
+function shipmentRecordsAftersalesSummary(
+  records: readonly ShipmentRecord[],
+  cases: readonly AftersalesCase[],
+): string {
+  const recordIds = new Set(records.map(({ id }) => id));
+  const matching = cases.filter(({ shipmentRecordId }) => recordIds.has(shipmentRecordId));
+  if (matching.length === 0) return '无售后';
+  const counts = matching.reduce((summary, aftersalesCase) => {
+    summary.set(aftersalesCase.status, (summary.get(aftersalesCase.status) ?? 0) + 1);
+    return summary;
+  }, new Map<AftersalesStatus, number>());
+  return [...counts].map(([status, count]) => (
+    `${aftersalesStatusLabel(status)} ${count}`
+  )).join('、');
+}
+
+function shipmentRecordAftersalesSummary(
+  record: ShipmentRecord,
+  cases: readonly AftersalesCase[],
+): string {
+  return shipmentRecordsAftersalesSummary([record], cases);
+}
+
+function shipmentRecordsCurrentAction(
+  records: readonly ShipmentRecord[],
+  cases: readonly AftersalesCase[],
+): string {
+  const recordIds = new Set(records.map(({ id }) => id));
+  const activeAftersalesStatuses = new Set(cases
+    .filter((aftersalesCase) => (
+      recordIds.has(aftersalesCase.shipmentRecordId) && aftersalesCase.status !== 'completed'
+    ))
+    .map(({ status }) => status));
+  if (activeAftersalesStatuses.has('waiting_inspection')) return '检查退回商品';
+  if (activeAftersalesStatuses.has('waiting_refund')) return '确认退款';
+  if (activeAftersalesStatuses.has('waiting_replacement')) return '安排补发';
+  if (activeAftersalesStatuses.has('waiting_return')) return '等待买家退回';
+  if (activeAftersalesStatuses.has('partially_completed')) return '继续处理未完成售后';
+  if (activeAftersalesStatuses.has('processing')) return '处理售后问题';
   const statuses = new Set(activeShipmentLogisticsStatuses(records));
   if (statuses.size === 0 || [...statuses].every((status) => status === 'delivered')) {
     return '无需物流操作';
@@ -2588,8 +3151,11 @@ function shipmentRecordsCurrentAction(records: readonly ShipmentRecord[]): strin
   return '跟进运输进度';
 }
 
-function shipmentRecordCurrentAction(record: ShipmentRecord): string {
-  return shipmentRecordsCurrentAction([record]);
+function shipmentRecordCurrentAction(
+  record: ShipmentRecord,
+  cases: readonly AftersalesCase[],
+): string {
+  return shipmentRecordsCurrentAction([record], cases);
 }
 
 function shipmentPackageLogisticsLabel(logistics: {

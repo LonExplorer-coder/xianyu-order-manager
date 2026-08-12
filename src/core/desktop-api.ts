@@ -64,6 +64,12 @@ import type {
   TableTemplateGranularity,
   UpdateTableTemplateInput,
 } from './table-templates';
+import type {
+  AftersalesCase,
+  AftersalesCaseQuery,
+  CreateAftersalesCaseInput,
+  UpdateAftersalesCaseInput,
+} from './aftersales-cases';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -120,6 +126,9 @@ export interface DesktopApi {
   updateShipmentPackageLogisticsStatus(
     input: UpdateShipmentPackageLogisticsStatusInput,
   ): Promise<ShipmentLogisticsStatusUpdateResult>;
+  queryAftersalesCases(query?: AftersalesCaseQuery): Promise<AftersalesCase[]>;
+  createAftersalesCase(input: CreateAftersalesCaseInput): Promise<AftersalesCase>;
+  updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;

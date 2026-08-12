@@ -733,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -788,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -874,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1014,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1213,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1393,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1530,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1657,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -1766,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1841,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24);
         COMMIT;
       `);
     } finally {
@@ -2362,5 +2362,307 @@ describe('发货记录', () => {
       },
     ]));
     expect(confirmation.record.sourceDifferences).toEqual([]);
+  });
+});
+
+describe('售后处理单', () => {
+  it('从发货记录选择部分商品数量建立可追溯的售后处理单', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-0001',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T10:00:00+08:00',
+      reason: '其中一件商品存在破损',
+      items: [{
+        shipmentPackageItemId: sourceItem.id,
+        quantity: 1,
+      }],
+    });
+
+    expect(created).toMatchObject({
+      shipmentRecordId: shipment.record.id,
+      status: 'processing',
+      revision: 1,
+      reason: '其中一件商品存在破损',
+      occurredAt: '2026-08-13T10:00:00+08:00',
+      items: [{
+        shipmentPackageItemId: sourceItem.id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: 2,
+      }],
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'processing',
+        reason: '其中一件商品存在破损',
+        occurredAt: '2026-08-13T10:00:00+08:00',
+      }],
+    });
+    expect(application.queryAftersalesCases()).toEqual([created]);
+  });
+
+  it('修改状态、原因和商品数量时追加不可变处理时间线且不改写物流', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-0002',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T11:00:00+08:00',
+      reason: '先登记一件商品破损',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+
+    const updated = application.updateAftersalesCase({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      status: 'waiting_return',
+      reason: '核对后两件商品均需退回',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+      changeReason: '与买家确认了实际受影响数量',
+    });
+
+    expect(updated).toMatchObject({
+      id: created.id,
+      status: 'waiting_return',
+      revision: 2,
+      reason: '核对后两件商品均需退回',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+      timeline: [
+        expect.objectContaining({ kind: 'created', resultRevision: 1 }),
+        {
+          kind: 'updated',
+          baseRevision: 1,
+          resultRevision: 2,
+          changeReason: '与买家确认了实际受影响数量',
+          before: {
+            status: 'processing',
+            reason: '先登记一件商品破损',
+            items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+          },
+          after: {
+            status: 'waiting_return',
+            reason: '核对后两件商品均需退回',
+            items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+          },
+          createdAt: expect.any(String),
+        },
+      ],
+    });
+    expect(application.queryAftersalesCases({ status: 'waiting_return' })).toEqual([updated]);
+    expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('in_transit');
+  });
+
+  it('阻止多个未完成售后静默占用超过已发数量并在完成后释放可处理数量', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-0003',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const first = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T12:00:00+08:00',
+      reason: '第一件商品售后处理中',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+
+    expect(() => application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T12:10:00+08:00',
+      reason: '错误登记超过剩余可处理数量',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+    })).toThrow('亚麻收纳袋最多还可登记 1 件售后');
+
+    application.updateAftersalesCase({
+      caseId: first.id,
+      expectedRevision: first.revision,
+      status: 'completed',
+      reason: first.reason,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      changeReason: '本次问题已经处理完成',
+    });
+    expect(application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T12:20:00+08:00',
+      reason: '完成后发生新的独立问题',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
+    })).toMatchObject({ status: 'processing', items: [{ quantity: 2 }] });
+  });
+
+  it('重启后重新读取售后当前值与完整处理时间线', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-aftersales-persistence-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-PERSIST',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T13:00:00+08:00',
+      reason: '重启持久化测试',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    const updated = application.updateAftersalesCase({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      status: 'waiting_inspection',
+      reason: '退回商品已经收到，等待检查',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      changeReason: '确认收到买家退回的商品',
+    });
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      expect(() => database.prepare(`
+        UPDATE aftersales_case_events
+        SET change_reason = '试图篡改历史'
+        WHERE case_id = ? AND result_revision = 2
+      `).run(created.id)).toThrow(/immutable/u);
+      expect(() => database.prepare(`
+        DELETE FROM aftersales_case_events
+        WHERE case_id = ? AND result_revision = 1
+      `).run(created.id)).toThrow(/immutable/u);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryAftersalesCases()).toEqual([updated]);
+  });
+
+  it('已有售后处理证据的包裹不能再按未交寄误操作撤销', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-EVIDENCE',
+        items: shipmentItems,
+      }],
+    });
+    application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T16:00:00+08:00',
+      reason: '买家已提出商品售后',
+      items: [{
+        shipmentPackageItemId: shipment.record.packages[0].items[0].id,
+        quantity: 1,
+      }],
+    });
+
+    expect(() => application.cancelShipmentPackages({
+      recordId: shipment.record.id,
+      packageIds: [shipment.record.packages[0].id],
+      reason: '误以为包裹尚未交寄',
+    })).toThrow('包裹已经产生售后处理证据，不能按未交寄撤销');
+  });
+
+  it('已完成售后不能重新打开，后续独立问题必须新建处理单', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-CLOSED',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-13T17:00:00+08:00',
+      reason: '第一轮独立售后问题',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    const completed = application.updateAftersalesCase({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      status: 'completed',
+      reason: created.reason,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      changeReason: '问题已经处理完成',
+    });
+
+    expect(() => application.updateAftersalesCase({
+      caseId: completed.id,
+      expectedRevision: completed.revision,
+      status: 'processing',
+      reason: '试图重新打开历史问题',
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      changeReason: '买家后来提出另一个问题',
+    })).toThrow('已完成的售后处理单不能重新打开，请为新的独立问题另行建立处理单');
   });
 });

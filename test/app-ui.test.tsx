@@ -28,6 +28,7 @@ import { orderReviewIssueLabel } from '../src/core/order-intake';
 import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches';
 import type { ShipmentGroupProjection } from '../src/core/shipment-groups';
 import type { ShipmentGroupArchive, ShipmentRecord } from '../src/core/shipment-records';
+import type { AftersalesCase } from '../src/core/aftersales-cases';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { App } from '../src/renderer/App';
 
@@ -405,6 +406,9 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     cancelShipmentPackages: vi.fn(),
     correctShipmentPackageLogistics: vi.fn(),
     updateShipmentPackageLogisticsStatus: vi.fn(),
+    queryAftersalesCases: vi.fn().mockResolvedValue([]),
+    createAftersalesCase: vi.fn(),
+    updateAftersalesCase: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
@@ -1248,6 +1252,266 @@ describe('订单管理工作台', () => {
     })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '已全部发货 2' }))
       .toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('在发货记录中按商品和数量展示真实售后概览与处理时间线', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const aftersalesCase: AftersalesCase = {
+      id: 'aftersales-ui-1',
+      shipmentRecordId: record.id,
+      status: 'waiting_return',
+      revision: 2,
+      reason: '买家需要退回破损商品',
+      occurredAt: '2026-08-13T10:00:00+08:00',
+      items: [{
+        id: 'aftersales-item-ui-1',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'processing',
+        reason: '买家反馈商品破损',
+        occurredAt: '2026-08-13T10:00:00+08:00',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        createdAt: '2026-08-13T02:00:00.000Z',
+      }, {
+        kind: 'updated',
+        baseRevision: 1,
+        resultRevision: 2,
+        changeReason: '已与买家确认退回处理',
+        before: {
+          status: 'processing',
+          reason: '买家反馈商品破损',
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        },
+        after: {
+          status: 'waiting_return',
+          reason: '买家需要退回破损商品',
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        },
+        createdAt: '2026-08-13T02:10:00.000Z',
+      }],
+      createdAt: '2026-08-13T02:00:00.000Z',
+      updatedAt: '2026-08-13T02:10:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([aftersalesCase]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+
+    expect(history).toHaveTextContent('售后：等待退回 1');
+    expect(history).toHaveTextContent('当前待办：等待买家退回');
+    expect(history).toHaveTextContent(sourceItem.sourceTitle);
+    expect(history).toHaveTextContent('× 1');
+    expect(history).toHaveTextContent('买家需要退回破损商品');
+    expect(history).toHaveTextContent('已与买家确认退回处理');
+  });
+
+  it('从发货记录选择具体商品数量建立售后处理单', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const created: AftersalesCase = {
+      id: 'aftersales-ui-created',
+      shipmentRecordId: record.id,
+      status: 'processing',
+      revision: 1,
+      reason: '其中一件商品破损',
+      occurredAt: '2026-08-13T14:00:00+08:00',
+      items: [{
+        id: 'aftersales-item-ui-created',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'processing',
+        reason: '其中一件商品破损',
+        occurredAt: '2026-08-13T14:00:00+08:00',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        createdAt: '2026-08-13T06:00:00.000Z',
+      }],
+      createdAt: '2026-08-13T06:00:00.000Z',
+      updatedAt: '2026-08-13T06:00:00.000Z',
+    };
+    const createAftersalesCase = vi.fn().mockResolvedValue(created);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([]),
+      createAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    await user.click(within(history).getByRole('button', { name: '建立售后处理单' }));
+    const dialog = screen.getByRole('dialog', { name: '建立售后处理单' });
+    fireEvent.change(within(dialog).getByLabelText('售后发生时间'), {
+      target: { value: '2026-08-13T14:00:00' },
+    });
+    await user.type(within(dialog).getByRole('textbox', { name: '问题原因' }), '其中一件商品破损');
+    fireEvent.change(within(dialog).getByRole('spinbutton', {
+      name: `${sourceItem.orderNumber} ${sourceItem.sourceTitle} 售后数量`,
+    }), { target: { value: '1' } });
+    const confirmButton = within(dialog).getByRole('button', { name: '确认建立' });
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
+
+    await waitFor(() => {
+      expect(createAftersalesCase).toHaveBeenCalledWith({
+        shipmentRecordId: record.id,
+        occurredAt: '2026-08-13T14:00:00+08:00',
+        reason: '其中一件商品破损',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      });
+    });
+    expect(history).toHaveTextContent('售后：处理中 1');
+    expect(history).toHaveTextContent('其中一件商品破损');
+  });
+
+  it('更新售后状态时保留商品数量并要求填写本次变更原因', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const created: AftersalesCase = {
+      id: 'aftersales-ui-update',
+      shipmentRecordId: record.id,
+      status: 'processing',
+      revision: 1,
+      reason: '商品存在破损',
+      occurredAt: '2026-08-13T15:00:00+08:00',
+      items: [{
+        id: 'aftersales-item-ui-update',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'processing',
+        reason: '商品存在破损',
+        occurredAt: '2026-08-13T15:00:00+08:00',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        createdAt: '2026-08-13T07:00:00.000Z',
+      }],
+      createdAt: '2026-08-13T07:00:00.000Z',
+      updatedAt: '2026-08-13T07:00:00.000Z',
+    };
+    const updated: AftersalesCase = {
+      ...created,
+      status: 'waiting_return',
+      revision: 2,
+      timeline: [...created.timeline, {
+        kind: 'updated',
+        baseRevision: 1,
+        resultRevision: 2,
+        changeReason: '与买家确认寄回商品',
+        before: {
+          status: 'processing',
+          reason: created.reason,
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        },
+        after: {
+          status: 'waiting_return',
+          reason: created.reason,
+          items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        },
+        createdAt: '2026-08-13T07:10:00.000Z',
+      }],
+      updatedAt: '2026-08-13T07:10:00.000Z',
+    };
+    const updateAftersalesCase = vi.fn().mockResolvedValue(updated);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([created]),
+      updateAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    await user.click(within(history).getByRole('button', { name: '更新售后处理' }));
+    const dialog = screen.getByRole('dialog', { name: '更新售后处理' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '售后状态' }), 'waiting_return');
+    const confirmButton = within(dialog).getByRole('button', { name: '确认更新' });
+    expect(confirmButton).toBeDisabled();
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '本次变更原因' }),
+      '与买家确认寄回商品',
+    );
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
+
+    await waitFor(() => expect(updateAftersalesCase).toHaveBeenCalledWith({
+      caseId: created.id,
+      expectedRevision: 1,
+      status: 'waiting_return',
+      reason: created.reason,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      changeReason: '与买家确认寄回商品',
+    }));
+    expect(history).toHaveTextContent('售后：等待退回 1');
+    expect(history).toHaveTextContent('与买家确认寄回商品');
   });
 
   it('发货后原订单变化时在发货记录中显示快照差异提醒', async () => {

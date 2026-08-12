@@ -75,6 +75,7 @@ import type {
   TableTemplateGranularity,
   UpdateTableTemplateInput,
 } from '../core/table-templates';
+import type { AftersalesCase } from '../core/aftersales-cases';
 import {
   LocalApplication,
   type RecognitionBatchItemUpdate,
@@ -425,6 +426,18 @@ export class DesktopSession {
     input: unknown,
   ): ShipmentLogisticsStatusUpdateResult {
     return this.requireApplication().updateShipmentPackageLogisticsStatus(input);
+  }
+
+  public queryAftersalesCases(input?: unknown): AftersalesCase[] {
+    return this.requireApplication().queryAftersalesCases(input);
+  }
+
+  public createAftersalesCase(input: unknown): AftersalesCase {
+    return this.requireApplication().createAftersalesCase(input);
+  }
+
+  public updateAftersalesCase(input: unknown): AftersalesCase {
+    return this.requireApplication().updateAftersalesCase(input);
   }
 
   public exportOrdersToWorkbook(
