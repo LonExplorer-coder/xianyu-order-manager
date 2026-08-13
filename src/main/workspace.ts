@@ -3897,6 +3897,83 @@ function version32SchemaState(database: DatabaseSync): 'absent' | 'complete' | '
   return 'partial';
 }
 
+const VERSION_33_SCHEMA_STATEMENTS = {
+  aftersales_return_exception_decision_events: `
+    CREATE TABLE aftersales_return_exception_decision_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      exception_id TEXT NOT NULL REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
+      return_record_id TEXT NOT NULL REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+      kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+      before_decision TEXT CHECK (
+        before_decision IS NULL OR before_decision IN (
+          'wait_investigation', 'refund_in_advance', 'partial_refund',
+          'reject_refund', 'negotiate'
+        )
+      ),
+      after_decision TEXT NOT NULL CHECK (after_decision IN (
+        'wait_investigation', 'refund_in_advance', 'partial_refund',
+        'reject_refund', 'negotiate'
+      )),
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL,
+      CHECK (
+        (kind = 'selected' AND before_decision IS NULL)
+        OR (kind = 'changed' AND before_decision IS NOT NULL
+          AND before_decision <> after_decision)
+      )
+    ) STRICT
+  `,
+  aftersales_return_exception_decisions_by_case: `
+    CREATE INDEX aftersales_return_exception_decisions_by_case
+    ON aftersales_return_exception_decision_events (case_id, exception_id, sequence)
+  `,
+  aftersales_return_exception_decision_identity_is_valid_on_insert: `
+    CREATE TRIGGER aftersales_return_exception_decision_identity_is_valid_on_insert
+    BEFORE INSERT ON aftersales_return_exception_decision_events
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM logistics_exception_matters AS exceptions
+      WHERE exceptions.id = NEW.exception_id
+        AND exceptions.direction = 'return'
+        AND exceptions.return_record_id = NEW.return_record_id
+        AND EXISTS (
+          SELECT 1
+          FROM aftersales_return_record_items AS case_items
+          WHERE case_items.return_record_id = NEW.return_record_id
+            AND case_items.aftersales_case_id = NEW.case_id
+            AND (
+              json_extract(exceptions.impact_json, '$.scope') = 'package'
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(exceptions.impact_json, '$.items') AS affected_item
+                WHERE json_extract(affected_item.value, '$.sourceItemId') = case_items.id
+              )
+            )
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'return exception decision identity mismatch');
+    END
+  `,
+  aftersales_return_exception_decisions_are_immutable_on_update: `
+    CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_return_exception_decision_events
+    BEGIN
+      SELECT RAISE(ABORT, 'return exception decision events are immutable');
+    END
+  `,
+  aftersales_return_exception_decisions_are_immutable_on_delete: `
+    CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_return_exception_decision_events
+    BEGIN
+      SELECT RAISE(ABORT, 'return exception decision events are immutable');
+    END
+  `,
+} as const;
+
 function migrateToVersion33(database: DatabaseSync): void {
   const schemaState = version33SchemaState(database);
   if (schemaState === 'partial') {
@@ -3905,76 +3982,7 @@ function migrateToVersion33(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE;');
   try {
     if (schemaState === 'absent') {
-      database.exec(`
-        CREATE TABLE aftersales_return_exception_decision_events (
-          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-          id TEXT NOT NULL UNIQUE,
-          case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
-          exception_id TEXT NOT NULL REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
-          return_record_id TEXT NOT NULL REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
-          kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
-          before_decision TEXT CHECK (
-            before_decision IS NULL OR before_decision IN (
-              'wait_investigation', 'refund_in_advance', 'partial_refund',
-              'reject_refund', 'negotiate'
-            )
-          ),
-          after_decision TEXT NOT NULL CHECK (after_decision IN (
-            'wait_investigation', 'refund_in_advance', 'partial_refund',
-            'reject_refund', 'negotiate'
-          )),
-          occurred_at TEXT NOT NULL,
-          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
-          created_at TEXT NOT NULL,
-          CHECK (
-            (kind = 'selected' AND before_decision IS NULL)
-            OR (kind = 'changed' AND before_decision IS NOT NULL
-              AND before_decision <> after_decision)
-          )
-        ) STRICT;
-
-        CREATE INDEX aftersales_return_exception_decisions_by_case
-        ON aftersales_return_exception_decision_events (case_id, exception_id, sequence);
-
-        CREATE TRIGGER aftersales_return_exception_decision_identity_is_valid_on_insert
-        BEFORE INSERT ON aftersales_return_exception_decision_events
-        WHEN NOT EXISTS (
-          SELECT 1
-          FROM logistics_exception_matters AS exceptions
-          WHERE exceptions.id = NEW.exception_id
-            AND exceptions.direction = 'return'
-            AND exceptions.return_record_id = NEW.return_record_id
-            AND EXISTS (
-              SELECT 1
-              FROM aftersales_return_record_items AS case_items
-              WHERE case_items.return_record_id = NEW.return_record_id
-                AND case_items.aftersales_case_id = NEW.case_id
-                AND (
-                  json_extract(exceptions.impact_json, '$.scope') = 'package'
-                  OR EXISTS (
-                    SELECT 1
-                    FROM json_each(exceptions.impact_json, '$.items') AS affected_item
-                    WHERE json_extract(affected_item.value, '$.sourceItemId') = case_items.id
-                  )
-                )
-            )
-        )
-        BEGIN
-          SELECT RAISE(ABORT, 'return exception decision identity mismatch');
-        END;
-
-        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_update
-        BEFORE UPDATE ON aftersales_return_exception_decision_events
-        BEGIN
-          SELECT RAISE(ABORT, 'return exception decision events are immutable');
-        END;
-
-        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_delete
-        BEFORE DELETE ON aftersales_return_exception_decision_events
-        BEGIN
-          SELECT RAISE(ABORT, 'return exception decision events are immutable');
-        END;
-      `);
+      database.exec(Object.values(VERSION_33_SCHEMA_STATEMENTS).join(';\n'));
     }
     assertForeignKeyIntegrity(database);
     database
@@ -4012,77 +4020,23 @@ function version33SchemaState(database: DatabaseSync): 'absent' | 'complete' | '
 }
 
 function hasCompleteVersion33Schema(database: DatabaseSync): boolean {
-  const columns = database.prepare(`
-    PRAGMA table_info(aftersales_return_exception_decision_events)
-  `).all() as Array<{
-    name: string;
-    type: string;
-    notnull: number;
-    pk: number;
-  }>;
-  const expectedColumns = [
-    'sequence', 'id', 'case_id', 'exception_id', 'return_record_id', 'kind',
-    'before_decision', 'after_decision', 'occurred_at', 'reason', 'created_at',
-  ];
-  if (columns.map(({ name }) => name).join(',') !== expectedColumns.join(',')) return false;
-  if (columns[0]?.type !== 'INTEGER' || columns[0]?.pk !== 1) return false;
-  if (columns.slice(1).some(({ type }) => type !== 'TEXT')) return false;
-  if (columns.filter(({ name }) => name !== 'sequence' && name !== 'before_decision')
-    .some(({ notnull }) => notnull !== 1)) return false;
-
-  const foreignKeys = database.prepare(`
-    PRAGMA foreign_key_list(aftersales_return_exception_decision_events)
-  `).all() as Array<{ from: string; table: string; to: string; on_delete: string }>;
-  const expectedForeignKeys = new Set([
-    'case_id:aftersales_cases:id:RESTRICT',
-    'exception_id:logistics_exception_matters:id:RESTRICT',
-    'return_record_id:aftersales_return_records:id:RESTRICT',
-  ]);
-  if (foreignKeys.length !== expectedForeignKeys.size || foreignKeys.some((foreignKey) => (
-    !expectedForeignKeys.has(
-      `${foreignKey.from}:${foreignKey.table}:${foreignKey.to}:${foreignKey.on_delete}`,
-    )
-  ))) return false;
-
-  const indexColumns = database.prepare(`
-    PRAGMA index_info(aftersales_return_exception_decisions_by_case)
-  `).all() as Array<{ name: string }>;
-  if (indexColumns.map(({ name }) => name).join(',') !== 'case_id,exception_id,sequence') {
-    return false;
-  }
   const schemaRows = database.prepare(`
-    SELECT name, lower(sql) AS sql
+    SELECT name, sql
     FROM sqlite_schema
-    WHERE name IN (
-      'aftersales_return_exception_decision_events',
-      'aftersales_return_exception_decision_identity_is_valid_on_insert',
-      'aftersales_return_exception_decisions_are_immutable_on_update',
-      'aftersales_return_exception_decisions_are_immutable_on_delete'
-    )
-  `).all() as Array<{ name: string; sql: string | null }>;
+    WHERE name IN (${Object.keys(VERSION_33_SCHEMA_STATEMENTS).map(() => '?').join(', ')})
+  `).all(...Object.keys(VERSION_33_SCHEMA_STATEMENTS)) as Array<{
+    name: string;
+    sql: string | null;
+  }>;
+  if (schemaRows.length !== Object.keys(VERSION_33_SCHEMA_STATEMENTS).length) return false;
   const sqlByName = new Map(schemaRows.map((row) => [row.name, row.sql ?? '']));
-  const tableSql = sqlByName.get('aftersales_return_exception_decision_events') ?? '';
-  if (!tableSql.includes("kind in ('selected', 'changed')")
-    || !tableSql.includes("'wait_investigation'")
-    || !tableSql.includes('before_decision <> after_decision')
-    || !tableSql.includes('strict')) return false;
-  const identitySql = sqlByName.get(
-    'aftersales_return_exception_decision_identity_is_valid_on_insert',
-  ) ?? '';
-  if (!identitySql.includes('before insert')
-    || !identitySql.includes('json_each(exceptions.impact_json')
-    || !identitySql.includes('case_items.aftersales_case_id = new.case_id')
-    || !identitySql.includes("json_extract(exceptions.impact_json, '$.scope') = 'package'")) {
-    return false;
-  }
-  const updateSql = sqlByName.get(
-    'aftersales_return_exception_decisions_are_immutable_on_update',
-  ) ?? '';
-  const deleteSql = sqlByName.get(
-    'aftersales_return_exception_decisions_are_immutable_on_delete',
-  ) ?? '';
-  return updateSql.includes('before update') && updateSql.includes('raise(abort')
-    && deleteSql.includes('before delete') && deleteSql.includes('raise(abort');
+  return Object.entries(VERSION_33_SCHEMA_STATEMENTS).every(([name, expectedSql]) => (
+    normalizeSchemaSql(sqlByName.get(name) ?? '') === normalizeSchemaSql(expectedSql)
+  ));
+}
+
+function normalizeSchemaSql(sql: string): string {
+  return sql.trim().replace(/;$/u, '').replace(/\s+/gu, ' ').toLowerCase();
 }
 
 function hasCompleteVersion31Schema(database: DatabaseSync): boolean {

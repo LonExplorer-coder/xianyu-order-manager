@@ -2281,6 +2281,12 @@ function assertReceivedQuantitiesOutsideConfirmedLoss(
       );
     }
   }
+  const maximumReceivableQuantity = returnRecord.items.reduce((total, item) => (
+    total + item.quantity - (lostQuantities.get(item.id) ?? 0)
+  ), 0);
+  if (maximumReceivableQuantity === 0) {
+    throw new Error('退货已确认丢失，不能登记实际收到或检查');
+  }
   for (const received of receivedItems) {
     const maximumReceivable = (planned.get(received.returnRecordItemId) ?? 0)
       - (lostQuantities.get(received.returnRecordItemId) ?? 0);

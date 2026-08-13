@@ -426,6 +426,19 @@ describe('发货组 Electron IPC', () => {
       occurredAt: '2026-08-15T10:40:00+08:00',
       reason: '承运方确认退货丢失',
     }) as AftersalesCase;
+    await expect(invoke('aftersales-cases:progress', {
+      kind: 'receive_return',
+      caseId: lost.id,
+      expectedRevision: lost.revision,
+      returnRecordId: registered.returns[0].id,
+      occurredAt: '2026-08-15T10:45:00+08:00',
+      reason: '不应用全部收到零件绕过整包丢失门禁',
+      items: registered.returns[0].items.map((item) => ({
+        returnRecordItemId: item.id,
+        receivedQuantity: 0,
+      })),
+      discrepancies: [],
+    })).rejects.toThrow('退货已确认丢失，不能登记实际收到或检查');
     const decided = await invoke('aftersales-cases:progress', {
       kind: 'decide_return_logistics_exception',
       caseId: lost.id,

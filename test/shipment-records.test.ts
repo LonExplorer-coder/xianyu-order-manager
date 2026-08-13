@@ -3326,6 +3326,19 @@ describe('退货异常跨流程协调', () => {
       occurredAt: '2026-08-14T22:40:00+08:00',
       reason: '错误尝试确认收到已丢失退货',
     })).toThrow('退货已确认丢失，不能登记实际收到或检查');
+    expect(() => application.progressAftersalesCase({
+      kind: 'receive_return',
+      caseId: lost.id,
+      expectedRevision: lost.revision,
+      returnRecordId: returnRecord.id,
+      occurredAt: '2026-08-14T22:41:00+08:00',
+      reason: '不应用全部收到零件绕过整包丢失门禁',
+      items: returnRecord.items.map((item) => ({
+        returnRecordItemId: item.id,
+        receivedQuantity: 0,
+      })),
+      discrepancies: [],
+    })).toThrow('退货已确认丢失，不能登记实际收到或检查');
 
     const waiting = application.progressAftersalesCase({
       kind: 'decide_return_logistics_exception',

@@ -81,6 +81,72 @@ describe('数据库升级', () => {
       .toThrow('检测到不完整的 v33 退货异常协调结构');
   });
 
+  it('拒绝对象齐全但关键约束和不可变触发器失效的伪 v33 结构', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v33-semantic-malformed-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      removeVersion33ExtensionArtifacts(database);
+      database.exec(`
+        CREATE TABLE aftersales_return_exception_decision_events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL,
+          case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+          exception_id TEXT NOT NULL REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
+          return_record_id TEXT NOT NULL REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+          before_decision TEXT CHECK (
+            before_decision IS NULL OR before_decision IN (
+              'wait_investigation', 'refund_in_advance', 'partial_refund',
+              'reject_refund', 'negotiate'
+            )
+          ),
+          after_decision TEXT NOT NULL CHECK (after_decision IN ('wait_investigation')),
+          occurred_at TEXT NOT NULL,
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+          created_at TEXT NOT NULL,
+          CHECK (
+            (kind = 'selected' AND before_decision IS NULL)
+            OR (kind = 'changed' AND before_decision IS NOT NULL
+              AND before_decision <> after_decision)
+          )
+        ) STRICT;
+        CREATE INDEX aftersales_return_exception_decisions_by_case
+        ON aftersales_return_exception_decision_events (case_id, exception_id, sequence);
+        CREATE TRIGGER aftersales_return_exception_decision_identity_is_valid_on_insert
+        BEFORE INSERT ON aftersales_return_exception_decision_events
+        WHEN 0 AND NOT EXISTS (
+          SELECT 1 FROM logistics_exception_matters AS exceptions
+          WHERE exceptions.id = NEW.exception_id
+            AND json_extract(exceptions.impact_json, '$.scope') = 'package'
+            AND EXISTS (
+              SELECT 1 FROM aftersales_return_record_items AS case_items
+              WHERE case_items.aftersales_case_id = NEW.case_id
+                AND EXISTS (
+                  SELECT 1 FROM json_each(exceptions.impact_json, '$.items')
+                )
+            )
+        ) BEGIN
+          SELECT RAISE(ABORT, 'return exception decision identity mismatch');
+        END;
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_update
+        BEFORE UPDATE ON aftersales_return_exception_decision_events WHEN 0 BEGIN
+          SELECT RAISE(ABORT, 'return exception decision events are immutable');
+        END;
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_delete
+        BEFORE DELETE ON aftersales_return_exception_decision_events WHEN 0 BEGIN
+          SELECT RAISE(ABORT, 'return exception decision events are immutable');
+        END;
+      `);
+    } finally {
+      database.close();
+    }
+
+    expect(() => Workspace.open(dataDirectory))
+      .toThrow('检测到不完整的 v33 退货异常协调结构');
+  });
+
   it('将带关联数据的 v1 数据库完整、幂等地升级到 v33 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
