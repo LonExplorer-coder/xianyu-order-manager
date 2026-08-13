@@ -2,96 +2,154 @@ import { describe, expect, it } from 'vitest';
 
 import {
   prepareLogisticsCorrection,
+  prepareLogisticsExceptionOpening,
+  prepareLogisticsExceptionProgress,
   prepareLogisticsStatusChange,
   sameLogisticsExceptionImpact,
+  supportsCarrierClaim,
   type LogisticsStatusChangeFacts,
 } from '../src/core/logistics-exceptions';
 
-function facts(
+function statusFacts(
   overrides: Partial<LogisticsStatusChangeFacts> = {},
 ): LogisticsStatusChangeFacts {
   return {
     direction: 'return',
-    currentStatus: 'in_transit',
-    nextStatus: 'lost',
+    currentStatus: 'awaiting_carrier',
+    nextStatus: 'in_transit',
     carrierAcceptedAt: null,
     physicalReceiptAt: null,
-    carrierAcceptanceConfirmed: false,
-    carrierConfirmedLoss: true,
+    carrierAcceptanceConfirmed: true,
     occurredAt: '2026-08-14T11:00:00+08:00',
     latestOccurredAt: '2026-08-14T10:30:00+08:00',
-    impact: { scope: 'package' },
-    availableItems: [{ sourceItemId: 'return-item-1', quantity: 2 }],
     ...overrides,
   };
 }
 
-describe('共同物流异常规则', () => {
-  it('正向和退货包裹都不能在没有揽收证据时登记丢件', () => {
-    for (const direction of ['outbound', 'return'] as const) {
-      expect(() => prepareLogisticsStatusChange(facts({ direction })))
-        .toThrow('没有承运方揽收证据，不能登记丢件');
-    }
-  });
-
-  it('用同一套规则保护事件时序和已收到的实物事实', () => {
-    expect(() => prepareLogisticsStatusChange(facts({
-      carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+describe('共同物流事实与异常事项规则', () => {
+  it('正常运输状态只描述包裹位置进展并保护证据与时序', () => {
+    expect(prepareLogisticsStatusChange(statusFacts())).toEqual({
+      nextStatus: 'in_transit',
+      carrierAcceptedAt: '2026-08-14T11:00:00+08:00',
+    });
+    expect(() => prepareLogisticsStatusChange(statusFacts({
       occurredAt: '2026-08-14T10:29:59+08:00',
     }))).toThrow('物流事件时间不能早于上一条事件');
-
-    expect(() => prepareLogisticsStatusChange(facts({
-      direction: 'outbound',
-      carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
-      physicalReceiptAt: '2026-08-14T10:40:00+08:00',
-      nextStatus: 'in_transit',
-      carrierConfirmedLoss: false,
-    }))).toThrow('已经收到的包裹不能回退到收件前状态');
-  });
-
-  it('商品级异常只接受包裹内的商品和不超量数量', () => {
-    const shared = facts({
-      carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
-      nextStatus: 'damaged',
-      carrierConfirmedLoss: false,
-    });
-    expect(() => prepareLogisticsStatusChange({
-      ...shared,
-      impact: {
-        scope: 'items',
-        items: [{ sourceItemId: 'return-item-1', quantity: 3 }],
-      },
-    })).toThrow('物流异常商品数量不能超过包裹内数量');
-
-    expect(() => prepareLogisticsStatusChange({
-      ...shared,
-      impact: {
-        scope: 'items',
-        items: [{ sourceItemId: 'other-item', quantity: 1 }],
-      },
-    })).toThrow('物流异常商品不属于当前包裹');
-
-    expect(prepareLogisticsStatusChange({
-      ...shared,
-      impact: {
-        scope: 'items',
-        items: [{ sourceItemId: 'return-item-1', quantity: 1 }],
-      },
-    })).toMatchObject({
-      nextStatus: 'damaged',
-      impact: {
-        scope: 'items',
-        items: [{ sourceItemId: 'return-item-1', quantity: 1 }],
-      },
-    });
-  });
-
-  it('揽收证据一旦建立就不能回退为待承运方接收', () => {
-    expect(() => prepareLogisticsStatusChange(facts({
+    expect(() => prepareLogisticsStatusChange(statusFacts({
       carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
       nextStatus: 'awaiting_carrier',
-      carrierConfirmedLoss: false,
+      carrierAcceptanceConfirmed: false,
     }))).toThrow('已有承运方揽收证据，不能登记为待承运方接收');
+    expect(() => prepareLogisticsStatusChange(statusFacts({
+      currentStatus: 'delivered',
+      nextStatus: 'in_transit',
+      physicalReceiptAt: '2026-08-14T10:40:00+08:00',
+    }))).toThrow('已收到或检查的退货包裹不能回退到收件前的物流状态');
+  });
+
+  it('正向和退货包裹共用异常登记、影响范围与丢件证据约束', () => {
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      evidence: {
+        carrierAcceptedAt: null,
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: true,
+      },
+    })).toThrow('没有承运方揽收证据');
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: true,
+      },
+    })).not.toThrow();
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T11:00:01+08:00',
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: true,
+      },
+    })).toThrow('丢件确认时间不能早于承运方揽收时间');
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'damaged',
+      stage: 'pending_verification',
+      impact: { scope: 'items', items: [{ sourceItemId: 'item-1', quantity: 3 }] },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: false,
+      },
+    })).toThrow('物流异常商品数量不能超过包裹内数量');
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'damaged',
+      stage: 'pending_verification',
+      impact: { scope: 'items', items: [{ sourceItemId: 'item-1', quantity: 1 }] },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: false,
+      },
+    })).not.toThrow();
+  });
+
+  it('异常阶段只允许向前推进，丢件可找回且终态不可再改', () => {
+    const shared = {
+      exceptionType: 'lost' as const,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      latestOccurredAt: '2026-08-14T10:30:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+        physicalReceiptAt: null,
+        carrierConfirmedLoss: true,
+      },
+    };
+    expect(() => prepareLogisticsExceptionProgress({
+      ...shared,
+      currentStage: 'pending_verification',
+      nextStage: 'confirmed',
+    })).not.toThrow();
+    expect(() => prepareLogisticsExceptionProgress({
+      ...shared,
+      currentStage: 'confirmed',
+      nextStage: 'recovered',
+    })).not.toThrow();
+    expect(() => prepareLogisticsExceptionProgress({
+      ...shared,
+      currentStage: 'resolved',
+      nextStage: 'investigating',
+    })).toThrow('物流异常处理阶段不能这样推进');
+    expect(() => prepareLogisticsExceptionProgress({
+      ...shared,
+      exceptionType: 'damaged',
+      currentStage: 'confirmed',
+      nextStage: 'recovered',
+    })).toThrow('只有丢件异常可以登记已找回');
+  });
+
+  it('承运索赔只接受已确认异常事项', () => {
+    expect(supportsCarrierClaim({ exceptionType: 'damaged', stage: 'confirmed' })).toBe(true);
+    expect(supportsCarrierClaim({
+      exceptionType: 'damaged',
+      stage: 'pending_verification',
+    })).toBe(false);
   });
 
   it('正向和退货物流信息更正共用变化与时间约束', () => {
@@ -106,10 +164,6 @@ describe('共同物流异常规则', () => {
       ...shared,
       next: shared.current,
     })).toThrow('物流信息没有变化');
-    expect(() => prepareLogisticsCorrection({
-      ...shared,
-      occurredAt: '2026-08-14T10:29:59+08:00',
-    })).toThrow('物流更正时间不能早于上一条物流事件');
   });
 
   it('按商品标识与数量判断异常影响范围是否相同', () => {

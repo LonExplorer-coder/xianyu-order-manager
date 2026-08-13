@@ -2,11 +2,17 @@ import { randomUUID } from 'node:crypto';
 
 import {
   assertOccurredAtNotBefore,
+  prepareLogisticsExceptionOpening,
+  prepareLogisticsExceptionProgress,
   supportsCarrierClaim,
   type CarrierClaim,
   type LogisticsDirection,
+  type LogisticsAffectedItem,
+  type LogisticsExceptionEvidence,
   type LogisticsExceptionImpact,
-  type LogisticsStatus,
+  type LogisticsExceptionMatter,
+  type LogisticsExceptionStage,
+  type LogisticsExceptionType,
 } from '../core/logistics-exceptions';
 import { Workspace } from './workspace';
 
@@ -20,22 +26,148 @@ export type LogisticsSubject = {
 export class LogisticsExceptionService {
   public constructor(private readonly workspace: Workspace) {}
 
+  public openException(input: {
+    subject: LogisticsSubject;
+    expectedPackageRevision: number;
+    exceptionType: LogisticsExceptionType;
+    stage: LogisticsExceptionStage;
+    impact: LogisticsExceptionImpact;
+    availableItems: readonly LogisticsAffectedItem[];
+    evidence: LogisticsExceptionEvidence;
+    occurredAt: string;
+    reason: string;
+  }): LogisticsExceptionMatter {
+    prepareLogisticsExceptionOpening(input);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.workspace.transaction(() => {
+      const table = input.subject.direction === 'outbound'
+        ? 'shipment_packages'
+        : 'aftersales_return_records';
+      const packageUpdated = this.workspace.database.prepare(`
+        UPDATE ${table}
+        SET revision = revision + 1
+        WHERE id = ? AND revision = ?
+      `).run(input.subject.packageId, input.expectedPackageRevision);
+      if (packageUpdated.changes !== 1) throw new Error('包裹事实已在其他操作中更新');
+      this.workspace.database.prepare(`
+        INSERT INTO logistics_exception_matters (
+          id, direction, shipment_package_id, return_record_id,
+          exception_type, stage, revision, impact_json, reason,
+          occurred_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        input.subject.direction,
+        input.subject.direction === 'outbound' ? input.subject.packageId : null,
+        input.subject.direction === 'return' ? input.subject.packageId : null,
+        input.exceptionType,
+        input.stage,
+        JSON.stringify(input.impact),
+        input.reason,
+        input.occurredAt,
+        now,
+        now,
+      );
+      this.workspace.database.prepare(`
+        INSERT INTO logistics_exception_events (
+          id, exception_id, kind, base_revision, result_revision,
+          before_stage, after_stage, reason, occurred_at, impact_json, created_at
+        ) VALUES (?, ?, 'opened', 0, 1, NULL, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        id,
+        input.stage,
+        input.reason,
+        input.occurredAt,
+        JSON.stringify(input.impact),
+        now,
+      );
+    });
+    return this.requireException(input.subject, id);
+  }
+
+  public progressException(input: {
+    subject: LogisticsSubject;
+    exceptionId: string;
+    expectedExceptionRevision: number;
+    stage: LogisticsExceptionStage;
+    evidence: LogisticsExceptionEvidence;
+    occurredAt: string;
+    reason: string;
+  }): LogisticsExceptionMatter {
+    const current = this.requireException(input.subject, input.exceptionId);
+    if (current.revision !== input.expectedExceptionRevision) {
+      throw new Error('物流异常已在其他操作中更新，请刷新后重试');
+    }
+    prepareLogisticsExceptionProgress({
+      exceptionType: current.exceptionType,
+      currentStage: current.stage,
+      nextStage: input.stage,
+      occurredAt: input.occurredAt,
+      latestOccurredAt: current.timeline.at(-1)?.occurredAt ?? current.occurredAt,
+      evidence: input.evidence,
+    });
+    const now = new Date().toISOString();
+    this.workspace.transaction(() => {
+      const updated = this.workspace.database.prepare(`
+        UPDATE logistics_exception_matters
+        SET stage = ?, revision = revision + 1, reason = ?, updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(
+        input.stage,
+        input.reason,
+        now,
+        current.id,
+        current.revision,
+      );
+      if (updated.changes !== 1) throw new Error('物流异常已在其他操作中更新');
+      this.workspace.database.prepare(`
+        INSERT INTO logistics_exception_events (
+          id, exception_id, kind, base_revision, result_revision,
+          before_stage, after_stage, reason, occurred_at, impact_json, created_at
+        ) VALUES (?, ?, 'stage_changed', ?, ?, ?, ?, ?, ?, NULL, ?)
+      `).run(
+        randomUUID(),
+        current.id,
+        current.revision,
+        current.revision + 1,
+        current.stage,
+        input.stage,
+        input.reason,
+        input.occurredAt,
+        now,
+      );
+    });
+    return this.requireException(input.subject, current.id);
+  }
+
+  public getExceptions(subject: LogisticsSubject): LogisticsExceptionMatter[] {
+    const column = subject.direction === 'outbound' ? 'shipment_package_id' : 'return_record_id';
+    const rows = this.workspace.database.prepare(`
+      SELECT * FROM logistics_exception_matters
+      WHERE direction = ? AND ${column} = ?
+      ORDER BY occurred_at, created_at, id
+    `).all(subject.direction, subject.packageId) as unknown as SqlRow[];
+    return rows.map((row) => this.exceptionFromRow(subject, row));
+  }
+
   public openClaim(input: {
     subject: LogisticsSubject;
-    currentStatus: LogisticsStatus;
+    exception: LogisticsExceptionMatter;
     latestOccurredAt: string;
     impact: LogisticsExceptionImpact;
     requestedAmountCents: number;
     occurredAt: string;
     reason: string;
   }): CarrierClaim {
-    if (!supportsCarrierClaim(input.currentStatus)) {
-      throw new Error('当前物流状态不能建立承运索赔');
+    if (!supportsCarrierClaim(input.exception)) {
+      throw new Error('当前物流异常尚不能建立承运索赔');
     }
     if (this.getClaim(input.subject)) throw new Error('当前包裹已经建立承运索赔');
     assertOccurredAtNotBefore(
       input.occurredAt,
-      input.latestOccurredAt,
+      input.exception.timeline.at(-1)?.occurredAt ?? input.latestOccurredAt,
       '承运索赔时间不能早于物流异常时间',
     );
     const claimId = randomUUID();
@@ -256,6 +388,71 @@ export class LogisticsExceptionService {
     if (!claim) throw new Error('当前包裹尚未建立承运索赔');
     return claim;
   }
+
+  private requireException(
+    subject: LogisticsSubject,
+    exceptionId: string,
+  ): LogisticsExceptionMatter {
+    const column = subject.direction === 'outbound' ? 'shipment_package_id' : 'return_record_id';
+    const row = this.workspace.database.prepare(`
+      SELECT * FROM logistics_exception_matters
+      WHERE id = ? AND direction = ? AND ${column} = ?
+    `).get(exceptionId, subject.direction, subject.packageId) as SqlRow | undefined;
+    if (!row) throw new Error('物流异常事项不存在');
+    return this.exceptionFromRow(subject, row);
+  }
+
+  private exceptionFromRow(
+    subject: LogisticsSubject,
+    row: SqlRow,
+  ): LogisticsExceptionMatter {
+    const id = asString(row.id);
+    const eventRows = this.workspace.database.prepare(`
+      SELECT * FROM logistics_exception_events
+      WHERE exception_id = ?
+      ORDER BY result_revision
+    `).all(id) as unknown as SqlRow[];
+    const timeline = eventRows.map((eventRow): LogisticsExceptionMatter['timeline'][number] => {
+      const kind = asString(eventRow.kind);
+      const occurredAt = asString(eventRow.occurred_at);
+      const createdAt = asString(eventRow.created_at);
+      const resultRevision = asNumber(eventRow.result_revision);
+      if (kind === 'opened') return {
+        kind,
+        resultRevision: 1,
+        stage: asLogisticsExceptionStage(eventRow.after_stage),
+        impact: parseLogisticsImpact(eventRow.impact_json),
+        reason: asString(eventRow.reason),
+        occurredAt,
+        createdAt,
+      };
+      if (kind !== 'stage_changed') throw new Error('数据库物流异常事件错误');
+      return {
+        kind,
+        baseRevision: asNumber(eventRow.base_revision),
+        resultRevision,
+        beforeStage: asLogisticsExceptionStage(eventRow.before_stage),
+        afterStage: asLogisticsExceptionStage(eventRow.after_stage),
+        reason: asString(eventRow.reason),
+        occurredAt,
+        createdAt,
+      };
+    });
+    return {
+      id,
+      direction: subject.direction,
+      packageId: subject.packageId,
+      exceptionType: asLogisticsExceptionType(row.exception_type),
+      stage: asLogisticsExceptionStage(row.stage),
+      revision: asNumber(row.revision),
+      impact: parseLogisticsImpact(row.impact_json),
+      reason: asString(row.reason),
+      occurredAt: asString(row.occurred_at),
+      timeline,
+      createdAt: asString(row.created_at),
+      updatedAt: asString(row.updated_at),
+    };
+  }
 }
 
 function asString(value: unknown): string {
@@ -275,6 +472,28 @@ function asCarrierClaimStatus(value: unknown): CarrierClaim['status'] {
     return value;
   }
   throw new Error('数据库承运索赔状态错误');
+}
+
+function asLogisticsExceptionType(value: unknown): LogisticsExceptionType {
+  if (
+    value === 'lost'
+    || value === 'delivery_dispute'
+    || value === 'damaged'
+    || value === 'misdelivered'
+    || value === 'other'
+  ) return value;
+  throw new Error('数据库物流异常类型错误');
+}
+
+function asLogisticsExceptionStage(value: unknown): LogisticsExceptionStage {
+  if (
+    value === 'pending_verification'
+    || value === 'investigating'
+    || value === 'confirmed'
+    || value === 'recovered'
+    || value === 'resolved'
+  ) return value;
+  throw new Error('数据库物流异常阶段错误');
 }
 
 function parseLogisticsImpact(value: unknown): LogisticsExceptionImpact {

@@ -62,6 +62,12 @@ const api: DesktopApi = {
   updateShipmentPackageLogisticsStatus: (input) => (
     ipcRenderer.invoke('shipment-records:update-package-logistics-status', input)
   ),
+  recordShipmentPackageLogisticsException: (input) => (
+    ipcRenderer.invoke('shipment-records:record-package-logistics-exception', input)
+  ),
+  progressShipmentPackageLogisticsException: (input) => (
+    ipcRenderer.invoke('shipment-records:progress-package-logistics-exception', input)
+  ),
   progressShipmentPackageCarrierClaim: (input) => (
     ipcRenderer.invoke('shipment-records:progress-package-carrier-claim', input)
   ),

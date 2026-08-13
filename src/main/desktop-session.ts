@@ -68,6 +68,7 @@ import type {
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
+  ShipmentLogisticsExceptionResult,
   ShipmentLogisticsStatusUpdateResult,
   ShipmentCarrierClaimProgressResult,
 } from '../core/shipment-records';
@@ -428,6 +429,22 @@ export class DesktopSession {
     input: unknown,
   ): ShipmentLogisticsStatusUpdateResult {
     const result = this.requireApplication().updateShipmentPackageLogisticsStatus(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public recordShipmentPackageLogisticsException(
+    input: unknown,
+  ): ShipmentLogisticsExceptionResult {
+    const result = this.requireApplication().recordShipmentPackageLogisticsException(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public progressShipmentPackageLogisticsException(
+    input: unknown,
+  ): ShipmentLogisticsExceptionResult {
+    const result = this.requireApplication().progressShipmentPackageLogisticsException(input);
     this.refreshOrders();
     return result;
   }

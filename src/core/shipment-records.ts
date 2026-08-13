@@ -3,7 +3,10 @@ import {
   isOutboundLogisticsStatus,
   OUTBOUND_LOGISTICS_STATUSES,
   type CarrierClaim,
+  type LogisticsExceptionMatter,
   type LogisticsExceptionImpact,
+  type LogisticsExceptionStage,
+  type LogisticsExceptionType,
   type OutboundLogisticsStatus,
 } from './logistics-exceptions';
 
@@ -71,6 +74,7 @@ export type ShipmentPackage = {
   items: ShipmentPackageItem[];
   cancellation: ShipmentCancellation | null;
   currentException: ShipmentPackageException | null;
+  logisticsExceptions: LogisticsExceptionMatter[];
   carrierClaim: CarrierClaim | null;
   timeline: ShipmentPackageTimelineEvent[];
   createdAt: string;
@@ -78,13 +82,7 @@ export type ShipmentPackage = {
 
 export type ShipmentLogisticsStatus = OutboundLogisticsStatus;
 
-export type ShipmentPackageException = {
-  direction: 'outbound';
-  logisticsStatus: ShipmentLogisticsStatus;
-  impact: LogisticsExceptionImpact;
-  reason: string;
-  occurredAt: string;
-};
+export type ShipmentPackageException = LogisticsExceptionMatter & { direction: 'outbound' };
 
 export type ShipmentPackageLogistics = {
   shippingCarrier: string;
@@ -109,7 +107,6 @@ export type ShipmentPackageLogisticsStatusChange = {
   beforeStatus: ShipmentLogisticsStatus;
   afterStatus: ShipmentLogisticsStatus;
   carrierAcceptedAt: string | null;
-  impact: LogisticsExceptionImpact;
   reason: string;
   occurredAt: string;
   createdAt: string;
@@ -206,13 +203,36 @@ export type UpdateShipmentPackageLogisticsStatusInput = {
   expectedRevision: number;
   logisticsStatus: ShipmentLogisticsStatus;
   carrierAcceptanceConfirmed?: boolean;
-  carrierConfirmedLoss?: boolean;
   occurredAt: string;
-  impact: LogisticsExceptionImpact;
   reason: string;
 };
 
 export type ShipmentLogisticsStatusUpdateResult = ShipmentConfirmationResult;
+
+export type RecordShipmentPackageLogisticsExceptionInput = {
+  recordId: string;
+  packageId: string;
+  expectedRevision: number;
+  exceptionType: LogisticsExceptionType;
+  stage: Exclude<LogisticsExceptionStage, 'recovered' | 'resolved'>;
+  impact: LogisticsExceptionImpact;
+  carrierConfirmedLoss?: boolean;
+  occurredAt: string;
+  reason: string;
+};
+
+export type ProgressShipmentPackageLogisticsExceptionInput = {
+  recordId: string;
+  packageId: string;
+  exceptionId: string;
+  expectedExceptionRevision: number;
+  stage: Exclude<LogisticsExceptionStage, 'pending_verification'>;
+  carrierConfirmedLoss?: boolean;
+  occurredAt: string;
+  reason: string;
+};
+
+export type ShipmentLogisticsExceptionResult = ShipmentConfirmationResult;
 
 export type ProgressShipmentPackageCarrierClaimInput =
   | {
@@ -346,8 +366,7 @@ export function normalizeUpdateShipmentPackageLogisticsStatusInput(
     record,
     [
       'recordId', 'packageId', 'expectedRevision', 'logisticsStatus',
-      'carrierAcceptanceConfirmed', 'carrierConfirmedLoss', 'occurredAt',
-      'impact', 'reason',
+      'carrierAcceptanceConfirmed', 'occurredAt', 'reason',
     ],
     '更新包裹物流状态参数',
   );
@@ -371,16 +390,7 @@ export function normalizeUpdateShipmentPackageLogisticsStatusInput(
           '承运方揽收确认无效',
         ),
       }),
-    ...(record.carrierConfirmedLoss === undefined
-      ? {}
-      : {
-        carrierConfirmedLoss: booleanValue(
-          record.carrierConfirmedLoss,
-          '承运方丢件确认无效',
-        ),
-      }),
     occurredAt: optionalDateTime(record.occurredAt, '包裹物流状态时间无效'),
-    impact: normalizeLogisticsImpact(record.impact),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的状态更新原因'),
   };
 }
@@ -453,8 +463,70 @@ export function normalizeProgressShipmentPackageCarrierClaimInput(
   };
 }
 
+export function normalizeRecordShipmentPackageLogisticsExceptionInput(
+  input: unknown,
+): RecordShipmentPackageLogisticsExceptionInput {
+  const record = asRecord(input, '登记正向物流异常参数无效');
+  rejectUnknownKeys(record, [
+    'recordId', 'packageId', 'expectedRevision', 'exceptionType', 'stage',
+    'impact', 'carrierConfirmedLoss', 'occurredAt', 'reason',
+  ], '登记正向物流异常参数');
+  if (!isLogisticsExceptionType(record.exceptionType)) throw new Error('物流异常类型无效');
+  if (
+    record.stage !== 'pending_verification'
+    && record.stage !== 'investigating'
+    && record.stage !== 'confirmed'
+  ) throw new Error('物流异常初始阶段无效');
+  return {
+    recordId: boundedText(record.recordId, 200, '发货记录标识无效'),
+    packageId: boundedText(record.packageId, 200, '包裹标识无效'),
+    expectedRevision: positiveRevision(record.expectedRevision),
+    exceptionType: record.exceptionType,
+    stage: record.stage,
+    impact: normalizeLogisticsImpact(record.impact),
+    ...(record.carrierConfirmedLoss === undefined ? {} : {
+      carrierConfirmedLoss: booleanValue(record.carrierConfirmedLoss, '承运方丢件确认无效'),
+    }),
+    occurredAt: dateTime(record.occurredAt, '物流异常时间无效'),
+    reason: boundedText(record.reason, 500, '请填写 1 至 500 字的物流异常说明'),
+  };
+}
+
+export function normalizeProgressShipmentPackageLogisticsExceptionInput(
+  input: unknown,
+): ProgressShipmentPackageLogisticsExceptionInput {
+  const record = asRecord(input, '推进正向物流异常参数无效');
+  rejectUnknownKeys(record, [
+    'recordId', 'packageId', 'exceptionId', 'expectedExceptionRevision',
+    'stage', 'carrierConfirmedLoss', 'occurredAt', 'reason',
+  ], '推进正向物流异常参数');
+  if (
+    record.stage !== 'investigating'
+    && record.stage !== 'confirmed'
+    && record.stage !== 'recovered'
+    && record.stage !== 'resolved'
+  ) throw new Error('物流异常处理阶段无效');
+  return {
+    recordId: boundedText(record.recordId, 200, '发货记录标识无效'),
+    packageId: boundedText(record.packageId, 200, '包裹标识无效'),
+    exceptionId: boundedText(record.exceptionId, 200, '物流异常标识无效'),
+    expectedExceptionRevision: positiveRevision(record.expectedExceptionRevision),
+    stage: record.stage,
+    ...(record.carrierConfirmedLoss === undefined ? {} : {
+      carrierConfirmedLoss: booleanValue(record.carrierConfirmedLoss, '承运方丢件确认无效'),
+    }),
+    occurredAt: dateTime(record.occurredAt, '物流异常时间无效'),
+    reason: boundedText(record.reason, 500, '请填写 1 至 500 字的物流异常处理说明'),
+  };
+}
+
 export function isShipmentLogisticsStatus(value: unknown): value is ShipmentLogisticsStatus {
   return isOutboundLogisticsStatus(value);
+}
+
+function isLogisticsExceptionType(value: unknown): value is LogisticsExceptionType {
+  return value === 'lost' || value === 'delivery_dispute' || value === 'damaged'
+    || value === 'misdelivered' || value === 'other';
 }
 
 function normalizeLogisticsImpact(value: unknown): LogisticsExceptionImpact {

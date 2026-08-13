@@ -8,9 +8,10 @@ import type { Recognizer } from '../src/core/contracts';
 import { createOrderTableProjectionPlan } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
+import { removeVersion31ExtensionArtifacts } from './version31-fixture';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v30 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v31 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -50,6 +51,7 @@ describe('数据库升级', () => {
       { version: 28 },
       { version: 29 },
       { version: 30 },
+      { version: 31 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -504,6 +506,7 @@ describe('数据库升级', () => {
       { version: 28 },
       { version: 29 },
       { version: 30 },
+      { version: 31 },
     ]);
     expect(
       (
@@ -759,6 +762,7 @@ describe('数据库升级', () => {
         { version: 28 },
         { version: 29 },
         { version: 30 },
+        { version: 31 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -957,7 +961,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 30 });
+        .toEqual({ version: 31 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1071,7 +1075,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 30 });
+        .toEqual({ version: 31 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1091,12 +1095,12 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
         { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 },
-        { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 },
+        { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1130,7 +1134,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 30 });
+        .toEqual({ version: 31 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1354,6 +1358,7 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
     const version = database.prepare('SELECT MAX(version) AS version FROM schema_migrations')
       .get() as { version: number };
     if (version.version < 11) return;
+    removeVersion31ExtensionArtifacts(database);
     const triggerRows = database.prepare(`
       SELECT name, sql
       FROM sqlite_master
@@ -1408,7 +1413,7 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1428,6 +1433,7 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
     enableForeignKeyConstraints: true,
   });
   try {
+    removeVersion31ExtensionArtifacts(database);
     database.exec(`
       BEGIN IMMEDIATE;
       ALTER TABLE original_orders DROP COLUMN note;
@@ -1448,7 +1454,7 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
       COMMIT;
     `);
   } finally {
@@ -1461,6 +1467,7 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
     enableForeignKeyConstraints: true,
   });
   try {
+    removeVersion31ExtensionArtifacts(database);
     const columns = database.prepare('PRAGMA table_info(order_drafts)').all() as unknown as Array<{
       name: string;
     }>;
@@ -1485,7 +1492,7 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
       COMMIT;
     `);
   } catch (error) {
@@ -1624,6 +1631,7 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
     enableForeignKeyConstraints: true,
   });
   try {
+    removeVersion31ExtensionArtifacts(database);
     database.exec('PRAGMA foreign_keys = OFF;');
     database.exec('BEGIN IMMEDIATE;');
     try {
@@ -1699,7 +1707,7 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
       `);
       database.exec('COMMIT;');
     } catch (error) {

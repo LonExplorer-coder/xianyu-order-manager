@@ -4,25 +4,13 @@ export type OutboundLogisticsStatus =
   | 'awaiting_carrier'
   | 'in_transit'
   | 'delivered'
-  | 'intercepting'
-  | 'intercepted_returned'
-  | 'lost'
-  | 'delivery_dispute'
-  | 'damaged'
-  | 'misdelivered'
-  | 'exception';
+  | 'returned';
 
 export type ReturnLogisticsStatus =
   | 'awaiting_carrier'
   | 'in_transit'
   | 'delivered'
-  | 'intercepting'
-  | 'returned_to_buyer'
-  | 'lost'
-  | 'delivery_dispute'
-  | 'damaged'
-  | 'misdelivered'
-  | 'exception';
+  | 'returned';
 
 export type LogisticsStatus = OutboundLogisticsStatus | ReturnLogisticsStatus;
 
@@ -34,6 +22,62 @@ export type LogisticsAffectedItem = {
 export type LogisticsExceptionImpact =
   | { scope: 'package' }
   | { scope: 'items'; items: LogisticsAffectedItem[] };
+
+export type LogisticsExceptionType =
+  | 'lost'
+  | 'delivery_dispute'
+  | 'damaged'
+  | 'misdelivered'
+  | 'other';
+
+export type LogisticsExceptionStage =
+  | 'pending_verification'
+  | 'investigating'
+  | 'confirmed'
+  | 'recovered'
+  | 'resolved';
+
+export type LogisticsExceptionEvent =
+  | {
+    kind: 'opened';
+    resultRevision: 1;
+    stage: LogisticsExceptionStage;
+    impact: LogisticsExceptionImpact;
+    reason: string;
+    occurredAt: string;
+    createdAt: string;
+  }
+  | {
+    kind: 'stage_changed';
+    baseRevision: number;
+    resultRevision: number;
+    beforeStage: LogisticsExceptionStage;
+    afterStage: LogisticsExceptionStage;
+    reason: string;
+    occurredAt: string;
+    createdAt: string;
+  };
+
+export type LogisticsExceptionMatter = {
+  id: string;
+  direction: LogisticsDirection;
+  packageId: string;
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+  revision: number;
+  impact: LogisticsExceptionImpact;
+  reason: string;
+  occurredAt: string;
+  timeline: LogisticsExceptionEvent[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LogisticsExceptionEvidence = {
+  carrierAcceptedAt: string | null;
+  physicalReceiptAt: string | null;
+  carrierConfirmedLoss: boolean;
+};
 
 export type CarrierClaimStatus = 'pending' | 'approved' | 'rejected' | 'paid';
 
@@ -93,17 +137,13 @@ export type LogisticsStatusChangeFacts = {
   carrierAcceptedAt: string | null;
   physicalReceiptAt: string | null;
   carrierAcceptanceConfirmed: boolean;
-  carrierConfirmedLoss: boolean;
   occurredAt: string;
   latestOccurredAt: string;
-  impact: LogisticsExceptionImpact;
-  availableItems: readonly LogisticsAffectedItem[];
 };
 
 export type PreparedLogisticsStatusChange = {
   nextStatus: LogisticsStatus;
   carrierAcceptedAt: string | null;
-  impact: LogisticsExceptionImpact;
 };
 
 export type LogisticsInformation = {
@@ -122,45 +162,101 @@ export const OUTBOUND_LOGISTICS_STATUSES = [
   'awaiting_carrier',
   'in_transit',
   'delivered',
-  'intercepting',
-  'intercepted_returned',
-  'lost',
-  'delivery_dispute',
-  'damaged',
-  'misdelivered',
-  'exception',
+  'returned',
 ] as const satisfies readonly OutboundLogisticsStatus[];
 
 export const RETURN_LOGISTICS_STATUSES = [
   'awaiting_carrier',
   'in_transit',
   'delivered',
-  'intercepting',
-  'returned_to_buyer',
-  'lost',
-  'delivery_dispute',
-  'damaged',
-  'misdelivered',
-  'exception',
+  'returned',
 ] as const satisfies readonly ReturnLogisticsStatus[];
 
-const CLAIMABLE_LOGISTICS_STATUSES = new Set<LogisticsStatus>([
+const CLAIMABLE_LOGISTICS_EXCEPTION_TYPES = new Set<LogisticsExceptionType>([
   'lost',
   'delivery_dispute',
   'damaged',
   'misdelivered',
-  'exception',
-  'returned_to_buyer',
+  'other',
 ]);
 
 const BEFORE_RECEIPT_LOGISTICS_STATUSES = new Set<LogisticsStatus>([
   'awaiting_carrier',
   'in_transit',
-  'intercepting',
-  'returned_to_buyer',
-  'lost',
-  'misdelivered',
 ]);
+
+const EXCEPTION_STAGE_TRANSITIONS: Readonly<Record<
+  LogisticsExceptionStage,
+  readonly LogisticsExceptionStage[]
+>> = {
+  pending_verification: ['investigating', 'confirmed', 'resolved'],
+  investigating: ['confirmed', 'resolved'],
+  confirmed: ['recovered', 'resolved'],
+  recovered: ['resolved'],
+  resolved: [],
+};
+
+export function isUnresolvedLogisticsExceptionStage(
+  stage: LogisticsExceptionStage,
+): boolean {
+  return stage !== 'recovered' && stage !== 'resolved';
+}
+
+export function nextLogisticsExceptionStages(
+  type: LogisticsExceptionType,
+  stage: LogisticsExceptionStage,
+): readonly LogisticsExceptionStage[] {
+  return type === 'lost'
+    ? EXCEPTION_STAGE_TRANSITIONS[stage]
+    : EXCEPTION_STAGE_TRANSITIONS[stage].filter((nextStage) => nextStage !== 'recovered');
+}
+
+export function prepareLogisticsExceptionOpening(input: {
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+  impact: LogisticsExceptionImpact;
+  availableItems: readonly LogisticsAffectedItem[];
+  evidence: LogisticsExceptionEvidence;
+  occurredAt: string;
+}): void {
+  if (input.stage === 'recovered' || input.stage === 'resolved') {
+    throw new Error('新物流异常不能从已找回或已解决开始');
+  }
+  assertImpact(input.impact, input.availableItems);
+  assertConfirmedExceptionEvidence(
+    input.exceptionType,
+    input.stage,
+    input.evidence,
+    input.occurredAt,
+  );
+}
+
+export function prepareLogisticsExceptionProgress(input: {
+  exceptionType: LogisticsExceptionType;
+  currentStage: LogisticsExceptionStage;
+  nextStage: LogisticsExceptionStage;
+  occurredAt: string;
+  latestOccurredAt: string;
+  evidence: LogisticsExceptionEvidence;
+}): void {
+  if (!EXCEPTION_STAGE_TRANSITIONS[input.currentStage].includes(input.nextStage)) {
+    throw new Error('物流异常处理阶段不能这样推进');
+  }
+  if (input.nextStage === 'recovered' && input.exceptionType !== 'lost') {
+    throw new Error('只有丢件异常可以登记已找回');
+  }
+  assertOccurredAtNotBefore(
+    input.occurredAt,
+    input.latestOccurredAt,
+    '物流异常时间不能早于上一条异常事件',
+  );
+  assertConfirmedExceptionEvidence(
+    input.exceptionType,
+    input.nextStage,
+    input.evidence,
+    input.occurredAt,
+  );
+}
 
 export function prepareLogisticsStatusChange(
   facts: LogisticsStatusChangeFacts,
@@ -174,21 +270,6 @@ export function prepareLogisticsStatusChange(
   );
   const carrierAcceptedAt = facts.carrierAcceptedAt
     ?? (facts.carrierAcceptanceConfirmed ? facts.occurredAt : null);
-  if (facts.nextStatus === 'lost') {
-    if (facts.physicalReceiptAt !== null) {
-      throw new Error(facts.direction === 'return'
-        ? '已收到或检查的退货包裹不能改为丢件'
-        : '已经收到的包裹不能登记为丢件');
-    }
-    if (carrierAcceptedAt === null) {
-      throw new Error('没有承运方揽收证据，不能登记丢件');
-    }
-    if (!facts.carrierConfirmedLoss) {
-      throw new Error(facts.direction === 'return'
-        ? '请确认承运方已经认定退货包裹遗失'
-        : '请确认承运方已经认定正向包裹遗失');
-    }
-  }
   if (
     facts.physicalReceiptAt !== null
     && BEFORE_RECEIPT_LOGISTICS_STATUSES.has(facts.nextStatus)
@@ -200,13 +281,9 @@ export function prepareLogisticsStatusChange(
   if (facts.nextStatus === 'awaiting_carrier' && carrierAcceptedAt !== null) {
     throw new Error('已有承运方揽收证据，不能登记为待承运方接收');
   }
-  assertImpact(facts.impact, facts.availableItems);
   return {
     nextStatus: facts.nextStatus,
     carrierAcceptedAt,
-    impact: facts.impact.scope === 'package'
-      ? { scope: 'package' }
-      : { scope: 'items', items: facts.impact.items.map((item) => ({ ...item })) },
   };
 }
 
@@ -241,8 +318,12 @@ export function isReturnLogisticsStatus(
     && (RETURN_LOGISTICS_STATUSES as readonly string[]).includes(value);
 }
 
-export function supportsCarrierClaim(status: LogisticsStatus): boolean {
-  return CLAIMABLE_LOGISTICS_STATUSES.has(status);
+export function supportsCarrierClaim(exception: {
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+}): boolean {
+  return exception.stage === 'confirmed'
+    && CLAIMABLE_LOGISTICS_EXCEPTION_TYPES.has(exception.exceptionType);
 }
 
 export function sameLogisticsExceptionImpact(
@@ -297,5 +378,26 @@ function assertImpact(
     if (item.quantity > available) {
       throw new Error('物流异常商品数量不能超过包裹内数量');
     }
+  }
+}
+
+function assertConfirmedExceptionEvidence(
+  exceptionType: LogisticsExceptionType,
+  stage: LogisticsExceptionStage,
+  evidence: LogisticsExceptionEvidence,
+  occurredAt: string,
+): void {
+  if (exceptionType !== 'lost' || stage !== 'confirmed') return;
+  if (evidence.physicalReceiptAt !== null) {
+    throw new Error('已有可信收到证据，不能确认丢件');
+  }
+  if (evidence.carrierAcceptedAt === null) {
+    throw new Error('没有承运方揽收证据，不能确认丢件');
+  }
+  if (Date.parse(occurredAt) < Date.parse(evidence.carrierAcceptedAt)) {
+    throw new Error('丢件确认时间不能早于承运方揽收时间');
+  }
+  if (!evidence.carrierConfirmedLoss) {
+    throw new Error('请确认承运方已经认定包裹遗失');
   }
 }

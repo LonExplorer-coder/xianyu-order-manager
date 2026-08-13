@@ -3,6 +3,9 @@ import type {
   CarrierClaimEvent as SharedCarrierClaimEvent,
   CarrierClaimStatus as SharedCarrierClaimStatus,
   LogisticsExceptionImpact,
+  LogisticsExceptionMatter,
+  LogisticsExceptionStage,
+  LogisticsExceptionType,
   ReturnLogisticsStatus,
 } from './logistics-exceptions';
 import { isReturnLogisticsStatus } from './logistics-exceptions';
@@ -152,7 +155,6 @@ export type AftersalesReturnEvent =
     reason: string;
     before: AftersalesReturnLogisticsStatus;
     after: AftersalesReturnLogisticsStatus;
-    impact: LogisticsExceptionImpact;
     createdAt: string;
   };
 
@@ -177,6 +179,8 @@ export type AftersalesReturnRecord = {
   } | null;
   items: AftersalesReturnItem[];
   discrepancies: AftersalesReturnDiscrepancy[];
+  currentException: (LogisticsExceptionMatter & { direction: 'return' }) | null;
+  logisticsExceptions: LogisticsExceptionMatter[];
   carrierClaim: CarrierClaim | null;
   timeline: AftersalesReturnEvent[];
   createdAt: string;
@@ -231,8 +235,30 @@ export type ProgressAftersalesCaseInput =
     expectedRevision: number;
     returnRecordId: string;
     logisticsStatus: AftersalesReturnLogisticsStatus;
-    impact?: LogisticsExceptionImpact;
     carrierAcceptanceConfirmed?: boolean;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'record_return_logistics_exception';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    exceptionType: LogisticsExceptionType;
+    stage: Exclude<LogisticsExceptionStage, 'recovered' | 'resolved'>;
+    impact?: LogisticsExceptionImpact;
+    carrierConfirmedLoss?: boolean;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'progress_return_logistics_exception';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    exceptionId: string;
+    expectedExceptionRevision: number;
+    stage: Exclude<LogisticsExceptionStage, 'pending_verification'>;
     carrierConfirmedLoss?: boolean;
     occurredAt: string;
     reason: string;
@@ -575,7 +601,7 @@ export function normalizeProgressAftersalesCaseInput(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'returnRecordId',
-        'logisticsStatus', 'impact', 'carrierAcceptanceConfirmed', 'carrierConfirmedLoss',
+        'logisticsStatus', 'carrierAcceptanceConfirmed',
         'occurredAt', 'reason',
       ],
       '更新退货物流状态参数',
@@ -588,7 +614,6 @@ export function normalizeProgressAftersalesCaseInput(
       ...common,
       returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
       logisticsStatus: record.logisticsStatus,
-      ...(record.impact === undefined ? {} : { impact: logisticsImpact(record.impact) }),
       ...(record.carrierAcceptanceConfirmed === undefined
         ? {}
         : {
@@ -597,16 +622,68 @@ export function normalizeProgressAftersalesCaseInput(
             '承运方揽收确认无效',
           ),
         }),
-      ...(record.carrierConfirmedLoss === undefined
-        ? {}
-        : {
-          carrierConfirmedLoss: booleanValue(
-            record.carrierConfirmedLoss,
-            '承运方丢件确认无效',
-          ),
-        }),
       occurredAt: dateTime(record.occurredAt, '退货物流状态时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流状态说明'),
+    };
+  }
+  if (record.kind === 'record_return_logistics_exception') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'exceptionType', 'stage', 'impact', 'carrierConfirmedLoss',
+        'occurredAt', 'reason',
+      ],
+      '登记退货物流异常参数',
+    );
+    if (!isLogisticsExceptionType(record.exceptionType)) throw new Error('退货物流异常类型无效');
+    if (
+      record.stage !== 'pending_verification'
+      && record.stage !== 'investigating'
+      && record.stage !== 'confirmed'
+    ) throw new Error('退货物流异常初始阶段无效');
+    return {
+      kind: 'record_return_logistics_exception',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      exceptionType: record.exceptionType,
+      stage: record.stage,
+      ...(record.impact === undefined ? {} : { impact: logisticsImpact(record.impact) }),
+      ...(record.carrierConfirmedLoss === undefined ? {} : {
+        carrierConfirmedLoss: booleanValue(record.carrierConfirmedLoss, '承运方丢件确认无效'),
+      }),
+      occurredAt: dateTime(record.occurredAt, '退货物流异常时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流异常说明'),
+    };
+  }
+  if (record.kind === 'progress_return_logistics_exception') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'exceptionId', 'expectedExceptionRevision', 'stage',
+        'carrierConfirmedLoss', 'occurredAt', 'reason',
+      ],
+      '推进退货物流异常参数',
+    );
+    if (
+      record.stage !== 'investigating'
+      && record.stage !== 'confirmed'
+      && record.stage !== 'recovered'
+      && record.stage !== 'resolved'
+    ) throw new Error('退货物流异常阶段无效');
+    return {
+      kind: 'progress_return_logistics_exception',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      exceptionId: boundedText(record.exceptionId, 200, '物流异常标识无效'),
+      expectedExceptionRevision: revision(record.expectedExceptionRevision),
+      stage: record.stage,
+      ...(record.carrierConfirmedLoss === undefined ? {} : {
+        carrierConfirmedLoss: booleanValue(record.carrierConfirmedLoss, '承运方丢件确认无效'),
+      }),
+      occurredAt: dateTime(record.occurredAt, '退货物流异常时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流异常处理说明'),
     };
   }
   if (record.kind === 'open_carrier_claim') {
@@ -857,6 +934,11 @@ function logisticsImpact(value: unknown): LogisticsExceptionImpact {
       };
     }),
   };
+}
+
+function isLogisticsExceptionType(value: unknown): value is LogisticsExceptionType {
+  return value === 'lost' || value === 'delivery_dispute' || value === 'damaged'
+    || value === 'misdelivered' || value === 'other';
 }
 
 function nonNegativeQuantity(value: unknown, message: string): number {

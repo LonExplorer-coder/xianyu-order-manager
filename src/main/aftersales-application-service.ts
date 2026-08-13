@@ -18,8 +18,6 @@ import {
 import {
   prepareLogisticsCorrection,
   prepareLogisticsStatusChange,
-  sameLogisticsExceptionImpact,
-  type LogisticsExceptionImpact,
 } from '../core/logistics-exceptions';
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { Workspace } from './workspace';
@@ -213,6 +211,8 @@ export class AftersalesApplicationService {
       || prepared.kind === 'inspect_return'
       || prepared.kind === 'correct_return_logistics'
       || prepared.kind === 'update_return_logistics_status'
+      || prepared.kind === 'record_return_logistics_exception'
+      || prepared.kind === 'progress_return_logistics_exception'
       || prepared.kind === 'open_carrier_claim'
       || prepared.kind === 'resolve_carrier_claim'
       || prepared.kind === 'confirm_carrier_compensation';
@@ -239,7 +239,12 @@ export class AftersalesApplicationService {
       const existingPackageRow = this.workspace.database.prepare(`
         SELECT
           records.id, records.status, records.revision, records.occurred_at,
-          records.logistics_status,
+          EXISTS (
+            SELECT 1 FROM logistics_exception_matters AS exceptions
+            WHERE exceptions.return_record_id = records.id
+              AND exceptions.exception_type = 'lost'
+              AND exceptions.stage = 'confirmed'
+          ) AS has_confirmed_loss,
           COALESCE((
             SELECT events.occurred_at
             FROM aftersales_return_record_events AS events
@@ -261,7 +266,7 @@ export class AftersalesApplicationService {
         if (asString(existingPackageRow.status) !== 'in_transit') {
           throw new Error('已经收到或检查的退货包裹不能再追加合装商品');
         }
-        if (asString(existingPackageRow.logistics_status) === 'lost') {
+        if (asNumber(existingPackageRow.has_confirmed_loss) === 1) {
           throw new Error('已确认丢件的退货包裹不能再追加合装商品');
         }
         assertOccurredAtNotBefore(
@@ -450,25 +455,13 @@ export class AftersalesApplicationService {
         carrierAcceptedAt: returnRecord.carrierAcceptedAt,
         physicalReceiptAt: returnRecord.receivedAt,
         carrierAcceptanceConfirmed: prepared.carrierAcceptanceConfirmed ?? false,
-        carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
         occurredAt: prepared.occurredAt,
         latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
           ?? returnRecord.occurredAt,
-        impact: prepared.impact ?? { scope: 'package' },
-        availableItems: returnRecord.items.map((item) => ({
-          sourceItemId: item.id,
-          quantity: item.quantity,
-        })),
       });
       if (
         prepared.logisticsStatus === returnRecord.logisticsStatus
         && statusChange.carrierAcceptedAt === returnRecord.carrierAcceptedAt
-        && sameLogisticsExceptionImpact(
-          [...returnRecord.timeline].reverse().find((event) => (
-            event.kind === 'logistics_status_updated'
-          ))?.impact ?? { scope: 'package' },
-          statusChange.impact,
-        )
       ) {
         throw new Error('退货物流状态没有变化');
       }
@@ -502,35 +495,72 @@ export class AftersalesApplicationService {
             before: returnRecord.logisticsStatus,
             after: prepared.logisticsStatus,
             carrierAcceptedAt: statusChange.carrierAcceptedAt,
-            impact: statusChange.impact,
           }),
           now,
         );
         this.advanceCasesForReturnRecord(
           returnRecord.id,
           current,
-          (linkedCase) => {
-            if (
-              prepared.logisticsStatus === 'lost'
-              && linkedCase.workflow === 'return_refund'
-              && linkedCase.refund?.status === 'pending'
-              && linkedCase.status !== 'completed'
-              && linkedCase.status !== 'cancelled'
-            ) {
-              return 'waiting_refund';
-            }
-            if (
-              returnRecord.logisticsStatus === 'lost'
-              && prepared.logisticsStatus !== 'lost'
-              && returnRecord.status === 'in_transit'
-              && linkedCase.workflow === 'return_refund'
-              && linkedCase.refund?.status === 'pending'
-              && linkedCase.status === 'waiting_refund'
-            ) {
-              return 'waiting_return';
-            }
-            return linkedCase.status;
+          (linkedCase) => linkedCase.status,
+          prepared.reason,
+          now,
+        );
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'record_return_logistics_exception') {
+      const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
+      if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
+      this.workspace.transaction(() => {
+        this.logisticsExceptionService().openException({
+          subject: { direction: 'return', packageId: returnRecord.id },
+          expectedPackageRevision: returnRecord.revision,
+          exceptionType: prepared.exceptionType,
+          stage: prepared.stage,
+          impact: prepared.impact ?? { scope: 'package' },
+          availableItems: returnRecord.items.map((item) => ({
+            sourceItemId: item.id,
+            quantity: item.quantity,
+          })),
+          evidence: {
+            carrierAcceptedAt: returnRecord.carrierAcceptedAt,
+            physicalReceiptAt: returnRecord.receivedAt,
+            carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
           },
+          occurredAt: prepared.occurredAt,
+          reason: prepared.reason,
+        });
+        this.advanceCasesForReturnRecord(
+          returnRecord.id,
+          current,
+          (linkedCase) => linkedCase.status,
+          prepared.reason,
+          now,
+        );
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'progress_return_logistics_exception') {
+      const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
+      if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
+      this.workspace.transaction(() => {
+        this.logisticsExceptionService().progressException({
+          subject: { direction: 'return', packageId: returnRecord.id },
+          exceptionId: prepared.exceptionId,
+          expectedExceptionRevision: prepared.expectedExceptionRevision,
+          stage: prepared.stage,
+          evidence: {
+            carrierAcceptedAt: returnRecord.carrierAcceptedAt,
+            physicalReceiptAt: returnRecord.receivedAt,
+            carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
+          },
+          occurredAt: prepared.occurredAt,
+          reason: prepared.reason,
+        });
+        this.advanceCasesForReturnRecord(
+          returnRecord.id,
+          current,
+          (linkedCase) => linkedCase.status,
           prepared.reason,
           now,
         );
@@ -549,8 +579,8 @@ export class AftersalesApplicationService {
       ) {
         throw new Error('当前退货记录尚不能确认收到');
       }
-      if (returnRecord.logisticsStatus === 'lost') {
-        throw new Error('请先把已找回包裹的退货物流状态更新为实际状态');
+      if (confirmedLoss(returnRecord)) {
+        throw new Error('请先把已找回包裹的物流异常推进为已找回或已解决');
       }
       assertOccurredAtNotBefore(
         prepared.occurredAt,
@@ -737,14 +767,13 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'open_carrier_claim') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
+      if (!returnRecord.currentException) throw new Error('当前退货包裹没有可索赔的物流异常');
       this.logisticsExceptionService().openClaim({
         subject: { direction: 'return', packageId: returnRecord.id },
-        currentStatus: returnRecord.logisticsStatus,
+        exception: returnRecord.currentException,
         latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
           ?? returnRecord.occurredAt,
-        impact: [...returnRecord.timeline].reverse().find((event) => (
-          event.kind === 'logistics_status_updated'
-        ))?.impact ?? { scope: 'package' },
+        impact: returnRecord.currentException.impact,
         requestedAmountCents: prepared.requestedAmountCents,
         occurredAt: prepared.occurredAt,
         reason: prepared.reason,
@@ -792,7 +821,7 @@ export class AftersalesApplicationService {
       const returnDecisionSupported = current.returns.length > 0
         && current.returns.every((returnRecord) => (
           returnRecord.status === 'inspected'
-          || returnRecord.logisticsStatus === 'lost'
+          || confirmedLoss(returnRecord)
           || returnRecord.carrierClaim !== null
       ));
       if (
@@ -816,7 +845,7 @@ export class AftersalesApplicationService {
         prepared.occurredAt,
         earliestRefundAt,
         current.workflow === 'return_refund'
-          ? current.returns.some(({ logisticsStatus }) => logisticsStatus === 'lost')
+          ? current.returns.some(confirmedLoss)
             ? '实际退款时间不能早于退货丢件确认时间'
             : current.returns.some(({ carrierClaim }) => carrierClaim !== null)
               ? '实际退款时间不能早于承运索赔建立时间'
@@ -1198,7 +1227,6 @@ export class AftersalesApplicationService {
             reason: asString(eventRow.reason),
             before: payload.before,
             after: payload.after,
-            impact: parseStoredLogisticsImpact(payload.impact),
           };
         }
         if (kind === 'received') {
@@ -1246,6 +1274,10 @@ export class AftersalesApplicationService {
       if (!isAftersalesReturnLogisticsStatus(logisticsStatus)) {
         throw new Error('数据库退货物流状态错误');
       }
+      const logisticsExceptions = this.logisticsExceptionService().getExceptions({
+        direction: 'return',
+        packageId: returnRecordId,
+      });
       return {
         id: returnRecordId,
         status,
@@ -1283,6 +1315,10 @@ export class AftersalesApplicationService {
           sourceSpec: asString(itemRow.source_spec),
         })),
         discrepancies: parseReturnDiscrepancies(row.discrepancies_json),
+        currentException: [...logisticsExceptions].reverse().find(({ stage }) => (
+          stage !== 'resolved'
+        )) as AftersalesCase['returns'][number]['currentException'] ?? null,
+        logisticsExceptions,
         carrierClaim: this.getCarrierClaim(returnRecordId),
         timeline,
         createdAt: asString(row.created_at),
@@ -1647,41 +1683,15 @@ function isReturnDiscrepancyKind(
     || value === 'missing_accessory' || value === 'unidentified';
 }
 
-function parseStoredLogisticsImpact(value: unknown): LogisticsExceptionImpact {
-  if (value === undefined) return { scope: 'package' };
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('数据库退货物流异常影响范围错误');
-  }
-  const record = value as Record<string, unknown>;
-  if (record.scope === 'package') return { scope: 'package' };
-  if (record.scope !== 'items' || !Array.isArray(record.items)) {
-    throw new Error('数据库退货物流异常影响范围错误');
-  }
-  return {
-    scope: 'items',
-    items: record.items.map((value) => {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('数据库退货物流异常商品错误');
-      }
-      const item = value as Record<string, unknown>;
-      if (
-        typeof item.sourceItemId !== 'string'
-        || !Number.isSafeInteger(item.quantity)
-        || Number(item.quantity) <= 0
-      ) {
-        throw new Error('数据库退货物流异常商品错误');
-      }
-      return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
-    }),
-  };
-}
-
 function latestReturnDecisionEvidenceAt(returns: AftersalesCase['returns']): string | null {
   const occurredAt = returns.flatMap((returnRecord) => {
     if (returnRecord.inspection) return [returnRecord.inspection.occurredAt];
-    const loss = [...returnRecord.timeline]
+    const loss = [...returnRecord.logisticsExceptions]
       .reverse()
-      .find((event) => event.kind === 'logistics_status_updated' && event.after === 'lost');
+      .find((exception) => (
+        exception.exceptionType === 'lost'
+        && (exception.stage === 'confirmed' || exception.stage === 'recovered')
+      ));
     if (loss) return [loss.occurredAt];
     const claimOpened = returnRecord.carrierClaim?.timeline.find(({ kind }) => kind === 'opened');
     return claimOpened ? [claimOpened.occurredAt] : [];
@@ -1690,4 +1700,9 @@ function latestReturnDecisionEvidenceAt(returns: AftersalesCase['returns']): str
   return occurredAt.reduce((latest, candidate) => (
     Date.parse(candidate) > Date.parse(latest) ? candidate : latest
   ));
+}
+
+function confirmedLoss(returnRecord: AftersalesCase['returns'][number]): boolean {
+  const exception = returnRecord.currentException;
+  return exception?.exceptionType === 'lost' && exception.stage === 'confirmed';
 }

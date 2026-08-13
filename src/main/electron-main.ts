@@ -231,6 +231,14 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     (_event, input: unknown) => desktopSession.updateShipmentPackageLogisticsStatus(input),
   );
   ipcMain.handle(
+    'shipment-records:record-package-logistics-exception',
+    (_event, input: unknown) => desktopSession.recordShipmentPackageLogisticsException(input),
+  );
+  ipcMain.handle(
+    'shipment-records:progress-package-logistics-exception',
+    (_event, input: unknown) => desktopSession.progressShipmentPackageLogisticsException(input),
+  );
+  ipcMain.handle(
     'shipment-records:progress-package-carrier-claim',
     (_event, input: unknown) => desktopSession.progressShipmentPackageCarrierClaim(input),
   );

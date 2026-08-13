@@ -183,6 +183,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 28) migrateToVersion28(database);
   if (row.version < 29) migrateToVersion29(database);
   if (row.version < 30) migrateToVersion30(database);
+  if (row.version < 31) migrateToVersion31(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3601,6 +3602,793 @@ function migrateToVersion30(database: DatabaseSync): void {
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
   }
+}
+
+function migrateToVersion31(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    if (hasCompleteVersion31Schema(database)) {
+      assertForeignKeyIntegrity(database);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (31, ?)')
+        .run(new Date().toISOString());
+      database.exec('COMMIT;');
+      return;
+    }
+    database.exec(`
+      CREATE TABLE logistics_exception_matters (
+        id TEXT PRIMARY KEY,
+        direction TEXT NOT NULL CHECK (direction IN ('outbound', 'return')),
+        shipment_package_id TEXT
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        return_record_id TEXT
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        exception_type TEXT NOT NULL CHECK (exception_type IN (
+          'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'other'
+        )),
+        stage TEXT NOT NULL CHECK (stage IN (
+          'pending_verification', 'investigating', 'confirmed', 'recovered', 'resolved'
+        )),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        impact_json TEXT NOT NULL CHECK (json_valid(impact_json)),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (direction = 'outbound' AND shipment_package_id IS NOT NULL AND return_record_id IS NULL)
+          OR (direction = 'return' AND shipment_package_id IS NULL AND return_record_id IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX logistics_exceptions_by_shipment_package
+      ON logistics_exception_matters (shipment_package_id, occurred_at, id)
+      WHERE shipment_package_id IS NOT NULL;
+
+      CREATE INDEX logistics_exceptions_by_return_record
+      ON logistics_exception_matters (return_record_id, occurred_at, id)
+      WHERE return_record_id IS NOT NULL;
+
+      CREATE TABLE logistics_exception_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        exception_id TEXT NOT NULL
+          REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('opened', 'stage_changed')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        before_stage TEXT CHECK (before_stage IS NULL OR before_stage IN (
+          'pending_verification', 'investigating', 'confirmed', 'recovered', 'resolved'
+        )),
+        after_stage TEXT NOT NULL CHECK (after_stage IN (
+          'pending_verification', 'investigating', 'confirmed', 'recovered', 'resolved'
+        )),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        impact_json TEXT CHECK (impact_json IS NULL OR json_valid(impact_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (exception_id, result_revision),
+        CHECK (
+          (kind = 'opened' AND base_revision = 0 AND before_stage IS NULL
+            AND result_revision = 1 AND impact_json IS NOT NULL)
+          OR (kind = 'stage_changed' AND base_revision >= 1
+            AND before_stage IS NOT NULL AND impact_json IS NULL)
+        )
+      ) STRICT;
+
+      CREATE TRIGGER logistics_exception_identity_is_immutable_on_update
+      BEFORE UPDATE OF
+        id, direction, shipment_package_id, return_record_id,
+        exception_type, impact_json, occurred_at, created_at
+      ON logistics_exception_matters
+      BEGIN
+        SELECT RAISE(ABORT, 'logistics exception identity is immutable');
+      END;
+
+      CREATE TRIGGER logistics_exception_matters_are_immutable_on_delete
+      BEFORE DELETE ON logistics_exception_matters
+      BEGIN
+        SELECT RAISE(ABORT, 'logistics exception matters are immutable');
+      END;
+
+      CREATE TRIGGER logistics_exception_events_are_immutable_on_update
+      BEFORE UPDATE ON logistics_exception_events
+      BEGIN
+        SELECT RAISE(ABORT, 'logistics exception events are immutable');
+      END;
+
+      CREATE TRIGGER logistics_exception_events_are_immutable_on_delete
+      BEFORE DELETE ON logistics_exception_events
+      BEGIN
+        SELECT RAISE(ABORT, 'logistics exception events are immutable');
+      END;
+    `);
+    migrateLegacyMixedLogisticsFacts(database);
+    contractMixedLogisticsStatusTables(database);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (31, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function hasCompleteVersion31Schema(database: DatabaseSync): boolean {
+  const requiredObjects = new Map<string, 'table' | 'index' | 'trigger'>([
+    ['logistics_exception_matters', 'table'],
+    ['logistics_exception_events', 'table'],
+    ['logistics_exceptions_by_shipment_package', 'index'],
+    ['logistics_exceptions_by_return_record', 'index'],
+    ['logistics_exception_identity_is_immutable_on_update', 'trigger'],
+    ['logistics_exception_matters_are_immutable_on_delete', 'trigger'],
+    ['logistics_exception_events_are_immutable_on_update', 'trigger'],
+    ['logistics_exception_events_are_immutable_on_delete', 'trigger'],
+    ['legacy_shipment_package_mixed_logistics_events', 'table'],
+    ['legacy_return_mixed_logistics_events', 'table'],
+    ['legacy_shipment_mixed_events_are_immutable_on_update', 'trigger'],
+    ['legacy_shipment_mixed_events_are_immutable_on_delete', 'trigger'],
+    ['legacy_return_mixed_events_are_immutable_on_update', 'trigger'],
+    ['legacy_return_mixed_events_are_immutable_on_delete', 'trigger'],
+  ]);
+  const rows = database.prepare(`
+    SELECT type, name, sql
+    FROM sqlite_schema
+    WHERE name IN (${[...requiredObjects].map(() => '?').join(', ')})
+  `).all(...requiredObjects.keys()) as { type: string; name: string; sql: string | null }[];
+  if (rows.length !== requiredObjects.size
+    || rows.some((row) => requiredObjects.get(row.name) !== row.type)) return false;
+
+  const tableSql = database.prepare(`
+    SELECT name, sql FROM sqlite_schema
+    WHERE type = 'table' AND name IN (
+      'shipment_packages',
+      'shipment_package_logistics_status_events',
+      'aftersales_return_records',
+      'logistics_exception_matters',
+      'logistics_exception_events'
+    )
+  `).all() as { name: string; sql: string }[];
+  const schemas = new Map(tableSql.map((row) => [row.name, row.sql]));
+  const normalStatusTables = [
+    schemas.get('shipment_packages'),
+    schemas.get('shipment_package_logistics_status_events'),
+    schemas.get('aftersales_return_records'),
+  ];
+  return normalStatusTables.every((sql) => sql?.includes("'awaiting_carrier'")
+      && sql.includes("'in_transit'") && sql.includes("'delivered'")
+      && sql.includes("'returned'")
+      && !sql.includes("'intercepting'") && !sql.includes("'lost'")
+      && !sql.includes("'delivery_dispute'") && !sql.includes("'damaged'")
+      && !sql.includes("'misdelivered'") && !sql.includes("'exception'"))
+    && schemas.get('logistics_exception_matters')?.includes("'pending_verification'") === true
+    && schemas.get('logistics_exception_events')?.includes("'stage_changed'") === true;
+}
+
+function contractMixedLogisticsStatusTables(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE legacy_shipment_package_mixed_logistics_events (
+      sequence INTEGER PRIMARY KEY,
+      id TEXT NOT NULL UNIQUE,
+      package_id TEXT NOT NULL,
+      base_revision INTEGER NOT NULL,
+      result_revision INTEGER NOT NULL,
+      before_status TEXT NOT NULL,
+      after_status TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT;
+
+    INSERT INTO legacy_shipment_package_mixed_logistics_events
+    SELECT sequence, id, package_id, base_revision, result_revision,
+           before_status, after_status, reason, occurred_at, payload_json, created_at
+    FROM shipment_package_logistics_status_events
+    WHERE after_status IN (
+      'intercepting', 'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+    );
+
+    CREATE TRIGGER legacy_shipment_mixed_events_are_immutable_on_update
+    BEFORE UPDATE ON legacy_shipment_package_mixed_logistics_events
+    BEGIN
+      SELECT RAISE(ABORT, 'legacy shipment mixed logistics events are immutable');
+    END;
+
+    CREATE TRIGGER legacy_shipment_mixed_events_are_immutable_on_delete
+    BEFORE DELETE ON legacy_shipment_package_mixed_logistics_events
+    BEGIN
+      SELECT RAISE(ABORT, 'legacy shipment mixed logistics events are immutable');
+    END;
+
+    CREATE TABLE legacy_return_mixed_logistics_events (
+      sequence INTEGER PRIMARY KEY,
+      id TEXT NOT NULL UNIQUE,
+      return_record_id TEXT NOT NULL,
+      base_revision INTEGER NOT NULL,
+      result_revision INTEGER NOT NULL,
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT;
+
+    INSERT INTO legacy_return_mixed_logistics_events
+    SELECT sequence, id, return_record_id, base_revision, result_revision,
+           occurred_at, reason, payload_json, created_at
+    FROM aftersales_return_record_events
+    WHERE kind = 'logistics_status_updated'
+      AND json_extract(payload_json, '$.after') IN (
+        'intercepting', 'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+      );
+
+    CREATE TRIGGER legacy_return_mixed_events_are_immutable_on_update
+    BEFORE UPDATE ON legacy_return_mixed_logistics_events
+    BEGIN
+      SELECT RAISE(ABORT, 'legacy return mixed logistics events are immutable');
+    END;
+
+    CREATE TRIGGER legacy_return_mixed_events_are_immutable_on_delete
+    BEFORE DELETE ON legacy_return_mixed_logistics_events
+    BEGIN
+      SELECT RAISE(ABORT, 'legacy return mixed logistics events are immutable');
+    END;
+
+    CREATE TABLE shipment_packages_v31 (
+      id TEXT PRIMARY KEY,
+      shipment_record_id TEXT NOT NULL
+        REFERENCES shipment_records(id) ON DELETE RESTRICT,
+      position INTEGER NOT NULL CHECK (position >= 0),
+      shipping_carrier TEXT NOT NULL,
+      tracking_number TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+      created_at TEXT NOT NULL,
+      logistics_status TEXT NOT NULL DEFAULT 'in_transit'
+        CHECK (logistics_status IN ('awaiting_carrier', 'in_transit', 'delivered', 'returned')),
+      carrier_accepted_at TEXT,
+      UNIQUE (shipment_record_id, position),
+      CHECK (logistics_status <> 'awaiting_carrier' OR carrier_accepted_at IS NULL)
+    ) STRICT;
+
+    INSERT INTO shipment_packages_v31 (
+      id, shipment_record_id, position, shipping_carrier, tracking_number,
+      revision, created_at, logistics_status, carrier_accepted_at
+    )
+    SELECT
+      id, shipment_record_id, position, shipping_carrier, tracking_number,
+      revision, created_at,
+      CASE WHEN logistics_status = 'intercepted_returned' THEN 'returned'
+           ELSE logistics_status END,
+      carrier_accepted_at
+    FROM shipment_packages;
+
+    DROP TABLE shipment_packages;
+    ALTER TABLE shipment_packages_v31 RENAME TO shipment_packages;
+
+    DROP TRIGGER shipment_package_logistics_status_events_are_immutable_on_update;
+    DROP TRIGGER shipment_package_logistics_status_events_are_immutable_on_delete;
+
+    CREATE TABLE shipment_package_logistics_status_events_v31 (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      package_id TEXT NOT NULL REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+      base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+      result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+      before_status TEXT NOT NULL CHECK (before_status IN (
+        'awaiting_carrier', 'in_transit', 'delivered', 'returned'
+      )),
+      after_status TEXT NOT NULL CHECK (after_status IN (
+        'awaiting_carrier', 'in_transit', 'delivered', 'returned'
+      )),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      occurred_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (package_id, result_revision)
+    ) STRICT;
+
+    INSERT INTO shipment_package_logistics_status_events_v31 (
+      sequence, id, package_id, base_revision, result_revision,
+      before_status, after_status, reason, occurred_at, payload_json, created_at
+    )
+    SELECT
+      events.sequence,
+      events.id,
+      events.package_id,
+      events.base_revision,
+      events.result_revision,
+      COALESCE((
+        SELECT CASE
+          WHEN earlier.after_status = 'intercepted_returned' THEN 'returned'
+          ELSE earlier.after_status
+        END
+        FROM shipment_package_logistics_status_events AS earlier
+        WHERE earlier.package_id = events.package_id
+          AND earlier.sequence < events.sequence
+          AND earlier.after_status IN (
+            'awaiting_carrier', 'in_transit', 'delivered', 'intercepted_returned'
+          )
+        ORDER BY earlier.sequence DESC
+        LIMIT 1
+      ), 'in_transit'),
+      CASE WHEN events.after_status = 'intercepted_returned' THEN 'returned'
+           ELSE events.after_status END,
+      events.reason,
+      events.occurred_at,
+      json_object('carrierAcceptedAt', json_extract(events.payload_json, '$.carrierAcceptedAt')),
+      events.created_at
+    FROM shipment_package_logistics_status_events AS events
+    WHERE events.after_status IN (
+      'awaiting_carrier', 'in_transit', 'delivered', 'intercepted_returned'
+    );
+
+    DROP TABLE shipment_package_logistics_status_events;
+    ALTER TABLE shipment_package_logistics_status_events_v31
+      RENAME TO shipment_package_logistics_status_events;
+
+    CREATE TRIGGER shipment_package_logistics_status_events_are_immutable_on_update
+    BEFORE UPDATE ON shipment_package_logistics_status_events
+    BEGIN
+      SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+    END;
+
+    CREATE TRIGGER shipment_package_logistics_status_events_are_immutable_on_delete
+    BEFORE DELETE ON shipment_package_logistics_status_events
+    BEGIN
+      SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+    END;
+
+    CREATE TABLE aftersales_return_records_v31 (
+      id TEXT PRIMARY KEY,
+      aftersales_case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK (status IN ('in_transit', 'received', 'inspected')),
+      revision INTEGER NOT NULL CHECK (revision >= 1),
+      shipping_carrier TEXT NOT NULL CHECK (length(trim(shipping_carrier)) BETWEEN 1 AND 100),
+      tracking_number TEXT NOT NULL CHECK (length(trim(tracking_number)) BETWEEN 1 AND 200),
+      occurred_at TEXT NOT NULL,
+      received_at TEXT,
+      inspection_result TEXT CHECK (
+        inspection_result IS NULL OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+      ),
+      inspection_note TEXT,
+      inspected_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      logistics_status TEXT NOT NULL CHECK (
+        logistics_status IN ('awaiting_carrier', 'in_transit', 'delivered', 'returned')
+      ),
+      carrier_accepted_at TEXT,
+      discrepancies_json TEXT NOT NULL CHECK (json_valid(discrepancies_json))
+    ) STRICT;
+
+    INSERT INTO aftersales_return_records_v31
+    SELECT
+      id, aftersales_case_id, status, revision, shipping_carrier, tracking_number,
+      occurred_at, received_at, inspection_result, inspection_note, inspected_at,
+      created_at, updated_at,
+      CASE WHEN logistics_status = 'returned_to_buyer' THEN 'returned'
+           ELSE logistics_status END,
+      carrier_accepted_at, discrepancies_json
+    FROM aftersales_return_records;
+
+    DROP TABLE aftersales_return_records;
+    ALTER TABLE aftersales_return_records_v31 RENAME TO aftersales_return_records;
+
+    DROP TRIGGER aftersales_return_record_events_are_immutable_on_update;
+    DROP TRIGGER aftersales_return_record_events_are_immutable_on_delete;
+
+    CREATE TABLE aftersales_return_record_events_v31 (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      return_record_id TEXT NOT NULL REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'registered', 'items_combined', 'logistics_corrected',
+        'logistics_status_updated', 'received', 'inspected'
+      )),
+      base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+      result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      inspection_result TEXT CHECK (
+        inspection_result IS NULL OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+      ),
+      payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (return_record_id, result_revision),
+      CHECK (
+        (kind = 'registered' AND base_revision = 0 AND inspection_result IS NULL)
+        OR (kind <> 'registered' AND base_revision >= 1)
+      )
+    ) STRICT;
+
+    INSERT INTO aftersales_return_record_events_v31
+    SELECT
+      sequence, id, return_record_id, kind, base_revision, result_revision,
+      occurred_at, reason, inspection_result,
+      CASE
+        WHEN kind = 'logistics_status_updated' THEN json_set(
+          payload_json,
+          '$.before',
+          COALESCE((
+            SELECT CASE
+              WHEN json_extract(earlier.payload_json, '$.after') = 'returned_to_buyer'
+                THEN 'returned'
+              ELSE json_extract(earlier.payload_json, '$.after')
+            END
+            FROM aftersales_return_record_events AS earlier
+            WHERE earlier.return_record_id = aftersales_return_record_events.return_record_id
+              AND earlier.sequence < aftersales_return_record_events.sequence
+              AND earlier.kind = 'logistics_status_updated'
+              AND json_extract(earlier.payload_json, '$.after') IN (
+                'awaiting_carrier', 'in_transit', 'delivered', 'returned_to_buyer'
+              )
+            ORDER BY earlier.sequence DESC
+            LIMIT 1
+          ), CASE
+            WHEN json_extract(payload_json, '$.before') = 'returned_to_buyer' THEN 'returned'
+            WHEN json_extract(payload_json, '$.before') IN (
+              'awaiting_carrier', 'in_transit', 'delivered'
+            ) THEN json_extract(payload_json, '$.before')
+            ELSE 'in_transit'
+          END),
+          '$.after',
+          CASE WHEN json_extract(payload_json, '$.after') = 'returned_to_buyer'
+            THEN 'returned'
+            ELSE json_extract(payload_json, '$.after')
+          END
+        )
+        ELSE payload_json
+      END,
+      created_at
+    FROM aftersales_return_record_events
+    WHERE kind <> 'logistics_status_updated'
+      OR json_extract(payload_json, '$.after') IN (
+        'awaiting_carrier', 'in_transit', 'delivered', 'returned_to_buyer'
+      );
+
+    DROP TABLE aftersales_return_record_events;
+    ALTER TABLE aftersales_return_record_events_v31 RENAME TO aftersales_return_record_events;
+
+    CREATE TRIGGER aftersales_return_record_events_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_return_record_events
+    BEGIN
+      SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+    END;
+
+    CREATE TRIGGER aftersales_return_record_events_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_return_record_events
+    BEGIN
+      SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+    END;
+  `);
+}
+
+type LegacyMixedLogisticsEvent = {
+  id: string;
+  packageId: string;
+  exceptionType: 'lost' | 'delivery_dispute' | 'damaged' | 'misdelivered' | 'other';
+  impactJson: string;
+  reason: string;
+  occurredAt: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedReason: string | null;
+};
+
+function migrateLegacyMixedLogisticsFacts(database: DatabaseSync): void {
+  const outboundRows = database.prepare(`
+    SELECT
+      events.id,
+      events.package_id,
+      events.after_status,
+      events.payload_json,
+      events.reason,
+      events.occurred_at,
+      events.created_at,
+      (
+        SELECT later.occurred_at
+        FROM shipment_package_logistics_status_events AS later
+        WHERE later.package_id = events.package_id
+          AND later.sequence > events.sequence
+          AND later.after_status IN (
+            'awaiting_carrier', 'in_transit', 'delivered', 'intercepted_returned'
+          )
+        ORDER BY later.sequence
+        LIMIT 1
+      ) AS resolved_at,
+      (
+        SELECT later.reason
+        FROM shipment_package_logistics_status_events AS later
+        WHERE later.package_id = events.package_id
+          AND later.sequence > events.sequence
+          AND later.after_status IN (
+            'awaiting_carrier', 'in_transit', 'delivered', 'intercepted_returned'
+          )
+        ORDER BY later.sequence
+        LIMIT 1
+      ) AS resolved_reason
+    FROM shipment_package_logistics_status_events AS events
+    WHERE events.after_status IN (
+      'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+    )
+    ORDER BY events.sequence
+  `).all() as unknown as Array<Record<string, string | number | null>>;
+  const outboundEvents = outboundRows.map((row): LegacyMixedLogisticsEvent => ({
+    id: asStoredText(row.id, '旧版正向物流异常标识无效'),
+    packageId: asStoredText(row.package_id, '旧版正向包裹标识无效'),
+    exceptionType: legacyExceptionType(row.after_status),
+    impactJson: legacyImpactJson(row.payload_json, '旧版正向物流异常影响范围无效'),
+    reason: asStoredText(row.reason, '旧版正向物流异常说明无效'),
+    occurredAt: asStoredText(row.occurred_at, '旧版正向物流异常时间无效'),
+    createdAt: asStoredText(row.created_at, '旧版正向物流异常创建时间无效'),
+    resolvedAt: row.resolved_at === null ? null : asStoredText(row.resolved_at, '旧版正向物流恢复时间无效'),
+    resolvedReason: row.resolved_reason === null ? null : asStoredText(row.resolved_reason, '旧版正向物流恢复说明无效'),
+  }));
+
+  const returnRows = database.prepare(`
+    SELECT
+      events.id,
+      events.return_record_id,
+      events.payload_json,
+      events.reason,
+      events.occurred_at,
+      events.created_at,
+      events.sequence
+    FROM aftersales_return_record_events AS events
+    WHERE events.kind = 'logistics_status_updated'
+    ORDER BY events.sequence
+  `).all() as unknown as Array<Record<string, string | number | null>>;
+  const parsedReturnRows = returnRows.map((row) => {
+    const payload = parseStoredJsonRecord(
+      row.payload_json,
+      '旧版退货物流状态事件无效',
+    );
+    return { row, payload };
+  });
+  const returnEvents: LegacyMixedLogisticsEvent[] = [];
+  for (const [index, { row, payload }] of parsedReturnRows.entries()) {
+    if (!isLegacyExceptionStatus(payload.after)) continue;
+    const returnRecordId = asStoredText(row.return_record_id, '旧版退货包裹标识无效');
+    const laterNormal = parsedReturnRows.slice(index + 1).find((candidate) => (
+      candidate.row.return_record_id === returnRecordId
+      && isLegacyNormalReturnStatus(candidate.payload.after)
+    ));
+    returnEvents.push({
+      id: asStoredText(row.id, '旧版退货物流异常标识无效'),
+      packageId: returnRecordId,
+      exceptionType: legacyExceptionType(payload.after),
+      impactJson: legacyImpactFromParsedPayload(payload, '旧版退货物流异常影响范围无效'),
+      reason: asStoredText(row.reason, '旧版退货物流异常说明无效'),
+      occurredAt: asStoredText(row.occurred_at, '旧版退货物流异常时间无效'),
+      createdAt: asStoredText(row.created_at, '旧版退货物流异常创建时间无效'),
+      resolvedAt: laterNormal
+        ? asStoredText(laterNormal.row.occurred_at, '旧版退货物流恢复时间无效')
+        : null,
+      resolvedReason: laterNormal
+        ? asStoredText(laterNormal.row.reason, '旧版退货物流恢复说明无效')
+        : null,
+    });
+  }
+
+  insertLegacyLogisticsExceptions(database, 'outbound', outboundEvents);
+  insertLegacyLogisticsExceptions(database, 'return', returnEvents);
+  backfillCurrentMixedExceptionWithoutEvent(database, 'outbound', outboundEvents);
+  backfillCurrentMixedExceptionWithoutEvent(database, 'return', returnEvents);
+
+  database.exec(`
+    UPDATE shipment_packages
+    SET logistics_status = COALESCE((
+      SELECT CASE
+        WHEN events.after_status IN ('awaiting_carrier', 'in_transit', 'delivered')
+          THEN events.after_status
+        WHEN events.after_status = 'intercepted_returned' THEN 'intercepted_returned'
+        ELSE NULL
+      END
+      FROM shipment_package_logistics_status_events AS events
+      WHERE events.package_id = shipment_packages.id
+        AND events.after_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepted_returned'
+        )
+      ORDER BY events.sequence DESC
+      LIMIT 1
+    ), 'in_transit')
+    WHERE logistics_status IN (
+      'intercepting', 'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+    );
+
+    UPDATE aftersales_return_records
+    SET logistics_status = COALESCE((
+      SELECT CASE
+        WHEN json_extract(events.payload_json, '$.after') = 'returned_to_buyer'
+          THEN 'returned_to_buyer'
+        ELSE json_extract(events.payload_json, '$.after')
+      END
+      FROM aftersales_return_record_events AS events
+      WHERE events.return_record_id = aftersales_return_records.id
+        AND events.kind = 'logistics_status_updated'
+        AND json_extract(events.payload_json, '$.after') IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'returned_to_buyer'
+        )
+      ORDER BY events.sequence DESC
+      LIMIT 1
+    ), CASE
+      WHEN status IN ('received', 'inspected') THEN 'delivered'
+      ELSE 'in_transit'
+    END)
+    WHERE logistics_status IN (
+      'intercepting', 'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+    );
+  `);
+}
+
+function insertLegacyLogisticsExceptions(
+  database: DatabaseSync,
+  direction: 'outbound' | 'return',
+  events: readonly LegacyMixedLogisticsEvent[],
+): void {
+  const insertMatter = database.prepare(`
+    INSERT INTO logistics_exception_matters (
+      id, direction, shipment_package_id, return_record_id,
+      exception_type, stage, revision, impact_json, reason,
+      occurred_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertEvent = database.prepare(`
+    INSERT INTO logistics_exception_events (
+      id, exception_id, kind, base_revision, result_revision,
+      before_stage, after_stage, reason, occurred_at, impact_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const event of events) {
+    const matterId = `legacy-${direction}-${event.id}`;
+    const initialStage = event.exceptionType === 'lost' ? 'confirmed' : 'pending_verification';
+    const resolved = event.resolvedAt !== null;
+    insertMatter.run(
+      matterId,
+      direction,
+      direction === 'outbound' ? event.packageId : null,
+      direction === 'return' ? event.packageId : null,
+      event.exceptionType,
+      resolved ? 'resolved' : initialStage,
+      resolved ? 2 : 1,
+      event.impactJson,
+      resolved ? event.resolvedReason : event.reason,
+      event.occurredAt,
+      event.createdAt,
+      resolved ? event.resolvedAt : event.createdAt,
+    );
+    insertEvent.run(
+      `legacy-${direction}-opened-${event.id}`,
+      matterId,
+      'opened',
+      0,
+      1,
+      null,
+      initialStage,
+      event.reason,
+      event.occurredAt,
+      event.impactJson,
+      event.createdAt,
+    );
+    if (resolved && event.resolvedAt && event.resolvedReason) {
+      insertEvent.run(
+        `legacy-${direction}-resolved-${event.id}`,
+        matterId,
+        'stage_changed',
+        1,
+        2,
+        initialStage,
+        'resolved',
+        event.resolvedReason,
+        event.resolvedAt,
+        null,
+        event.resolvedAt,
+      );
+    }
+  }
+}
+
+function backfillCurrentMixedExceptionWithoutEvent(
+  database: DatabaseSync,
+  direction: 'outbound' | 'return',
+  migratedEvents: readonly LegacyMixedLogisticsEvent[],
+): void {
+  const table = direction === 'outbound' ? 'shipment_packages' : 'aftersales_return_records';
+  const rows = database.prepare(`
+    SELECT id, logistics_status, created_at
+    FROM ${table}
+    WHERE logistics_status IN (
+      'lost', 'delivery_dispute', 'damaged', 'misdelivered', 'exception'
+    )
+  `).all() as unknown as Array<{ id: string; logistics_status: string; created_at: string }>;
+  const packageIdsWithEvents = new Set(migratedEvents.map(({ packageId }) => packageId));
+  const missing = rows.filter(({ id }) => !packageIdsWithEvents.has(id)).map((row) => ({
+    id: `current-${row.id}`,
+    packageId: row.id,
+    exceptionType: legacyExceptionType(row.logistics_status),
+    impactJson: '{"scope":"package"}',
+    reason: '旧版物流异常状态保守升级',
+    occurredAt: row.created_at,
+    createdAt: row.created_at,
+    resolvedAt: null,
+    resolvedReason: null,
+  } satisfies LegacyMixedLogisticsEvent));
+  insertLegacyLogisticsExceptions(database, direction, missing);
+}
+
+function legacyImpactJson(value: unknown, message: string): string {
+  const payload = parseStoredJsonRecord(value, message);
+  return legacyImpactFromParsedPayload(payload, message);
+}
+
+function legacyImpactFromParsedPayload(
+  payload: Record<string, unknown>,
+  message: string,
+): string {
+  const impact = payload.impact ?? { scope: 'package' };
+  if (!impact || typeof impact !== 'object' || Array.isArray(impact)) throw new Error(message);
+  const record = impact as Record<string, unknown>;
+  if (record.scope === 'package') return '{"scope":"package"}';
+  if (record.scope !== 'items' || !Array.isArray(record.items) || record.items.length === 0) {
+    throw new Error(message);
+  }
+  for (const item of record.items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(message);
+    const value = item as Record<string, unknown>;
+    if (
+      typeof value.sourceItemId !== 'string'
+      || !Number.isSafeInteger(value.quantity)
+      || Number(value.quantity) <= 0
+    ) throw new Error(message);
+  }
+  return JSON.stringify(impact);
+}
+
+function parseStoredJsonRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== 'string') throw new Error(message);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(message, { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(message);
+  return parsed as Record<string, unknown>;
+}
+
+function legacyExceptionType(value: unknown): LegacyMixedLogisticsEvent['exceptionType'] {
+  if (
+    value === 'lost'
+    || value === 'delivery_dispute'
+    || value === 'damaged'
+    || value === 'misdelivered'
+  ) return value;
+  if (value === 'exception') return 'other';
+  throw new Error('旧版物流异常类型无效');
+}
+
+function isLegacyExceptionStatus(value: unknown): boolean {
+  return value === 'lost' || value === 'delivery_dispute' || value === 'damaged'
+    || value === 'misdelivered' || value === 'exception';
+}
+
+function isLegacyNormalReturnStatus(value: unknown): boolean {
+  return value === 'awaiting_carrier' || value === 'in_transit' || value === 'delivered'
+    || value === 'returned_to_buyer';
+}
+
+function asStoredText(value: unknown, message: string): string {
+  if (typeof value !== 'string' || !value) throw new Error(message);
+  return value;
 }
 
 function rebuildFulfillmentStatusTablesForVersion26(database: DatabaseSync): void {

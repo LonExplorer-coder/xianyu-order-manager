@@ -11,6 +11,7 @@ import {
   aftersalesStatusLabel,
   aftersalesTodoForCases,
 } from '../core/order-operations-projection';
+import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import type { ShipmentRecord } from '../core/shipment-records';
 
 export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
@@ -27,13 +28,7 @@ export function returnLogisticsStatusLabel(status: AftersalesReturnLogisticsStat
     awaiting_carrier: '待承运方接收',
     in_transit: '运输中',
     delivered: '已签收',
-    intercepting: '拦截处理中',
-    returned_to_buyer: '已退回买家',
-    lost: '丢件',
-    delivery_dispute: '签收争议',
-    damaged: '运输破损',
-    misdelivered: '错投',
-    exception: '其他物流异常',
+    returned: '已退回',
   }[status];
 }
 
@@ -121,6 +116,10 @@ export function aftersalesCurrentAction(
       returnLogisticsStatuses: aftersalesCase.returns.map(({ logisticsStatus }) => logisticsStatus),
       carrierClaimStatuses: aftersalesCase.returns.flatMap(({ carrierClaim }) => (
         carrierClaim ? [carrierClaim.status] : []
+      )),
+      hasUnresolvedLogisticsException: aftersalesCase.returns.some(({ currentException }) => (
+        currentException !== null
+        && isUnresolvedLogisticsExceptionStage(currentException.stage)
       )),
     }));
   return aftersalesTodoForCases(matchingCases);

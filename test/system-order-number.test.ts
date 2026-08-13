@@ -16,6 +16,7 @@ import {
   systemOrderNumberForSequence,
 } from '../src/core/system-order-number';
 import { LocalApplication } from '../src/main/local-application';
+import { removeVersion31ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
 
@@ -178,6 +179,7 @@ describe('永久系统订单编号', () => {
     const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
     try {
+      removeVersion31ExtensionArtifacts(legacy);
       const rows = legacy.prepare('SELECT id FROM original_orders ORDER BY id').all() as Array<{ id: string }>;
       legacy.prepare('UPDATE original_orders SET created_at = ? WHERE id = ?')
         .run('2026-08-12T15:59:00.000Z', rows[0].id);
@@ -190,7 +192,7 @@ describe('永久系统订单编号', () => {
         DROP TRIGGER original_orders_require_system_order_number_on_insert;
         DROP INDEX original_orders_by_system_order_number;
         ALTER TABLE original_orders DROP COLUMN system_order_number;
-        DELETE FROM schema_migrations WHERE version IN (27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (27, 28, 29, 30, 31);
       `);
     } finally {
       legacy.close();

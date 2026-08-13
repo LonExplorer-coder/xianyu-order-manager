@@ -6,6 +6,7 @@ import type {
   CarrierClaimStatus,
 } from './aftersales-cases';
 import type { ShipmentLogisticsStatus } from './shipment-records';
+import type { LogisticsExceptionStage, LogisticsExceptionType } from './logistics-exceptions';
 
 export type OrderOperationsShipmentItem = {
   shipmentPackageItemId: string;
@@ -25,7 +26,8 @@ export type OrderOperationsPackage = {
   cancellationReason: string | null;
   currentException: {
     direction: 'outbound';
-    logisticsStatus: ShipmentLogisticsStatus;
+    exceptionType: LogisticsExceptionType;
+    stage: LogisticsExceptionStage;
     affectedQuantity: number;
     reason: string;
     occurredAt: string;
@@ -67,7 +69,8 @@ export type OrderOperationsAftersalesCase = {
     logisticsStatus: AftersalesReturnLogisticsStatus;
     currentException: {
       direction: 'return';
-      logisticsStatus: AftersalesReturnLogisticsStatus;
+      exceptionType: LogisticsExceptionType;
+      stage: LogisticsExceptionStage;
       affectedQuantity: number;
       reason: string;
       occurredAt: string;
@@ -114,13 +117,7 @@ const SHIPMENT_LOGISTICS_STATUS_LABELS: Record<ShipmentLogisticsStatus, string> 
   awaiting_carrier: '待承运方接收',
   in_transit: '运输中',
   delivered: '已签收',
-  intercepting: '拦截处理中',
-  intercepted_returned: '已拦截退回',
-  lost: '丢件',
-  delivery_dispute: '投递争议',
-  damaged: '运输破损',
-  misdelivered: '错投',
-  exception: '其他物流异常',
+  returned: '已退回',
 };
 
 export function orderOperationsOverview(
@@ -197,6 +194,7 @@ export function aftersalesTodoForCases(
     returnStatuses: readonly AftersalesReturnStatus[];
     returnLogisticsStatuses?: readonly AftersalesReturnLogisticsStatus[];
     carrierClaimStatuses?: readonly CarrierClaimStatus[];
+    hasUnresolvedLogisticsException?: boolean;
   }[],
 ): string | null {
   const activeCases = cases.filter(({ status }) => status !== 'completed');
@@ -206,9 +204,17 @@ export function aftersalesTodoForCases(
   if (activeCases.some(({ status }) => status === 'waiting_refund')) {
     return '确认退款';
   }
-  if (cases.some(({ returnStatuses, returnLogisticsStatuses = [] }) => (
+  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('pending'))) {
+    return '跟进承运索赔';
+  }
+  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('approved'))) {
+    return '确认承运赔付';
+  }
+  if (cases.some(({ hasUnresolvedLogisticsException }) => hasUnresolvedLogisticsException)) {
+    return '处理退货物流异常';
+  }
+  if (cases.some(({ returnStatuses }) => (
     returnStatuses.includes('in_transit')
-    && !returnLogisticsStatuses.includes('lost')
   ))) {
     return '确认收到退货';
   }
@@ -218,33 +224,21 @@ export function aftersalesTodoForCases(
       .map(({ status }) => status),
   ));
   if (caseTodo) return caseTodo;
-  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('pending'))) {
-    return '跟进承运索赔';
-  }
-  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('approved'))) {
-    return '确认承运赔付';
-  }
   return null;
 }
 
 export function shipmentTodoForStatuses(
   statuses: ReadonlySet<ShipmentLogisticsStatus>,
   carrierClaimStatuses: ReadonlySet<CarrierClaimStatus> = new Set(),
+  hasUnresolvedLogisticsException = false,
 ): string {
   if (carrierClaimStatuses.has('pending')) return '跟进承运索赔';
   if (carrierClaimStatuses.has('approved')) return '确认承运赔付';
+  if (hasUnresolvedLogisticsException) return '处理物流异常';
   if (statuses.size === 0 || [...statuses].every((status) => status === 'delivered')) {
     return '无需物流操作';
   }
-  if (statuses.has('lost')) return '处理丢件';
-  if (
-    statuses.has('delivery_dispute')
-    || statuses.has('damaged')
-    || statuses.has('misdelivered')
-    || statuses.has('exception')
-  ) return '处理物流异常';
-  if (statuses.has('intercepting')) return '跟进拦截结果';
-  if (statuses.has('intercepted_returned')) return '确认退回货物';
+  if (statuses.has('returned')) return '确认退回货物';
   if (statuses.has('awaiting_carrier')) return '确认承运方接收';
   return '跟进运输进度';
 }

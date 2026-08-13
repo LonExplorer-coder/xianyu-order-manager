@@ -15,6 +15,7 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
+import { removeVersion31ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
 
@@ -727,13 +728,14 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -782,13 +784,14 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -868,13 +871,14 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -958,6 +962,7 @@ describe('发货记录', () => {
     const database = new DatabaseSync(databasePath);
     const legacyArchiveId = `legacy-shipment-group-archive-${first.record.id}`;
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_are_immutable_on_update;
@@ -1014,7 +1019,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1109,6 +1114,7 @@ describe('发货记录', () => {
     const version21Time = new Date('2026-08-12T02:00:03.000Z').toISOString();
     const itemEditTime = new Date('2026-08-12T02:00:04.000Z').toISOString();
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_are_immutable_on_update;
@@ -1213,7 +1219,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1319,6 +1325,7 @@ describe('发货记录', () => {
     const itemRemovalTime = new Date('2026-08-12T01:00:02.500Z').toISOString();
     const version21Time = new Date('2026-08-12T01:00:03.000Z').toISOString();
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_are_immutable_on_update;
@@ -1393,7 +1400,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1468,6 +1475,7 @@ describe('发货记录', () => {
       addressNormalized: '广东省深圳市福田区新址路2号',
     };
     try {
+      removeVersion31ExtensionArtifacts(version20Database);
       version20Database.exec(`
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_are_immutable_on_update;
@@ -1530,7 +1538,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1607,6 +1615,7 @@ describe('发货记录', () => {
     const legacyArchiveId = `legacy-shipment-group-archive-${first.record.id}`;
     const database = new DatabaseSync(databasePath);
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_are_immutable_on_update;
@@ -1657,7 +1666,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1718,6 +1727,7 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
@@ -1766,7 +1776,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1835,13 +1845,14 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         COMMIT;
       `);
     } finally {
@@ -1943,12 +1954,13 @@ describe('发货记录', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.prepare(`
         UPDATE original_orders
         SET fulfillment_status = 'pending_shipment'
         WHERE id = ?
       `).run(firstOrder.id);
-      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30)').run();
+      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30, 31)').run();
     } finally {
       database.close();
     }
@@ -2377,6 +2389,330 @@ describe('发货记录', () => {
     expect(reopened.queryShipmentRecords()).toEqual([result.record]);
   });
 
+  it('正向包裹保留最后可信正常运输事实并独立推进不可变物流异常时间线', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-SEPARATE-EXCEPTION-001',
+        items: remainingItems,
+      }],
+    });
+    const shipmentPackage = shipment.record.packages[0];
+
+    const accepted = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      reason: '承运方已确认揽收',
+    });
+    const opened = application.recordShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: accepted.record.packages[0].revision,
+      exceptionType: 'lost',
+      stage: 'pending_verification',
+      impact: { scope: 'package' },
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '运单长时间无新扫描，先待核实',
+    });
+    const exception = opened.record.packages[0].logisticsExceptions[0];
+
+    expect(opened.record.packages[0]).toMatchObject({
+      logisticsStatus: 'in_transit',
+      currentException: {
+        id: exception.id,
+        direction: 'outbound',
+        exceptionType: 'lost',
+        stage: 'pending_verification',
+        revision: 1,
+        impact: { scope: 'package' },
+      },
+      logisticsExceptions: [{
+        id: exception.id,
+        stage: 'pending_verification',
+        timeline: [{
+          kind: 'opened',
+          resultRevision: 1,
+          stage: 'pending_verification',
+          reason: '运单长时间无新扫描,先待核实',
+          occurredAt: '2026-08-14T10:00:00+08:00',
+        }],
+      }],
+    });
+
+    const investigating = application.progressShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      exceptionId: exception.id,
+      expectedExceptionRevision: 1,
+      stage: 'investigating',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '已向承运方发起查询',
+    });
+    const confirmed = application.progressShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      exceptionId: exception.id,
+      expectedExceptionRevision: 2,
+      stage: 'confirmed',
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      reason: '承运方确认遗失',
+    });
+    const recovered = application.progressShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      exceptionId: exception.id,
+      expectedExceptionRevision: 3,
+      stage: 'recovered',
+      occurredAt: '2026-08-14T12:00:00+08:00',
+      reason: '承运方在转运中心找回包裹',
+    });
+    const resolved = application.progressShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      exceptionId: exception.id,
+      expectedExceptionRevision: 4,
+      stage: 'resolved',
+      occurredAt: '2026-08-14T13:00:00+08:00',
+      reason: '包裹已恢复正常派送',
+    });
+
+    expect(investigating.record.packages[0].logisticsStatus).toBe('in_transit');
+    expect(confirmed.record.packages[0].logisticsStatus).toBe('in_transit');
+    expect(recovered.record.packages[0].logisticsStatus).toBe('in_transit');
+    expect(resolved.record.packages[0]).toMatchObject({
+      logisticsStatus: 'in_transit',
+      currentException: null,
+      logisticsExceptions: [{
+        id: exception.id,
+        stage: 'resolved',
+        revision: 5,
+        timeline: [
+          expect.objectContaining({ kind: 'opened', resultRevision: 1 }),
+          expect.objectContaining({
+            kind: 'stage_changed', baseRevision: 1, resultRevision: 2,
+            beforeStage: 'pending_verification', afterStage: 'investigating',
+          }),
+          expect.objectContaining({
+            kind: 'stage_changed', baseRevision: 2, resultRevision: 3,
+            beforeStage: 'investigating', afterStage: 'confirmed',
+          }),
+          expect.objectContaining({
+            kind: 'stage_changed', baseRevision: 3, resultRevision: 4,
+            beforeStage: 'confirmed', afterStage: 'recovered',
+          }),
+          expect.objectContaining({
+            kind: 'stage_changed', baseRevision: 4, resultRevision: 5,
+            beforeStage: 'recovered', afterStage: 'resolved',
+          }),
+        ],
+      }],
+    });
+  });
+
+  it('正向丢件异常只能在承运揽收且没有可信收到证据时确认', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-LOSS-EVIDENCE-001',
+        items: remainingItems,
+      }],
+    });
+    const shipmentPackage = shipment.record.packages[0];
+
+    expect(() => application.recordShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      carrierConfirmedLoss: true,
+      impact: { scope: 'package' },
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      reason: '没有揽收证据就尝试确认丢件',
+    })).toThrow('没有承运方揽收证据，不能确认丢件');
+
+    const delivered = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'delivered',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '承运方扫描签收',
+    });
+    expect(() => application.recordShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: delivered.record.packages[0].revision,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      carrierConfirmedLoss: true,
+      impact: { scope: 'package' },
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      reason: '已有签收证据后尝试确认丢件',
+    })).toThrow('已有可信收到证据，不能确认丢件');
+    expect(application.queryShipmentRecords()[0].packages[0]).toMatchObject({
+      logisticsStatus: 'delivered',
+      logisticsExceptions: [],
+    });
+  });
+
+  it('从 v30 混合物流状态保守升级正常运输与异常事项并保持重启幂等', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-v30-logistics-facts-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V30-MIXED-EXCEPTION',
+        items: remainingItems,
+      }],
+    });
+    application.close();
+
+    const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      legacy.exec('PRAGMA ignore_check_constraints = ON;');
+      legacy.prepare(`
+        UPDATE shipment_packages
+        SET logistics_status = 'damaged', revision = 2
+        WHERE id = ?
+      `).run(shipment.record.packages[0].id);
+      legacy.prepare(`
+        INSERT INTO shipment_package_logistics_status_events (
+          id, package_id, base_revision, result_revision,
+          before_status, after_status, reason, occurred_at, payload_json, created_at
+        ) VALUES (?, ?, 1, 2, 'in_transit', 'damaged', ?, ?, ?, ?)
+      `).run(
+        'legacy-v30-damaged-event',
+        shipment.record.packages[0].id,
+        '旧版混合状态记录了运输破损',
+        '2026-08-14T15:00:00+08:00',
+        JSON.stringify({ impact: { scope: 'items', items: [] } }),
+        '2026-08-14T15:00:00.000Z',
+      );
+      legacy.exec(`
+        PRAGMA ignore_check_constraints = OFF;
+        DROP TRIGGER logistics_exception_identity_is_immutable_on_update;
+        DROP TRIGGER logistics_exception_matters_are_immutable_on_delete;
+        DROP TRIGGER logistics_exception_events_are_immutable_on_update;
+        DROP TRIGGER logistics_exception_events_are_immutable_on_delete;
+        DROP TABLE logistics_exception_events;
+        DROP TABLE logistics_exception_matters;
+        DROP TRIGGER legacy_shipment_mixed_events_are_immutable_on_update;
+        DROP TRIGGER legacy_shipment_mixed_events_are_immutable_on_delete;
+        DROP TRIGGER legacy_return_mixed_events_are_immutable_on_update;
+        DROP TRIGGER legacy_return_mixed_events_are_immutable_on_delete;
+        DROP TABLE legacy_shipment_package_mixed_logistics_events;
+        DROP TABLE legacy_return_mixed_logistics_events;
+        DELETE FROM schema_migrations WHERE version = 31;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    await expect(createApplication(root, false))
+      .rejects.toThrow('旧版正向物流异常影响范围无效');
+    const rolledBack = new DatabaseSync(databasePath);
+    try {
+      expect(rolledBack.prepare(`
+        SELECT logistics_status AS logisticsStatus
+        FROM shipment_packages WHERE id = ?
+      `).get(shipment.record.packages[0].id)).toEqual({ logisticsStatus: 'damaged' });
+      expect(() => rolledBack.prepare(`
+        SELECT COUNT(*) AS count FROM logistics_exception_matters
+      `)).toThrow(/no such table/u);
+      rolledBack.exec('DROP TRIGGER shipment_package_logistics_status_events_are_immutable_on_update;');
+      rolledBack.prepare(`
+        UPDATE shipment_package_logistics_status_events
+        SET payload_json = ? WHERE id = 'legacy-v30-damaged-event'
+      `).run(JSON.stringify({ impact: { scope: 'items', items: [{
+        sourceItemId: shipment.record.packages[0].items[0].id,
+        quantity: 1,
+      }] } }));
+      rolledBack.exec(`
+        CREATE TRIGGER shipment_package_logistics_status_events_are_immutable_on_update
+        BEFORE UPDATE ON shipment_package_logistics_status_events
+        BEGIN
+          SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+        END;
+      `);
+    } finally {
+      rolledBack.close();
+    }
+
+    const migrated = await createApplication(root, false);
+    const migratedPackage = migrated.queryShipmentRecords()[0].packages[0];
+    expect(migratedPackage).toMatchObject({
+      logisticsStatus: 'in_transit',
+      currentException: {
+        direction: 'outbound',
+        exceptionType: 'damaged',
+        stage: 'pending_verification',
+        impact: { scope: 'items', items: [{
+          sourceItemId: shipment.record.packages[0].items[0].id,
+          quantity: 1,
+        }] },
+        reason: '旧版混合状态记录了运输破损',
+      },
+      logisticsExceptions: [expect.objectContaining({
+        exceptionType: 'damaged',
+        stage: 'pending_verification',
+        timeline: [expect.objectContaining({ kind: 'opened', resultRevision: 1 })],
+      })],
+    });
+    expect(migratedPackage.timeline).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ afterStatus: 'damaged' }),
+    ]));
+    const migratedSnapshot = structuredClone(migratedPackage);
+    migrated.close();
+
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryShipmentRecords()[0].packages[0]).toEqual(migratedSnapshot);
+    const verified = new DatabaseSync(databasePath);
+    try {
+      expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 31 });
+      expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(() => verified.prepare(`
+        UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
+      `).run()).toThrow(/logistics exception events are immutable/u);
+    } finally {
+      verified.close();
+    }
+  });
+
   it('正向发货通过共同模块登记商品级异常、索赔和实际赔付', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-outbound-claim-impact-'));
     const application = await createApplication(root);
@@ -2401,11 +2737,12 @@ describe('发货记录', () => {
     });
     const shipmentPackage = confirmation.record.packages[0];
 
-    const exceptional = application.updateShipmentPackageLogisticsStatus({
+    const exceptional = application.recordShipmentPackageLogisticsException({
       recordId: confirmation.record.id,
       packageId: shipmentPackage.id,
       expectedRevision: shipmentPackage.revision,
-      logisticsStatus: 'damaged',
+      exceptionType: 'damaged',
+      stage: 'confirmed',
       occurredAt: '2026-08-14T09:00:00+08:00',
       reason: '承运方反馈外包装损坏，仅影响第一笔订单的一件商品',
       impact: {
@@ -2415,10 +2752,11 @@ describe('发货记录', () => {
     });
 
     expect(exceptional.record.packages[0]).toMatchObject({
-      logisticsStatus: 'damaged',
+      logisticsStatus: 'in_transit',
       currentException: {
         direction: 'outbound',
-        logisticsStatus: 'damaged',
+        exceptionType: 'damaged',
+        stage: 'confirmed',
         impact: {
           scope: 'items',
           items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
@@ -2430,7 +2768,8 @@ describe('发货记录', () => {
       .toMatchObject({
         currentException: {
           direction: 'outbound',
-          logisticsStatus: 'damaged',
+          exceptionType: 'damaged',
+          stage: 'confirmed',
           affectedQuantity: 1,
         },
       });
@@ -2517,6 +2856,80 @@ describe('发货记录', () => {
     }
   });
 
+  it('订单投影会在同包裹的多个未解决异常中选择实际影响当前订单的事项', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder, secondOrder] = group.orders;
+    const firstItem = firstOrder.items[0];
+    const secondItem = secondOrder.items[0];
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [
+        { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: firstItem.quantity },
+        { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: secondItem.quantity },
+      ],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-MULTI-ORDER-EXCEPTIONS',
+        items: [
+          { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: firstItem.quantity },
+          { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: secondItem.quantity },
+        ],
+      }],
+    });
+    const shipmentPackage = confirmation.record.packages[0];
+    const firstException = application.recordShipmentPackageLogisticsException({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      exceptionType: 'damaged',
+      stage: 'confirmed',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
+      },
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      reason: '第一笔订单的商品运输破损',
+    });
+    const firstExceptionId = firstException.record.packages[0].currentException?.id;
+    if (!firstExceptionId) throw new Error('测试前置：第一个异常未登记');
+    const secondException = application.recordShipmentPackageLogisticsException({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: firstException.record.packages[0].revision,
+      exceptionType: 'misdelivered',
+      stage: 'investigating',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackage.items[1].id, quantity: 1 }],
+      },
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '第二笔订单的商品疑似错投',
+    });
+    const secondExceptionId = secondException.record.packages[0].currentException?.id;
+    if (!secondExceptionId) throw new Error('测试前置：第二个异常未登记');
+
+    expect(application.getOrder(firstOrder.id).operations.shipmentRecords[0].packages[0])
+      .toMatchObject({
+        logisticsStatus: 'in_transit',
+        currentException: {
+          exceptionType: 'damaged',
+          stage: 'confirmed',
+          affectedQuantity: 1,
+        },
+      });
+    expect(application.getOrder(secondOrder.id).operations.shipmentRecords[0].packages[0])
+      .toMatchObject({
+        logisticsStatus: 'in_transit',
+        currentException: {
+          exceptionType: 'misdelivered',
+          stage: 'investigating',
+          affectedQuantity: 1,
+        },
+      });
+    expect(firstExceptionId).not.toBe(secondExceptionId);
+  });
+
   it('正向包裹已签收后不能回退到收件前状态或登记丢件', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -2540,6 +2953,7 @@ describe('发货记录', () => {
       packageId: shipmentPackage.id,
       expectedRevision: shipmentPackage.revision,
       logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T10:00:00+08:00',
       reason: '承运商首次回传签收',
     });
     expect(() => application.updateShipmentPackageLogisticsStatus({
@@ -2547,17 +2961,20 @@ describe('发货记录', () => {
       packageId: shipmentPackage.id,
       expectedRevision: delivered.record.packages[0].revision,
       logisticsStatus: 'in_transit',
+      occurredAt: '2026-08-14T10:30:00+08:00',
       reason: '承运商更正误报签收',
     })).toThrow('已经收到的包裹不能回退到收件前状态');
-    expect(() => application.updateShipmentPackageLogisticsStatus({
+    expect(() => application.recordShipmentPackageLogisticsException({
       recordId: confirmation.record.id,
       packageId: shipmentPackage.id,
       expectedRevision: delivered.record.packages[0].revision,
-      logisticsStatus: 'lost',
-      carrierAcceptanceConfirmed: true,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       carrierConfirmedLoss: true,
+      occurredAt: '2026-08-14T11:00:00+08:00',
       reason: '签收后不能改判丢件',
-    })).toThrow('已经收到的包裹不能登记为丢件');
+    })).toThrow('已有可信收到证据，不能确认丢件');
     expect(group.orders.map((order) => application.getOrder(order.id).order.fulfillmentStatus))
       .toEqual(['delivered', 'delivered']);
   });
@@ -2866,6 +3283,183 @@ describe('退货物流与承运索赔', () => {
     });
   });
 
+  it('升级旧版退货签收争议及后续正常事实时重建可读时间线', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-return-delivery-dispute-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-RETURN-DISPUTE-MIGRATION',
+        items: shipmentItems,
+      }],
+    });
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      occurredAt: '2026-08-13T20:00:00+08:00',
+      reason: '买家退回一件商品',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: shipment.record.packages[0].items[0].id, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '圆通速递',
+      trackingNumber: 'YT-RETURN-DISPUTE-MIGRATION',
+      occurredAt: '2026-08-13T20:10:00+08:00',
+      reason: '买家已经寄出退货',
+    });
+    const returnRecord = registered.returns[0];
+    const delivered = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: returnRecord.id,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-13T21:00:00+08:00',
+      reason: '承运轨迹显示退货已签收',
+    });
+    const deliveredReturn = delivered.returns[0];
+    application.close();
+
+    const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      legacy.exec('PRAGMA ignore_check_constraints = ON;');
+      legacy.prepare(`
+        UPDATE aftersales_return_records
+        SET logistics_status = 'delivery_dispute', revision = revision + 1
+        WHERE id = ?
+      `).run(returnRecord.id);
+      legacy.prepare(`
+        INSERT INTO aftersales_return_record_events (
+          id, return_record_id, kind, base_revision, result_revision,
+          occurred_at, reason, inspection_result, payload_json, created_at
+        ) VALUES (?, ?, 'logistics_status_updated', ?, ?, ?, ?, NULL, ?, ?)
+      `).run(
+        'legacy-return-delivery-dispute-event',
+        returnRecord.id,
+        deliveredReturn.revision,
+        deliveredReturn.revision + 1,
+        '2026-08-13T21:10:00+08:00',
+        '旧版将签收争议与运输状态混在一起',
+        JSON.stringify({
+          before: 'delivered',
+          after: 'delivery_dispute',
+          impact: { scope: 'package' },
+        }),
+        '2026-08-13T13:10:00.000Z',
+      );
+      legacy.prepare(`
+        UPDATE aftersales_return_records
+        SET logistics_status = 'misdelivered', revision = revision + 1
+        WHERE id = ?
+      `).run(returnRecord.id);
+      legacy.prepare(`
+        INSERT INTO aftersales_return_record_events (
+          id, return_record_id, kind, base_revision, result_revision,
+          occurred_at, reason, inspection_result, payload_json, created_at
+        ) VALUES (?, ?, 'logistics_status_updated', ?, ?, ?, ?, NULL, ?, ?)
+      `).run(
+        'legacy-return-misdelivered-event',
+        returnRecord.id,
+        deliveredReturn.revision + 1,
+        deliveredReturn.revision + 2,
+        '2026-08-13T21:15:00+08:00',
+        '签收争议后又记录为疑似错投',
+        JSON.stringify({
+          before: 'delivery_dispute',
+          after: 'misdelivered',
+          impact: { scope: 'package' },
+        }),
+        '2026-08-13T13:15:00.000Z',
+      );
+      legacy.prepare(`
+        UPDATE aftersales_return_records
+        SET logistics_status = 'returned_to_buyer', revision = revision + 1
+        WHERE id = ?
+      `).run(returnRecord.id);
+      legacy.prepare(`
+        INSERT INTO aftersales_return_record_events (
+          id, return_record_id, kind, base_revision, result_revision,
+          occurred_at, reason, inspection_result, payload_json, created_at
+        ) VALUES (?, ?, 'logistics_status_updated', ?, ?, ?, ?, NULL, ?, ?)
+      `).run(
+        'legacy-return-returned-event',
+        returnRecord.id,
+        deliveredReturn.revision + 2,
+        deliveredReturn.revision + 3,
+        '2026-08-13T21:20:00+08:00',
+        '承运方后续将退货包裹退回买家',
+        JSON.stringify({
+          before: 'delivery_dispute',
+          after: 'returned_to_buyer',
+        }),
+        '2026-08-13T13:20:00.000Z',
+      );
+      legacy.exec('PRAGMA ignore_check_constraints = OFF;');
+      removeVersion31ExtensionArtifacts(legacy);
+      legacy.prepare('DELETE FROM schema_migrations WHERE version = 31').run();
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = await createApplication(root, false);
+    const migratedReturn = migrated.queryAftersalesCases({})
+      .find(({ id }) => id === created.id)?.returns[0];
+    expect(migratedReturn).toMatchObject({
+      id: returnRecord.id,
+      logisticsStatus: 'returned',
+      currentException: null,
+      logisticsExceptions: expect.arrayContaining([
+        expect.objectContaining({
+          direction: 'return',
+          exceptionType: 'delivery_dispute',
+          stage: 'resolved',
+          impact: { scope: 'package' },
+          reason: '承运方后续将退货包裹退回买家',
+          timeline: [
+            expect.objectContaining({
+              kind: 'opened',
+              reason: '旧版将签收争议与运输状态混在一起',
+            }),
+            expect.objectContaining({
+              kind: 'stage_changed',
+              afterStage: 'resolved',
+              reason: '承运方后续将退货包裹退回买家',
+            }),
+          ],
+        }),
+        expect.objectContaining({
+          exceptionType: 'misdelivered',
+          stage: 'resolved',
+          timeline: [
+            expect.objectContaining({
+              kind: 'opened',
+              reason: '签收争议后又记录为疑似错投',
+            }),
+            expect.objectContaining({ kind: 'stage_changed', afterStage: 'resolved' }),
+          ],
+        }),
+      ]),
+      timeline: expect.arrayContaining([expect.objectContaining({
+        kind: 'logistics_status_updated',
+        before: 'delivered',
+        after: 'returned',
+        reason: '承运方后续将退货包裹退回买家',
+      })]),
+    });
+  });
+
   it('相同退货运单默认阻止重复登记并允许用户明确确认合装退货', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -2993,11 +3587,12 @@ describe('退货物流与承运索赔', () => {
       item.shipmentPackageItemId === firstItem.id
     ))?.id as string;
     const damaged = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: secondCase.id,
       expectedRevision: carrierAccepted.revision,
       returnRecordId: combined.returns[0].id,
-      logisticsStatus: 'damaged',
+      exceptionType: 'damaged',
+      stage: 'confirmed',
       impact: {
         scope: 'items',
         items: [{ sourceItemId: firstReturnItemId, quantity: 1 }],
@@ -3008,7 +3603,8 @@ describe('退货物流与承运索赔', () => {
     expect(application.getOrder(firstItem.orderId).operations.aftersalesCases[0]
       .returnPackages[0].currentException).toMatchObject({
       direction: 'return',
-      logisticsStatus: 'damaged',
+      exceptionType: 'damaged',
+      stage: 'confirmed',
       affectedQuantity: 1,
     });
     expect(application.getOrder(secondItem.orderId).operations.aftersalesCases[0]
@@ -3065,6 +3661,86 @@ describe('退货物流与承运索赔', () => {
       .discrepancies).toEqual([]);
   });
 
+  it('退货包裹在正常运输事实之外独立保留物流异常事项', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-RETURN-SEPARATE-EXCEPTION',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      occurredAt: '2026-08-14T14:00:00+08:00',
+      reason: '验证退货正常运输与异常分离',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-RETURN-SEPARATE-EXCEPTION',
+      occurredAt: '2026-08-14T14:10:00+08:00',
+      reason: '买家已交寄退货包裹',
+    });
+    const returnPackage = registered.returns[0];
+    const accepted = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: returnPackage.id,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T14:20:00+08:00',
+      reason: '承运方已确认揽收退货',
+    });
+    const opened = application.progressAftersalesCase({
+      kind: 'record_return_logistics_exception',
+      caseId: accepted.id,
+      expectedRevision: accepted.revision,
+      returnRecordId: returnPackage.id,
+      exceptionType: 'damaged',
+      stage: 'pending_verification',
+      impact: { scope: 'items', items: [{ sourceItemId: returnPackage.items[0].id, quantity: 1 }] },
+      occurredAt: '2026-08-14T14:30:00+08:00',
+      reason: '运输中外包装受损，等待承运方核实',
+    });
+
+    expect(opened).toMatchObject({
+      status: 'waiting_return',
+      returns: [{
+        logisticsStatus: 'in_transit',
+        currentException: {
+          direction: 'return',
+          exceptionType: 'damaged',
+          stage: 'pending_verification',
+          impact: {
+            scope: 'items',
+            items: [{ sourceItemId: returnPackage.items[0].id, quantity: 1 }],
+          },
+        },
+        logisticsExceptions: [expect.objectContaining({
+          exceptionType: 'damaged',
+          stage: 'pending_verification',
+          timeline: [expect.objectContaining({ kind: 'opened', resultRevision: 1 })],
+        })],
+      }],
+    });
+  });
+
   it('分别保存计划退回、实际收到和检查通过数量并呈现退货检查差异', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -3119,15 +3795,17 @@ describe('退货物流与承运索赔', () => {
       discrepancies: [{ kind: 'missing', quantity: 1, note: '包裹内少一件商品' }],
     });
     expect(() => application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: received.id,
       expectedRevision: received.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'lost',
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       carrierConfirmedLoss: true,
       occurredAt: '2026-08-13T23:25:00+08:00',
       reason: '已收到后不应再改为丢件',
-    })).toThrow('已收到或检查的退货包裹不能改为丢件');
+    })).toThrow('已有可信收到证据，不能确认丢件');
     expect(() => application.progressAftersalesCase({
       kind: 'update_return_logistics_status',
       caseId: received.id,
@@ -3221,7 +3899,7 @@ describe('退货物流与承运索赔', () => {
       }]);
   });
 
-  it('没有揽收证据时不能认定丢件并在承运方确认遗失后转入退款处理', async () => {
+  it('没有揽收证据时不能确认丢件且异常事项不改写售后状态', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
     const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
@@ -3263,15 +3941,17 @@ describe('退货物流与承运索赔', () => {
     });
 
     expect(() => application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: registered.id,
       expectedRevision: registered.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'lost',
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       carrierConfirmedLoss: true,
       occurredAt: '2026-08-14T08:20:00+08:00',
       reason: '没有揽收记录就尝试登记丢件',
-    })).toThrow('没有承运方揽收证据，不能登记丢件');
+    })).toThrow('没有承运方揽收证据，不能确认丢件');
     expect(() => application.progressAftersalesCase({
       kind: 'update_return_logistics_status',
       caseId: registered.id,
@@ -3311,29 +3991,33 @@ describe('退货物流与承运索赔', () => {
       reason: '尝试把收到时间登记在承运方揽收之前',
     })).toThrow('退货收到时间不能早于上一条退货事件');
     expect(() => application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: accepted.id,
       expectedRevision: accepted.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'lost',
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       occurredAt: '2026-08-14T09:00:00+08:00',
       reason: '尚未确认承运方认定遗失',
-    })).toThrow('请确认承运方已经认定退货包裹遗失');
+    })).toThrow('请确认承运方已经认定包裹遗失');
 
     const lost = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: accepted.id,
       expectedRevision: accepted.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'lost',
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       carrierConfirmedLoss: true,
       occurredAt: '2026-08-14T09:10:00+08:00',
       reason: '承运方书面确认包裹遗失',
     });
     expect(lost).toMatchObject({
-      status: 'waiting_refund',
+      status: 'waiting_return',
       returns: [{
-        logisticsStatus: 'lost',
+        logisticsStatus: 'in_transit',
         carrierAcceptedAt: '2026-08-14T08:30:00+08:00',
         timeline: expect.arrayContaining([
           expect.objectContaining({
@@ -3341,12 +4025,11 @@ describe('退货物流与承运索赔', () => {
             before: 'awaiting_carrier',
             after: 'in_transit',
           }),
-          expect.objectContaining({
-            kind: 'logistics_status_updated',
-            before: 'in_transit',
-            after: 'lost',
-          }),
         ]),
+        currentException: expect.objectContaining({
+          exceptionType: 'lost',
+          stage: 'confirmed',
+        }),
       }],
     });
     const anotherSourceItem = shipment.record.packages[0].items[1];
@@ -3369,11 +4052,13 @@ describe('退货物流与承运索赔', () => {
       combineWithExisting: true,
     })).toThrow('已确认丢件的退货包裹不能再追加合装商品');
     const recovered = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'progress_return_logistics_exception',
       caseId: lost.id,
       expectedRevision: lost.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'delivered',
+      exceptionId: lost.returns[0].currentException?.id as string,
+      expectedExceptionRevision: lost.returns[0].currentException?.revision as number,
+      stage: 'recovered',
       occurredAt: '2026-08-14T09:20:00+08:00',
       reason: '退款前承运方找回包裹并送达',
     });
@@ -3428,11 +4113,12 @@ describe('退货物流与承运索赔', () => {
       reason: '承运方已经揽收',
     });
     const lost = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: accepted.id,
       expectedRevision: accepted.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'lost',
+      exceptionType: 'lost',
+      stage: 'confirmed',
       carrierConfirmedLoss: true,
       impact: {
         scope: 'items',
@@ -3463,10 +4149,11 @@ describe('退货物流与承运索赔', () => {
           id: returnPackage.id,
           shippingCarrier: '中通快递',
           trackingNumber: 'ZT-CARRIER-CLAIM-0001',
-          logisticsStatus: 'lost',
+          logisticsStatus: 'in_transit',
           currentException: {
             direction: 'return',
-            logisticsStatus: 'lost',
+            exceptionType: 'lost',
+            stage: 'confirmed',
             affectedQuantity: 1,
             reason: '承运方确认包裹遗失',
           },
@@ -3479,7 +4166,8 @@ describe('退货物流与承运索赔', () => {
           }],
         }],
       });
-    expect(application.getOrder(sourceItem.orderId).operations.currentTodo).toBe('确认退款');
+    expect(application.getOrder(sourceItem.orderId).operations.currentTodo)
+      .toBe('跟进承运索赔');
 
     const refunded = application.progressAftersalesCase({
       kind: 'confirm_refund',
@@ -3555,19 +4243,22 @@ describe('退货物流与承运索赔', () => {
       returnRecordId: returnPackage.id,
       occurredAt: '2026-08-17T09:50:00+08:00',
       reason: '未更新丢件结论就尝试登记收到',
-    })).toThrow('请先把已找回包裹的退货物流状态更新为实际状态');
+    })).toThrow('请先把已找回包裹的物流异常推进为已找回或已解决');
 
     const recovered = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'progress_return_logistics_exception',
       caseId: compensated.id,
       expectedRevision: compensated.revision,
       returnRecordId: returnPackage.id,
-      logisticsStatus: 'delivered',
+      exceptionId: compensated.returns[0].currentException?.id as string,
+      expectedExceptionRevision: compensated.returns[0].currentException?.revision as number,
+      stage: 'recovered',
       occurredAt: '2026-08-17T10:00:00+08:00',
       reason: '售后结案后承运方找回包裹并实际送达',
     });
     expect(recovered.status).toBe('completed');
-    expect(application.getOrder(sourceItem.orderId).operations.currentTodo).toBe('确认收到退货');
+    expect(application.getOrder(sourceItem.orderId).operations.currentTodo)
+      .toBe('确认收到退货');
     const receivedAfterCompletion = application.progressAftersalesCase({
       kind: 'receive_return',
       caseId: recovered.id,
@@ -3625,11 +4316,13 @@ describe('退货物流与承运索赔', () => {
       reason: '承运方已经揽收第二个包裹',
     });
     const exceptional = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: rejectedAccepted.id,
       expectedRevision: rejectedAccepted.revision,
       returnRecordId: rejectedAccepted.returns[0].id,
-      logisticsStatus: 'exception',
+      exceptionType: 'other',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       occurredAt: '2026-08-14T13:00:00+08:00',
       reason: '物流长期停滞，人工登记异常',
     });
@@ -3759,11 +4452,13 @@ describe('退货物流与承运索赔', () => {
       reason: '承运方确认揽收',
     });
     const exceptional = application.progressAftersalesCase({
-      kind: 'update_return_logistics_status',
+      kind: 'record_return_logistics_exception',
       caseId: accepted.id,
       expectedRevision: accepted.revision,
       returnRecordId: accepted.returns[0].id,
-      logisticsStatus: 'damaged',
+      exceptionType: 'damaged',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
       occurredAt: '2026-08-14T14:30:00+08:00',
       reason: '运输途中破损',
     });
@@ -3791,6 +4486,7 @@ describe('退货物流与承运索赔', () => {
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
@@ -3860,7 +4556,7 @@ describe('退货物流与承运索赔', () => {
         WHERE direction = 'return';
         DROP TABLE carrier_claims;
         ALTER TABLE carrier_claims_v29_fixture RENAME TO carrier_claims;
-        DELETE FROM schema_migrations WHERE version = 30;
+        DELETE FROM schema_migrations WHERE version IN (30, 31);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -3971,6 +4667,7 @@ describe('退货物流与承运索赔', () => {
     const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
     const database = new DatabaseSync(databasePath);
     try {
+      removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;

@@ -20,6 +20,11 @@ import type {
 import { normalizeShanghaiDateTime } from '../core/order-normalization';
 import type { ShipmentRecord } from '../core/shipment-records';
 import { AFTERSALES_STATUS_OPTIONS } from './aftersales-presentation';
+import {
+  LOGISTICS_EXCEPTION_TYPE_OPTIONS,
+  logisticsExceptionStageLabel,
+  nextLogisticsExceptionStages,
+} from './logistics-presentation';
 
 type ShipmentItem = ShipmentRecord['packages'][number]['items'][number];
 
@@ -294,7 +299,23 @@ export function ProgressAftersalesCaseDialog({
     returnRecord?.logisticsStatus ?? 'in_transit',
   );
   const [carrierAcceptanceConfirmed, setCarrierAcceptanceConfirmed] = useState(false);
+  const [exceptionType, setExceptionType] = useState<
+    'lost' | 'delivery_dispute' | 'damaged' | 'misdelivered' | 'other'
+  >('lost');
+  const exceptionStageOptions = kind === 'progress_return_logistics_exception'
+    && returnRecord?.currentException
+    ? nextLogisticsExceptionStages(
+      returnRecord.currentException.exceptionType,
+      returnRecord.currentException.stage,
+    )
+    : ['pending_verification', 'investigating', 'confirmed'] as const;
+  const [exceptionStage, setExceptionStage] = useState<
+    'pending_verification' | 'investigating' | 'confirmed' | 'recovered' | 'resolved'
+  >(exceptionStageOptions[0]);
   const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
+  const activeExceptionType = kind === 'progress_return_logistics_exception'
+    ? returnRecord?.currentException?.exceptionType
+    : exceptionType;
   const [claimOutcome, setClaimOutcome] = useState<'approved' | 'rejected'>('approved');
   const [inspectionResult, setInspectionResult] = useState<ReturnInspectionResult>('resellable');
   const [inspectionResults, setInspectionResults] = useState<Record<string, ReturnInspectionResult>>(
@@ -326,6 +347,8 @@ export function ProgressAftersalesCaseDialog({
   const needsLogisticsIdentity = kind === 'register_return' || kind === 'correct_return_logistics';
   const needsReturnRecord = kind === 'receive_return' || kind === 'inspect_return'
     || kind === 'correct_return_logistics' || kind === 'update_return_logistics_status'
+    || kind === 'record_return_logistics_exception'
+    || kind === 'progress_return_logistics_exception'
     || kind === 'open_carrier_claim' || kind === 'resolve_carrier_claim'
     || kind === 'confirm_carrier_compensation';
   const canSubmit = Boolean(
@@ -334,6 +357,10 @@ export function ProgressAftersalesCaseDialog({
     && (!needsAmount || amountCents !== null)
     && (!needsLogisticsIdentity || (shippingCarrier.trim() && trackingNumber.trim()))
     && (!needsReturnRecord || returnRecord)
+    && !((kind === 'record_return_logistics_exception'
+      || kind === 'progress_return_logistics_exception')
+      && activeExceptionType === 'lost' && exceptionStage === 'confirmed'
+      && !carrierConfirmedLoss)
     && !(kind === 'update_return_logistics_status'
       && logisticsStatus === 'awaiting_carrier'
       && (carrierAcceptanceConfirmed || returnRecord?.carrierAcceptedAt != null)),
@@ -395,7 +422,30 @@ export function ProgressAftersalesCaseDialog({
         case 'update_return_logistics_status':
           input = {
             kind, ...common, returnRecordId: targetId, logisticsStatus,
-            carrierAcceptanceConfirmed, carrierConfirmedLoss,
+            carrierAcceptanceConfirmed,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'record_return_logistics_exception':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            exceptionType,
+            stage: exceptionStage as 'pending_verification' | 'investigating' | 'confirmed',
+            impact: { scope: 'package' },
+            ...(exceptionType === 'lost' && exceptionStage === 'confirmed'
+              ? { carrierConfirmedLoss: true }
+              : {}),
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'progress_return_logistics_exception':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            exceptionId: returnRecord?.currentException?.id as string,
+            expectedExceptionRevision: returnRecord?.currentException?.revision as number,
+            stage: exceptionStage as 'investigating' | 'confirmed' | 'recovered' | 'resolved',
+            ...(returnRecord?.currentException?.exceptionType === 'lost'
+              && exceptionStage === 'confirmed' ? { carrierConfirmedLoss: true } : {}),
             occurredAt: normalizedOccurredAt as string, reason,
           };
           break;
@@ -537,15 +587,39 @@ export function ProgressAftersalesCaseDialog({
               />
               <span>已核对承运方揽收证据</span>
             </label>
-            {logisticsStatus === 'lost' && (
+          </>
+        )}
+        {(kind === 'record_return_logistics_exception'
+          || kind === 'progress_return_logistics_exception') && (
+          <>
+            {kind === 'record_return_logistics_exception' && (
+              <label>
+                <span>异常类型</span>
+                <select aria-label="退货物流异常类型" value={exceptionType}
+                  onChange={(event) => setExceptionType(event.target.value as typeof exceptionType)}>
+                  {LOGISTICS_EXCEPTION_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label>
+              <span>异常处理阶段</span>
+              <select aria-label="退货物流异常处理阶段" value={exceptionStage}
+                onChange={(event) => setExceptionStage(event.target.value as typeof exceptionStage)}>
+                {exceptionStageOptions.map((value) => (
+                  <option key={value} value={value}>{logisticsExceptionStageLabel(value)}</option>
+                ))}
+              </select>
+            </label>
+            {((kind === 'record_return_logistics_exception' && exceptionType === 'lost')
+              || (kind === 'progress_return_logistics_exception'
+                && returnRecord?.currentException?.exceptionType === 'lost'))
+              && exceptionStage === 'confirmed' && (
               <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={carrierConfirmedLoss}
-                  disabled={saving}
-                  onChange={(event) => setCarrierConfirmedLoss(event.target.checked)}
-                />
-                <span>承运方已经确认退货包裹遗失</span>
+                <input type="checkbox" checked={carrierConfirmedLoss}
+                  onChange={(event) => setCarrierConfirmedLoss(event.target.checked)} />
+                <span>已核对承运方的丢件结论</span>
               </label>
             )}
           </>
@@ -992,6 +1066,20 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     reasonLabel: '状态核对说明',
     confirmLabel: '确认更新',
   };
+  if (kind === 'record_return_logistics_exception') return {
+    title: '登记退货物流异常',
+    description: '异常事项与正常退货运输事实分别保存，不会自动决定退款或责任。',
+    timeLabel: '异常发生时间',
+    reasonLabel: '异常说明',
+    confirmLabel: '确认登记',
+  };
+  if (kind === 'progress_return_logistics_exception') return {
+    title: '推进退货物流异常',
+    description: '只追加核实进展；找回或解决不会删除退款、检查或索赔历史。',
+    timeLabel: '阶段发生时间',
+    reasonLabel: '阶段说明',
+    confirmLabel: '确认推进',
+  };
   if (kind === 'open_carrier_claim') return {
     title: '建立承运索赔',
     description: '承运索赔与买家退款分别推进，申请金额不会自动生成退款。',
@@ -1036,13 +1124,7 @@ const RETURN_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
   { value: 'awaiting_carrier', label: '待承运方接收' },
   { value: 'in_transit', label: '运输中' },
   { value: 'delivered', label: '已签收' },
-  { value: 'intercepting', label: '拦截处理中' },
-  { value: 'returned_to_buyer', label: '已退回买家' },
-  { value: 'lost', label: '丢件' },
-  { value: 'delivery_dispute', label: '签收争议' },
-  { value: 'damaged', label: '运输破损' },
-  { value: 'misdelivered', label: '错投' },
-  { value: 'exception', label: '其他物流异常' },
+  { value: 'returned', label: '已退回' },
 ];
 
 const RETURN_DISCREPANCY_OPTIONS: ReadonlyArray<{

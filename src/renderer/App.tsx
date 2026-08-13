@@ -88,11 +88,11 @@ import {
   ShipmentLogisticsStatus,
   ShipmentRecord,
 } from '../core/shipment-records';
-import { supportsCarrierClaim } from '../core/logistics-exceptions';
 import type {
   AftersalesCase,
   ProgressAftersalesCaseInput,
 } from '../core/aftersales-cases';
+import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -141,6 +141,12 @@ import {
 } from '../core/order-operations-projection';
 import { OrderExportDialog } from './OrderExportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
+import {
+  LOGISTICS_EXCEPTION_TYPE_OPTIONS,
+  logisticsExceptionStageLabel,
+  logisticsExceptionTypeLabel,
+  nextLogisticsExceptionStages,
+} from './logistics-presentation';
 
 export type AppProps = {
   api: DesktopApi;
@@ -1586,6 +1592,11 @@ function ShipmentGroupsWorkspace({
     shipmentPackage: ShipmentRecord['packages'][number];
     packageIndex: number;
   } | null>(null);
+  const [logisticsExceptionTarget, setLogisticsExceptionTarget] = useState<{
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  } | null>(null);
   const [carrierClaimTarget, setCarrierClaimTarget] = useState<{
     record: ShipmentRecord;
     shipmentPackage: ShipmentRecord['packages'][number];
@@ -1935,6 +1946,9 @@ function ShipmentGroupsWorkspace({
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
           }}
+          onProgressLogisticsException={(record, shipmentPackage, packageIndex) => {
+            setLogisticsExceptionTarget({ record, shipmentPackage, packageIndex });
+          }}
           onProgressCarrierClaim={(record, shipmentPackage, packageIndex) => {
             setCarrierClaimTarget({ record, shipmentPackage, packageIndex });
           }}
@@ -1965,6 +1979,9 @@ function ShipmentGroupsWorkspace({
           }}
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
+          }}
+          onProgressLogisticsException={(record, shipmentPackage, packageIndex) => {
+            setLogisticsExceptionTarget({ record, shipmentPackage, packageIndex });
           }}
           onProgressCarrierClaim={(record, shipmentPackage, packageIndex) => {
             setCarrierClaimTarget({ record, shipmentPackage, packageIndex });
@@ -2041,6 +2058,19 @@ function ShipmentGroupsWorkspace({
             setCarrierClaimTarget(null);
           }}
           onClose={() => setCarrierClaimTarget(null)}
+        />
+      )}
+
+      {logisticsExceptionTarget && (
+        <ShipmentPackageLogisticsExceptionDialog
+          api={api}
+          target={logisticsExceptionTarget}
+          onApplied={({ archive, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            replaceArchive(archive);
+            setLogisticsExceptionTarget(null);
+          }}
+          onClose={() => setLogisticsExceptionTarget(null)}
         />
       )}
 
@@ -2357,6 +2387,7 @@ function ShipmentArchiveSection({
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onProgressLogisticsException,
   onProgressCarrierClaim,
   onCreateAftersales,
   onUpdateAftersales,
@@ -2384,6 +2415,11 @@ function ShipmentArchiveSection({
     packageIndex: number,
   ) => void;
   onUpdateLogisticsStatus: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onProgressLogisticsException: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
@@ -2556,6 +2592,7 @@ function ShipmentArchiveSection({
                     onCancelPackage={onCancelPackage}
                     onCorrectLogistics={onCorrectLogistics}
                     onUpdateLogisticsStatus={onUpdateLogisticsStatus}
+                    onProgressLogisticsException={onProgressLogisticsException}
                     onProgressCarrierClaim={onProgressCarrierClaim}
                     onCreateAftersales={onCreateAftersales}
                     onUpdateAftersales={onUpdateAftersales}
@@ -2578,6 +2615,7 @@ function ShipmentRecordsSection({
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onProgressLogisticsException,
   onProgressCarrierClaim,
   onCreateAftersales,
   onUpdateAftersales,
@@ -2598,6 +2636,11 @@ function ShipmentRecordsSection({
     packageIndex: number,
   ) => void;
   onUpdateLogisticsStatus: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onProgressLogisticsException: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
@@ -2697,9 +2740,9 @@ function ShipmentRecordsSection({
                 </ul>
                 {shipmentPackage.currentException && (
                   <div className="shipment-package-exception" role="status">
-                    <strong>正向物流异常 · {shipmentLogisticsStatusLabel(
-                      shipmentPackage.currentException.logisticsStatus,
-                    )}</strong>
+                    <strong>正向物流异常 · {logisticsExceptionTypeLabel(
+                      shipmentPackage.currentException.exceptionType,
+                    )} · {logisticsExceptionStageLabel(shipmentPackage.currentException.stage)}</strong>
                     <span>{shipmentPackage.currentException.impact.scope === 'package'
                       ? `影响整个包裹（${shipmentPackage.totalQuantity} 件）`
                       : `影响 ${shipmentPackage.currentException.impact.items.reduce(
@@ -2729,12 +2772,24 @@ function ShipmentRecordsSection({
                     <button
                       className="button button--quiet"
                       type="button"
+                      onClick={() => onProgressLogisticsException(
+                        record,
+                        shipmentPackage,
+                        packageIndex,
+                      )}
+                    >
+                      {shipmentPackage.currentException ? '推进物流异常' : '登记物流异常'}
+                    </button>
+                    <button
+                      className="button button--quiet"
+                      type="button"
                       aria-label={`更正物流 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
                       onClick={() => onCorrectLogistics(record, shipmentPackage, packageIndex)}
                     >
                       更正物流
                     </button>
-                    {((shipmentPackage.currentException && !shipmentPackage.carrierClaim)
+                    {((shipmentPackage.currentException?.stage === 'confirmed'
+                      && !shipmentPackage.carrierClaim)
                       || shipmentPackage.carrierClaim?.status === 'pending'
                       || shipmentPackage.carrierClaim?.status === 'approved') && (
                       <button
@@ -2880,7 +2935,18 @@ function shipmentRecordsCurrentAction(
     .flatMap(({ packages }) => packages)
     .filter(({ status }) => status === 'active')
     .flatMap(({ carrierClaim }) => carrierClaim ? [carrierClaim.status] : []));
-  return shipmentTodoForStatuses(statuses, carrierClaimStatuses);
+  const hasUnresolvedLogisticsException = records
+    .filter(({ status }) => status === 'active')
+    .some(({ packages }) => packages.some((shipmentPackage) => (
+      shipmentPackage.status === 'active'
+      && shipmentPackage.currentException !== null
+      && isUnresolvedLogisticsExceptionStage(shipmentPackage.currentException.stage)
+    )));
+  return shipmentTodoForStatuses(
+    statuses,
+    carrierClaimStatuses,
+    hasUnresolvedLogisticsException,
+  );
 }
 
 function shipmentRecordCurrentAction(
@@ -2921,37 +2987,10 @@ function UpdateShipmentPackageLogisticsStatusDialog({
   );
   const [reason, setReason] = useState('');
   const [carrierAcceptanceConfirmed, setCarrierAcceptanceConfirmed] = useState(false);
-  const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
-  const [impactScope, setImpactScope] = useState<'package' | 'items'>(
-    target.shipmentPackage.currentException?.impact.scope ?? 'package',
-  );
-  const [affectedQuantities, setAffectedQuantities] = useState<Record<string, number>>(() => {
-    const impact = target.shipmentPackage.currentException?.impact;
-    return impact?.scope === 'items'
-      ? Object.fromEntries(impact.items.map((item) => [item.sourceItemId, item.quantity]))
-      : {};
-  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const exceptional = supportsCarrierClaim(logisticsStatus);
-  const selectedAffectedItems = target.shipmentPackage.items.flatMap((item) => {
-    const quantity = affectedQuantities[item.id] ?? 0;
-    return quantity > 0 ? [{ sourceItemId: item.id, quantity }] : [];
-  });
-  const missingLossEvidence = logisticsStatus === 'lost'
-    && !target.shipmentPackage.carrierAcceptedAt
-    && !carrierAcceptanceConfirmed;
-  const missingAffectedItems = exceptional
-    && impactScope === 'items'
-    && selectedAffectedItems.length === 0;
-  const nextImpact = exceptional && impactScope === 'items'
-    ? { scope: 'items' as const, items: selectedAffectedItems }
-    : { scope: 'package' as const };
-  const currentImpact = target.shipmentPackage.currentException?.impact ?? { scope: 'package' as const };
-  const impactChanged = JSON.stringify(nextImpact) !== JSON.stringify(currentImpact);
   const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus
-    || carrierAcceptanceConfirmed
-    || (exceptional && impactChanged);
+    || carrierAcceptanceConfirmed;
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement
@@ -2964,9 +3003,7 @@ function UpdateShipmentPackageLogisticsStatusDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (
-      saving || !changed || !reason.trim() || missingLossEvidence
-      || (logisticsStatus === 'lost' && !carrierConfirmedLoss)
-      || missingAffectedItems
+      saving || !changed || !reason.trim()
     ) return;
     setSaving(true);
     setError('');
@@ -2977,11 +3014,7 @@ function UpdateShipmentPackageLogisticsStatusDialog({
         expectedRevision: target.shipmentPackage.revision,
         logisticsStatus,
         ...(carrierAcceptanceConfirmed ? { carrierAcceptanceConfirmed: true } : {}),
-        ...(logisticsStatus === 'lost' ? { carrierConfirmedLoss: true } : {}),
         occurredAt: new Date().toISOString(),
-        impact: exceptional && impactScope === 'items'
-          ? { scope: 'items', items: selectedAffectedItems }
-          : { scope: 'package' },
         reason,
       });
       onApplied(result);
@@ -3042,66 +3075,6 @@ function UpdateShipmentPackageLogisticsStatusDialog({
             <span>我已核对承运方揽收证据</span>
           </label>
         )}
-        {logisticsStatus === 'lost' && (
-          <label className="shipment-package-action-dialog__check">
-            <input
-              type="checkbox"
-              checked={carrierConfirmedLoss}
-              disabled={saving}
-              onChange={(event) => setCarrierConfirmedLoss(event.target.checked)}
-            />
-            <span>我已核对承运方的丢件结论</span>
-          </label>
-        )}
-        {exceptional && (
-          <fieldset className="shipment-package-impact">
-            <legend>异常影响范围</legend>
-            <label>
-              <input
-                type="radio"
-                name="shipment-exception-impact"
-                checked={impactScope === 'package'}
-                disabled={saving}
-                onChange={() => setImpactScope('package')}
-              />
-              <span>整个包裹</span>
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="shipment-exception-impact"
-                checked={impactScope === 'items'}
-                disabled={saving}
-                onChange={() => setImpactScope('items')}
-              />
-              <span>指定商品与数量</span>
-            </label>
-            {impactScope === 'items' && (
-              <div className="shipment-package-impact__items">
-                {target.shipmentPackage.items.map((item) => (
-                  <label key={item.id}>
-                    <span>{item.orderNumber} · {item.sourceTitle}
-                      {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
-                    <input
-                      aria-label={`受影响数量 ${item.sourceTitle}`}
-                      type="number"
-                      min={0}
-                      max={item.quantity}
-                      step={1}
-                      value={affectedQuantities[item.id] ?? 0}
-                      disabled={saving}
-                      onChange={(event) => setAffectedQuantities((current) => ({
-                        ...current,
-                        [item.id]: Number(event.target.value),
-                      }))}
-                    />
-                    <small>/ {item.quantity} 件</small>
-                  </label>
-                ))}
-              </div>
-            )}
-          </fieldset>
-        )}
         <label>
           <span>状态更新原因</span>
           <textarea
@@ -3120,11 +3093,180 @@ function UpdateShipmentPackageLogisticsStatusDialog({
           <button
             className="button button--primary"
             type="submit"
-            disabled={saving || !changed || !reason.trim() || missingLossEvidence
-              || (logisticsStatus === 'lost' && !carrierConfirmedLoss)
-              || missingAffectedItems}
+            disabled={saving || !changed || !reason.trim()}
           >
             {saving ? '正在更新…' : '确认更新'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function ShipmentPackageLogisticsExceptionDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target: {
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  };
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const current = target.shipmentPackage.currentException;
+  const [exceptionType, setExceptionType] = useState<
+    'lost' | 'delivery_dispute' | 'damaged' | 'misdelivered' | 'other'
+  >(current?.exceptionType ?? 'lost');
+  const stageOptions = current
+    ? nextLogisticsExceptionStages(current.exceptionType, current.stage)
+    : ['pending_verification', 'investigating', 'confirmed'] as const;
+  const [stage, setStage] = useState<
+    'pending_verification' | 'investigating' | 'confirmed' | 'recovered' | 'resolved'
+  >(stageOptions[0]);
+  const [impactScope, setImpactScope] = useState<'package' | 'items'>('package');
+  const [affectedQuantities, setAffectedQuantities] = useState<Record<string, number>>({});
+  const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
+  const [occurredAt, setOccurredAt] = useState(
+    new Date(Date.now() + 8 * 60 * 60 * 1_000).toISOString().slice(0, 19),
+  );
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const affectedItems = target.shipmentPackage.items.flatMap((item) => {
+    const quantity = affectedQuantities[item.id] ?? 0;
+    return quantity > 0 ? [{ sourceItemId: item.id, quantity }] : [];
+  });
+  const normalizedOccurredAt = normalizeShanghaiDateTime(occurredAt.replace('T', ' '));
+  const needsLossConfirmation = exceptionType === 'lost' && stage === 'confirmed';
+  const canSubmit = Boolean(
+    reason.trim()
+      && normalizedOccurredAt
+      && (!needsLossConfirmation || carrierConfirmedLoss)
+      && (current || impactScope === 'package' || affectedItems.length > 0),
+  );
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit || !normalizedOccurredAt) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = current
+        ? await api.progressShipmentPackageLogisticsException({
+          recordId: target.record.id,
+          packageId: target.shipmentPackage.id,
+          exceptionId: current.id,
+          expectedExceptionRevision: current.revision,
+          stage: stage as 'investigating' | 'confirmed' | 'recovered' | 'resolved',
+          ...(needsLossConfirmation ? { carrierConfirmedLoss: true } : {}),
+          occurredAt: normalizedOccurredAt,
+          reason,
+        })
+        : await api.recordShipmentPackageLogisticsException({
+          recordId: target.record.id,
+          packageId: target.shipmentPackage.id,
+          expectedRevision: target.shipmentPackage.revision,
+          exceptionType,
+          stage: stage as 'pending_verification' | 'investigating' | 'confirmed',
+          impact: impactScope === 'package'
+            ? { scope: 'package' }
+            : { scope: 'items', items: affectedItems },
+          ...(needsLossConfirmation ? { carrierConfirmedLoss: true } : {}),
+          occurredAt: normalizedOccurredAt,
+          reason,
+        });
+      onApplied(result);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div ref={dialogRef} className="order-export-backdrop" role="dialog" aria-modal="true"
+      aria-labelledby={headingId} tabIndex={-1}>
+      <form className="shipment-package-action-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
+          <h2 id={headingId}>{current ? '推进正向物流异常' : '登记正向物流异常'}</h2>
+          <p>异常事项与正常运输事实分别保存，不会自动生成退款、补发或责任结论。</p>
+        </header>
+        {!current && (
+          <label>
+            <span>异常类型</span>
+            <select aria-label="异常类型" value={exceptionType} disabled={saving}
+              onChange={(event) => setExceptionType(event.target.value as typeof exceptionType)}>
+              {LOGISTICS_EXCEPTION_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          <span>异常处理阶段</span>
+          <select aria-label="异常处理阶段" value={stage} disabled={saving}
+            onChange={(event) => setStage(event.target.value as typeof stage)}>
+            {stageOptions.map((value) => (
+              <option key={value} value={value}>{logisticsExceptionStageLabel(value)}</option>
+            ))}
+          </select>
+        </label>
+        {!current && (
+          <fieldset className="shipment-package-impact">
+            <legend>异常影响范围</legend>
+            <label><input type="radio" name="outbound-exception-impact"
+              checked={impactScope === 'package'} onChange={() => setImpactScope('package')} />
+              <span>整个包裹</span></label>
+            <label><input type="radio" name="outbound-exception-impact"
+              checked={impactScope === 'items'} onChange={() => setImpactScope('items')} />
+              <span>指定商品与数量</span></label>
+            {impactScope === 'items' && target.shipmentPackage.items.map((item) => (
+              <label key={item.id}>
+                <span>{item.sourceTitle}</span>
+                <input type="number" min={0} max={item.quantity} step={1}
+                  aria-label={`受影响数量 ${item.sourceTitle}`}
+                  value={affectedQuantities[item.id] ?? 0}
+                  onChange={(event) => setAffectedQuantities((values) => ({
+                    ...values, [item.id]: Number(event.target.value),
+                  }))} />
+              </label>
+            ))}
+          </fieldset>
+        )}
+        {needsLossConfirmation && (
+          <label className="shipment-package-action-dialog__check">
+            <input type="checkbox" checked={carrierConfirmedLoss}
+              onChange={(event) => setCarrierConfirmedLoss(event.target.checked)} />
+            <span>我已核对承运方的丢件结论</span>
+          </label>
+        )}
+        <label><span>发生时间</span><input type="datetime-local" step={1}
+          aria-label="异常发生时间" value={occurredAt}
+          onChange={(event) => setOccurredAt(event.target.value)} /></label>
+        <label><span>说明</span><textarea aria-label="异常说明" value={reason}
+          maxLength={500} onChange={(event) => setReason(event.target.value)} /></label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>取消</button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving ? '正在保存…' : '确认保存'}
           </button>
         </footer>
       </form>
@@ -8481,8 +8623,10 @@ function DetailWorkspace({
                           <p>{shipmentPackageLogisticsLabel(shipmentPackage)}</p>
                           {shipmentPackage.currentException && (
                             <p className="shipment-package-exception">
-                              <strong>正向物流异常：{shipmentLogisticsStatusLabel(
-                                shipmentPackage.currentException.logisticsStatus,
+                              <strong>正向物流异常：{logisticsExceptionTypeLabel(
+                                shipmentPackage.currentException.exceptionType,
+                              )} · {logisticsExceptionStageLabel(
+                                shipmentPackage.currentException.stage,
                               )}</strong>
                               <span>影响 {shipmentPackage.currentException.affectedQuantity} 件</span>
                               <small>{shipmentPackage.currentException.reason}</small>
@@ -8564,8 +8708,10 @@ function DetailWorkspace({
                             {returnPackage.currentException && (
                               <div className="shipment-package-exception">
                                 <strong>
-                                  退货物流异常 · {returnLogisticsStatusLabel(
-                                    returnPackage.currentException.logisticsStatus,
+                                  退货物流异常 · {logisticsExceptionTypeLabel(
+                                    returnPackage.currentException.exceptionType,
+                                  )} · {logisticsExceptionStageLabel(
+                                    returnPackage.currentException.stage,
                                   )}
                                 </strong>
                                 <span>影响 {returnPackage.currentException.affectedQuantity} 件</span>

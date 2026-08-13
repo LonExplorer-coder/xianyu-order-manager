@@ -56,11 +56,14 @@ import type {
   ConfirmShipmentInput,
   CorrectShipmentPackageLogisticsInput,
   ProgressShipmentPackageCarrierClaimInput,
+  ProgressShipmentPackageLogisticsExceptionInput,
+  RecordShipmentPackageLogisticsExceptionInput,
   ShipmentCancellationResult,
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
   ShipmentLogisticsStatusUpdateResult,
+  ShipmentLogisticsExceptionResult,
   ShipmentCarrierClaimProgressResult,
   UpdateShipmentPackageLogisticsStatusInput,
 } from './shipment-records';
@@ -133,6 +136,12 @@ export interface DesktopApi {
   updateShipmentPackageLogisticsStatus(
     input: UpdateShipmentPackageLogisticsStatusInput,
   ): Promise<ShipmentLogisticsStatusUpdateResult>;
+  recordShipmentPackageLogisticsException(
+    input: RecordShipmentPackageLogisticsExceptionInput,
+  ): Promise<ShipmentLogisticsExceptionResult>;
+  progressShipmentPackageLogisticsException(
+    input: ProgressShipmentPackageLogisticsExceptionInput,
+  ): Promise<ShipmentLogisticsExceptionResult>;
   progressShipmentPackageCarrierClaim(
     input: ProgressShipmentPackageCarrierClaimInput,
   ): Promise<ShipmentCarrierClaimProgressResult>;

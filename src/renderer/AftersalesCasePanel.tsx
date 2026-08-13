@@ -14,6 +14,10 @@ import {
   returnQuantityDifferenceSummary,
 } from './aftersales-presentation';
 import { ProgressAftersalesCaseDialog } from './AftersalesCaseDialogs';
+import {
+  logisticsExceptionStageLabel,
+  logisticsExceptionTypeLabel,
+} from './logistics-presentation';
 
 export function AftersalesCasePanel({
   record,
@@ -90,6 +94,16 @@ export function AftersalesCasePanel({
                   物流信息已更正 · {formatDateTime(lastLogisticsCorrection(returnRecord)?.occurredAt as string)}
                 </small>
               )}
+              {returnRecord.currentException && (
+                <div className="shipment-record-card__return-exception" role="status">
+                  <strong>
+                    物流异常 · {logisticsExceptionTypeLabel(
+                      returnRecord.currentException.exceptionType,
+                    )} · {logisticsExceptionStageLabel(returnRecord.currentException.stage)}
+                  </strong>
+                  <span>{returnRecord.currentException.reason}</span>
+                </div>
+              )}
               <ul aria-label="退货商品真实数量">
                 {returnRecord.items.map((item) => (
                   <li key={item.id}>
@@ -155,7 +169,20 @@ export function AftersalesCasePanel({
                 >
                   更新退货物流状态
                 </button>
-                {!returnRecord.carrierClaim && carrierClaimAvailable(returnRecord.logisticsStatus) && (
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => setProgressTarget({
+                    aftersalesCase,
+                    kind: returnRecord.currentException
+                      ? 'progress_return_logistics_exception'
+                      : 'record_return_logistics_exception',
+                    returnRecordId: returnRecord.id,
+                  })}
+                >
+                  {returnRecord.currentException ? '推进退货物流异常' : '登记退货物流异常'}
+                </button>
+                {!returnRecord.carrierClaim && carrierClaimAvailable(returnRecord.currentException) && (
                   <button
                     className="button button--quiet"
                     type="button"
@@ -331,7 +358,7 @@ function primaryProgressAction(
   }
   if (aftersalesCase.status === 'cancelled' || aftersalesCase.status === 'completed') {
     const terminalReturn = aftersalesCase.returns[0];
-    if (terminalReturn?.status === 'in_transit' && terminalReturn.logisticsStatus !== 'lost') {
+    if (terminalReturn?.status === 'in_transit' && !isConfirmedLost(terminalReturn)) {
       return 'receive_return';
     }
     if (terminalReturn?.status === 'received') return 'inspect_return';
@@ -348,7 +375,7 @@ function primaryProgressAction(
     && aftersalesCase.returns.length > 0
     && aftersalesCase.returns.every((record) => (
       record.status === 'inspected'
-      || record.logisticsStatus === 'lost'
+      || isConfirmedLost(record)
       || record.carrierClaim !== null
     ))
   ) {
@@ -363,7 +390,7 @@ function primaryProgressAction(
   if (aftersalesCase.status === 'waiting_refund' && returnRecord?.status === 'inspected') {
     return 'confirm_refund';
   }
-  if (aftersalesCase.status === 'waiting_refund' && returnRecord?.logisticsStatus === 'lost') {
+  if (aftersalesCase.status === 'waiting_refund' && returnRecord && isConfirmedLost(returnRecord)) {
     return 'confirm_refund';
   }
   return null;
@@ -373,7 +400,7 @@ function returnFactProgressAction(
   aftersalesCase: AftersalesCase,
 ): 'receive_return' | 'inspect_return' | null {
   const returnRecord = aftersalesCase.returns[0];
-  if (returnRecord?.status === 'in_transit' && returnRecord.logisticsStatus !== 'lost') {
+  if (returnRecord?.status === 'in_transit' && !isConfirmedLost(returnRecord)) {
     return 'receive_return';
   }
   if (returnRecord?.status === 'received') return 'inspect_return';
@@ -390,6 +417,8 @@ function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string 
     cancel: '取消售后',
     correct_return_logistics: '更正退货物流',
     update_return_logistics_status: '更新退货物流状态',
+    record_return_logistics_exception: '登记退货物流异常',
+    progress_return_logistics_exception: '推进退货物流异常',
     open_carrier_claim: '建立承运索赔',
     resolve_carrier_claim: '登记索赔结果',
     confirm_carrier_compensation: '确认实际赔付',
@@ -481,9 +510,15 @@ function carrierClaimEventLabel(
   }[kind];
 }
 
-function carrierClaimAvailable(status: AftersalesCase['returns'][number]['logisticsStatus']): boolean {
-  return status === 'lost' || status === 'delivery_dispute' || status === 'damaged'
-    || status === 'misdelivered' || status === 'exception' || status === 'returned_to_buyer';
+function isConfirmedLost(returnRecord: AftersalesCase['returns'][number]): boolean {
+  return returnRecord.currentException?.exceptionType === 'lost'
+    && returnRecord.currentException.stage === 'confirmed';
+}
+
+function carrierClaimAvailable(
+  exception: AftersalesCase['returns'][number]['currentException'],
+): boolean {
+  return exception?.stage === 'confirmed';
 }
 
 function formatMoney(cents: number): string {

@@ -147,7 +147,9 @@ import {
 } from '../core/shipment-groups';
 import {
   isShipmentLogisticsStatus,
+  normalizeProgressShipmentPackageLogisticsExceptionInput,
   normalizeProgressShipmentPackageCarrierClaimInput,
+  normalizeRecordShipmentPackageLogisticsExceptionInput,
   normalizeCancelShipmentPackagesInput,
   normalizeConfirmShipmentInput,
   normalizeCorrectShipmentPackageLogisticsInput,
@@ -157,6 +159,7 @@ import {
   type ShipmentGroupArchive,
   type ShipmentItemQuantityInput,
   type ShipmentLogisticsCorrectionResult,
+  type ShipmentLogisticsExceptionResult,
   type ShipmentLogisticsStatusUpdateResult,
   type ShipmentLogisticsStatus,
   type ShipmentCarrierClaimProgressResult,
@@ -170,9 +173,6 @@ import {
 import {
   prepareLogisticsCorrection,
   prepareLogisticsStatusChange,
-  sameLogisticsExceptionImpact,
-  supportsCarrierClaim,
-  type LogisticsExceptionImpact,
 } from '../core/logistics-exceptions';
 import type { AftersalesCase } from '../core/aftersales-cases';
 import {
@@ -3550,23 +3550,13 @@ export class LocalApplication {
       carrierAcceptedAt: shipmentPackage.carrierAcceptedAt,
       physicalReceiptAt,
       carrierAcceptanceConfirmed: prepared.carrierAcceptanceConfirmed ?? false,
-      carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
       occurredAt: prepared.occurredAt,
       latestOccurredAt: shipmentPackage.timeline.at(-1)?.occurredAt
         ?? shipmentPackage.createdAt,
-      impact: prepared.impact,
-      availableItems: shipmentPackage.items.map((item) => ({
-        sourceItemId: item.id,
-        quantity: item.quantity,
-      })),
     });
     if (
       shipmentPackage.logisticsStatus === prepared.logisticsStatus
       && shipmentPackage.carrierAcceptedAt === statusChange.carrierAcceptedAt
-      && sameLogisticsExceptionImpact(
-        shipmentPackage.currentException?.impact ?? { scope: 'package' },
-        statusChange.impact,
-      )
     ) {
       throw new Error('包裹物流状态没有变化');
     }
@@ -3603,7 +3593,6 @@ export class LocalApplication {
         prepared.occurredAt,
         JSON.stringify({
           carrierAcceptedAt: statusChange.carrierAcceptedAt,
-          impact: statusChange.impact,
         }),
         now,
       );
@@ -3617,6 +3606,71 @@ export class LocalApplication {
       archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
       projection: this.queryShipmentGroups(),
     };
+  }
+
+  public recordShipmentPackageLogisticsException(
+    input: unknown,
+  ): ShipmentLogisticsExceptionResult {
+    const prepared = normalizeRecordShipmentPackageLogisticsExceptionInput(input);
+    const record = this.getShipmentRecord(prepared.recordId);
+    if (record.status === 'voided') throw new Error('已作废的发货记录不能登记物流异常');
+    const shipmentPackage = record.packages.find(({ id }) => id === prepared.packageId);
+    if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
+    if (shipmentPackage.status === 'cancelled') throw new Error('已撤销的包裹不能登记物流异常');
+    const physicalReceiptAt = [...shipmentPackage.timeline].reverse().find((event) => (
+      event.kind === 'status_changed' && event.afterStatus === 'delivered'
+    ))?.occurredAt ?? (shipmentPackage.logisticsStatus === 'delivered'
+      ? shipmentPackage.createdAt
+      : null);
+    this.logisticsExceptionService().openException({
+      subject: { direction: 'outbound', packageId: shipmentPackage.id },
+      expectedPackageRevision: prepared.expectedRevision,
+      exceptionType: prepared.exceptionType,
+      stage: prepared.stage,
+      impact: prepared.impact,
+      availableItems: shipmentPackage.items.map((item) => ({
+        sourceItemId: item.id,
+        quantity: item.quantity,
+      })),
+      evidence: {
+        carrierAcceptedAt: shipmentPackage.carrierAcceptedAt,
+        physicalReceiptAt,
+        carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
+      },
+      occurredAt: prepared.occurredAt,
+      reason: prepared.reason,
+    });
+    return this.shipmentLogisticsExceptionResult(record.id);
+  }
+
+  public progressShipmentPackageLogisticsException(
+    input: unknown,
+  ): ShipmentLogisticsExceptionResult {
+    const prepared = normalizeProgressShipmentPackageLogisticsExceptionInput(input);
+    const record = this.getShipmentRecord(prepared.recordId);
+    if (record.status === 'voided') throw new Error('已作废的发货记录不能推进物流异常');
+    const shipmentPackage = record.packages.find(({ id }) => id === prepared.packageId);
+    if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
+    if (shipmentPackage.status === 'cancelled') throw new Error('已撤销的包裹不能推进物流异常');
+    const physicalReceiptAt = [...shipmentPackage.timeline].reverse().find((event) => (
+      event.kind === 'status_changed' && event.afterStatus === 'delivered'
+    ))?.occurredAt ?? (shipmentPackage.logisticsStatus === 'delivered'
+      ? shipmentPackage.createdAt
+      : null);
+    this.logisticsExceptionService().progressException({
+      subject: { direction: 'outbound', packageId: shipmentPackage.id },
+      exceptionId: prepared.exceptionId,
+      expectedExceptionRevision: prepared.expectedExceptionRevision,
+      stage: prepared.stage,
+      evidence: {
+        carrierAcceptedAt: shipmentPackage.carrierAcceptedAt,
+        physicalReceiptAt,
+        carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
+      },
+      occurredAt: prepared.occurredAt,
+      reason: prepared.reason,
+    });
+    return this.shipmentLogisticsExceptionResult(record.id);
   }
 
   public progressShipmentPackageCarrierClaim(
@@ -3634,12 +3688,15 @@ export class LocalApplication {
       if (shipmentPackage.revision !== prepared.expectedRevision) {
         throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
       }
+      if (!shipmentPackage.currentException) {
+        throw new Error('当前包裹没有可索赔的物流异常');
+      }
       logistics.openClaim({
         subject,
-        currentStatus: shipmentPackage.logisticsStatus,
+        exception: shipmentPackage.currentException,
         latestOccurredAt: shipmentPackage.timeline.at(-1)?.occurredAt
           ?? shipmentPackage.createdAt,
-        impact: shipmentPackage.currentException?.impact ?? { scope: 'package' },
+        impact: shipmentPackage.currentException.impact,
         requestedAmountCents: prepared.requestedAmountCents,
         occurredAt: prepared.occurredAt,
         reason: prepared.reason,
@@ -3665,6 +3722,15 @@ export class LocalApplication {
       });
     }
     const updatedRecord = this.getShipmentRecord(record.id);
+    return {
+      record: updatedRecord,
+      archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
+      projection: this.queryShipmentGroups(),
+    };
+  }
+
+  private shipmentLogisticsExceptionResult(recordId: string): ShipmentLogisticsExceptionResult {
+    const updatedRecord = this.getShipmentRecord(recordId);
     return {
       record: updatedRecord,
       archive: this.getShipmentGroupArchive(updatedRecord.archiveId),
@@ -3786,7 +3852,6 @@ export class LocalApplication {
           afterStatus: asShipmentLogisticsStatus(changeRow.after_status),
           carrierAcceptedAt: parseShipmentStatusPayload(changeRow.payload_json)
             .carrierAcceptedAt,
-          impact: parseShipmentStatusPayload(changeRow.payload_json).impact,
           reason: asString(changeRow.reason),
           occurredAt: asString(changeRow.occurred_at),
           createdAt: asString(changeRow.created_at),
@@ -3795,6 +3860,10 @@ export class LocalApplication {
         left.resultRevision - right.resultRevision ||
         left.createdAt.localeCompare(right.createdAt)
       ));
+      const logisticsExceptions = this.logisticsExceptionService().getExceptions({
+        direction: 'outbound',
+        packageId,
+      });
       return {
         id: packageId,
         position: asNumber(packageRow.position),
@@ -3812,7 +3881,10 @@ export class LocalApplication {
           reason: asString(cancellationRow.reason),
           createdAt: asString(cancellationRow.created_at),
         } : null,
-        currentException: currentShipmentException(timeline),
+        currentException: [...logisticsExceptions].reverse().find(({ stage }) => (
+          stage !== 'resolved'
+        )) as ShipmentPackage['currentException'] ?? null,
+        logisticsExceptions,
         carrierClaim: this.logisticsExceptionService().getClaim({
           direction: 'outbound',
           packageId,
@@ -6301,7 +6373,6 @@ function asShipmentLogisticsStatus(
 
 function parseShipmentStatusPayload(value: unknown): {
   carrierAcceptedAt: string | null;
-  impact: LogisticsExceptionImpact;
 } {
   if (typeof value !== 'string') throw new Error('数据库包裹物流状态事件格式错误');
   let parsed: unknown;
@@ -6315,58 +6386,11 @@ function parseShipmentStatusPayload(value: unknown): {
   }
   const record = parsed as Record<string, unknown>;
   const carrierAcceptedAt = record.carrierAcceptedAt;
-  const impact = record.impact;
   if (carrierAcceptedAt !== undefined && carrierAcceptedAt !== null && typeof carrierAcceptedAt !== 'string') {
     throw new Error('数据库包裹物流状态事件格式错误');
   }
   return {
     carrierAcceptedAt: carrierAcceptedAt === undefined ? null : carrierAcceptedAt,
-    impact: parseStoredLogisticsImpact(impact),
-  };
-}
-
-function parseStoredLogisticsImpact(value: unknown): LogisticsExceptionImpact {
-  if (value === undefined) return { scope: 'package' };
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('数据库物流异常影响范围格式错误');
-  }
-  const record = value as Record<string, unknown>;
-  if (record.scope === 'package') return { scope: 'package' };
-  if (record.scope !== 'items' || !Array.isArray(record.items)) {
-    throw new Error('数据库物流异常影响范围格式错误');
-  }
-  return {
-    scope: 'items',
-    items: record.items.map((value) => {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('数据库物流异常商品格式错误');
-      }
-      const item = value as Record<string, unknown>;
-      if (
-        typeof item.sourceItemId !== 'string'
-        || !Number.isSafeInteger(item.quantity)
-        || Number(item.quantity) <= 0
-      ) {
-        throw new Error('数据库物流异常商品格式错误');
-      }
-      return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
-    }),
-  };
-}
-
-function currentShipmentException(
-  timeline: readonly ShipmentPackageTimelineEvent[],
-): ShipmentPackage['currentException'] {
-  const latest = [...timeline].reverse().find((event) => event.kind === 'status_changed');
-  if (!latest || latest.kind !== 'status_changed' || !supportsCarrierClaim(latest.afterStatus)) {
-    return null;
-  }
-  return {
-    direction: 'outbound',
-    logisticsStatus: latest.afterStatus,
-    impact: latest.impact,
-    reason: latest.reason,
-    occurredAt: latest.occurredAt,
   };
 }
 

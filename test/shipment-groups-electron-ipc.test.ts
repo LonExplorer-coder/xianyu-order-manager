@@ -148,7 +148,7 @@ describe('发货组 Electron IPC', () => {
     expect(confirmShipment).toHaveBeenCalledWith(input);
   });
 
-  it('通过受控通道撤销未交寄包裹、更正物流并更新时间线状态', async () => {
+  it('通过受控通道撤销未交寄包裹、更正物流并独立推进运输事实与异常', async () => {
     const cancelShipmentPackages = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-1', status: 'voided' },
     });
@@ -158,6 +158,12 @@ describe('发货组 Electron IPC', () => {
     const updateShipmentPackageLogisticsStatus = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-2', logisticsStatus: 'delivered' },
     });
+    const recordShipmentPackageLogisticsException = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2', currentExceptionStage: 'pending_verification' },
+    });
+    const progressShipmentPackageLogisticsException = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2', currentExceptionStage: 'investigating' },
+    });
     const progressShipmentPackageCarrierClaim = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-2', carrierClaimStatus: 'pending' },
     });
@@ -165,6 +171,8 @@ describe('发货组 Electron IPC', () => {
       cancelShipmentPackages,
       correctShipmentPackageLogistics,
       updateShipmentPackageLogisticsStatus,
+      recordShipmentPackageLogisticsException,
+      progressShipmentPackageLogisticsException,
       progressShipmentPackageCarrierClaim,
       onRecognitionBatchesChanged: vi.fn(),
       onOrdersChanged: vi.fn(),
@@ -198,6 +206,25 @@ describe('发货组 Electron IPC', () => {
       occurredAt: '2026-08-14T09:00:00+08:00',
       reason: '就包裹破损申请索赔',
     };
+    const exceptionInput = {
+      recordId: 'shipment-record-2',
+      packageId: 'package-2',
+      expectedRevision: 3,
+      exceptionType: 'damaged',
+      stage: 'pending_verification',
+      impact: { scope: 'package' },
+      occurredAt: '2026-08-14T08:30:00+08:00',
+      reason: '外包装破损待核实',
+    };
+    const exceptionProgressInput = {
+      recordId: 'shipment-record-2',
+      packageId: 'package-2',
+      exceptionId: 'logistics-exception-1',
+      expectedExceptionRevision: 1,
+      stage: 'investigating',
+      occurredAt: '2026-08-14T08:40:00+08:00',
+      reason: '承运方正在调查',
+    };
 
     await expect(invoke('shipment-records:cancel-packages', cancelInput))
       .resolves.toMatchObject({ record: { status: 'voided' } });
@@ -205,11 +232,17 @@ describe('发货组 Electron IPC', () => {
       .resolves.toMatchObject({ record: { id: 'shipment-record-2' } });
     await expect(invoke('shipment-records:update-package-logistics-status', statusInput))
       .resolves.toMatchObject({ record: { logisticsStatus: 'delivered' } });
+    await expect(invoke('shipment-records:record-package-logistics-exception', exceptionInput))
+      .resolves.toMatchObject({ record: { currentExceptionStage: 'pending_verification' } });
+    await expect(invoke('shipment-records:progress-package-logistics-exception', exceptionProgressInput))
+      .resolves.toMatchObject({ record: { currentExceptionStage: 'investigating' } });
     await expect(invoke('shipment-records:progress-package-carrier-claim', claimInput))
       .resolves.toMatchObject({ record: { carrierClaimStatus: 'pending' } });
     expect(cancelShipmentPackages).toHaveBeenCalledWith(cancelInput);
     expect(correctShipmentPackageLogistics).toHaveBeenCalledWith(correctionInput);
     expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(statusInput);
+    expect(recordShipmentPackageLogisticsException).toHaveBeenCalledWith(exceptionInput);
+    expect(progressShipmentPackageLogisticsException).toHaveBeenCalledWith(exceptionProgressInput);
     expect(progressShipmentPackageCarrierClaim).toHaveBeenCalledWith(claimInput);
   });
 

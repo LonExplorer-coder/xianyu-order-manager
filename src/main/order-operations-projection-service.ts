@@ -21,7 +21,11 @@ import {
   isShipmentLogisticsStatus,
   type ShipmentLogisticsStatus,
 } from '../core/shipment-records';
-import { supportsCarrierClaim } from '../core/logistics-exceptions';
+import {
+  isUnresolvedLogisticsExceptionStage,
+  type LogisticsExceptionStage,
+  type LogisticsExceptionType,
+} from '../core/logistics-exceptions';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -30,6 +34,7 @@ type ProjectedAftersalesCase = {
   returnStatuses: AftersalesReturnStatus[];
   returnLogisticsStatuses: AftersalesReturnLogisticsStatus[];
   carrierClaimStatuses: CarrierClaimStatus[];
+  hasUnresolvedLogisticsException: boolean;
 };
 
 export class OrderOperationsProjectionService {
@@ -66,27 +71,11 @@ export class OrderOperationsProjectionService {
         packages.shipping_carrier,
         packages.tracking_number,
         packages.logistics_status,
-        (
-          SELECT events.payload_json
-          FROM shipment_package_logistics_status_events AS events
-          WHERE events.package_id = packages.id
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_payload_json,
-        (
-          SELECT events.reason
-          FROM shipment_package_logistics_status_events AS events
-          WHERE events.package_id = packages.id
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_reason,
-        (
-          SELECT events.occurred_at
-          FROM shipment_package_logistics_status_events AS events
-          WHERE events.package_id = packages.id
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_occurred_at,
+        exceptions.exception_type,
+        exceptions.stage AS exception_stage,
+        exceptions.impact_json AS exception_impact_json,
+        exceptions.reason AS exception_reason,
+        exceptions.occurred_at AS exception_occurred_at,
         claims.status AS outbound_carrier_claim_status,
         claims.impact_json AS outbound_carrier_claim_impact_json,
         cancellations.id AS cancellation_event_id,
@@ -104,6 +93,28 @@ export class OrderOperationsProjectionService {
         ON voids.shipment_record_id = records.id
       LEFT JOIN shipment_package_cancellation_events AS cancellations
         ON cancellations.package_id = packages.id
+      LEFT JOIN logistics_exception_matters AS exceptions
+        ON exceptions.id = (
+          SELECT candidate.id
+          FROM logistics_exception_matters AS candidate
+          WHERE candidate.shipment_package_id = packages.id
+            AND candidate.stage <> 'resolved'
+            AND (
+              json_extract(candidate.impact_json, '$.scope') = 'package'
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(candidate.impact_json, '$.items') AS affected_item
+                JOIN shipment_package_items AS affected_package_item
+                  ON affected_package_item.id = json_extract(
+                    affected_item.value, '$.sourceItemId'
+                  )
+                WHERE affected_package_item.package_id = packages.id
+                  AND affected_package_item.order_id = items.order_id
+              )
+            )
+          ORDER BY candidate.occurred_at DESC, candidate.id DESC
+          LIMIT 1
+        )
       LEFT JOIN carrier_claims AS claims
         ON claims.direction = 'outbound' AND claims.shipment_package_id = packages.id
       WHERE items.order_id IN (SELECT value FROM json_each(?))
@@ -120,8 +131,9 @@ export class OrderOperationsProjectionService {
     const recordsByOrder = new Map<string, Map<string, OrderOperationsShipmentRecord>>();
     const packagesByOrder = new Map<string, Map<string, OrderOperationsPackage>>();
     const packageExceptionPayloads = new Map<string, {
-      status: ShipmentLogisticsStatus;
-      payload: Record<string, unknown>;
+      exceptionType: LogisticsExceptionType;
+      stage: LogisticsExceptionStage;
+      impact: ReturnType<typeof parseProjectedLogisticsImpact>;
       reason: string;
       occurredAt: string;
     }>();
@@ -177,15 +189,20 @@ export class OrderOperationsProjectionService {
           });
         }
         if (
-          row.latest_status_payload_json !== null
-          && row.latest_status_reason !== null
-          && row.latest_status_occurred_at !== null
+          row.exception_type !== null
+          && row.exception_stage !== null
+          && row.exception_impact_json !== null
+          && row.exception_reason !== null
+          && row.exception_occurred_at !== null
         ) {
           packageExceptionPayloads.set(`${orderId}\u0000${packageId}`, {
-            status: logisticsStatus,
-            payload: parseJsonRecord(row.latest_status_payload_json),
-            reason: asString(row.latest_status_reason),
-            occurredAt: asString(row.latest_status_occurred_at),
+            exceptionType: parseLogisticsExceptionType(row.exception_type),
+            stage: parseLogisticsExceptionStage(row.exception_stage),
+            impact: parseProjectedLogisticsImpact(
+              parseJsonRecord(row.exception_impact_json),
+            ),
+            reason: asString(row.exception_reason),
+            occurredAt: asString(row.exception_occurred_at),
           });
         }
         packages.set(packageId, shipmentPackage);
@@ -202,8 +219,8 @@ export class OrderOperationsProjectionService {
     for (const [orderId, packages] of packagesByOrder) {
       for (const [packageId, shipmentPackage] of packages) {
         const facts = packageExceptionPayloads.get(`${orderId}\u0000${packageId}`);
-        if (!facts || !supportsCarrierClaim(facts.status)) continue;
-        const impact = parseProjectedLogisticsImpact(facts.payload.impact);
+        if (!facts) continue;
+        const impact = facts.impact;
         const itemIds = new Set(shipmentPackage.items.map(({ shipmentPackageItemId }) => (
           shipmentPackageItemId
         )));
@@ -215,7 +232,8 @@ export class OrderOperationsProjectionService {
         if (affectedQuantity === 0) continue;
         shipmentPackage.currentException = {
           direction: 'outbound',
-          logisticsStatus: facts.status,
+          exceptionType: facts.exceptionType,
+          stage: facts.stage,
           affectedQuantity,
           reason: facts.reason,
           occurredAt: facts.occurredAt,
@@ -317,7 +335,8 @@ export class OrderOperationsProjectionService {
               status,
               returnStatuses,
               returnLogisticsStatuses,
-              carrierClaimStatuses,
+            carrierClaimStatuses,
+            hasUnresolvedLogisticsException: false,
             }])
               ?? '无需售后操作',
             items: [],
@@ -348,30 +367,11 @@ export class OrderOperationsProjectionService {
         return_records.tracking_number,
         return_records.logistics_status,
         return_records.discrepancies_json,
-        (
-          SELECT events.payload_json
-          FROM aftersales_return_record_events AS events
-          WHERE events.return_record_id = return_records.id
-            AND events.kind = 'logistics_status_updated'
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_payload_json,
-        (
-          SELECT events.reason
-          FROM aftersales_return_record_events AS events
-          WHERE events.return_record_id = return_records.id
-            AND events.kind = 'logistics_status_updated'
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_reason,
-        (
-          SELECT events.occurred_at
-          FROM aftersales_return_record_events AS events
-          WHERE events.return_record_id = return_records.id
-            AND events.kind = 'logistics_status_updated'
-          ORDER BY events.result_revision DESC
-          LIMIT 1
-        ) AS latest_status_occurred_at,
+        exceptions.exception_type,
+        exceptions.stage AS exception_stage,
+        exceptions.impact_json AS exception_impact_json,
+        exceptions.reason AS exception_reason,
+        exceptions.occurred_at AS exception_occurred_at,
         claims.status AS carrier_claim_status,
         claims.impact_json AS carrier_claim_impact_json,
         return_items.quantity AS planned_quantity,
@@ -387,6 +387,30 @@ export class OrderOperationsProjectionService {
         ON return_records.id = return_items.return_record_id
       JOIN shipment_package_items AS shipment_items
         ON shipment_items.id = return_items.shipment_package_item_id
+      LEFT JOIN logistics_exception_matters AS exceptions
+        ON exceptions.id = (
+          SELECT candidate.id
+          FROM logistics_exception_matters AS candidate
+          WHERE candidate.return_record_id = return_records.id
+            AND candidate.stage <> 'resolved'
+            AND (
+              json_extract(candidate.impact_json, '$.scope') = 'package'
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(candidate.impact_json, '$.items') AS affected_item
+                JOIN aftersales_return_record_items AS affected_return_item
+                  ON affected_return_item.id = json_extract(
+                    affected_item.value, '$.sourceItemId'
+                  )
+                JOIN shipment_package_items AS affected_shipment_item
+                  ON affected_shipment_item.id = affected_return_item.shipment_package_item_id
+                WHERE affected_return_item.return_record_id = return_records.id
+                  AND affected_shipment_item.order_id = shipment_items.order_id
+              )
+            )
+          ORDER BY candidate.occurred_at DESC, candidate.id DESC
+          LIMIT 1
+        )
       LEFT JOIN carrier_claims AS claims
         ON claims.return_record_id = return_records.id
       WHERE shipment_items.order_id IN (SELECT value FROM json_each(?))
@@ -402,7 +426,9 @@ export class OrderOperationsProjectionService {
     const packageDiscrepancies = new Map<string, AftersalesReturnDiscrepancy[]>();
     const packageItemIds = new Map<string, Set<string>>();
     const packageExceptionPayloads = new Map<string, {
-      payload: Record<string, unknown>;
+      exceptionType: LogisticsExceptionType;
+      stage: LogisticsExceptionStage;
+      impact: ReturnType<typeof parseProjectedLogisticsImpact>;
       reason: string;
       occurredAt: string;
     }>();
@@ -448,15 +474,18 @@ export class OrderOperationsProjectionService {
         packages.set(key, returnPackage);
         projectedCase.value.returnPackages.push(returnPackage);
         if (
-          supportsCarrierClaim(logisticsStatus)
-          && row.latest_status_payload_json !== null
-          && row.latest_status_reason !== null
-          && row.latest_status_occurred_at !== null
+          row.exception_type !== null
+          && row.exception_stage !== null
+          && row.exception_impact_json !== null
+          && row.exception_reason !== null
+          && row.exception_occurred_at !== null
         ) {
           packageExceptionPayloads.set(key, {
-            payload: parseJsonRecord(row.latest_status_payload_json),
-            reason: asString(row.latest_status_reason),
-            occurredAt: asString(row.latest_status_occurred_at),
+            exceptionType: parseLogisticsExceptionType(row.exception_type),
+            stage: parseLogisticsExceptionStage(row.exception_stage),
+            impact: parseProjectedLogisticsImpact(parseJsonRecord(row.exception_impact_json)),
+            reason: asString(row.exception_reason),
+            occurredAt: asString(row.exception_occurred_at),
           });
         }
       }
@@ -478,7 +507,7 @@ export class OrderOperationsProjectionService {
       ));
       const exceptionFacts = packageExceptionPayloads.get(key);
       if (exceptionFacts) {
-        const impact = parseProjectedLogisticsImpact(exceptionFacts.payload.impact);
+        const impact = exceptionFacts.impact;
         const affectedQuantity = affectedQuantityForImpact(
           impact,
           itemIds,
@@ -487,7 +516,8 @@ export class OrderOperationsProjectionService {
         if (affectedQuantity > 0) {
           returnPackage.currentException = {
             direction: 'return',
-            logisticsStatus: returnPackage.logisticsStatus,
+            exceptionType: exceptionFacts.exceptionType,
+            stage: exceptionFacts.stage,
             affectedQuantity,
             reason: exceptionFacts.reason,
             occurredAt: exceptionFacts.occurredAt,
@@ -504,6 +534,10 @@ export class OrderOperationsProjectionService {
     }
     for (const [orderId, cases] of casesByOrder) {
       for (const projectedCase of cases.values()) {
+        projectedCase.hasUnresolvedLogisticsException = projectedCase.value.returnPackages.some(
+          ({ currentException }) => currentException !== null
+            && currentException.stage !== 'recovered',
+        );
         projectedCase.carrierClaimStatuses = projectedCase.value.returnPackages.flatMap(
           ({ carrierClaimStatus }) => carrierClaimStatus ? [carrierClaimStatus] : [],
         );
@@ -512,6 +546,7 @@ export class OrderOperationsProjectionService {
           returnStatuses: projectedCase.returnStatuses,
           returnLogisticsStatuses: projectedCase.returnLogisticsStatuses,
           carrierClaimStatuses: projectedCase.carrierClaimStatuses,
+          hasUnresolvedLogisticsException: projectedCase.hasUnresolvedLogisticsException,
         }]) ?? '无需售后操作';
       }
       result.set(orderId, [...cases.values()]);
@@ -530,14 +565,18 @@ function buildProjection(
     returnStatuses: projectedCase.returnStatuses,
     returnLogisticsStatuses: projectedCase.returnLogisticsStatuses,
     carrierClaimStatuses: projectedCase.carrierClaimStatuses,
+    hasUnresolvedLogisticsException: projectedCase.hasUnresolvedLogisticsException,
   })));
   const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
   const carrierClaimStatuses = new Set<CarrierClaimStatus>();
+  let hasUnresolvedLogisticsException = false;
   for (const record of shipmentRecords) {
     if (record.status === 'voided') continue;
     for (const shipmentPackage of record.packages) {
       if (shipmentPackage.status === 'active') {
         logisticsStatuses.add(shipmentPackage.logisticsStatus);
+        hasUnresolvedLogisticsException ||= shipmentPackage.currentException !== null
+          && isUnresolvedLogisticsExceptionStage(shipmentPackage.currentException.stage);
         if (shipmentPackage.carrierClaimStatus) {
           carrierClaimStatuses.add(shipmentPackage.carrierClaimStatus);
         }
@@ -548,7 +587,11 @@ function buildProjection(
     shipmentRecords,
     aftersalesCases,
     currentTodo: aftersalesTodo
-      ?? shipmentTodoForStatuses(logisticsStatuses, carrierClaimStatuses),
+      ?? shipmentTodoForStatuses(
+        logisticsStatuses,
+        carrierClaimStatuses,
+        hasUnresolvedLogisticsException,
+      ),
   };
 }
 
@@ -571,6 +614,28 @@ function asNumber(value: unknown): number {
 function asShipmentLogisticsStatus(value: unknown): ShipmentLogisticsStatus {
   if (!isShipmentLogisticsStatus(value)) throw new Error('数据库包裹物流状态格式错误');
   return value;
+}
+
+function parseLogisticsExceptionType(value: unknown): LogisticsExceptionType {
+  if (
+    value === 'lost'
+    || value === 'delivery_dispute'
+    || value === 'damaged'
+    || value === 'misdelivered'
+    || value === 'other'
+  ) return value;
+  throw new Error('数据库物流异常类型投影格式错误');
+}
+
+function parseLogisticsExceptionStage(value: unknown): LogisticsExceptionStage {
+  if (
+    value === 'pending_verification'
+    || value === 'investigating'
+    || value === 'confirmed'
+    || value === 'recovered'
+    || value === 'resolved'
+  ) return value;
+  throw new Error('数据库物流异常阶段投影格式错误');
 }
 
 function asAftersalesStatus(value: unknown): AftersalesStatus {
