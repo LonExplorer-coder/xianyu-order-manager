@@ -42,6 +42,7 @@ export type CarrierClaimEvent =
     kind: 'opened';
     resultRevision: 1;
     requestedAmountCents: number;
+    impact: LogisticsExceptionImpact;
     reason: string;
     occurredAt: string;
     createdAt: string;
@@ -71,6 +72,7 @@ export type CarrierClaim = {
   revision: number;
   requestedAmountCents: number;
   approvedAmountCents: number | null;
+  impact: LogisticsExceptionImpact;
   reason: string;
   actualCompensation: {
     id: string;

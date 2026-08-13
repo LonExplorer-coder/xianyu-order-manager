@@ -3472,6 +3472,47 @@ function migrateToVersion30(database: DatabaseSync): void {
       DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_update;
       DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_delete;
 
+      CREATE TABLE carrier_claim_events_v30 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        claim_id TEXT NOT NULL REFERENCES carrier_claims(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN (
+          'opened', 'approved', 'rejected', 'compensation_confirmed'
+        )),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        amount_cents INTEGER CHECK (amount_cents > 0),
+        impact_json TEXT CHECK (impact_json IS NULL OR json_valid(impact_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (claim_id, result_revision),
+        CHECK (
+          (kind = 'opened' AND base_revision = 0 AND amount_cents IS NOT NULL
+            AND impact_json IS NOT NULL)
+          OR (kind = 'approved' AND base_revision >= 1 AND amount_cents IS NOT NULL
+            AND impact_json IS NULL)
+          OR (kind = 'rejected' AND base_revision >= 1 AND amount_cents IS NULL
+            AND impact_json IS NULL)
+          OR (kind = 'compensation_confirmed' AND base_revision >= 1
+            AND amount_cents IS NOT NULL AND impact_json IS NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO carrier_claim_events_v30 (
+        sequence, id, claim_id, kind, base_revision, result_revision,
+        occurred_at, reason, amount_cents, impact_json, created_at
+      )
+      SELECT
+        sequence, id, claim_id, kind, base_revision, result_revision,
+        occurred_at, reason, amount_cents,
+        CASE WHEN kind = 'opened' THEN '{"scope":"package"}' ELSE NULL END,
+        created_at
+      FROM carrier_claim_events;
+
+      DROP TABLE carrier_claim_events;
+      ALTER TABLE carrier_claim_events_v30 RENAME TO carrier_claim_events;
+
       CREATE TABLE carrier_claims_v30 (
         id TEXT PRIMARY KEY,
         direction TEXT NOT NULL CHECK (direction IN ('outbound', 'return')),
@@ -3511,6 +3552,15 @@ function migrateToVersion30(database: DatabaseSync): void {
 
       DROP TABLE carrier_claims;
       ALTER TABLE carrier_claims_v30 RENAME TO carrier_claims;
+
+      CREATE TRIGGER carrier_claim_identity_is_immutable_on_update
+      BEFORE UPDATE OF
+        id, direction, shipment_package_id, return_record_id,
+        requested_amount_cents, impact_json, created_at
+      ON carrier_claims
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier claim identity is immutable');
+      END;
 
       CREATE TRIGGER carrier_claim_events_are_immutable_on_update
       BEFORE UPDATE ON carrier_claim_events

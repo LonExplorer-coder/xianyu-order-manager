@@ -61,14 +61,15 @@ export class LogisticsExceptionService {
       this.workspace.database.prepare(`
         INSERT INTO carrier_claim_events (
           id, claim_id, kind, base_revision, result_revision,
-          occurred_at, reason, amount_cents, created_at
-        ) VALUES (?, ?, 'opened', 0, 1, ?, ?, ?, ?)
+          occurred_at, reason, amount_cents, impact_json, created_at
+        ) VALUES (?, ?, 'opened', 0, 1, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(),
         claimId,
         input.occurredAt,
         input.reason,
         input.requestedAmountCents,
+        JSON.stringify(input.impact),
         now,
       );
     });
@@ -199,6 +200,7 @@ export class LogisticsExceptionService {
         kind,
         resultRevision: 1,
         requestedAmountCents: asNumber(eventRow.amount_cents),
+        impact: parseLogisticsImpact(eventRow.impact_json),
         reason: asString(eventRow.reason),
         occurredAt,
         createdAt,
@@ -234,6 +236,7 @@ export class LogisticsExceptionService {
       approvedAmountCents: row.approved_amount_cents === null
         ? null
         : asNumber(row.approved_amount_cents),
+      impact: parseLogisticsImpact(row.impact_json),
       reason: asString(row.reason),
       actualCompensation: compensationRow ? {
         id: asString(compensationRow.id),
@@ -272,4 +275,37 @@ function asCarrierClaimStatus(value: unknown): CarrierClaim['status'] {
     return value;
   }
   throw new Error('数据库承运索赔状态错误');
+}
+
+function parseLogisticsImpact(value: unknown): LogisticsExceptionImpact {
+  if (typeof value !== 'string') throw new Error('数据库承运索赔影响范围错误');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error('数据库承运索赔影响范围错误', { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('数据库承运索赔影响范围错误');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.scope === 'package') return { scope: 'package' };
+  if (record.scope !== 'items' || !Array.isArray(record.items) || record.items.length === 0) {
+    throw new Error('数据库承运索赔影响范围错误');
+  }
+  return {
+    scope: 'items',
+    items: record.items.map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('数据库承运索赔影响商品错误');
+      }
+      const item = value as Record<string, unknown>;
+      if (
+        typeof item.sourceItemId !== 'string'
+        || !Number.isSafeInteger(item.quantity)
+        || Number(item.quantity) <= 0
+      ) throw new Error('数据库承运索赔影响商品错误');
+      return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
+    }),
+  };
 }

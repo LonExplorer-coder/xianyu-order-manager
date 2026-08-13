@@ -2378,7 +2378,8 @@ describe('发货记录', () => {
   });
 
   it('正向发货通过共同模块登记商品级异常、索赔和实际赔付', async () => {
-    const application = await createApplication();
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-outbound-claim-impact-'));
+    const application = await createApplication(root);
     const group = application.queryShipmentGroups().groups[0];
     const [firstOrder, secondOrder] = group.orders;
     const firstItem = firstOrder.items[0];
@@ -2481,15 +2482,39 @@ describe('发货记录', () => {
       status: 'paid',
       requestedAmountCents: 1_000,
       approvedAmountCents: 800,
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
+      },
       actualCompensation: { amountCents: 700 },
       timeline: [
-        expect.objectContaining({ kind: 'opened' }),
+        expect.objectContaining({
+          kind: 'opened',
+          impact: {
+            scope: 'items',
+            items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
+          },
+        }),
         expect.objectContaining({ kind: 'approved' }),
         expect.objectContaining({ kind: 'compensation_confirmed' }),
       ],
     });
     expect(application.getOrder(firstOrder.id).order.fulfillmentStatus).toBe('shipped');
     expect(application.queryAftersalesCases()).toEqual([]);
+    const paidClaim = compensated.record.packages[0].carrierClaim;
+    if (!paidClaim) throw new Error('测试前置条件：正向承运索赔未建立');
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      expect(() => database.prepare(`
+        UPDATE carrier_claims
+        SET impact_json = '{"scope":"package"}'
+        WHERE id = ?
+      `).run(paidClaim.id)).toThrow(
+        /carrier claim identity is immutable/u,
+      );
+    } finally {
+      database.close();
+    }
   });
 
   it('正向包裹已签收后不能回退到收件前状态或登记丢件', async () => {
