@@ -239,6 +239,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('aftersales-cases:update', (_event, input: unknown) => (
     desktopSession.updateAftersalesCase(input)
   ));
+  ipcMain.handle('aftersales-cases:progress', (_event, input: unknown) => (
+    desktopSession.progressAftersalesCase(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

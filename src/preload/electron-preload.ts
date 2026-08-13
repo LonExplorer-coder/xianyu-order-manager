@@ -65,6 +65,7 @@ const api: DesktopApi = {
   queryAftersalesCases: (query) => ipcRenderer.invoke('aftersales-cases:query', query),
   createAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:create', input),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),
+  progressAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:progress', input),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   onOrdersChanged: (listener) => {

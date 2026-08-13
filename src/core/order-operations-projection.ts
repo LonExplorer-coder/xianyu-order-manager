@@ -1,4 +1,4 @@
-import type { AftersalesStatus } from './aftersales-cases';
+import type { AftersalesReturnStatus, AftersalesStatus } from './aftersales-cases';
 import type { ShipmentLogisticsStatus } from './shipment-records';
 
 export type OrderOperationsShipmentItem = {
@@ -67,7 +67,9 @@ const AFTERSALES_STATUS_LABELS: Record<AftersalesStatus, string> = {
   waiting_refund: '等待退款',
   waiting_replacement: '等待补发',
   partially_completed: '部分完成',
+  ready_to_complete: '待完成',
   completed: '已完成',
+  cancelled: '已取消',
 };
 
 const SHIPMENT_LOGISTICS_STATUS_LABELS: Record<ShipmentLogisticsStatus, string> = {
@@ -143,8 +145,29 @@ export function aftersalesTodoForStatuses(
   if (statuses.has('waiting_replacement')) return '安排补发';
   if (statuses.has('waiting_return')) return '等待买家退回';
   if (statuses.has('partially_completed')) return '继续处理未完成售后';
+  if (statuses.has('ready_to_complete')) return '确认完成售后';
   if (statuses.has('processing')) return '处理售后问题';
   return null;
+}
+
+export function aftersalesTodoForCases(
+  cases: readonly {
+    status: AftersalesStatus;
+    returnStatuses: readonly AftersalesReturnStatus[];
+  }[],
+): string | null {
+  const activeCases = cases.filter(({ status }) => status !== 'completed');
+  if (activeCases.some(({ returnStatuses }) => returnStatuses.includes('received'))) {
+    return '检查退回商品';
+  }
+  if (activeCases.some(({ returnStatuses }) => returnStatuses.includes('in_transit'))) {
+    return '确认收到退货';
+  }
+  return aftersalesTodoForStatuses(new Set(
+    activeCases
+      .filter(({ status }) => status !== 'cancelled')
+      .map(({ status }) => status),
+  ));
 }
 
 export function shipmentTodoForStatuses(

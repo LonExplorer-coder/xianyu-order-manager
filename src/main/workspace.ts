@@ -179,6 +179,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 25) migrateToVersion25(database);
   if (row.version < 26) migrateToVersion26(database);
   if (row.version < 27) migrateToVersion27(database);
+  if (row.version < 28) migrateToVersion28(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2859,6 +2860,225 @@ function migrateToVersion27(database: DatabaseSync): void {
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (27, ?)')
       .run(migratedAt);
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion28(database: DatabaseSync): void {
+  const caseColumns = storedTableColumnNames(database, 'aftersales_cases');
+  const workflowProjection = caseColumns.includes('workflow') ? 'workflow' : "'general'";
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE aftersales_cases_v28 (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        workflow TEXT NOT NULL
+          CHECK (workflow IN ('general', 'refund_only', 'return_refund')),
+        status TEXT NOT NULL CHECK (status IN (
+          'processing', 'waiting_return', 'waiting_inspection', 'waiting_refund',
+          'waiting_replacement', 'partially_completed', 'ready_to_complete',
+          'completed', 'cancelled'
+        )),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO aftersales_cases_v28 (
+        id, shipment_record_id, workflow, status, revision, reason,
+        occurred_at, created_at, updated_at
+      )
+      SELECT
+        id, shipment_record_id, ${workflowProjection}, status, revision, reason,
+        occurred_at, created_at, updated_at
+      FROM aftersales_cases;
+
+      DROP TABLE aftersales_cases;
+      ALTER TABLE aftersales_cases_v28 RENAME TO aftersales_cases;
+
+      CREATE INDEX aftersales_cases_by_record_and_status
+      ON aftersales_cases (shipment_record_id, status, occurred_at, id);
+
+      CREATE TABLE IF NOT EXISTS pending_financial_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+        aftersales_case_id TEXT NOT NULL UNIQUE
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'cancelled')),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK (
+          (status = 'pending' AND resolved_at IS NULL)
+          OR (status IN ('confirmed', 'cancelled') AND resolved_at IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS pending_financial_item_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        pending_item_id TEXT NOT NULL
+          REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('created', 'confirmed', 'cancelled')),
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        actual_amount_cents INTEGER CHECK (actual_amount_cents > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (kind = 'created' AND actual_amount_cents IS NULL)
+          OR (kind = 'confirmed' AND actual_amount_cents IS NOT NULL)
+          OR (kind = 'cancelled' AND actual_amount_cents IS NULL)
+        )
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS financial_records (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+        pending_item_id TEXT NOT NULL UNIQUE
+          REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+        aftersales_case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        occurred_at TEXT NOT NULL,
+        note TEXT NOT NULL CHECK (length(trim(note)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS aftersales_return_records (
+        id TEXT PRIMARY KEY,
+        aftersales_case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN ('in_transit', 'received', 'inspected')),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        shipping_carrier TEXT NOT NULL CHECK (length(trim(shipping_carrier)) BETWEEN 1 AND 100),
+        tracking_number TEXT NOT NULL CHECK (length(trim(tracking_number)) BETWEEN 1 AND 200),
+        occurred_at TEXT NOT NULL,
+        received_at TEXT,
+        inspection_result TEXT CHECK (
+          inspection_result IS NULL
+          OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+        ),
+        inspection_note TEXT,
+        inspected_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (
+            status = 'in_transit' AND received_at IS NULL
+            AND inspection_result IS NULL AND inspection_note IS NULL AND inspected_at IS NULL
+          )
+          OR (
+            status = 'received' AND received_at IS NOT NULL
+            AND inspection_result IS NULL AND inspection_note IS NULL AND inspected_at IS NULL
+          )
+          OR (
+            status = 'inspected' AND received_at IS NOT NULL
+            AND inspection_result IS NOT NULL AND inspection_note IS NOT NULL
+            AND inspected_at IS NOT NULL
+            AND length(trim(inspection_note)) BETWEEN 1 AND 500
+          )
+        )
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS aftersales_return_record_items (
+        id TEXT PRIMARY KEY,
+        return_record_id TEXT NOT NULL
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        shipment_package_item_id TEXT NOT NULL
+          REFERENCES shipment_package_items(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        UNIQUE (return_record_id, shipment_package_item_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS aftersales_return_record_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        return_record_id TEXT NOT NULL
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('registered', 'received', 'inspected')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        inspection_result TEXT CHECK (
+          inspection_result IS NULL
+          OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+        ),
+        created_at TEXT NOT NULL,
+        UNIQUE (return_record_id, result_revision),
+        CHECK (
+          (kind = 'registered' AND base_revision = 0 AND inspection_result IS NULL)
+          OR (kind = 'received' AND base_revision >= 1 AND inspection_result IS NULL)
+          OR (kind = 'inspected' AND base_revision >= 1 AND inspection_result IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE TRIGGER IF NOT EXISTS pending_financial_item_events_are_immutable_on_update
+      BEFORE UPDATE ON pending_financial_item_events
+      BEGIN
+        SELECT RAISE(ABORT, 'pending financial item events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS pending_financial_item_events_are_immutable_on_delete
+      BEFORE DELETE ON pending_financial_item_events
+      BEGIN
+        SELECT RAISE(ABORT, 'pending financial item events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS financial_records_are_immutable_on_update
+      BEFORE UPDATE ON financial_records
+      BEGIN
+        SELECT RAISE(ABORT, 'financial records are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS financial_records_are_immutable_on_delete
+      BEFORE DELETE ON financial_records
+      BEGIN
+        SELECT RAISE(ABORT, 'financial records are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_return_record_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_return_record_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_return_record_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_return_record_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_return_record_items_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_return_record_items
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record items are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS aftersales_return_record_items_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_return_record_items
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record items are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (28, ?)')
+      .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {
     try {

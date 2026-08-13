@@ -88,7 +88,10 @@ import {
   ShipmentLogisticsStatus,
   ShipmentRecord,
 } from '../core/shipment-records';
-import type { AftersalesCase } from '../core/aftersales-cases';
+import type {
+  AftersalesCase,
+  ProgressAftersalesCaseInput,
+} from '../core/aftersales-cases';
 import {
   isValidAddressPair,
   isValidPhonePair,
@@ -1642,6 +1645,14 @@ function ShipmentGroupsWorkspace({
     setActiveView(nextArchive.status);
   }
 
+  async function progressAftersales(input: ProgressAftersalesCaseInput) {
+    const updated = await api.progressAftersalesCase(input);
+    onAftersalesCasesChange([
+      updated,
+      ...aftersalesCases.filter(({ id }) => id !== updated.id),
+    ]);
+  }
+
   function toggleGroup(groupId: string) {
     setSelectedGroupIds((current) => (
       current.includes(groupId)
@@ -1902,6 +1913,7 @@ function ShipmentGroupsWorkspace({
           onUpdateAftersales={(record, aftersalesCase) => {
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
+          onProgressAftersales={progressAftersales}
         />
       )}
 
@@ -1929,6 +1941,7 @@ function ShipmentGroupsWorkspace({
           onUpdateAftersales={(record, aftersalesCase) => {
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
+          onProgressAftersales={progressAftersales}
         />
       )}
 
@@ -2301,6 +2314,7 @@ function ShipmentArchiveSection({
   onUpdateLogisticsStatus,
   onCreateAftersales,
   onUpdateAftersales,
+  onProgressAftersales,
 }: {
   label: string;
   emptyMessage: string;
@@ -2330,6 +2344,7 @@ function ShipmentArchiveSection({
   ) => void;
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
+  onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
 }) {
   const [logisticsFilter, setLogisticsFilter] = useState<'all' | ShipmentLogisticsStatus>('all');
   const visibleArchives = logisticsFilter === 'all'
@@ -2492,6 +2507,7 @@ function ShipmentArchiveSection({
                     onUpdateLogisticsStatus={onUpdateLogisticsStatus}
                     onCreateAftersales={onCreateAftersales}
                     onUpdateAftersales={onUpdateAftersales}
+                    onProgressAftersales={onProgressAftersales}
                   />
                 </details>
               </article>
@@ -2512,6 +2528,7 @@ function ShipmentRecordsSection({
   onUpdateLogisticsStatus,
   onCreateAftersales,
   onUpdateAftersales,
+  onProgressAftersales,
   embedded = false,
 }: {
   records: ShipmentRecord[];
@@ -2534,6 +2551,7 @@ function ShipmentRecordsSection({
   ) => void;
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
+  onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
   embedded?: boolean;
 }) {
   const content = records.length === 0 ? (
@@ -2671,6 +2689,7 @@ function ShipmentRecordsSection({
             aftersalesCases={recordAftersalesCases}
             focusedCaseId={focus?.recordId === record.id ? focus.aftersalesCaseId : undefined}
             onUpdate={(aftersalesCase) => onUpdateAftersales(record, aftersalesCase)}
+            onProgress={onProgressAftersales}
           />
         </article>
         );

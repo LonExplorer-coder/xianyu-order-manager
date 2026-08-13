@@ -3577,6 +3577,10 @@ export class LocalApplication {
     return this.aftersalesService().update(input);
   }
 
+  public progressAftersalesCase(input: unknown): AftersalesCase {
+    return this.aftersalesService().progress(input);
+  }
+
   private getShipmentRecord(recordId: string): ShipmentRecord {
     const workspace = this.requireWorkspace();
     const row = workspace.database.prepare(`

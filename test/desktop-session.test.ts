@@ -131,6 +131,7 @@ describe('桌面启动状态', () => {
         quantity: 1,
       }],
     });
+    expect(notifications).toHaveLength(2);
     expect(session.getOrder(order.id).operations).toMatchObject({
       shipmentRecords: [{
         id: shipment.record.id,

@@ -197,15 +197,18 @@ describe('发货组 Electron IPC', () => {
     expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(statusInput);
   });
 
-  it('通过受控通道建立、更新并查询售后处理单', async () => {
+  it('通过受控通道建立、更新、推进并查询售后处理单', async () => {
     const created = { id: 'aftersales-1', status: 'processing', revision: 1 };
     const updated = { id: 'aftersales-1', status: 'waiting_return', revision: 2 };
     const createAftersalesCase = vi.fn().mockReturnValue(created);
     const updateAftersalesCase = vi.fn().mockReturnValue(updated);
+    const progressed = { id: 'aftersales-1', status: 'ready_to_complete', revision: 3 };
+    const progressAftersalesCase = vi.fn().mockReturnValue(progressed);
     const queryAftersalesCases = vi.fn().mockReturnValue([updated]);
     registerIpcHandlers({
       createAftersalesCase,
       updateAftersalesCase,
+      progressAftersalesCase,
       queryAftersalesCases,
       onRecognitionBatchesChanged: vi.fn(),
       onOrdersChanged: vi.fn(),
@@ -225,12 +228,22 @@ describe('发货组 Electron IPC', () => {
       changeReason: '与买家确认退回处理',
     };
     const query = { status: 'waiting_return' };
+    const progressInput = {
+      kind: 'confirm_refund',
+      caseId: 'aftersales-1',
+      expectedRevision: 2,
+      actualRefundCents: 500,
+      occurredAt: '2026-08-13T10:10:00+08:00',
+      note: '平台确认实际退款',
+    };
 
     await expect(invoke('aftersales-cases:create', createInput)).resolves.toEqual(created);
     await expect(invoke('aftersales-cases:update', updateInput)).resolves.toEqual(updated);
+    await expect(invoke('aftersales-cases:progress', progressInput)).resolves.toEqual(progressed);
     await expect(invoke('aftersales-cases:query', query)).resolves.toEqual([updated]);
     expect(createAftersalesCase).toHaveBeenCalledWith(createInput);
     expect(updateAftersalesCase).toHaveBeenCalledWith(updateInput);
+    expect(progressAftersalesCase).toHaveBeenCalledWith(progressInput);
     expect(queryAftersalesCases).toHaveBeenCalledWith(query);
   });
 });

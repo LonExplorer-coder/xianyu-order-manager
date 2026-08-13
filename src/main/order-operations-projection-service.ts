@@ -1,8 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-import { isAftersalesStatus, type AftersalesStatus } from '../core/aftersales-cases';
 import {
-  aftersalesTodoForStatuses,
+  isAftersalesStatus,
+  type AftersalesReturnStatus,
+  type AftersalesStatus,
+} from '../core/aftersales-cases';
+import {
+  aftersalesTodoForCases,
   shipmentTodoForStatuses,
   type OrderOperationsAftersalesCase,
   type OrderOperationsPackage,
@@ -15,6 +19,11 @@ import {
 } from '../core/shipment-records';
 
 type SqlRow = Record<string, string | number | null>;
+
+type ProjectedAftersalesCase = {
+  value: OrderOperationsAftersalesCase;
+  returnStatuses: AftersalesReturnStatus[];
+};
 
 export class OrderOperationsProjectionService {
   public constructor(private readonly database: DatabaseSync) {}
@@ -128,7 +137,7 @@ export class OrderOperationsProjectionService {
 
   private aftersalesCases(
     orderIds: readonly string[],
-  ): ReadonlyMap<string, OrderOperationsAftersalesCase[]> {
+  ): ReadonlyMap<string, ProjectedAftersalesCase[]> {
     const rows = this.database.prepare(`
       SELECT
         shipment_items.order_id,
@@ -138,6 +147,11 @@ export class OrderOperationsProjectionService {
         cases.reason,
         cases.occurred_at,
         cases.created_at,
+        (
+          SELECT json_group_array(return_records.status)
+          FROM aftersales_return_records AS return_records
+          WHERE return_records.aftersales_case_id = cases.id
+        ) AS return_statuses_json,
         case_items.quantity,
         shipment_items.id AS shipment_package_item_id,
         shipment_items.package_id,
@@ -158,30 +172,33 @@ export class OrderOperationsProjectionService {
         shipment_items.position,
         shipment_items.id
     `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
-    const result = new Map<string, OrderOperationsAftersalesCase[]>();
-    const casesByOrder = new Map<string, Map<string, OrderOperationsAftersalesCase>>();
+    const result = new Map<string, ProjectedAftersalesCase[]>();
+    const casesByOrder = new Map<string, Map<string, ProjectedAftersalesCase>>();
     for (const row of rows) {
       const orderId = asString(row.order_id);
       const cases = casesByOrder.get(orderId) ?? new Map();
       casesByOrder.set(orderId, cases);
       const caseId = asString(row.case_id);
-      let aftersalesCase = cases.get(caseId);
-      if (!aftersalesCase) {
+      let projectedCase = cases.get(caseId);
+      if (!projectedCase) {
         const status = asAftersalesStatus(row.status);
-        aftersalesCase = {
-          id: caseId,
-          shipmentRecordId: asString(row.shipment_record_id),
-          status,
-          reason: asString(row.reason),
-          occurredAt: asString(row.occurred_at),
-          currentTodo: status === 'completed'
-            ? '无需售后操作'
-            : aftersalesTodoForStatuses(new Set([status])) ?? '无需售后操作',
-          items: [],
+        const returnStatuses = parseReturnStatuses(row.return_statuses_json);
+        projectedCase = {
+          value: {
+            id: caseId,
+            shipmentRecordId: asString(row.shipment_record_id),
+            status,
+            reason: asString(row.reason),
+            occurredAt: asString(row.occurred_at),
+            currentTodo: aftersalesTodoForCases([{ status, returnStatuses }])
+              ?? '无需售后操作',
+            items: [],
+          },
+          returnStatuses,
         };
-        cases.set(caseId, aftersalesCase);
+        cases.set(caseId, projectedCase);
       }
-      aftersalesCase.items.push({
+      projectedCase.value.items.push({
         shipmentPackageItemId: asString(row.shipment_package_item_id),
         packageId: asString(row.package_id),
         orderItemId: asString(row.source_order_item_id),
@@ -197,13 +214,13 @@ export class OrderOperationsProjectionService {
 
 function buildProjection(
   shipmentRecords: OrderOperationsShipmentRecord[],
-  aftersalesCases: OrderOperationsAftersalesCase[],
+  projectedAftersalesCases: ProjectedAftersalesCase[],
 ): OrderOperationsProjection {
-  const aftersalesTodo = aftersalesTodoForStatuses(new Set(
-    aftersalesCases
-      .filter(({ status }) => status !== 'completed')
-      .map(({ status }) => status),
-  ));
+  const aftersalesCases = projectedAftersalesCases.map(({ value }) => value);
+  const aftersalesTodo = aftersalesTodoForCases(projectedAftersalesCases.map((projectedCase) => ({
+    status: projectedCase.value.status,
+    returnStatuses: projectedCase.returnStatuses,
+  })));
   const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
   for (const record of shipmentRecords) {
     if (record.status === 'voided') continue;
@@ -244,4 +261,20 @@ function asShipmentLogisticsStatus(value: unknown): ShipmentLogisticsStatus {
 function asAftersalesStatus(value: unknown): AftersalesStatus {
   if (!isAftersalesStatus(value)) throw new Error('数据库售后状态格式错误');
   return value;
+}
+
+function parseReturnStatuses(value: unknown): AftersalesReturnStatus[] {
+  if (typeof value !== 'string') throw new Error('数据库退货状态投影格式错误');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error('数据库退货状态投影格式错误', { cause: error });
+  }
+  if (!Array.isArray(parsed) || !parsed.every((status) => (
+    status === 'in_transit' || status === 'received' || status === 'inspected'
+  ))) {
+    throw new Error('数据库退货状态投影格式错误');
+  }
+  return parsed;
 }

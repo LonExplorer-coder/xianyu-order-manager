@@ -1739,7 +1739,9 @@ select:focus-visible {
 
 .shipment-record-card__aftersales-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 7px;
   margin-top: 8px;
 }
 
@@ -1912,6 +1914,42 @@ select:focus-visible {
   margin: 9px 0;
   padding: 0;
   list-style: none;
+}
+
+.shipment-record-card__aftersales-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 9px;
+  padding: 9px 10px;
+  border: 1px solid rgb(184 134 11 / 20%);
+  border-radius: 6px;
+  color: var(--navy-600);
+  background: rgb(255 255 255 / 72%);
+  font-size: 9px;
+}
+
+.shipment-record-card__aftersales-facts strong {
+  color: var(--navy-900);
+}
+
+.shipment-record-card__return-record {
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgb(184 134 11 / 24%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 72%);
+}
+
+.shipment-record-card__return-record > header {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shipment-record-card__return-record .shipment-record-card__timeline {
+  margin-top: 8px;
 }
 
 .shipment-package-action-dialog {

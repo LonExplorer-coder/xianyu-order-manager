@@ -5,14 +5,16 @@ import {
 } from '../core/aftersales-cases';
 import {
   aftersalesStatusLabel,
-  aftersalesTodoForStatuses,
+  aftersalesTodoForCases,
 } from '../core/order-operations-projection';
 import type { ShipmentRecord } from '../core/shipment-records';
 
 export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
   value: AftersalesStatus;
   label: string;
-}> = AFTERSALES_STATUSES.map((value) => ({ value, label: aftersalesStatusLabel(value) }));
+}> = AFTERSALES_STATUSES
+  .filter((value) => value !== 'ready_to_complete')
+  .map((value) => ({ value, label: aftersalesStatusLabel(value) }));
 
 export { aftersalesStatusLabel };
 
@@ -44,10 +46,13 @@ export function aftersalesCurrentAction(
   cases: readonly AftersalesCase[],
 ): string | null {
   const recordIds = new Set(records.map(({ id }) => id));
-  const statuses = new Set(cases
+  const matchingCases = cases
     .filter((aftersalesCase) => (
-      recordIds.has(aftersalesCase.shipmentRecordId) && aftersalesCase.status !== 'completed'
+      recordIds.has(aftersalesCase.shipmentRecordId)
     ))
-    .map(({ status }) => status));
-  return aftersalesTodoForStatuses(statuses);
+    .map((aftersalesCase) => ({
+      status: aftersalesCase.status,
+      returnStatuses: aftersalesCase.returns.map(({ status }) => status),
+    }));
+  return aftersalesTodoForCases(matchingCases);
 }

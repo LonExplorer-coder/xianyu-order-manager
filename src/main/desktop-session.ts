@@ -436,11 +436,21 @@ export class DesktopSession {
   }
 
   public createAftersalesCase(input: unknown): AftersalesCase {
-    return this.requireApplication().createAftersalesCase(input);
+    const result = this.requireApplication().createAftersalesCase(input);
+    this.refreshOrders();
+    return result;
   }
 
   public updateAftersalesCase(input: unknown): AftersalesCase {
-    return this.requireApplication().updateAftersalesCase(input);
+    const result = this.requireApplication().updateAftersalesCase(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public progressAftersalesCase(input: unknown): AftersalesCase {
+    const result = this.requireApplication().progressAftersalesCase(input);
+    this.refreshOrders();
+    return result;
   }
 
   public exportOrdersToWorkbook(

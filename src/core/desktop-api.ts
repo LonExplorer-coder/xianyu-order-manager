@@ -72,6 +72,7 @@ import type {
   AftersalesCase,
   AftersalesCaseQuery,
   CreateAftersalesCaseInput,
+  ProgressAftersalesCaseInput,
   UpdateAftersalesCaseInput,
 } from './aftersales-cases';
 
@@ -133,6 +134,7 @@ export interface DesktopApi {
   queryAftersalesCases(query?: AftersalesCaseQuery): Promise<AftersalesCase[]>;
   createAftersalesCase(input: CreateAftersalesCaseInput): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
+  progressAftersalesCase(input: ProgressAftersalesCaseInput): Promise<AftersalesCase>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
