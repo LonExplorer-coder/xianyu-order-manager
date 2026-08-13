@@ -30,7 +30,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 33 });
+        .toEqual({ version: 34 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -223,6 +223,7 @@ describe('数据库升级', () => {
       { version: 31 },
       { version: 32 },
       { version: 33 },
+      { version: 34 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -682,6 +683,7 @@ describe('数据库升级', () => {
       { version: 31 },
       { version: 32 },
       { version: 33 },
+      { version: 34 },
     ]);
     expect(
       (
@@ -940,6 +942,7 @@ describe('数据库升级', () => {
         { version: 31 },
         { version: 32 },
         { version: 33 },
+        { version: 34 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1138,7 +1141,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 33 });
+        .toEqual({ version: 34 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1252,7 +1255,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 33 });
+        .toEqual({ version: 34 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1272,7 +1275,7 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
@@ -1280,6 +1283,7 @@ describe('数据库升级', () => {
         { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 },
         { version: 32 },
         { version: 33 },
+        { version: 34 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1313,7 +1317,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 33 });
+        .toEqual({ version: 34 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{

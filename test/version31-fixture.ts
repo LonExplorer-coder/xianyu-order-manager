@@ -42,6 +42,7 @@ export function removeVersion32ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 export function removeVersion33ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion34ExtensionArtifacts(database);
   database.exec(`
     PRAGMA foreign_keys = OFF;
     DROP TRIGGER IF EXISTS aftersales_return_exception_decision_identity_is_valid_on_insert;
@@ -49,6 +50,31 @@ export function removeVersion33ExtensionArtifacts(database: DatabaseSync): void 
     DROP TRIGGER IF EXISTS aftersales_return_exception_decisions_are_immutable_on_delete;
     DROP TABLE IF EXISTS aftersales_return_exception_decision_events;
     DELETE FROM schema_migrations WHERE version = 33;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+export function removeVersion34ExtensionArtifacts(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TRIGGER IF EXISTS aftersales_processing_rounds_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_processing_rounds_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_processing_round_items_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_processing_round_items_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_round_returns_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_round_returns_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_replacement_shipments_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_replacement_shipments_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_replacement_items_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_replacement_items_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_processing_round_item_source_is_valid_on_insert;
+    DROP TRIGGER IF EXISTS aftersales_replacement_item_identity_is_valid_on_insert;
+    DROP TABLE IF EXISTS aftersales_replacement_items;
+    DROP TABLE IF EXISTS aftersales_replacement_shipments;
+    DROP TABLE IF EXISTS aftersales_round_returns;
+    DROP TABLE IF EXISTS aftersales_processing_round_items;
+    DROP TABLE IF EXISTS aftersales_processing_rounds;
+    DELETE FROM schema_migrations WHERE version = 34;
     PRAGMA foreign_keys = ON;
   `);
 }

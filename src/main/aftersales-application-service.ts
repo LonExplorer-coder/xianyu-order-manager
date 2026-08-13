@@ -13,7 +13,11 @@ import {
   type AftersalesCaseItem,
   type AftersalesCaseItemInput,
   type AftersalesCaseSnapshot,
+  type AftersalesFulfillmentSummary,
+  type AftersalesProcessingRound,
+  type ProgressAftersalesCaseInput,
   type AftersalesReturnDiscrepancy,
+  type AftersalesReturnRecord,
 } from '../core/aftersales-cases';
 import {
   coordinateAftersales,
@@ -36,14 +40,30 @@ import {
 } from '../core/logistics-exceptions';
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { Workspace } from './workspace';
+import type { ShipmentRecord } from '../core/shipment-records';
 
 type SqlRow = Record<string, string | number | null>;
 
 export class AftersalesApplicationService {
-  public constructor(private readonly workspace: Workspace) {}
+  public constructor(
+    private readonly workspace: Workspace,
+    private readonly shipmentRecordReader?: (recordId: string) => ShipmentRecord,
+  ) {}
 
   public create(input: unknown): AftersalesCase {
     const prepared = normalizeCreateAftersalesCaseInput(input);
+    const activeParent = this.workspace.database.prepare(`
+      SELECT cases.id
+      FROM aftersales_replacement_shipments AS replacements
+      JOIN aftersales_processing_rounds AS rounds ON rounds.id = replacements.round_id
+      JOIN aftersales_cases AS cases ON cases.id = rounds.case_id
+      WHERE replacements.shipment_record_id = ?
+        AND cases.status NOT IN ('completed', 'cancelled')
+      LIMIT 1
+    `).get(prepared.shipmentRecordId) as SqlRow | undefined;
+    if (activeParent) {
+      throw new Error('补发商品仍属于未完成的售后处理，请在原处理单新增轮次');
+    }
     const sourceItems = this.resolveSourceItems(prepared.shipmentRecordId, prepared.items);
     this.assertQuantitiesAvailable(prepared.items, sourceItems);
     const sourcePackages = sourcePackageEvidence(prepared.items, sourceItems);
@@ -95,6 +115,36 @@ export class AftersalesApplicationService {
       for (const item of prepared.items) {
         insertItem.run(randomUUID(), caseId, item.shipmentPackageItemId, item.quantity);
       }
+      const roundId = randomUUID();
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_processing_rounds (
+          id, case_id, round_number, workflow, source_shipment_record_id,
+          occurred_at, reason, created_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+      `).run(
+        roundId,
+        caseId,
+        prepared.workflow === 'exchange' || prepared.workflow === 'direct_replacement'
+          ? prepared.workflow
+          : 'legacy',
+        prepared.shipmentRecordId,
+        prepared.occurredAt,
+        prepared.reason,
+        now,
+      );
+      const insertRoundItem = this.workspace.database.prepare(`
+        INSERT INTO aftersales_processing_round_items (
+          id, round_id, source_shipment_package_item_id, quantity
+        ) VALUES (?, ?, ?, ?)
+      `);
+      for (const item of prepared.items) {
+        insertRoundItem.run(
+          randomUUID(),
+          roundId,
+          item.shipmentPackageItemId,
+          item.quantity,
+        );
+      }
       if (handlingDirection !== null) {
         this.workspace.database.prepare(`
           INSERT INTO aftersales_handling_direction_events (
@@ -117,7 +167,7 @@ export class AftersalesApplicationService {
           ) VALUES (?, ?, 'requested', ?, ?, ?)
         `).run(randomUUID(), caseId, prepared.occurredAt, prepared.reason, now);
       }
-      if (prepared.workflow !== 'general') {
+      if (prepared.workflow === 'refund_only' || prepared.workflow === 'return_refund') {
         const pendingItemId = randomUUID();
         const requestedAmountCents = prepared.requestedRefundCents;
         if (requestedAmountCents === undefined) throw new Error('申请退款金额无效');
@@ -275,6 +325,147 @@ export class AftersalesApplicationService {
       throw new Error('已经结束的售后处理单不能继续推进');
     }
     const now = new Date().toISOString();
+    if (prepared.kind === 'create_replacement_shipment') {
+      const round = current.rounds.at(-1);
+      if (!round || round.workflow === 'legacy') {
+        throw new Error('当前售后没有可补发的处理轮次');
+      }
+      if (round.replacementShipment) throw new Error('当前处理轮次已建立补发记录');
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        round.occurredAt,
+        '补发时间不能早于当前处理轮次开始时间',
+      );
+      if (round.workflow === 'exchange') {
+        const roundReturns = current.returns.filter(({ id }) => round.returnRecordIds.includes(id));
+        if (roundReturns.length === 0 || roundReturns.some(({ status }) => status !== 'inspected')) {
+          throw new Error('换货必须先完成本轮退货收货与检查');
+        }
+        const latestInspectionAt = roundReturns.reduce((latest, returnRecord) => {
+          const occurredAt = returnRecord.inspection?.occurredAt;
+          return occurredAt && Date.parse(occurredAt) > Date.parse(latest) ? occurredAt : latest;
+        }, round.occurredAt);
+        assertOccurredAtNotBefore(
+          prepared.occurredAt,
+          latestInspectionAt,
+          '补发时间不能早于本轮退货检查时间',
+        );
+      }
+      const roundItemById = new Map(round.items.map((item) => [item.id, item] as const));
+      const allocated = new Map<string, number>();
+      for (const shipmentPackage of prepared.packages) {
+        const seen = new Set<string>();
+        for (const item of shipmentPackage.items) {
+          if (seen.has(item.roundItemId)) throw new Error('同一补发包裹不能重复分配同一商品');
+          seen.add(item.roundItemId);
+          const source = roundItemById.get(item.roundItemId);
+          if (!source) throw new Error('补发商品不属于当前处理轮次');
+          allocated.set(item.roundItemId, (allocated.get(item.roundItemId) ?? 0) + item.quantity);
+        }
+      }
+      if (round.items.some((item) => allocated.get(item.id) !== item.quantity)) {
+        throw new Error('补发包裹必须精确覆盖当前处理轮次的全部商品数量');
+      }
+      this.workspace.transaction(() => {
+        this.createReplacementShipment(current, round, prepared, now);
+        this.advanceCase(current, 'waiting_replacement', prepared.reason, now);
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'start_next_round') {
+      const currentRound = current.rounds.at(-1);
+      const replacement = currentRound?.replacementShipment;
+      if (!currentRound || !replacement || replacement.id !== prepared.sourceShipmentRecordId) {
+        throw new Error('新一轮必须以当前轮次的补发记录为来源');
+      }
+      const sourceItems = this.resolveSourceItems(prepared.sourceShipmentRecordId, prepared.items);
+      this.assertQuantitiesAvailable(prepared.items, sourceItems, current.id);
+      if (prepared.workflow === 'exchange' && prepared.items.some((item) => (
+        asString(sourceItems.get(item.shipmentPackageItemId)?.source_logistics_status)
+          !== 'delivered'
+      ))) {
+        throw new Error('补发商品尚未签收，不能建立买家退回的换货轮次');
+      }
+      if (prepared.workflow === 'exchange') {
+        const latestDeliveryAt = prepared.items.reduce((latest, item) => {
+          const deliveredAt = asNullableString(
+            sourceItems.get(item.shipmentPackageItemId)?.source_delivered_at,
+          );
+          if (!deliveredAt) throw new Error('补发商品缺少可信签收时间');
+          return Date.parse(deliveredAt) > Date.parse(latest) ? deliveredAt : latest;
+        }, currentRound.replacementOccurredAt ?? currentRound.occurredAt);
+        assertOccurredAtNotBefore(
+          prepared.occurredAt,
+          latestDeliveryAt,
+          '新一轮换货问题时间不能早于补发商品签收时间',
+        );
+      }
+      const latestSourceOccurredAt = currentRound.replacementOccurredAt
+        ?? currentRound.occurredAt;
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        latestSourceOccurredAt,
+        '新一轮问题时间不能早于上一轮补发时间',
+      );
+      const nextRoundNumber = currentRound.roundNumber + 1;
+      this.workspace.transaction(() => {
+        const roundId = randomUUID();
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_processing_rounds (
+            id, case_id, round_number, workflow, source_shipment_record_id,
+            occurred_at, reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          roundId,
+          current.id,
+          nextRoundNumber,
+          prepared.workflow,
+          prepared.sourceShipmentRecordId,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+        const insertItem = this.workspace.database.prepare(`
+          INSERT INTO aftersales_processing_round_items (
+            id, round_id, source_shipment_package_item_id, quantity
+          ) VALUES (?, ?, ?, ?)
+        `);
+        for (const item of prepared.items) {
+          insertItem.run(randomUUID(), roundId, item.shipmentPackageItemId, item.quantity);
+        }
+        this.advanceCase(
+          current,
+          prepared.workflow === 'exchange' ? 'waiting_return' : 'waiting_replacement',
+          prepared.reason,
+          now,
+        );
+        this.workspace.database.prepare(`
+          UPDATE aftersales_cases SET handling_direction = ? WHERE id = ?
+        `).run(
+          prepared.workflow === 'exchange' ? 'buyer_return' : 'replacement',
+          current.id,
+        );
+        const nextDirection = prepared.workflow === 'exchange' ? 'buyer_return' : 'replacement';
+        const previousDirection = current.coordination.handlingDirection;
+        if (previousDirection && previousDirection !== nextDirection) {
+          this.workspace.database.prepare(`
+            INSERT INTO aftersales_handling_direction_events (
+              id, case_id, kind, before_direction, after_direction,
+              occurred_at, reason, created_at
+            ) VALUES (?, ?, 'changed', ?, ?, ?, ?, ?)
+          `).run(
+            randomUUID(),
+            current.id,
+            previousDirection,
+            nextDirection,
+            prepared.occurredAt,
+            prepared.reason,
+            now,
+          );
+        }
+      });
+      return this.get(current.id);
+    }
     if (prepared.kind === 'record_interception_result') {
       if (
         current.workflow !== 'return_refund'
@@ -347,10 +538,11 @@ export class AftersalesApplicationService {
       return this.get(current.id);
     }
     if (prepared.kind === 'register_return') {
+      const activeRound = current.rounds.at(-1);
       if (
-        current.workflow !== 'return_refund' ||
+        (current.workflow !== 'return_refund' && activeRound?.workflow !== 'exchange') ||
         current.status !== 'waiting_return' ||
-        current.returns.length > 0
+        !activeRound || activeRound.returnRecordIds.length > 0
       ) {
         throw new Error('当前售后尚不能登记退货物流');
       }
@@ -407,15 +599,19 @@ export class AftersalesApplicationService {
               inspection_result, inspection_note
             ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL)
           `);
-          for (const item of current.items) {
+          for (const item of activeRound.items) {
             insertItem.run(
               randomUUID(),
               returnRecordId,
               current.id,
-              item.shipmentPackageItemId,
+              item.sourceShipmentPackageItemId,
               item.quantity,
             );
           }
+          this.workspace.database.prepare(`
+            INSERT INTO aftersales_round_returns (round_id, return_record_id)
+            VALUES (?, ?)
+          `).run(activeRound.id, returnRecordId);
           const updated = this.workspace.database.prepare(`
             UPDATE aftersales_return_records
             SET revision = revision + 1, updated_at = ?
@@ -435,8 +631,8 @@ export class AftersalesApplicationService {
             prepared.occurredAt,
             prepared.reason,
             JSON.stringify({
-              items: current.items.map(({ shipmentPackageItemId, quantity }) => ({
-                shipmentPackageItemId,
+              items: activeRound.items.map(({ sourceShipmentPackageItemId, quantity }) => ({
+                shipmentPackageItemId: sourceShipmentPackageItemId,
                 quantity,
               })),
             }),
@@ -475,15 +671,19 @@ export class AftersalesApplicationService {
             inspection_result, inspection_note
           ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL)
         `);
-        for (const item of current.items) {
+        for (const item of activeRound.items) {
           insertItem.run(
             randomUUID(),
             returnRecordId,
             current.id,
-            item.shipmentPackageItemId,
+            item.sourceShipmentPackageItemId,
             item.quantity,
           );
         }
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_round_returns (round_id, return_record_id)
+          VALUES (?, ?)
+        `).run(activeRound.id, returnRecordId);
         this.workspace.database.prepare(`
           INSERT INTO aftersales_return_record_events (
             id, return_record_id, kind, base_revision, result_revision,
@@ -736,13 +936,16 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'receive_return') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
+      const returnRound = current.rounds.find(({ returnRecordIds }) => (
+        returnRecordIds.includes(prepared.returnRecordId)
+      ));
       if (
-        current.workflow !== 'return_refund' ||
+        (current.workflow !== 'return_refund' && returnRound?.workflow !== 'exchange') ||
         (current.status !== 'waiting_return'
           && current.status !== 'ready_to_complete'
           && current.status !== 'cancelled'
           && current.status !== 'completed') ||
-        returnRecord?.status !== 'in_transit'
+        returnRecord?.status !== 'in_transit' || !returnRound
       ) {
         throw new Error('当前退货记录尚不能确认收到');
       }
@@ -829,13 +1032,16 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'inspect_return') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
+      const returnRound = current.rounds.find(({ returnRecordIds }) => (
+        returnRecordIds.includes(prepared.returnRecordId)
+      ));
       if (
-        current.workflow !== 'return_refund' ||
+        (current.workflow !== 'return_refund' && returnRound?.workflow !== 'exchange') ||
         (current.status !== 'waiting_inspection'
           && current.status !== 'ready_to_complete'
           && current.status !== 'cancelled'
           && current.status !== 'completed') ||
-        returnRecord?.status !== 'received'
+        returnRecord?.status !== 'received' || !returnRound
       ) {
         throw new Error('当前退货记录尚不能登记检查结果');
       }
@@ -925,7 +1131,11 @@ export class AftersalesApplicationService {
           (linkedCase) => linkedCase.status === 'cancelled' || linkedCase.status === 'completed'
             || linkedCase.status === 'ready_to_complete'
             ? linkedCase.status
-            : 'waiting_refund',
+            : linkedCase.rounds.find(({ returnRecordIds }) => (
+              returnRecordIds.includes(returnRecord.id)
+            ))?.workflow === 'exchange'
+              ? 'waiting_replacement'
+              : 'waiting_refund',
           prepared.note,
           now,
         );
@@ -1083,33 +1293,37 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'cancel') {
       const refund = current.refund;
-      if (!refund || refund.status !== 'pending') {
+      if (refund && refund.status !== 'pending') {
         throw new Error('已经确认实际退款的售后不能取消');
       }
       this.workspace.transaction(() => {
-        const cancelled = this.workspace.database.prepare(`
-          UPDATE pending_financial_items
-          SET status = 'cancelled', resolved_at = ?
-          WHERE id = ? AND status = 'pending'
-        `).run(now, refund.pendingItemId);
-        if (cancelled.changes !== 1) throw new Error('退款申请已在其他操作中处理');
-        this.workspace.database.prepare(`
-          INSERT INTO pending_financial_item_events (
-            id, pending_item_id, kind, requested_amount_cents,
-            actual_amount_cents, reason, created_at
-          ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?)
-        `).run(
-          randomUUID(),
-          refund.pendingItemId,
-          refund.requestedAmountCents,
-          prepared.reason,
-          now,
-        );
+        if (refund) {
+          const cancelled = this.workspace.database.prepare(`
+            UPDATE pending_financial_items
+            SET status = 'cancelled', resolved_at = ?
+            WHERE id = ? AND status = 'pending'
+          `).run(now, refund.pendingItemId);
+          if (cancelled.changes !== 1) throw new Error('退款申请已在其他操作中处理');
+          this.workspace.database.prepare(`
+            INSERT INTO pending_financial_item_events (
+              id, pending_item_id, kind, requested_amount_cents,
+              actual_amount_cents, reason, created_at
+            ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?)
+          `).run(
+            randomUUID(), refund.pendingItemId, refund.requestedAmountCents,
+            prepared.reason, now,
+          );
+        }
         this.advanceCase(current, 'cancelled', prepared.reason, now);
       });
       return this.get(current.id);
     }
-    if (current.status !== 'ready_to_complete' || current.refund?.status !== 'confirmed') {
+    const replacementWorkflow = current.rounds.at(-1)?.workflow === 'exchange'
+      || current.rounds.at(-1)?.workflow === 'direct_replacement';
+    if (
+      current.status !== 'ready_to_complete'
+      || (!replacementWorkflow && current.refund?.status !== 'confirmed')
+    ) {
       throw new Error('请先完成退款与必要的退货处理');
     }
     this.workspace.transaction(() => {
@@ -1120,17 +1334,50 @@ export class AftersalesApplicationService {
 
   public assertPackagesCanBeCancelled(packageIds: readonly string[]): void {
     const aftersalesEvidence = this.workspace.database.prepare(`
-      SELECT cases.id
+      SELECT 1
       FROM shipment_package_items AS shipment_items
-      JOIN aftersales_case_items AS case_items
-        ON case_items.shipment_package_item_id = shipment_items.id
-      JOIN aftersales_cases AS cases ON cases.id = case_items.case_id
       WHERE shipment_items.package_id = ?
+        AND (
+          EXISTS (
+            SELECT 1 FROM aftersales_case_items AS case_items
+            WHERE case_items.shipment_package_item_id = shipment_items.id
+          )
+          OR EXISTS (
+            SELECT 1 FROM aftersales_processing_round_items AS round_items
+            WHERE round_items.source_shipment_package_item_id = shipment_items.id
+          )
+          OR EXISTS (
+            SELECT 1 FROM aftersales_replacement_items AS replacement_items
+            WHERE replacement_items.shipment_package_item_id = shipment_items.id
+          )
+        )
       LIMIT 1
     `);
     if (packageIds.some((packageId) => aftersalesEvidence.get(packageId))) {
       throw new Error('包裹已经产生售后处理证据，不能按未交寄撤销');
     }
+  }
+
+  public synchronizeReplacementShipment(shipmentRecordId: string, now: string): void {
+    const row = this.workspace.database.prepare(`
+      SELECT rounds.case_id, rounds.id AS round_id
+      FROM aftersales_replacement_shipments AS replacements
+      JOIN aftersales_processing_rounds AS rounds ON rounds.id = replacements.round_id
+      WHERE replacements.shipment_record_id = ?
+    `).get(shipmentRecordId) as SqlRow | undefined;
+    if (!row) return;
+    const current = this.get(asString(row.case_id));
+    const round = current.rounds.at(-1);
+    if (!round || round.id !== asString(row.round_id) || !round.replacementShipment) return;
+    if (current.status === 'completed' || current.status === 'cancelled') return;
+    const activePackages = round.replacementShipment.packages.filter(({ status }) => status === 'active');
+    if (activePackages.length === 0 || activePackages.some(({ logisticsStatus }) => (
+      logisticsStatus !== 'delivered'
+    ))) return;
+    if (current.status === 'ready_to_complete') return;
+    this.workspace.transaction(() => {
+      this.advanceCase(current, 'ready_to_complete', '本轮补发包裹已全部签收', now);
+    });
   }
 
   private resolveSourceItems(
@@ -1157,6 +1404,17 @@ export class AftersalesApplicationService {
           packages.shipping_carrier AS source_shipping_carrier,
           packages.tracking_number AS source_tracking_number,
           packages.logistics_status AS source_logistics_status,
+          COALESCE((
+            SELECT events.occurred_at
+            FROM shipment_package_logistics_status_events AS events
+            WHERE events.package_id = packages.id
+              AND events.after_status = 'delivered'
+            ORDER BY events.result_revision DESC
+            LIMIT 1
+          ), CASE
+            WHEN packages.logistics_status = 'delivered' THEN packages.created_at
+            ELSE NULL
+          END) AS source_delivered_at,
           COALESCE((
             SELECT MAX(CASE
               WHEN json_extract(exceptions.impact_json, '$.scope') = 'package'
@@ -1294,6 +1552,8 @@ export class AftersalesApplicationService {
     });
     const refund = this.getRefund(caseId);
     const returns = this.getReturns(caseId);
+    const rounds = this.getProcessingRounds(caseId);
+    const fulfillment = this.getFulfillmentSummary(caseId, rounds);
     const returnExceptions = this.getReturnExceptionEvidenceHistory(caseId, returns).map(
       (exception) => ({
         ...exception,
@@ -1303,6 +1563,18 @@ export class AftersalesApplicationService {
         ),
       }),
     );
+    const coordination = coordinateAftersales({
+      handlingDirection: asNullableHandlingDirection(row.handling_direction),
+      sourcePackages: this.getSourcePackageEvidence(caseId),
+      interception: this.getInterception(caseId),
+      handlingDirectionTimeline: this.getHandlingDirectionTimeline(caseId),
+      refundStatus: refund?.status ?? null,
+      returnExceptions,
+    });
+    const currentRound = rounds.at(-1);
+    const currentRoundReturns = currentRound
+      ? returns.filter(({ id }) => currentRound.returnRecordIds.includes(id))
+      : [];
     return {
       id: asString(row.id),
       shipmentRecordId: asString(row.shipment_record_id),
@@ -1314,18 +1586,289 @@ export class AftersalesApplicationService {
       items,
       refund,
       returns,
-      coordination: coordinateAftersales({
-        handlingDirection: asNullableHandlingDirection(row.handling_direction),
-        sourcePackages: this.getSourcePackageEvidence(caseId),
-        interception: this.getInterception(caseId),
-        handlingDirectionTimeline: this.getHandlingDirectionTimeline(caseId),
-        refundStatus: refund?.status ?? null,
-        returnExceptions,
-      }),
+      rounds,
+      fulfillment,
+      coordination: currentRound && currentRound.workflow !== 'legacy'
+        && coordination.returnException === null
+        ? {
+          ...coordination,
+          currentTodo: replacementRoundTodo(currentRound, currentRoundReturns),
+        }
+        : coordination,
       timeline,
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
     };
+  }
+
+  private getProcessingRounds(caseId: string): AftersalesProcessingRound[] {
+    const rows = this.workspace.database.prepare(`
+      SELECT * FROM aftersales_processing_rounds
+      WHERE case_id = ?
+      ORDER BY round_number, id
+    `).all(caseId) as unknown as SqlRow[];
+    return rows.map((row) => {
+      const roundId = asString(row.id);
+      const itemRows = this.workspace.database.prepare(`
+        SELECT
+          round_items.id,
+          round_items.source_shipment_package_item_id,
+          round_items.quantity,
+          shipment_items.package_id,
+          shipment_items.order_id,
+          shipment_items.source_order_item_id,
+          shipment_items.order_number,
+          shipment_items.source_title,
+          shipment_items.source_spec
+        FROM aftersales_processing_round_items AS round_items
+        JOIN shipment_package_items AS shipment_items
+          ON shipment_items.id = round_items.source_shipment_package_item_id
+        WHERE round_items.round_id = ?
+        ORDER BY shipment_items.order_number, shipment_items.position, round_items.id
+      `).all(roundId) as unknown as SqlRow[];
+      const returnRows = this.workspace.database.prepare(`
+        SELECT return_record_id FROM aftersales_round_returns
+        WHERE round_id = ? ORDER BY return_record_id
+      `).all(roundId) as unknown as SqlRow[];
+      const replacementRow = this.workspace.database.prepare(`
+        SELECT shipment_record_id, occurred_at FROM aftersales_replacement_shipments
+        WHERE round_id = ?
+      `).get(roundId) as SqlRow | undefined;
+      const workflow = asString(row.workflow);
+      if (workflow !== 'legacy' && workflow !== 'exchange' && workflow !== 'direct_replacement') {
+        throw new Error('数据库售后处理轮次方式错误');
+      }
+      return {
+        id: roundId,
+        roundNumber: asNumber(row.round_number),
+        workflow,
+        sourceShipmentRecordId: asString(row.source_shipment_record_id),
+        items: itemRows.map((item) => ({
+          id: asString(item.id),
+          sourceShipmentPackageItemId: asString(item.source_shipment_package_item_id),
+          packageId: asString(item.package_id),
+          orderId: asString(item.order_id),
+          orderItemId: asString(item.source_order_item_id),
+          orderNumber: asString(item.order_number),
+          sourceTitle: asString(item.source_title),
+          sourceSpec: asString(item.source_spec),
+          quantity: asNumber(item.quantity),
+        })),
+        returnRecordIds: returnRows.map((item) => asString(item.return_record_id)),
+        replacementShipment: replacementRow
+          ? this.readShipmentRecord(asString(replacementRow.shipment_record_id))
+          : null,
+        replacementOccurredAt: replacementRow
+          ? asString(replacementRow.occurred_at)
+          : null,
+        occurredAt: asString(row.occurred_at),
+        reason: asString(row.reason),
+        createdAt: asString(row.created_at),
+      };
+    });
+  }
+
+  private getFulfillmentSummary(
+    caseId: string,
+    rounds: readonly AftersalesProcessingRound[],
+  ): AftersalesFulfillmentSummary {
+    const sentRow = this.workspace.database.prepare(`
+      SELECT
+        (SELECT COALESCE(SUM(quantity), 0) FROM aftersales_case_items WHERE case_id = ?) +
+        (SELECT COALESCE(SUM(items.quantity), 0)
+         FROM aftersales_replacement_items AS items
+         JOIN aftersales_replacement_shipments AS replacements
+           ON replacements.id = items.replacement_shipment_id
+         JOIN aftersales_processing_rounds AS rounds ON rounds.id = replacements.round_id
+         WHERE rounds.case_id = ?) AS quantity
+    `).get(caseId, caseId) as SqlRow;
+    const returnedRow = this.workspace.database.prepare(`
+      SELECT COALESCE(SUM(return_items.received_quantity), 0) AS quantity
+      FROM aftersales_round_returns AS links
+      JOIN aftersales_processing_rounds AS rounds ON rounds.id = links.round_id
+      JOIN aftersales_return_record_items AS return_items
+        ON return_items.return_record_id = links.return_record_id
+       AND return_items.aftersales_case_id = rounds.case_id
+      WHERE rounds.case_id = ?
+    `).get(caseId) as SqlRow;
+    const heldOriginalRow = this.workspace.database.prepare(`
+      SELECT COALESCE(SUM(case_items.quantity), 0) AS quantity
+      FROM aftersales_case_items AS case_items
+      JOIN shipment_package_items AS items
+        ON items.id = case_items.shipment_package_item_id
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      WHERE case_items.case_id = ? AND packages.logistics_status = 'delivered'
+    `).get(caseId) as SqlRow;
+    const heldReplacementRow = this.workspace.database.prepare(`
+      SELECT COALESCE(SUM(mapped.quantity), 0) AS quantity
+      FROM aftersales_replacement_items AS mapped
+      JOIN aftersales_replacement_shipments AS replacements
+        ON replacements.id = mapped.replacement_shipment_id
+      JOIN aftersales_processing_rounds AS rounds ON rounds.id = replacements.round_id
+      JOIN shipment_package_items AS items ON items.id = mapped.shipment_package_item_id
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      WHERE rounds.case_id = ? AND packages.logistics_status = 'delivered'
+    `).get(caseId) as SqlRow;
+    const returned = asNumber(returnedRow.quantity);
+    return {
+      cumulativeSentQuantity: asNumber(sentRow.quantity),
+      cumulativeReturnedQuantity: returned,
+      buyerHeldQuantity: Math.max(
+        asNumber(heldOriginalRow.quantity) + asNumber(heldReplacementRow.quantity) - returned,
+        0,
+      ),
+      currentRoundNumber: rounds.at(-1)?.roundNumber ?? 1,
+    };
+  }
+
+  private readShipmentRecord(recordId: string): ShipmentRecord {
+    if (!this.shipmentRecordReader) throw new Error('售后服务缺少发货记录读取器');
+    return this.shipmentRecordReader(recordId);
+  }
+
+  private createReplacementShipment(
+    current: AftersalesCase,
+    round: AftersalesProcessingRound,
+    prepared: Extract<ProgressAftersalesCaseInput, { kind: 'create_replacement_shipment' }>,
+    now: string,
+  ): void {
+    const sourceRecord = this.readShipmentRecord(round.sourceShipmentRecordId);
+    const sourceItemRows = new Map(round.items.map((item) => {
+      const row = this.workspace.database.prepare(`
+        SELECT * FROM shipment_package_items WHERE id = ?
+      `).get(item.sourceShipmentPackageItemId) as SqlRow | undefined;
+      if (!row) throw new Error('补发商品来源快照不存在');
+      return [item.id, row] as const;
+    }));
+    const allocatedOrderIds = [...new Set(prepared.packages.flatMap((shipmentPackage) => (
+      shipmentPackage.items.map((item) => (
+        asString(sourceItemRows.get(item.roundItemId)?.order_id)
+      ))
+    )))].sort();
+    const sourceOrderById = new Map(sourceRecord.sourceOrders.map((order) => [order.orderId, order]));
+    const memberOrders = allocatedOrderIds.map((orderId) => {
+      const order = sourceOrderById.get(orderId);
+      if (!order) throw new Error('补发记录缺少订单来源快照');
+      return order;
+    });
+    const totalQuantity = prepared.packages.flatMap(({ items }) => items)
+      .reduce((sum, { quantity }) => sum + quantity, 0);
+    const archiveId = randomUUID();
+    const recordId = randomUUID();
+    const sourceGroupId = `aftersales-replacement-${current.id}-round-${round.roundNumber}`;
+    this.workspace.database.prepare(`
+      INSERT INTO shipment_group_archives (
+        id, source_group_id, status, recipient, phone, phone_normalized,
+        address_original, address_normalized, member_order_ids_json,
+        member_recipient_snapshots_json, total_quantity,
+        created_at, fully_shipped_at, updated_at
+      ) VALUES (?, ?, 'fully_shipped', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      archiveId,
+      sourceGroupId,
+      sourceRecord.recipient,
+      sourceRecord.phone,
+      sourceRecord.phoneNormalized,
+      sourceRecord.addressOriginal,
+      sourceRecord.addressNormalized,
+      JSON.stringify(allocatedOrderIds),
+      JSON.stringify(memberOrders.map((order) => ({
+        orderId: order.orderId,
+        recipient: order.recipient,
+        phone: order.phone,
+        addressOriginal: order.addressOriginal,
+      }))),
+      totalQuantity,
+      now,
+      now,
+      now,
+    );
+    this.workspace.database.prepare(`
+      INSERT INTO shipment_records (
+        id, shipment_group_archive_id, source_group_id, recipient, phone,
+        phone_normalized, address_original, address_normalized, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      recordId,
+      archiveId,
+      sourceGroupId,
+      sourceRecord.recipient,
+      sourceRecord.phone,
+      sourceRecord.phoneNormalized,
+      sourceRecord.addressOriginal,
+      sourceRecord.addressNormalized,
+      now,
+    );
+    const insertSnapshot = this.workspace.database.prepare(`
+      INSERT INTO shipment_record_order_snapshots (
+        id, shipment_record_id, order_id, order_number, seller_account,
+        buyer_nickname, recipient, phone, address_original,
+        amount_cents, revision, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const order of memberOrders) {
+      insertSnapshot.run(
+        randomUUID(), recordId, order.orderId, order.orderNumber, order.sellerAccount,
+        order.buyerNickname, order.recipient, order.phone, order.addressOriginal,
+        order.amountCents, order.revision, now,
+      );
+    }
+    const replacementId = randomUUID();
+    this.workspace.database.prepare(`
+      INSERT INTO aftersales_replacement_shipments (
+        id, round_id, shipment_record_id, occurred_at, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(replacementId, round.id, recordId, prepared.occurredAt, now);
+    for (const [packagePosition, shipmentPackage] of prepared.packages.entries()) {
+      const packageId = randomUUID();
+      this.workspace.database.prepare(`
+        INSERT INTO shipment_packages (
+          id, shipment_record_id, position, shipping_carrier,
+          tracking_number, revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?)
+      `).run(
+        packageId,
+        recordId,
+        packagePosition,
+        shipmentPackage.shippingCarrier,
+        shipmentPackage.trackingNumber,
+        now,
+      );
+      for (const [itemPosition, item] of shipmentPackage.items.entries()) {
+        const source = sourceItemRows.get(item.roundItemId);
+        if (!source) throw new Error('补发商品来源已变化');
+        const shipmentItemId = randomUUID();
+        this.workspace.database.prepare(`
+          INSERT INTO shipment_package_items (
+            id, package_id, position, order_id, source_order_item_id,
+            order_number, seller_account, buyer_nickname, source_title, source_spec,
+            unit_price_cents, source_item_quantity, quantity, subtotal_cents, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          shipmentItemId,
+          packageId,
+          itemPosition,
+          asString(source.order_id),
+          asString(source.source_order_item_id),
+          asString(source.order_number),
+          asString(source.seller_account),
+          asString(source.buyer_nickname),
+          asString(source.source_title),
+          asString(source.source_spec),
+          asNumber(source.unit_price_cents),
+          asNumber(source.source_item_quantity),
+          item.quantity,
+          asNumber(source.unit_price_cents) * item.quantity,
+          now,
+        );
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_replacement_items (
+            id, replacement_shipment_id, round_item_id,
+            shipment_package_item_id, quantity
+          ) VALUES (?, ?, ?, ?, ?)
+        `).run(randomUUID(), replacementId, item.roundItemId, shipmentItemId, item.quantity);
+      }
+    }
   }
 
   private getSourcePackageEvidence(caseId: string): AftersalesSourcePackageEvidence[] {
@@ -1888,6 +2431,24 @@ function initialHandlingDirection(input: {
     if (input.requested !== undefined) throw new Error('仅退款处理不能选择退货退款处理方向');
     return null;
   }
+  if (input.workflow === 'exchange') {
+    if (input.requested !== undefined && input.requested !== 'buyer_return') {
+      throw new Error('换货处理必须先由买家退回商品');
+    }
+    if (!input.availableDirections.includes('buyer_return')) {
+      throw new Error('当前实物控制关系不允许建立换货处理');
+    }
+    return 'buyer_return';
+  }
+  if (input.workflow === 'direct_replacement') {
+    if (input.requested !== undefined && input.requested !== 'replacement') {
+      throw new Error('直接补发处理方向无效');
+    }
+    if (!input.availableDirections.includes('replacement')) {
+      throw new Error('当前实物控制关系不允许直接补发');
+    }
+    return 'replacement';
+  }
   const requested = input.requested;
   if (!requested) {
     throw new Error('请根据当前实物控制关系明确选择售后处理方向');
@@ -1896,6 +2457,28 @@ function initialHandlingDirection(input: {
     throw new Error('当前实物流转证据不允许该售后处理方向');
   }
   return requested;
+}
+
+function replacementRoundTodo(
+  round: AftersalesProcessingRound,
+  returns: readonly AftersalesReturnRecord[],
+): string {
+  if (round.workflow === 'legacy') return '继续当前售后处理';
+  if (round.workflow === 'exchange' && returns.length === 0) return '等待买家退回';
+  if (round.workflow === 'exchange' && returns.some(({ status }) => status === 'in_transit')) {
+    return '等待并确认收到本轮退回商品';
+  }
+  if (round.workflow === 'exchange' && returns.some(({ status }) => status === 'received')) {
+    return '检查本轮退回商品';
+  }
+  if (!round.replacementShipment) return `安排第 ${round.roundNumber} 轮补发`;
+  const activePackages = round.replacementShipment.packages.filter(({ status }) => status === 'active');
+  if (activePackages.length > 0 && activePackages.every(({ logisticsStatus }) => (
+    logisticsStatus === 'delivered'
+  ))) {
+    return '确认本轮补发签收并完成售后，或登记新的处理轮次';
+  }
+  return `跟进第 ${round.roundNumber} 轮补发运输`;
 }
 
 function sourcePackageEvidence(
@@ -1941,6 +2524,11 @@ function sourcePackageEvidence(
 function asString(value: string | number | null | undefined): string {
   if (typeof value !== 'string') throw new Error('数据库文本字段格式错误');
   return value;
+}
+
+function asNullableString(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return asString(value);
 }
 
 function asNumber(value: string | number | null | undefined): number {

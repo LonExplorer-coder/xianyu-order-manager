@@ -722,7 +722,7 @@ flowchart TD
 
 当前 [Issue #52](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/52) 已完成包裹、部分发货与作废边界决策；[Issue #18](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/18) 可以据此实施发货记录、包裹商品明细和发货快照。
 
-截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线；[Issue #57](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/57) 已交付按发货快照商品与数量建立、修改和查询的售后处理单、售后概览、可处理数量校验与不可变处理时间线；[Issue #58](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/58) 已交付精确到商品与数量的仅退款和退货退款向导，分别保存退款申请、实际资金记录、退货物流、实际收到与检查结果。物流、售后、退货和资金事实分别保存，不会互相猜测；补发、库存流水和完整财务模块仍由后续任务承接。
+截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线；[Issue #57](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/57) 已交付按发货快照商品与数量建立、修改和查询的售后处理单、售后概览、可处理数量校验与不可变处理时间线；[Issue #58](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/58) 已交付精确到商品与数量的仅退款和退货退款向导；[Issue #59](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/59) 已交付换货、直接补发、独立补发记录和多轮售后链路。物流、售后、退货、补发和资金事实分别保存，不会互相猜测；库存流水和完整财务模块仍由后续任务承接。
 
 ## 18. 推荐的渐进实施顺序
 

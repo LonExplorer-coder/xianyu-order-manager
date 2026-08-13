@@ -69,6 +69,32 @@ export function AftersalesCasePanel({
               </li>
             ))}
           </ul>
+          {aftersalesCase.rounds?.some(({ workflow }) => workflow !== 'legacy') && (
+            <section className="shipment-record-card__coordination" aria-label="售后实物流转汇总">
+              <strong>当前第 {aftersalesCase.fulfillment.currentRoundNumber} 轮 · {aftersalesCase.coordination.currentTodo}</strong>
+              <span>
+                累计发出 {aftersalesCase.fulfillment.cumulativeSentQuantity} 件
+                {' · '}累计退回 {aftersalesCase.fulfillment.cumulativeReturnedQuantity} 件
+                {' · '}买家当前持有 {aftersalesCase.fulfillment.buyerHeldQuantity} 件
+              </span>
+              <ol>
+                {aftersalesCase.rounds.map((round) => (
+                  <li key={round.id}>
+                    <strong>第 {round.roundNumber} 轮 · {round.workflow === 'exchange' ? '换货' : round.workflow === 'direct_replacement' ? '直接补发' : '旧版处理'}</strong>
+                    <span>来源发货 {round.sourceShipmentRecordId}</span>
+                    <span>{round.items.map((item) => (
+                      `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} × ${item.quantity}`
+                    )).join('；')}</span>
+                    {round.replacementShipment ? (
+                      <span>补发：{round.replacementShipment.packages.map((shipmentPackage) => (
+                        `${shipmentPackage.shippingCarrier} ${shipmentPackage.trackingNumber} · ${shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}`
+                      )).join('；')}</span>
+                    ) : <span>补发：尚未建立</span>}
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
           {aftersalesCase.workflow === 'return_refund' && (
             <div
               className="shipment-record-card__coordination"
@@ -390,6 +416,17 @@ export function AftersalesCasePanel({
                   {progressActionLabel(primaryProgressAction(aftersalesCase) as ProgressAftersalesCaseInput['kind'])}
                 </button>
               )}
+              {aftersalesCase.rounds?.at(-1)?.replacementShipment
+                && aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled' && (
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => setProgressTarget({ aftersalesCase, kind: 'start_next_round' })}
+                >
+                  {progressActionLabel('start_next_round')}
+                </button>
+              )}
               {primaryProgressAction(aftersalesCase) === 'confirm_refund'
                 && returnFactProgressAction(aftersalesCase) && (
                 <button
@@ -415,7 +452,9 @@ export function AftersalesCasePanel({
                   {progressActionLabel('complete')}
                 </button>
               )}
-              {aftersalesCase.refund?.status === 'pending' && (
+              {(aftersalesCase.refund?.status === 'pending'
+                || aftersalesCase.workflow === 'exchange'
+                || aftersalesCase.workflow === 'direct_replacement') && (
                 <button
                   className="button button--quiet"
                   type="button"
@@ -518,7 +557,10 @@ function primaryProgressAction(
     return returnFactProgressAction(aftersalesCase) ?? 'complete';
   }
   if (aftersalesCase.status === 'cancelled' || aftersalesCase.status === 'completed') {
-    const terminalReturn = aftersalesCase.returns[0];
+    const currentRound = aftersalesCase.rounds?.at(-1);
+    const terminalReturn = aftersalesCase.returns.find(({ id }) => (
+      currentRound?.returnRecordIds.includes(id)
+    )) ?? aftersalesCase.returns.at(-1);
     if (terminalReturn?.status === 'in_transit' && canReceiveReturn(terminalReturn)) {
       return 'receive_return';
     }
@@ -527,6 +569,25 @@ function primaryProgressAction(
   }
   if (aftersalesCase.workflow === 'refund_only' && aftersalesCase.status === 'waiting_refund') {
     return 'confirm_refund';
+  }
+  const currentRound = aftersalesCase.rounds?.at(-1);
+  if (currentRound?.workflow === 'exchange' || currentRound?.workflow === 'direct_replacement') {
+    const returnRecord = aftersalesCase.returns.find(({ id }) => (
+      currentRound.returnRecordIds.includes(id)
+    ));
+    if (currentRound.workflow === 'exchange'
+      && aftersalesCase.status === 'waiting_return' && !returnRecord) return 'register_return';
+    if (currentRound.workflow === 'exchange'
+      && aftersalesCase.status === 'waiting_return'
+      && returnRecord?.status === 'in_transit') {
+      return canReceiveReturn(returnRecord) ? 'receive_return' : null;
+    }
+    if (currentRound.workflow === 'exchange'
+      && aftersalesCase.status === 'waiting_inspection'
+      && returnRecord?.status === 'received') return 'inspect_return';
+    if (aftersalesCase.status === 'waiting_replacement'
+      && !currentRound.replacementShipment) return 'create_replacement_shipment';
+    return null;
   }
   if (aftersalesCase.workflow !== 'return_refund') return null;
   if (aftersalesCase.coordination.handlingDirection === 'only_refund'
@@ -563,7 +624,10 @@ function primaryProgressAction(
 function returnFactProgressAction(
   aftersalesCase: AftersalesCase,
 ): 'receive_return' | 'inspect_return' | null {
-  const returnRecord = aftersalesCase.returns[0];
+  const currentRound = aftersalesCase.rounds?.at(-1);
+  const returnRecord = aftersalesCase.returns.find(({ id }) => (
+    currentRound?.returnRecordIds.includes(id)
+  )) ?? aftersalesCase.returns.at(-1);
   if (returnRecord?.status === 'in_transit' && canReceiveReturn(returnRecord)) {
     return 'receive_return';
   }
@@ -573,6 +637,8 @@ function returnFactProgressAction(
 
 function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string {
   const labels: Record<ProgressAftersalesCaseInput['kind'], string> = {
+    create_replacement_shipment: '建立本轮补发',
+    start_next_round: '登记新一轮问题',
     record_interception_result: '登记拦截结果',
     change_handling_direction: '转换处理方向',
     register_return: '登记退货物流',
@@ -610,7 +676,11 @@ function aftersalesWorkflowLabel(workflow: AftersalesCase['workflow']): string {
     ? '仅退款'
     : workflow === 'return_refund'
       ? '退货退款'
-      : '一般处理';
+      : workflow === 'exchange'
+        ? '换货'
+        : workflow === 'direct_replacement'
+          ? '直接补发'
+          : '一般处理';
 }
 
 function interceptionEventLabel(

@@ -3596,9 +3596,12 @@ export class LocalApplication {
         }),
         now,
       );
-      for (const orderId of new Set(shipmentPackage.items.map(({ orderId }) => orderId))) {
-        this.synchronizeShipmentOrderFulfillment(orderId, now);
+      if (record.sourceRecordRole !== 'aftersales_replacement') {
+        for (const orderId of new Set(shipmentPackage.items.map(({ orderId }) => orderId))) {
+          this.synchronizeShipmentOrderFulfillment(orderId, now);
+        }
       }
+      this.aftersalesService().synchronizeReplacementShipment(record.id, now);
     });
     const updatedRecord = this.getShipmentRecord(record.id);
     return {
@@ -3913,6 +3916,9 @@ export class LocalApplication {
     });
     return {
       id: asString(row.id),
+      sourceRecordRole: workspace.database.prepare(`
+        SELECT 1 FROM aftersales_replacement_shipments WHERE shipment_record_id = ?
+      `).get(recordId) ? 'aftersales_replacement' : 'initial',
       archiveId: asString(row.shipment_group_archive_id),
       sourceGroupId: asString(row.source_group_id),
       status: voidRow ? 'voided' : 'active',
@@ -3941,10 +3947,13 @@ export class LocalApplication {
       SELECT COALESCE(SUM(items.quantity), 0) AS quantity
       FROM shipment_package_items AS items
       JOIN shipment_packages AS packages ON packages.id = items.package_id
+      LEFT JOIN aftersales_replacement_shipments AS replacements
+        ON replacements.shipment_record_id = packages.shipment_record_id
       LEFT JOIN shipment_package_cancellation_events AS cancellations
         ON cancellations.package_id = packages.id
       WHERE items.source_order_item_id = ?
         AND cancellations.id IS NULL
+        AND replacements.id IS NULL
     `).get(orderItemId) as SqlRow;
     return asNumber(row.quantity);
   }
@@ -5400,7 +5409,10 @@ export class LocalApplication {
   }
 
   private aftersalesService(): AftersalesApplicationService {
-    return new AftersalesApplicationService(this.requireWorkspace());
+    return new AftersalesApplicationService(
+      this.requireWorkspace(),
+      (recordId) => this.getShipmentRecord(recordId),
+    );
   }
 
   private logisticsExceptionService(): LogisticsExceptionService {

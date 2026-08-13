@@ -149,43 +149,44 @@ function migrate(database: DatabaseSync): void {
     ) STRICT;
   `);
 
-  const row = database
-    .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations')
-    .get() as { version: number };
+  const versions = new Set((database.prepare(
+    'SELECT version FROM schema_migrations',
+  ).all() as Array<{ version: number }>).map(({ version }) => version));
 
-  if (row.version < 1) migrateToVersion1(database);
-  if (row.version < 2) migrateToVersion2(database);
-  if (row.version < 3) migrateToVersion3(database);
-  if (row.version < 4) migrateToVersion4(database);
-  if (row.version < 5) migrateToVersion5(database);
-  if (row.version < 6) migrateToVersion6(database);
-  if (row.version < 7) migrateToVersion7(database);
-  if (row.version < 8) migrateToVersion8(database);
-  if (row.version < 9) migrateToVersion9(database);
-  if (row.version < 10) migrateToVersion10(database);
-  if (row.version < 11) migrateToVersion11(database);
-  if (row.version < 12) migrateToVersion12(database);
-  if (row.version < 13) migrateToVersion13(database);
-  if (row.version < 14) migrateToVersion14(database);
-  if (row.version < 15) migrateToVersion15(database);
-  if (row.version < 16) migrateToVersion16(database);
-  if (row.version < 17) migrateToVersion17(database);
-  if (row.version < 18) migrateToVersion18(database);
-  if (row.version < 19) migrateToVersion19(database);
-  if (row.version < 20) migrateToVersion20(database);
-  if (row.version < 21) migrateToVersion21(database);
-  if (row.version < 22) migrateToVersion22(database);
-  if (row.version < 23) migrateToVersion23(database);
-  if (row.version < 24) migrateToVersion24(database);
-  if (row.version < 25) migrateToVersion25(database);
-  if (row.version < 26) migrateToVersion26(database);
-  if (row.version < 27) migrateToVersion27(database);
-  if (row.version < 28) migrateToVersion28(database);
-  if (row.version < 29) migrateToVersion29(database);
-  if (row.version < 30) migrateToVersion30(database);
-  if (row.version < 31) migrateToVersion31(database);
-  if (row.version < 32) migrateToVersion32(database);
-  if (row.version < 33) migrateToVersion33(database);
+  if (!versions.has(1)) migrateToVersion1(database);
+  if (!versions.has(2)) migrateToVersion2(database);
+  if (!versions.has(3)) migrateToVersion3(database);
+  if (!versions.has(4)) migrateToVersion4(database);
+  if (!versions.has(5)) migrateToVersion5(database);
+  if (!versions.has(6)) migrateToVersion6(database);
+  if (!versions.has(7)) migrateToVersion7(database);
+  if (!versions.has(8)) migrateToVersion8(database);
+  if (!versions.has(9)) migrateToVersion9(database);
+  if (!versions.has(10)) migrateToVersion10(database);
+  if (!versions.has(11)) migrateToVersion11(database);
+  if (!versions.has(12)) migrateToVersion12(database);
+  if (!versions.has(13)) migrateToVersion13(database);
+  if (!versions.has(14)) migrateToVersion14(database);
+  if (!versions.has(15)) migrateToVersion15(database);
+  if (!versions.has(16)) migrateToVersion16(database);
+  if (!versions.has(17)) migrateToVersion17(database);
+  if (!versions.has(18)) migrateToVersion18(database);
+  if (!versions.has(19)) migrateToVersion19(database);
+  if (!versions.has(20)) migrateToVersion20(database);
+  if (!versions.has(21)) migrateToVersion21(database);
+  if (!versions.has(22)) migrateToVersion22(database);
+  if (!versions.has(23)) migrateToVersion23(database);
+  if (!versions.has(24)) migrateToVersion24(database);
+  if (!versions.has(25)) migrateToVersion25(database);
+  if (!versions.has(26)) migrateToVersion26(database);
+  if (!versions.has(27)) migrateToVersion27(database);
+  if (!versions.has(28)) migrateToVersion28(database);
+  if (!versions.has(29)) migrateToVersion29(database);
+  if (!versions.has(30)) migrateToVersion30(database);
+  if (!versions.has(31)) migrateToVersion31(database);
+  if (!versions.has(32)) migrateToVersion32(database);
+  if (!versions.has(33)) migrateToVersion33(database);
+  if (!versions.has(34)) migrateToVersion34(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3997,6 +3998,262 @@ function migrateToVersion33(database: DatabaseSync): void {
     }
     throw error;
   }
+}
+
+const VERSION_34_SCHEMA_STATEMENTS = {
+  aftersales_processing_rounds: `
+    CREATE TABLE aftersales_processing_rounds (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      round_number INTEGER NOT NULL CHECK (round_number >= 1),
+      workflow TEXT NOT NULL CHECK (workflow IN ('legacy', 'exchange', 'direct_replacement')),
+      source_shipment_record_id TEXT NOT NULL REFERENCES shipment_records(id) ON DELETE RESTRICT,
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL,
+      UNIQUE (case_id, round_number)
+    ) STRICT`,
+  aftersales_processing_round_items: `
+    CREATE TABLE aftersales_processing_round_items (
+      id TEXT PRIMARY KEY,
+      round_id TEXT NOT NULL REFERENCES aftersales_processing_rounds(id) ON DELETE RESTRICT,
+      source_shipment_package_item_id TEXT NOT NULL
+        REFERENCES shipment_package_items(id) ON DELETE RESTRICT,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      UNIQUE (round_id, source_shipment_package_item_id)
+    ) STRICT`,
+  aftersales_round_returns: `
+    CREATE TABLE aftersales_round_returns (
+      round_id TEXT NOT NULL REFERENCES aftersales_processing_rounds(id) ON DELETE RESTRICT,
+      return_record_id TEXT NOT NULL
+        REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+      PRIMARY KEY (round_id, return_record_id)
+    ) STRICT`,
+  aftersales_replacement_shipments: `
+    CREATE TABLE aftersales_replacement_shipments (
+      id TEXT PRIMARY KEY,
+      round_id TEXT NOT NULL UNIQUE
+        REFERENCES aftersales_processing_rounds(id) ON DELETE RESTRICT,
+      shipment_record_id TEXT NOT NULL UNIQUE
+        REFERENCES shipment_records(id) ON DELETE RESTRICT,
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT`,
+  aftersales_replacement_items: `
+    CREATE TABLE aftersales_replacement_items (
+      id TEXT PRIMARY KEY,
+      replacement_shipment_id TEXT NOT NULL
+        REFERENCES aftersales_replacement_shipments(id) ON DELETE RESTRICT,
+      round_item_id TEXT NOT NULL
+        REFERENCES aftersales_processing_round_items(id) ON DELETE RESTRICT,
+      shipment_package_item_id TEXT NOT NULL UNIQUE
+        REFERENCES shipment_package_items(id) ON DELETE RESTRICT,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      UNIQUE (replacement_shipment_id, round_item_id, shipment_package_item_id)
+    ) STRICT`,
+  aftersales_processing_round_item_source_is_valid_on_insert: `
+    CREATE TRIGGER aftersales_processing_round_item_source_is_valid_on_insert
+    BEFORE INSERT ON aftersales_processing_round_items
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM aftersales_processing_rounds AS rounds
+      JOIN shipment_package_items AS items
+        ON items.id = NEW.source_shipment_package_item_id
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      WHERE rounds.id = NEW.round_id
+        AND packages.shipment_record_id = rounds.source_shipment_record_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'aftersales round item source record mismatch'); END`,
+  aftersales_replacement_item_identity_is_valid_on_insert: `
+    CREATE TRIGGER aftersales_replacement_item_identity_is_valid_on_insert
+    BEFORE INSERT ON aftersales_replacement_items
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM aftersales_replacement_shipments AS replacements
+      JOIN aftersales_processing_round_items AS round_items
+        ON round_items.id = NEW.round_item_id
+       AND round_items.round_id = replacements.round_id
+      JOIN shipment_package_items AS shipment_items
+        ON shipment_items.id = NEW.shipment_package_item_id
+      JOIN shipment_packages AS packages ON packages.id = shipment_items.package_id
+      JOIN shipment_package_items AS source_items
+        ON source_items.id = round_items.source_shipment_package_item_id
+      WHERE replacements.id = NEW.replacement_shipment_id
+        AND packages.shipment_record_id = replacements.shipment_record_id
+        AND shipment_items.order_id = source_items.order_id
+        AND shipment_items.source_order_item_id = source_items.source_order_item_id
+        AND shipment_items.quantity = NEW.quantity
+        AND (
+          SELECT COALESCE(SUM(existing.quantity), 0) + NEW.quantity
+          FROM aftersales_replacement_items AS existing
+          WHERE existing.replacement_shipment_id = NEW.replacement_shipment_id
+            AND existing.round_item_id = NEW.round_item_id
+        ) <= round_items.quantity
+    )
+    BEGIN SELECT RAISE(ABORT, 'aftersales replacement item identity mismatch'); END`,
+  aftersales_processing_rounds_are_immutable_on_update: immutableUpdateTrigger(
+    'aftersales_processing_rounds',
+    'aftersales processing rounds are immutable',
+  ),
+  aftersales_processing_rounds_are_immutable_on_delete: immutableDeleteTrigger(
+    'aftersales_processing_rounds',
+    'aftersales processing rounds are immutable',
+  ),
+  aftersales_processing_round_items_are_immutable_on_update: immutableUpdateTrigger(
+    'aftersales_processing_round_items',
+    'aftersales processing round items are immutable',
+  ),
+  aftersales_processing_round_items_are_immutable_on_delete: immutableDeleteTrigger(
+    'aftersales_processing_round_items',
+    'aftersales processing round items are immutable',
+  ),
+  aftersales_round_returns_are_immutable_on_update: immutableUpdateTrigger(
+    'aftersales_round_returns',
+    'aftersales round returns are immutable',
+  ),
+  aftersales_round_returns_are_immutable_on_delete: immutableDeleteTrigger(
+    'aftersales_round_returns',
+    'aftersales round returns are immutable',
+  ),
+  aftersales_replacement_shipments_are_immutable_on_update: immutableUpdateTrigger(
+    'aftersales_replacement_shipments',
+    'aftersales replacement shipments are immutable',
+  ),
+  aftersales_replacement_shipments_are_immutable_on_delete: immutableDeleteTrigger(
+    'aftersales_replacement_shipments',
+    'aftersales replacement shipments are immutable',
+  ),
+  aftersales_replacement_items_are_immutable_on_update: immutableUpdateTrigger(
+    'aftersales_replacement_items',
+    'aftersales replacement items are immutable',
+  ),
+  aftersales_replacement_items_are_immutable_on_delete: immutableDeleteTrigger(
+    'aftersales_replacement_items',
+    'aftersales replacement items are immutable',
+  ),
+} as const;
+
+function immutableUpdateTrigger(table: string, message: string): string {
+  return `CREATE TRIGGER ${table}_are_immutable_on_update
+    BEFORE UPDATE ON ${table}
+    BEGIN SELECT RAISE(ABORT, '${message}'); END`;
+}
+
+function immutableDeleteTrigger(table: string, message: string): string {
+  return `CREATE TRIGGER ${table}_are_immutable_on_delete
+    BEFORE DELETE ON ${table}
+    BEGIN SELECT RAISE(ABORT, '${message}'); END`;
+}
+
+function migrateToVersion34(database: DatabaseSync): void {
+  const existing = database.prepare(`
+    SELECT name FROM sqlite_schema
+    WHERE name IN (${Object.keys(VERSION_34_SCHEMA_STATEMENTS).map(() => '?').join(', ')})
+  `).all(...Object.keys(VERSION_34_SCHEMA_STATEMENTS)) as Array<{ name: string }>;
+  if (existing.length !== 0 && existing.length !== Object.keys(VERSION_34_SCHEMA_STATEMENTS).length) {
+    throw new Error('检测到不完整的 v34 售后处理轮次结构');
+  }
+  if (existing.length > 0 && !hasCompleteVersion34Schema(database)) {
+    throw new Error('检测到不完整的 v34 售后处理轮次结构');
+  }
+  const casesSql = (database.prepare(`
+    SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'aftersales_cases'
+  `).get() as { sql: string }).sql;
+  const supportsReplacementWorkflows = casesSql.includes("'exchange'")
+    && casesSql.includes("'direct_replacement'");
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    if (!supportsReplacementWorkflows) {
+      database.exec(`
+        CREATE TABLE aftersales_cases_v34 (
+          id TEXT PRIMARY KEY,
+          shipment_record_id TEXT NOT NULL
+            REFERENCES shipment_records(id) ON DELETE RESTRICT,
+          workflow TEXT NOT NULL CHECK (workflow IN (
+            'general', 'refund_only', 'return_refund', 'exchange', 'direct_replacement'
+          )),
+          status TEXT NOT NULL CHECK (status IN (
+            'processing', 'waiting_return', 'waiting_inspection', 'waiting_refund',
+            'waiting_replacement', 'partially_completed', 'ready_to_complete',
+            'completed', 'cancelled'
+          )),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+          occurred_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          handling_direction TEXT CHECK (
+            handling_direction IS NULL OR handling_direction IN (
+              'waiting', 'intercept', 'refuse', 'buyer_return', 'only_refund', 'replacement'
+            )
+          )
+        ) STRICT;
+        INSERT INTO aftersales_cases_v34
+        SELECT id, shipment_record_id, workflow, status, revision, reason,
+               occurred_at, created_at, updated_at, handling_direction
+        FROM aftersales_cases;
+        DROP TABLE aftersales_cases;
+        ALTER TABLE aftersales_cases_v34 RENAME TO aftersales_cases;
+        CREATE INDEX aftersales_cases_by_record_and_status
+        ON aftersales_cases (shipment_record_id, status, occurred_at, id);
+      `);
+    }
+    if (existing.length === 0) {
+      database.exec(Object.values(VERSION_34_SCHEMA_STATEMENTS).join(';\n'));
+      database.exec(`
+        INSERT INTO aftersales_processing_rounds (
+          id, case_id, round_number, workflow, source_shipment_record_id,
+          occurred_at, reason, created_at
+        )
+        SELECT
+          'legacy-round-' || id, id, 1,
+          CASE WHEN workflow IN ('exchange', 'direct_replacement') THEN workflow ELSE 'legacy' END,
+          shipment_record_id, occurred_at, reason, created_at
+        FROM aftersales_cases;
+
+        INSERT INTO aftersales_processing_round_items (
+          id, round_id, source_shipment_package_item_id, quantity
+        )
+        SELECT
+          'legacy-round-item-' || items.id,
+          'legacy-round-' || items.case_id,
+          items.shipment_package_item_id,
+          items.quantity
+        FROM aftersales_case_items AS items;
+
+        INSERT INTO aftersales_round_returns (round_id, return_record_id)
+        SELECT DISTINCT
+          'legacy-round-' || return_items.aftersales_case_id,
+          return_items.return_record_id
+        FROM aftersales_return_record_items AS return_items;
+      `);
+    }
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (34, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function hasCompleteVersion34Schema(database: DatabaseSync): boolean {
+  const rows = database.prepare(`
+    SELECT name, sql FROM sqlite_schema
+    WHERE name IN (${Object.keys(VERSION_34_SCHEMA_STATEMENTS).map(() => '?').join(', ')})
+  `).all(...Object.keys(VERSION_34_SCHEMA_STATEMENTS)) as Array<{
+    name: string;
+    sql: string | null;
+  }>;
+  if (rows.length !== Object.keys(VERSION_34_SCHEMA_STATEMENTS).length) return false;
+  const actual = new Map(rows.map((row) => [row.name, row.sql ?? '']));
+  return Object.entries(VERSION_34_SCHEMA_STATEMENTS).every(([name, expected]) => (
+    normalizeSchemaSql(actual.get(name) ?? '') === normalizeSchemaSql(expected)
+  ));
 }
 
 function version33SchemaState(database: DatabaseSync): 'absent' | 'complete' | 'partial' {

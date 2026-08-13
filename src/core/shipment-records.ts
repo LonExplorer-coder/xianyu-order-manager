@@ -123,6 +123,7 @@ export type ShipmentCancellation = {
 
 export type ShipmentRecord = {
   id: string;
+  sourceRecordRole: 'initial' | 'aftersales_replacement';
   archiveId: string;
   sourceGroupId: string;
   status: 'active' | 'voided';

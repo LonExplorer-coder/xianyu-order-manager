@@ -16,6 +16,7 @@ import {
   type AftersalesHandlingDirection,
   type AftersalesReturnExceptionDecision,
 } from './aftersales-coordination';
+import type { ShipmentRecord } from './shipment-records';
 
 export type AftersalesStatus =
   | 'processing'
@@ -28,7 +29,14 @@ export type AftersalesStatus =
   | 'completed'
   | 'cancelled';
 
-export type AftersalesWorkflow = 'general' | 'refund_only' | 'return_refund';
+export type AftersalesWorkflow =
+  | 'general'
+  | 'refund_only'
+  | 'return_refund'
+  | 'exchange'
+  | 'direct_replacement';
+
+export type AftersalesReplacementWorkflow = 'exchange' | 'direct_replacement';
 
 export type PendingFinancialItemStatus = 'pending' | 'confirmed' | 'cancelled';
 
@@ -196,6 +204,24 @@ export type AftersalesReturnRecord = {
 
 export type ProgressAftersalesCaseInput =
   | {
+    kind: 'create_replacement_shipment';
+    caseId: string;
+    expectedRevision: number;
+    occurredAt: string;
+    reason: string;
+    packages: AftersalesReplacementPackageInput[];
+  }
+  | {
+    kind: 'start_next_round';
+    caseId: string;
+    expectedRevision: number;
+    sourceShipmentRecordId: string;
+    workflow: AftersalesReplacementWorkflow;
+    occurredAt: string;
+    reason: string;
+    items: AftersalesCaseItemInput[];
+  }
+  | {
     kind: 'record_interception_result';
     caseId: string;
     expectedRevision: number;
@@ -352,6 +378,17 @@ export type AftersalesCaseItemInput = {
   quantity: number;
 };
 
+export type AftersalesReplacementPackageItemInput = {
+  roundItemId: string;
+  quantity: number;
+};
+
+export type AftersalesReplacementPackageInput = {
+  shippingCarrier: string;
+  trackingNumber: string;
+  items: AftersalesReplacementPackageItemInput[];
+};
+
 export type CreateAftersalesCaseInput = {
   shipmentRecordId: string;
   workflow?: AftersalesWorkflow;
@@ -428,10 +465,45 @@ export type AftersalesCase = {
   items: AftersalesCaseItem[];
   refund: AftersalesRefund | null;
   returns: AftersalesReturnRecord[];
+  rounds: AftersalesProcessingRound[];
+  fulfillment: AftersalesFulfillmentSummary;
   coordination: AftersalesCoordination;
   timeline: AftersalesCaseEvent[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type AftersalesProcessingRoundItem = {
+  id: string;
+  sourceShipmentPackageItemId: string;
+  packageId: string;
+  orderId: string;
+  orderItemId: string;
+  orderNumber: string;
+  sourceTitle: string;
+  sourceSpec: string;
+  quantity: number;
+};
+
+export type AftersalesProcessingRound = {
+  id: string;
+  roundNumber: number;
+  workflow: AftersalesReplacementWorkflow | 'legacy';
+  sourceShipmentRecordId: string;
+  items: AftersalesProcessingRoundItem[];
+  returnRecordIds: string[];
+  replacementShipment: ShipmentRecord | null;
+  replacementOccurredAt: string | null;
+  occurredAt: string;
+  reason: string;
+  createdAt: string;
+};
+
+export type AftersalesFulfillmentSummary = {
+  cumulativeSentQuantity: number;
+  cumulativeReturnedQuantity: number;
+  buyerHeldQuantity: number;
+  currentRoundNumber: number;
 };
 
 export type AftersalesCaseQuery = {
@@ -455,6 +527,8 @@ export const AFTERSALES_WORKFLOWS = [
   'general',
   'refund_only',
   'return_refund',
+  'exchange',
+  'direct_replacement',
 ] as const satisfies readonly AftersalesWorkflow[];
 
 export function isAftersalesStatus(value: unknown): value is AftersalesStatus {
@@ -488,12 +562,16 @@ export function normalizeCreateAftersalesCaseInput(
   );
   const workflow = record.workflow ?? 'general';
   if (!isAftersalesWorkflow(workflow)) throw new Error('售后处理方式无效');
-  if (workflow === 'general' && record.requestedRefundCents !== undefined) {
-    throw new Error('一般处理不能登记申请退款金额');
+  if (
+    workflow !== 'refund_only'
+    && workflow !== 'return_refund'
+    && record.requestedRefundCents !== undefined
+  ) {
+    throw new Error('当前售后处理方式不能登记申请退款金额');
   }
-  const requestedRefundCents = workflow === 'general'
-    ? undefined
-    : money(record.requestedRefundCents, false);
+  const requestedRefundCents = workflow === 'refund_only' || workflow === 'return_refund'
+    ? money(record.requestedRefundCents, false)
+    : undefined;
   return {
     shipmentRecordId: boundedText(record.shipmentRecordId, 200, '发货记录标识无效'),
     workflow,
@@ -555,6 +633,76 @@ export function normalizeProgressAftersalesCaseInput(
     caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
     expectedRevision: revision(record.expectedRevision),
   };
+  if (record.kind === 'create_replacement_shipment') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'occurredAt', 'reason', 'packages'],
+      '建立补发记录参数',
+    );
+    const packages = arrayValue(record.packages, '请至少添加一个补发包裹');
+    if (packages.length === 0 || packages.length > 100) {
+      throw new Error('请添加 1 至 100 个补发包裹');
+    }
+    return {
+      kind: 'create_replacement_shipment',
+      ...common,
+      occurredAt: dateTime(record.occurredAt, '补发时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的补发原因'),
+      packages: packages.map((value) => {
+        const shipmentPackage = asRecord(value, '补发包裹信息无效');
+        rejectUnknownKeys(
+          shipmentPackage,
+          ['shippingCarrier', 'trackingNumber', 'items'],
+          '补发包裹信息',
+        );
+        const items = arrayValue(shipmentPackage.items, '补发包裹商品无效');
+        if (items.length === 0 || items.length > 10_000) {
+          throw new Error('每个补发包裹至少需要一条商品明细');
+        }
+        return {
+          shippingCarrier: optionalText(shipmentPackage.shippingCarrier, 200, '补发承运方过长'),
+          trackingNumber: optionalText(shipmentPackage.trackingNumber, 200, '补发运单号过长'),
+          items: items.map((value) => {
+            const item = asRecord(value, '补发商品无效');
+            rejectUnknownKeys(item, ['roundItemId', 'quantity'], '补发商品');
+            if (!Number.isSafeInteger(item.quantity) || Number(item.quantity) <= 0) {
+              throw new Error('补发商品数量无效');
+            }
+            return {
+              roundItemId: boundedText(item.roundItemId, 200, '售后轮次商品标识无效'),
+              quantity: Number(item.quantity),
+            };
+          }),
+        };
+      }),
+    };
+  }
+  if (record.kind === 'start_next_round') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'sourceShipmentRecordId',
+        'workflow', 'occurredAt', 'reason', 'items',
+      ],
+      '建立下一处理轮次参数',
+    );
+    if (record.workflow !== 'exchange' && record.workflow !== 'direct_replacement') {
+      throw new Error('售后处理轮次方式无效');
+    }
+    return {
+      kind: 'start_next_round',
+      ...common,
+      sourceShipmentRecordId: boundedText(
+        record.sourceShipmentRecordId,
+        200,
+        '轮次来源发货记录无效',
+      ),
+      workflow: record.workflow,
+      occurredAt: dateTime(record.occurredAt, '售后处理轮次时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的新一轮问题原因'),
+      items: itemInputs(record.items),
+    };
+  }
   if (record.kind === 'record_interception_result') {
     rejectUnknownKeys(
       record,
@@ -1079,6 +1227,11 @@ function asRecord(value: unknown, message: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function arrayValue(value: unknown, message: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(message);
+  return value;
+}
+
 function rejectUnknownKeys(
   record: Record<string, unknown>,
   allowedKeys: readonly string[],
@@ -1093,6 +1246,13 @@ function boundedText(value: unknown, maximum: number, message: string): string {
   if (typeof value !== 'string') throw new Error(message);
   const normalized = value.normalize('NFKC').trim();
   if (!normalized || normalized.length > maximum) throw new Error(message);
+  return normalized;
+}
+
+function optionalText(value: unknown, maximum: number, message: string): string {
+  if (typeof value !== 'string') throw new Error(message);
+  const normalized = value.normalize('NFKC').trim();
+  if (normalized.length > maximum) throw new Error(message);
   return normalized;
 }
 

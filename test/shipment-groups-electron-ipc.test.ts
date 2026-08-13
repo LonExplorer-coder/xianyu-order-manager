@@ -286,14 +286,28 @@ describe('发货组 Electron IPC', () => {
       occurredAt: '2026-08-13T10:10:00+08:00',
       note: '平台确认实际退款',
     };
+    const replacementInput = {
+      kind: 'create_replacement_shipment',
+      caseId: 'aftersales-1',
+      expectedRevision: 3,
+      occurredAt: '2026-08-13T10:20:00+08:00',
+      reason: '换货检查完成后补发',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-REPLACEMENT-IPC',
+        items: [{ roundItemId: 'round-item-1', quantity: 1 }],
+      }],
+    };
 
     await expect(invoke('aftersales-cases:create', createInput)).resolves.toEqual(created);
     await expect(invoke('aftersales-cases:update', updateInput)).resolves.toEqual(updated);
     await expect(invoke('aftersales-cases:progress', progressInput)).resolves.toEqual(progressed);
+    await expect(invoke('aftersales-cases:progress', replacementInput)).resolves.toEqual(progressed);
     await expect(invoke('aftersales-cases:query', query)).resolves.toEqual([updated]);
     expect(createAftersalesCase).toHaveBeenCalledWith(createInput);
     expect(updateAftersalesCase).toHaveBeenCalledWith(updateInput);
-    expect(progressAftersalesCase).toHaveBeenCalledWith(progressInput);
+    expect(progressAftersalesCase).toHaveBeenNthCalledWith(1, progressInput);
+    expect(progressAftersalesCase).toHaveBeenNthCalledWith(2, replacementInput);
     expect(queryAftersalesCases).toHaveBeenCalledWith(query);
   });
 

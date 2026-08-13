@@ -80,7 +80,8 @@ export function CreateAftersalesCaseDialog({
     reason.trim() &&
     occurredAt &&
     selectedItems.length > 0 &&
-    (workflow === 'general' || requestedRefundCents !== null) &&
+    ((workflow !== 'refund_only' && workflow !== 'return_refund')
+      || requestedRefundCents !== null) &&
     (workflow !== 'return_refund'
       || (effectiveHandlingDirection !== ''
         && availableDirections.includes(effectiveHandlingDirection))),
@@ -100,7 +101,7 @@ export function CreateAftersalesCaseDialog({
         workflow,
         occurredAt: normalizedOccurredAt,
         reason,
-        ...(workflow === 'general'
+        ...(workflow !== 'refund_only' && workflow !== 'return_refund'
           ? {}
           : {
             requestedRefundCents: requestedRefundCents as number,
@@ -150,6 +151,8 @@ export function CreateAftersalesCaseDialog({
             <option value="general">一般处理</option>
             <option value="refund_only">仅退款</option>
             <option value="return_refund">退货退款</option>
+            <option value="exchange">换货</option>
+            <option value="direct_replacement">直接补发</option>
           </select>
         </label>
         <label>
@@ -164,7 +167,7 @@ export function CreateAftersalesCaseDialog({
           />
         </label>
         <ReasonField label="问题原因" value={reason} saving={saving} onChange={setReason} />
-        {workflow !== 'general' && (
+        {(workflow === 'refund_only' || workflow === 'return_refund') && (
           <label>
             <span>申请退款金额（元）</span>
             <input
@@ -364,8 +367,13 @@ export function ProgressAftersalesCaseDialog({
   const headingId = useId();
   const descriptionId = useId();
   const dialogRef = useDialogFocus();
+  const activeRound = aftersalesCase.rounds?.at(-1);
   const returnRecord = aftersalesCase.returns.find(({ id }) => id === returnRecordId)
-    ?? aftersalesCase.returns[0];
+    ?? aftersalesCase.returns.find(({ id }) => activeRound?.returnRecordIds.includes(id))
+    ?? aftersalesCase.returns.at(-1);
+  const nextRoundSourceItems = activeRound?.replacementShipment?.packages
+    .filter(({ status }) => status === 'active')
+    .flatMap(({ items }) => items) ?? [];
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [reason, setReason] = useState('');
   const [amountYuan, setAmountYuan] = useState('');
@@ -376,6 +384,12 @@ export function ProgressAftersalesCaseDialog({
     kind === 'correct_return_logistics' ? returnRecord?.trackingNumber ?? '' : '',
   );
   const [combineWithExisting, setCombineWithExisting] = useState(false);
+  const [nextRoundWorkflow, setNextRoundWorkflow] = useState<'exchange' | 'direct_replacement'>(
+    'exchange',
+  );
+  const [nextRoundQuantities, setNextRoundQuantities] = useState<Record<string, number>>(
+    Object.fromEntries(nextRoundSourceItems.map((item) => [item.id, item.quantity])),
+  );
   const [logisticsStatus, setLogisticsStatus] = useState<AftersalesReturnLogisticsStatus>(
     returnRecord?.logisticsStatus ?? 'in_transit',
   );
@@ -437,7 +451,9 @@ export function ProgressAftersalesCaseDialog({
     || kind === 'open_carrier_claim'
     || kind === 'confirm_carrier_compensation'
     || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved');
-  const needsLogisticsIdentity = kind === 'register_return' || kind === 'correct_return_logistics';
+  const needsLogisticsIdentity = kind === 'register_return'
+    || kind === 'correct_return_logistics'
+    || kind === 'create_replacement_shipment';
   const needsReturnRecord = kind === 'receive_return' || kind === 'inspect_return'
     || kind === 'correct_return_logistics' || kind === 'update_return_logistics_status'
     || kind === 'record_return_logistics_exception'
@@ -451,6 +467,10 @@ export function ProgressAftersalesCaseDialog({
     && (!needsAmount || amountCents !== null)
     && (!needsLogisticsIdentity || (shippingCarrier.trim() && trackingNumber.trim()))
     && (!needsReturnRecord || returnRecord)
+    && (kind !== 'create_replacement_shipment' || activeRound)
+    && (kind !== 'start_next_round'
+      || (activeRound?.replacementShipment
+        && Object.values(nextRoundQuantities).some((quantity) => quantity > 0)))
     && !((kind === 'record_return_logistics_exception'
       || kind === 'progress_return_logistics_exception')
       && activeExceptionType === 'lost' && exceptionStage === 'confirmed'
@@ -476,6 +496,34 @@ export function ProgressAftersalesCaseDialog({
       const targetId = returnRecord?.id as string;
       let input: ProgressAftersalesCaseInput;
       switch (kind) {
+        case 'create_replacement_shipment':
+          input = {
+            kind, ...common,
+            occurredAt: normalizedOccurredAt as string,
+            reason,
+            packages: [{
+              shippingCarrier,
+              trackingNumber,
+              items: (activeRound?.items ?? []).map((item) => ({
+                roundItemId: item.id,
+                quantity: item.quantity,
+              })),
+            }],
+          };
+          break;
+        case 'start_next_round':
+          input = {
+            kind, ...common,
+            sourceShipmentRecordId: activeRound?.replacementShipment?.id as string,
+            workflow: nextRoundWorkflow,
+            occurredAt: normalizedOccurredAt as string,
+            reason,
+            items: nextRoundSourceItems.flatMap((item) => {
+              const quantity = nextRoundQuantities[item.id] ?? 0;
+              return quantity > 0 ? [{ shipmentPackageItemId: item.id, quantity }] : [];
+            }),
+          };
+          break;
         case 'record_interception_result':
           input = {
             kind, ...common, result: interceptionResult,
@@ -677,12 +725,13 @@ export function ProgressAftersalesCaseDialog({
             </select>
           </label>
         )}
-        {(kind === 'register_return' || kind === 'correct_return_logistics') && (
+        {(kind === 'register_return' || kind === 'correct_return_logistics'
+          || kind === 'create_replacement_shipment') && (
           <>
             <label>
-              <span>退货承运方</span>
+              <span>{kind === 'create_replacement_shipment' ? '补发承运方' : '退货承运方'}</span>
               <input
-                aria-label="退货承运方"
+                aria-label={kind === 'create_replacement_shipment' ? '补发承运方' : '退货承运方'}
                 value={shippingCarrier}
                 maxLength={100}
                 disabled={saving}
@@ -690,15 +739,59 @@ export function ProgressAftersalesCaseDialog({
               />
             </label>
             <label>
-              <span>退货运单号</span>
+              <span>{kind === 'create_replacement_shipment' ? '补发运单号' : '退货运单号'}</span>
               <input
-                aria-label="退货运单号"
+                aria-label={kind === 'create_replacement_shipment' ? '补发运单号' : '退货运单号'}
                 value={trackingNumber}
                 maxLength={200}
                 disabled={saving}
                 onChange={(event) => setTrackingNumber(event.target.value)}
               />
             </label>
+          </>
+        )}
+        {kind === 'create_replacement_shipment' && activeRound && (
+          <fieldset>
+            <legend>本轮补发商品与数量</legend>
+            <ul>
+              {activeRound.items.map((item) => (
+                <li key={item.id}>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''} × {item.quantity}</li>
+              ))}
+            </ul>
+          </fieldset>
+        )}
+        {kind === 'start_next_round' && (
+          <>
+            <label>
+              <span>新一轮处理方式</span>
+              <select aria-label="新一轮处理方式" value={nextRoundWorkflow}
+                onChange={(event) => setNextRoundWorkflow(
+                  event.target.value as 'exchange' | 'direct_replacement',
+                )}>
+                <option value="exchange">换货</option>
+                <option value="direct_replacement">直接补发</option>
+              </select>
+            </label>
+            <fieldset>
+              <legend>本次出问题的补发商品</legend>
+              <div className="aftersales-case-dialog__items">
+                {nextRoundSourceItems.map((item) => (
+                  <label key={item.id}>
+                    <span><strong>{item.sourceTitle}</strong><small>{item.sourceSpec}</small></span>
+                    <input type="number" min={0} max={item.quantity} step={1}
+                      aria-label={`${item.sourceTitle} 新一轮数量`}
+                      value={nextRoundQuantities[item.id] ?? 0}
+                      onChange={(event) => setNextRoundQuantities({
+                        ...nextRoundQuantities,
+                        [item.id]: Math.min(
+                          item.quantity,
+                          Math.max(0, Number.parseInt(event.target.value, 10) || 0),
+                        ),
+                      })} />
+                  </label>
+                ))}
+              </div>
+            </fieldset>
           </>
         )}
         {kind === 'register_return' && (
@@ -1204,6 +1297,20 @@ function normalizeActionDateTime(value: string): string {
 }
 
 function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
+  if (kind === 'create_replacement_shipment') return {
+    title: '建立本轮补发记录',
+    description: '补发会建立新的正向发货记录与包裹，原发货记录保持不变。',
+    timeLabel: '补发时间',
+    reasonLabel: '补发说明',
+    confirmLabel: '确认补发',
+  };
+  if (kind === 'start_next_round') return {
+    title: '登记新的售后处理轮次',
+    description: '以当前补发记录中再次出问题的商品为来源，上一轮历史保持不变。',
+    timeLabel: '新问题发生时间',
+    reasonLabel: '新一轮问题原因',
+    confirmLabel: '确认建立新一轮',
+  };
   if (kind === 'record_interception_result') return {
     title: '登记拦截结果',
     description: '只记录承运方已确认的成功或失败，不自动退款或改写包裹物流。',

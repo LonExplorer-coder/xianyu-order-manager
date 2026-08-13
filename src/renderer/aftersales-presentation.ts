@@ -109,8 +109,7 @@ export function shipmentRecordsAftersalesSummary(
   records: readonly ShipmentRecord[],
   cases: readonly AftersalesCase[],
 ): string {
-  const recordIds = new Set(records.map(({ id }) => id));
-  const matching = cases.filter(({ shipmentRecordId }) => recordIds.has(shipmentRecordId));
+  const matching = aftersalesCasesForShipmentRecords(records, cases);
   if (matching.length === 0) return '无售后';
   const counts = matching.reduce((summary, aftersalesCase) => {
     summary.set(aftersalesCase.status, (summary.get(aftersalesCase.status) ?? 0) + 1);
@@ -132,11 +131,7 @@ export function aftersalesCurrentAction(
   records: readonly ShipmentRecord[],
   cases: readonly AftersalesCase[],
 ): string | null {
-  const recordIds = new Set(records.map(({ id }) => id));
-  const matchingCases = cases
-    .filter((aftersalesCase) => (
-      recordIds.has(aftersalesCase.shipmentRecordId)
-    ))
+  const matchingCases = aftersalesCasesForShipmentRecords(records, cases)
     .map((aftersalesCase) => ({
       status: aftersalesCase.status,
       returnStatuses: aftersalesCase.returns.map(({ status }) => status),
@@ -150,4 +145,31 @@ export function aftersalesCurrentAction(
       )),
     }));
   return aftersalesTodoForCases(matchingCases);
+}
+
+export function aftersalesCasesForShipmentRecords(
+  records: readonly ShipmentRecord[],
+  cases: readonly AftersalesCase[],
+): AftersalesCase[] {
+  const recordIds = new Set(records.map(({ id }) => id));
+  return cases.filter((aftersalesCase) => (
+    recordIds.has(aftersalesCase.shipmentRecordId)
+    || aftersalesCase.rounds.some(({ replacementShipment }) => (
+      replacementShipment !== null && recordIds.has(replacementShipment.id)
+    ))
+  ));
+}
+
+export function hasActiveParentAftersalesCase(
+  record: ShipmentRecord,
+  cases: readonly AftersalesCase[],
+): boolean {
+  if (record.sourceRecordRole !== 'aftersales_replacement') return false;
+  return cases.some((aftersalesCase) => (
+    aftersalesCase.status !== 'completed'
+    && aftersalesCase.status !== 'cancelled'
+    && aftersalesCase.rounds.some(({ replacementShipment }) => (
+      replacementShipment?.id === record.id
+    ))
+  ));
 }

@@ -24,15 +24,19 @@ export class OrderFulfillmentProjectionService {
   public constructor(private readonly database: DatabaseSync) {}
 
   public hasShipmentHistory(orderId: string): boolean {
+    const replacementJoin = this.replacementJoin('packages', 'shipment_record_id');
     const row = this.database.prepare(`
       SELECT COUNT(*) AS count
-      FROM shipment_package_items
-      WHERE order_id = ?
+      FROM shipment_package_items AS items
+      JOIN shipment_packages AS packages ON packages.id = items.package_id
+      ${replacementJoin.sql}
+      WHERE items.order_id = ? ${replacementJoin.condition}
     `).get(orderId) as CountRow;
     return row.count > 0;
   }
 
   public hasActiveShipmentQuantity(orderId: string): boolean {
+    const replacementJoin = this.replacementJoin('records');
     const row = this.database.prepare(`
       SELECT COUNT(*) AS count
       FROM shipment_package_items AS items
@@ -42,19 +46,24 @@ export class OrderFulfillmentProjectionService {
         ON cancellations.package_id = packages.id
       LEFT JOIN shipment_record_void_events AS voids
         ON voids.shipment_record_id = records.id
+      ${replacementJoin.sql}
       WHERE items.order_id = ?
         AND cancellations.id IS NULL
         AND voids.id IS NULL
+        ${replacementJoin.condition}
     `).get(orderId) as CountRow;
     return row.count > 0;
   }
 
   public project(orderId: string): ShipmentProjectedFulfillmentStatus {
+    const replacementJoin = this.replacementJoin('records');
+    const replacementPredicate = replacementJoin.enabled ? 'AND replacements.id IS NULL' : '';
     const quantities = this.database.prepare(`
       SELECT
         order_items.quantity AS ordered_quantity,
         COALESCE(SUM(CASE
-          WHEN cancellations.id IS NULL AND voids.id IS NULL THEN shipment_items.quantity
+          WHEN cancellations.id IS NULL AND voids.id IS NULL ${replacementPredicate}
+            THEN shipment_items.quantity
           ELSE 0
         END), 0) AS shipped_quantity
       FROM order_items
@@ -66,6 +75,7 @@ export class OrderFulfillmentProjectionService {
         ON cancellations.package_id = packages.id
       LEFT JOIN shipment_record_void_events AS voids
         ON voids.shipment_record_id = records.id
+      ${replacementJoin.sql}
       WHERE order_items.order_id = ?
       GROUP BY order_items.id, order_items.position, order_items.quantity
       ORDER BY order_items.position, order_items.id
@@ -92,9 +102,11 @@ export class OrderFulfillmentProjectionService {
         ON cancellations.package_id = packages.id
       LEFT JOIN shipment_record_void_events AS voids
         ON voids.shipment_record_id = records.id
+      ${replacementJoin.sql}
       WHERE items.order_id = ?
         AND cancellations.id IS NULL
         AND voids.id IS NULL
+        ${replacementJoin.condition}
     `).get(orderId) as { package_count: number; delivered_count: number };
     return packageCounts.package_count > 0
       && packageCounts.delivered_count === packageCounts.package_count
@@ -138,6 +150,27 @@ export class OrderFulfillmentProjectionService {
       JSON.stringify(nextStatus),
     );
     return true;
+  }
+
+  private replacementJoin(
+    recordAlias: 'packages' | 'records',
+    recordIdColumn: 'id' | 'shipment_record_id' = 'id',
+  ): {
+    enabled: boolean;
+    sql: string;
+    condition: string;
+  } {
+    const enabled = Boolean(this.database.prepare(`
+      SELECT 1 FROM sqlite_schema
+      WHERE type = 'table' AND name = 'aftersales_replacement_shipments'
+    `).get());
+    if (!enabled) return { enabled, sql: '', condition: '' };
+    return {
+      enabled,
+      sql: `LEFT JOIN aftersales_replacement_shipments AS replacements
+        ON replacements.shipment_record_id = ${recordAlias}.${recordIdColumn}`,
+      condition: 'AND replacements.id IS NULL',
+    };
   }
 
   public synchronizeExistingShipmentOrders(now: string): void {

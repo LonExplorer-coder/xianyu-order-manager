@@ -40,8 +40,19 @@ import type { AftersalesCase } from '../src/core/aftersales-cases';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { App } from '../src/renderer/App';
+import { hasActiveParentAftersalesCase } from '../src/renderer/aftersales-presentation';
 
 afterEach(cleanup);
+
+const emptyAftersalesRounds: Pick<AftersalesCase, 'rounds' | 'fulfillment'> = {
+  rounds: [],
+  fulfillment: {
+    cumulativeSentQuantity: 0,
+    cumulativeReturnedQuantity: 0,
+    buyerHeldQuantity: 0,
+    currentRoundNumber: 1,
+  },
+};
 
 const draft: OrderDraft = {
   id: 'draft-1',
@@ -308,6 +319,7 @@ function shipmentRecordForGroup(
   })));
   return {
     id: 'shipment-record-ui-1',
+    sourceRecordRole: 'initial',
     archiveId: 'shipment-group-archive-ui-1',
     sourceGroupId: group.id,
     status: 'active',
@@ -1538,6 +1550,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const sourceItem = record.packages[0].items[0];
     const aftersalesCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-1',
       shipmentRecordId: record.id,
       workflow: 'general',
@@ -1634,6 +1647,225 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('展示售后轮次汇总并从当前轮建立独立补发记录', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const roundItem = {
+      id: 'round-item-ui-replacement',
+      sourceShipmentPackageItemId: sourceItem.id,
+      packageId: record.packages[0].id,
+      orderId: sourceItem.orderId,
+      orderItemId: sourceItem.orderItemId,
+      orderNumber: sourceItem.orderNumber,
+      sourceTitle: sourceItem.sourceTitle,
+      sourceSpec: sourceItem.sourceSpec,
+      quantity: 1,
+    };
+    const aftersalesCase: AftersalesCase = {
+      id: 'aftersales-ui-replacement',
+      shipmentRecordId: record.id,
+      workflow: 'direct_replacement',
+      status: 'waiting_replacement',
+      revision: 1,
+      reason: '缺少配件，直接补发',
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      items: [{
+        id: 'case-item-ui-replacement',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: null,
+      returns: [],
+      rounds: [{
+        id: 'round-ui-replacement',
+        roundNumber: 1,
+        workflow: 'direct_replacement',
+        sourceShipmentRecordId: record.id,
+        items: [roundItem],
+        returnRecordIds: [],
+        replacementShipment: null,
+        replacementOccurredAt: null,
+        occurredAt: '2026-08-14T10:00:00+08:00',
+        reason: '缺少配件，直接补发',
+        createdAt: '2026-08-14T02:00:00.000Z',
+      }],
+      fulfillment: {
+        cumulativeSentQuantity: 1,
+        cumulativeReturnedQuantity: 0,
+        buyerHeldQuantity: 1,
+        currentRoundNumber: 1,
+      },
+      coordination: {
+        ...testAftersalesCoordination('replacement'),
+        currentTodo: '安排第 1 轮补发',
+      },
+      timeline: [],
+      createdAt: '2026-08-14T02:00:00.000Z',
+      updatedAt: '2026-08-14T02:00:00.000Z',
+    };
+    const progressAftersalesCase = vi.fn().mockResolvedValue(aftersalesCase);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([aftersalesCase]),
+      progressAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    expect(within(history).getByRole('region', { name: '售后实物流转汇总' }))
+      .toHaveTextContent('累计发出 1 件 · 累计退回 0 件 · 买家当前持有 1 件');
+    await user.click(within(history).getByRole('button', { name: '建立本轮补发' }));
+    const dialog = screen.getByRole('dialog', { name: '建立本轮补发记录' });
+    await user.type(within(dialog).getByRole('textbox', { name: '补发承运方' }), '顺丰速运');
+    await user.type(within(dialog).getByRole('textbox', { name: '补发运单号' }), 'SF-UI-REPLACEMENT');
+    await user.type(within(dialog).getByRole('textbox', { name: '补发说明' }), '缺件确认后补发');
+    await user.click(within(dialog).getByRole('button', { name: '确认补发' }));
+
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenCalledWith({
+      kind: 'create_replacement_shipment',
+      caseId: aftersalesCase.id,
+      expectedRevision: 1,
+      occurredAt: expect.any(String),
+      reason: '缺件确认后补发',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-UI-REPLACEMENT',
+        items: [{ roundItemId: roundItem.id, quantity: 1 }],
+      }],
+    }));
+  });
+
+  it('补发记录沿用活动父售后概况且不提供另建售后或撤销入口', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const sourceRecord = archive.records[0];
+    const sourceItem = sourceRecord.packages[0].items[0];
+    const replacementRecord: ShipmentRecord = {
+      ...sourceRecord,
+      id: 'shipment-record-ui-replacement',
+      sourceRecordRole: 'aftersales_replacement',
+      sourceGroupId: 'aftersales-replacement-ui',
+      packages: [{
+        ...sourceRecord.packages[0],
+        id: 'shipment-package-ui-replacement',
+        trackingNumber: 'SF-UI-PARENT-AFTERSALES',
+        items: [{ ...sourceItem, id: 'shipment-item-ui-replacement', quantity: 1 }],
+      }],
+      totalQuantity: 1,
+    };
+    const roundItem = {
+      id: 'round-item-ui-parent',
+      sourceShipmentPackageItemId: sourceItem.id,
+      packageId: sourceRecord.packages[0].id,
+      orderId: sourceItem.orderId,
+      orderItemId: sourceItem.orderItemId,
+      orderNumber: sourceItem.orderNumber,
+      sourceTitle: sourceItem.sourceTitle,
+      sourceSpec: sourceItem.sourceSpec,
+      quantity: 1,
+    };
+    const aftersalesCase: AftersalesCase = {
+      id: 'aftersales-ui-parent',
+      shipmentRecordId: sourceRecord.id,
+      workflow: 'direct_replacement',
+      status: 'waiting_replacement',
+      revision: 2,
+      reason: '活动父售后',
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      items: [{
+        id: 'case-item-ui-parent',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: sourceRecord.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: null,
+      returns: [],
+      rounds: [{
+        id: 'round-ui-parent',
+        roundNumber: 1,
+        workflow: 'direct_replacement',
+        sourceShipmentRecordId: sourceRecord.id,
+        items: [roundItem],
+        returnRecordIds: [],
+        replacementShipment: replacementRecord,
+        replacementOccurredAt: '2026-08-14T10:10:00+08:00',
+        occurredAt: '2026-08-14T10:00:00+08:00',
+        reason: '活动父售后',
+        createdAt: '2026-08-14T02:00:00.000Z',
+      }],
+      fulfillment: {
+        cumulativeSentQuantity: 2,
+        cumulativeReturnedQuantity: 0,
+        buyerHeldQuantity: 1,
+        currentRoundNumber: 1,
+      },
+      coordination: testAftersalesCoordination('replacement'),
+      timeline: [],
+      createdAt: '2026-08-14T02:00:00.000Z',
+      updatedAt: '2026-08-14T02:10:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([{
+        ...archive,
+        records: [sourceRecord, replacementRecord],
+      }]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([aftersalesCase]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const replacementCard = await screen.findByRole('article', {
+      name: `发货记录 ${replacementRecord.id}`,
+    });
+    expect(replacementCard).toHaveTextContent('售后：等待补发 1');
+    expect(within(replacementCard).queryByRole('button', { name: '建立售后处理单' }))
+      .not.toBeInTheDocument();
+    expect(within(replacementCard).queryByRole('button', {
+      name: /撤销未交寄包裹/u,
+    })).not.toBeInTheDocument();
+    expect(hasActiveParentAftersalesCase(replacementRecord, [{
+      ...aftersalesCase,
+      status: 'completed',
+    }, {
+      ...aftersalesCase,
+      id: 'independent-active-case',
+      shipmentRecordId: replacementRecord.id,
+      workflow: 'general',
+      status: 'processing',
+      rounds: [],
+    }])).toBe(false);
+  });
+
   it('从发货记录选择商品数量和申请金额建立仅退款处理', async () => {
     const user = userEvent.setup();
     const group = singleShipmentGroupProjection().groups[0];
@@ -1641,6 +1873,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const sourceItem = record.packages[0].items[0];
     const created: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-created',
       shipmentRecordId: record.id,
       workflow: 'refund_only',
@@ -1763,6 +1996,7 @@ describe('订单管理工作台', () => {
       createdAt: '2026-08-13T07:00:00.000Z',
     };
     const created: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-interception',
       shipmentRecordId: record.id,
       workflow: 'return_refund',
@@ -2176,6 +2410,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const sourceItem = record.packages[0].items[0];
     const pending: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-refund-progress',
       shipmentRecordId: record.id,
       workflow: 'refund_only',
@@ -2374,6 +2609,7 @@ describe('订单管理工作台', () => {
       updatedAt: '2026-08-13T09:00:00.000Z',
     };
     const pending: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-logistics-exception',
       shipmentRecordId: record.id,
       workflow: 'return_refund',
@@ -2640,6 +2876,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const sourceItem = record.packages[0].items[0];
     const pending: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-return-progress',
       shipmentRecordId: record.id,
       workflow: 'return_refund',
@@ -3144,6 +3381,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const sourceItem = record.packages[0].items[0];
     const created: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-update',
       shipmentRecordId: record.id,
       workflow: 'general',
@@ -4838,6 +5076,7 @@ describe('订单管理工作台', () => {
     const record = archive.records[0];
     const shipmentPackage = record.packages[0];
     const aftersalesCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-order-detail-1',
       shipmentRecordId: record.id,
       workflow: 'general',

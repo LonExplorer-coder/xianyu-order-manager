@@ -77,7 +77,7 @@ describe('事实驱动的订单履约', () => {
       `).get(draft.id)).toEqual({ fulfillment_status: 'pending_shipment' });
       expect(upgraded.database.prepare(`
         SELECT MAX(version) AS version FROM schema_migrations
-      `).get()).toEqual({ version: 33 });
+      `).get()).toEqual({ version: 34 });
       expect(() => upgraded.database.prepare(`
         UPDATE original_orders SET fulfillment_status = 'returned' WHERE id = ?
       `).run(order.id)).toThrow();

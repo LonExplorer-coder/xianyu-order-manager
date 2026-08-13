@@ -126,9 +126,11 @@ import {
   UpdateAftersalesCaseDialog,
 } from './AftersalesCaseDialogs';
 import {
+  aftersalesCasesForShipmentRecords,
   aftersalesCurrentAction,
   aftersalesStatusLabel,
   carrierClaimStatusLabel,
+  hasActiveParentAftersalesCase,
   returnDiscrepancyLabel,
   returnLogisticsStatusLabel,
   returnQuantityDifferenceSummary,
@@ -2660,9 +2662,8 @@ function ShipmentRecordsSection({
   ) : (
     <div className="shipment-records-list">
       {records.map((record) => {
-        const recordAftersalesCases = aftersalesCases.filter(
-          ({ shipmentRecordId }) => shipmentRecordId === record.id,
-        );
+        const recordAftersalesCases = aftersalesCasesForShipmentRecords([record], aftersalesCases);
+        const hasActiveParentAftersales = hasActiveParentAftersalesCase(record, aftersalesCases);
         return (
         <article
           id={`shipment-record-${record.id}`}
@@ -2689,7 +2690,7 @@ function ShipmentRecordsSection({
               aftersalesCases,
             )}</span>
           </div>
-          {record.status === 'active' && (
+          {record.status === 'active' && !hasActiveParentAftersales && (
             <div className="shipment-record-card__aftersales-actions">
               <button
                 className="button button--quiet"
@@ -2808,14 +2809,16 @@ function ShipmentRecordsSection({
                             : '确认承运赔付'}
                       </button>
                     )}
-                    <button
-                      className="button button--quiet"
-                      type="button"
-                      aria-label={`撤销未交寄包裹 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
-                      onClick={() => onCancelPackage(record, shipmentPackage, packageIndex)}
-                    >
-                      撤销未交寄包裹
-                    </button>
+                    {record.sourceRecordRole !== 'aftersales_replacement' && (
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        aria-label={`撤销未交寄包裹 包裹 ${packageIndex + 1} ${shipmentPackage.trackingNumber || '未填写运单号'}`}
+                        onClick={() => onCancelPackage(record, shipmentPackage, packageIndex)}
+                      >
+                        撤销未交寄包裹
+                      </button>
+                    )}
                   </footer>
                 )}
                 {shipmentPackage.timeline.length > 0 && (
