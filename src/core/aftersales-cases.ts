@@ -11,8 +11,10 @@ import type {
 import { isReturnLogisticsStatus } from './logistics-exceptions';
 import {
   isAftersalesHandlingDirection,
+  isAftersalesReturnExceptionDecision,
   type AftersalesCoordination,
   type AftersalesHandlingDirection,
+  type AftersalesReturnExceptionDecision,
 } from './aftersales-coordination';
 
 export type AftersalesStatus =
@@ -281,6 +283,16 @@ export type ProgressAftersalesCaseInput =
     expectedExceptionRevision: number;
     stage: Exclude<LogisticsExceptionStage, 'pending_verification'>;
     carrierConfirmedLoss?: boolean;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'decide_return_logistics_exception';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    exceptionId: string;
+    decision: AftersalesReturnExceptionDecision;
     occurredAt: string;
     reason: string;
   }
@@ -749,6 +761,28 @@ export function normalizeProgressAftersalesCaseInput(
       }),
       occurredAt: dateTime(record.occurredAt, '退货物流异常时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流异常处理说明'),
+    };
+  }
+  if (record.kind === 'decide_return_logistics_exception') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'exceptionId', 'decision', 'occurredAt', 'reason',
+      ],
+      '选择退货物流异常处理参数',
+    );
+    if (!isAftersalesReturnExceptionDecision(record.decision)) {
+      throw new Error('退货物流异常处理选择无效');
+    }
+    return {
+      kind: 'decide_return_logistics_exception',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      exceptionId: boundedText(record.exceptionId, 200, '物流异常标识无效'),
+      decision: record.decision,
+      occurredAt: dateTime(record.occurredAt, '异常处理选择时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的异常处理选择原因'),
     };
   }
   if (record.kind === 'open_carrier_claim') {

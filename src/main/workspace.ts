@@ -185,6 +185,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 30) migrateToVersion30(database);
   if (row.version < 31) migrateToVersion31(database);
   if (row.version < 32) migrateToVersion32(database);
+  if (row.version < 33) migrateToVersion33(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3893,6 +3894,109 @@ function version32SchemaState(database: DatabaseSync): 'absent' | 'complete' | '
   if (hasHandlingDirection
     && rows.length === requiredObjects.size
     && matchingObjectCount === requiredObjects.size) return 'complete';
+  return 'partial';
+}
+
+function migrateToVersion33(database: DatabaseSync): void {
+  const schemaState = version33SchemaState(database);
+  if (schemaState === 'partial') {
+    throw new Error('检测到不完整的 v33 退货异常协调结构');
+  }
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    if (schemaState === 'absent') {
+      database.exec(`
+        CREATE TABLE aftersales_return_exception_decision_events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+          exception_id TEXT NOT NULL REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
+          return_record_id TEXT NOT NULL REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+          before_decision TEXT CHECK (
+            before_decision IS NULL OR before_decision IN (
+              'wait_investigation', 'refund_in_advance', 'partial_refund',
+              'reject_refund', 'negotiate'
+            )
+          ),
+          after_decision TEXT NOT NULL CHECK (after_decision IN (
+            'wait_investigation', 'refund_in_advance', 'partial_refund',
+            'reject_refund', 'negotiate'
+          )),
+          occurred_at TEXT NOT NULL,
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+          created_at TEXT NOT NULL,
+          CHECK (
+            (kind = 'selected' AND before_decision IS NULL)
+            OR (kind = 'changed' AND before_decision IS NOT NULL
+              AND before_decision <> after_decision)
+          )
+        ) STRICT;
+
+        CREATE INDEX aftersales_return_exception_decisions_by_case
+        ON aftersales_return_exception_decision_events (case_id, exception_id, sequence);
+
+        CREATE TRIGGER aftersales_return_exception_decision_identity_is_valid_on_insert
+        BEFORE INSERT ON aftersales_return_exception_decision_events
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM logistics_exception_matters AS exceptions
+          JOIN aftersales_return_record_items AS items
+            ON items.return_record_id = NEW.return_record_id
+          WHERE exceptions.id = NEW.exception_id
+            AND exceptions.direction = 'return'
+            AND exceptions.return_record_id = NEW.return_record_id
+            AND items.aftersales_case_id = NEW.case_id
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'return exception decision identity mismatch');
+        END;
+
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_update
+        BEFORE UPDATE ON aftersales_return_exception_decision_events
+        BEGIN
+          SELECT RAISE(ABORT, 'return exception decision events are immutable');
+        END;
+
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_delete
+        BEFORE DELETE ON aftersales_return_exception_decision_events
+        BEGIN
+          SELECT RAISE(ABORT, 'return exception decision events are immutable');
+        END;
+      `);
+    }
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (33, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function version33SchemaState(database: DatabaseSync): 'absent' | 'complete' | 'partial' {
+  const requiredObjects = new Map<string, 'table' | 'index' | 'trigger'>([
+    ['aftersales_return_exception_decision_events', 'table'],
+    ['aftersales_return_exception_decisions_by_case', 'index'],
+    ['aftersales_return_exception_decision_identity_is_valid_on_insert', 'trigger'],
+    ['aftersales_return_exception_decisions_are_immutable_on_update', 'trigger'],
+    ['aftersales_return_exception_decisions_are_immutable_on_delete', 'trigger'],
+  ]);
+  const rows = database.prepare(`
+    SELECT type, name
+    FROM sqlite_schema
+    WHERE name IN (${[...requiredObjects].map(() => '?').join(', ')})
+  `).all(...requiredObjects.keys()) as Array<{ type: string; name: string }>;
+  if (rows.length === 0) return 'absent';
+  if (rows.length === requiredObjects.size && rows.every((row) => (
+    requiredObjects.get(row.name) === row.type
+  ))) return 'complete';
   return 'partial';
 }
 

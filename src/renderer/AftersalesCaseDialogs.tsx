@@ -22,6 +22,7 @@ import {
   physicalControlForSourcePackages,
   sourcePackageEvidenceFromShipmentRecord,
   type AftersalesHandlingDirection,
+  type AftersalesReturnExceptionDecision,
 } from '../core/aftersales-coordination';
 import { normalizeShanghaiDateTime } from '../core/order-normalization';
 import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
@@ -393,6 +394,9 @@ export function ProgressAftersalesCaseDialog({
     'pending_verification' | 'investigating' | 'confirmed' | 'recovered' | 'resolved'
   >(exceptionStageOptions[0]);
   const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
+  const [returnExceptionDecision, setReturnExceptionDecision] = useState<
+    AftersalesReturnExceptionDecision
+  >(aftersalesCase.coordination.returnException?.decision ?? 'wait_investigation');
   const activeExceptionType = kind === 'progress_return_logistics_exception'
     ? returnRecord?.currentException?.exceptionType
     : exceptionType;
@@ -438,6 +442,7 @@ export function ProgressAftersalesCaseDialog({
     || kind === 'correct_return_logistics' || kind === 'update_return_logistics_status'
     || kind === 'record_return_logistics_exception'
     || kind === 'progress_return_logistics_exception'
+    || kind === 'decide_return_logistics_exception'
     || kind === 'open_carrier_claim' || kind === 'resolve_carrier_claim'
     || kind === 'confirm_carrier_compensation';
   const canSubmit = Boolean(
@@ -547,6 +552,14 @@ export function ProgressAftersalesCaseDialog({
             stage: exceptionStage as 'investigating' | 'confirmed' | 'recovered' | 'resolved',
             ...(returnRecord?.currentException?.exceptionType === 'lost'
               && exceptionStage === 'confirmed' ? { carrierConfirmedLoss: true } : {}),
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'decide_return_logistics_exception':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            exceptionId: aftersalesCase.coordination.returnException?.exceptionId as string,
+            decision: returnExceptionDecision,
             occurredAt: normalizedOccurredAt as string, reason,
           };
           break;
@@ -759,6 +772,25 @@ export function ProgressAftersalesCaseDialog({
               </label>
             )}
           </>
+        )}
+        {kind === 'decide_return_logistics_exception' && (
+          <label>
+            <span>退货异常处理选择</span>
+            <select
+              aria-label="退货异常处理选择"
+              value={returnExceptionDecision}
+              disabled={saving}
+              onChange={(event) => setReturnExceptionDecision(
+                event.target.value as AftersalesReturnExceptionDecision,
+              )}
+            >
+              <option value="wait_investigation">等待调查</option>
+              <option value="refund_in_advance">先行退款</option>
+              <option value="partial_refund">部分退款</option>
+              <option value="reject_refund">拒绝退款</option>
+              <option value="negotiate">继续协商</option>
+            </select>
+          </label>
         )}
         {kind === 'resolve_carrier_claim' && (
           <label>
@@ -1241,6 +1273,13 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     timeLabel: '阶段发生时间',
     reasonLabel: '阶段说明',
     confirmLabel: '确认推进',
+  };
+  if (kind === 'decide_return_logistics_exception') return {
+    title: '选择退货异常处理',
+    description: '只记录当前与买家的处理选择；实际退款和承运索赔仍需分别确认。',
+    timeLabel: '处理选择时间',
+    reasonLabel: '选择原因',
+    confirmLabel: '确认选择',
   };
   if (kind === 'open_carrier_claim') return {
     title: '建立承运索赔',

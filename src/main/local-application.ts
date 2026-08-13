@@ -3611,12 +3611,30 @@ export class LocalApplication {
   public recordShipmentPackageLogisticsException(
     input: unknown,
   ): ShipmentLogisticsExceptionResult {
+    const workspace = this.requireWorkspace();
     const prepared = normalizeRecordShipmentPackageLogisticsExceptionInput(input);
     const record = this.getShipmentRecord(prepared.recordId);
     if (record.status === 'voided') throw new Error('已作废的发货记录不能登记物流异常');
     const shipmentPackage = record.packages.find(({ id }) => id === prepared.packageId);
     if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
     if (shipmentPackage.status === 'cancelled') throw new Error('已撤销的包裹不能登记物流异常');
+    if (prepared.exceptionType === 'lost') {
+      const affectedItemIds = prepared.impact.scope === 'package'
+        ? shipmentPackage.items.map(({ id }) => id)
+        : prepared.impact.items.map(({ sourceItemId }) => sourceItemId);
+      if (affectedItemIds.length > 0) {
+        const placeholders = affectedItemIds.map(() => '?').join(', ');
+        const returnedItem = workspace.database.prepare(`
+          SELECT 1
+          FROM aftersales_return_record_items
+          WHERE shipment_package_item_id IN (${placeholders})
+          LIMIT 1
+        `).get(...affectedItemIds);
+        if (returnedItem) {
+          throw new Error('买家已交寄同一商品，不能再把原正向包裹普通登记为丢件');
+        }
+      }
+    }
     const physicalReceiptAt = [...shipmentPackage.timeline].reverse().find((event) => (
       event.kind === 'status_changed' && event.afterStatus === 'delivered'
     ))?.occurredAt ?? (shipmentPackage.logisticsStatus === 'delivered'

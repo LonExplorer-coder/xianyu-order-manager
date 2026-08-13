@@ -21,6 +21,7 @@ export function removeVersion31ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 export function removeVersion32ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion33ExtensionArtifacts(database);
   database.exec(`
     PRAGMA foreign_keys = OFF;
     DROP TRIGGER IF EXISTS aftersales_direction_events_are_immutable_on_update;
@@ -38,4 +39,16 @@ export function removeVersion32ExtensionArtifacts(database: DatabaseSync): void 
   if (hasHandlingDirection) {
     database.exec('ALTER TABLE aftersales_cases DROP COLUMN handling_direction;');
   }
+}
+
+export function removeVersion33ExtensionArtifacts(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TRIGGER IF EXISTS aftersales_return_exception_decision_identity_is_valid_on_insert;
+    DROP TRIGGER IF EXISTS aftersales_return_exception_decisions_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_return_exception_decisions_are_immutable_on_delete;
+    DROP TABLE IF EXISTS aftersales_return_exception_decision_events;
+    DELETE FROM schema_migrations WHERE version = 33;
+    PRAGMA foreign_keys = ON;
+  `);
 }

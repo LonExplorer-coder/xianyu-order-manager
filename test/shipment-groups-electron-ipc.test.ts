@@ -395,9 +395,58 @@ describe('发货组 Electron IPC', () => {
         ],
       },
     });
+    const registered = await invoke('aftersales-cases:progress', {
+      kind: 'register_return',
+      caseId: changed.id,
+      expectedRevision: changed.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-AFTERSALES-COORDINATION-IPC',
+      occurredAt: '2026-08-15T10:20:00+08:00',
+      reason: '买家已实际交寄退货',
+    }) as AftersalesCase;
+    const accepted = await invoke('aftersales-cases:progress', {
+      kind: 'update_return_logistics_status',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: registered.returns[0].id,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-15T10:30:00+08:00',
+      reason: '承运方确认揽收',
+    }) as AftersalesCase;
+    const lost = await invoke('aftersales-cases:progress', {
+      kind: 'record_return_logistics_exception',
+      caseId: accepted.id,
+      expectedRevision: accepted.revision,
+      returnRecordId: registered.returns[0].id,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-15T10:40:00+08:00',
+      reason: '承运方确认退货丢失',
+    }) as AftersalesCase;
+    const decided = await invoke('aftersales-cases:progress', {
+      kind: 'decide_return_logistics_exception',
+      caseId: lost.id,
+      expectedRevision: lost.revision,
+      returnRecordId: registered.returns[0].id,
+      exceptionId: lost.coordination.returnException?.exceptionId,
+      decision: 'refund_in_advance',
+      occurredAt: '2026-08-15T10:50:00+08:00',
+      reason: '买家侧先行退款，承运异常继续处理',
+    }) as AftersalesCase;
+    expect(decided.coordination.returnException).toMatchObject({
+      decision: 'refund_in_advance',
+      affectedQuantity: 1,
+      timeline: [expect.objectContaining({
+        kind: 'selected',
+        after: 'refund_in_advance',
+      })],
+    });
     await expect(invoke('aftersales-cases:query', {
       shipmentRecordId: shipment.record.id,
-    })).resolves.toEqual([changed]);
+    })).resolves.toEqual([decided]);
   });
 });
 

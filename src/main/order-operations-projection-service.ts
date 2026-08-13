@@ -35,6 +35,7 @@ type ProjectedAftersalesCase = {
   returnLogisticsStatuses: AftersalesReturnLogisticsStatus[];
   carrierClaimStatuses: CarrierClaimStatus[];
   hasUnresolvedLogisticsException: boolean;
+  hasPendingReturnExceptionDecision: boolean;
 };
 
 export class OrderOperationsProjectionService {
@@ -335,8 +336,9 @@ export class OrderOperationsProjectionService {
               status,
               returnStatuses,
               returnLogisticsStatuses,
-            carrierClaimStatuses,
-            hasUnresolvedLogisticsException: false,
+              carrierClaimStatuses,
+              hasUnresolvedLogisticsException: false,
+              hasPendingReturnExceptionDecision: false,
             }])
               ?? '无需售后操作',
             items: [],
@@ -372,6 +374,14 @@ export class OrderOperationsProjectionService {
         exceptions.impact_json AS exception_impact_json,
         exceptions.reason AS exception_reason,
         exceptions.occurred_at AS exception_occurred_at,
+        (
+          SELECT decisions.after_decision
+          FROM aftersales_return_exception_decision_events AS decisions
+          WHERE decisions.case_id = return_items.aftersales_case_id
+            AND decisions.exception_id = exceptions.id
+          ORDER BY decisions.sequence DESC
+          LIMIT 1
+        ) AS exception_decision,
         claims.status AS carrier_claim_status,
         claims.impact_json AS carrier_claim_impact_json,
         return_items.quantity AS planned_quantity,
@@ -431,6 +441,7 @@ export class OrderOperationsProjectionService {
       impact: ReturnType<typeof parseProjectedLogisticsImpact>;
       reason: string;
       occurredAt: string;
+      decision: string | null;
     }>();
     const packageClaimFacts = new Map<string, {
       status: CarrierClaimStatus;
@@ -486,6 +497,9 @@ export class OrderOperationsProjectionService {
             impact: parseProjectedLogisticsImpact(parseJsonRecord(row.exception_impact_json)),
             reason: asString(row.exception_reason),
             occurredAt: asString(row.exception_occurred_at),
+            decision: row.exception_decision === null
+              ? null
+              : asString(row.exception_decision),
           });
         }
       }
@@ -541,12 +555,23 @@ export class OrderOperationsProjectionService {
         projectedCase.carrierClaimStatuses = projectedCase.value.returnPackages.flatMap(
           ({ carrierClaimStatus }) => carrierClaimStatus ? [carrierClaimStatus] : [],
         );
+        projectedCase.hasPendingReturnExceptionDecision = projectedCase.value.returnPackages.some(
+          (returnPackage) => {
+            const payload = packageExceptionPayloads.get(
+              `${orderId}\u0000${projectedCase.value.id}\u0000${returnPackage.id}`,
+            );
+            return payload?.exceptionType === 'lost'
+              && payload.stage === 'confirmed'
+              && payload.decision === null;
+          },
+        );
         projectedCase.value.currentTodo = aftersalesTodoForCases([{
           status: projectedCase.value.status,
           returnStatuses: projectedCase.returnStatuses,
           returnLogisticsStatuses: projectedCase.returnLogisticsStatuses,
           carrierClaimStatuses: projectedCase.carrierClaimStatuses,
           hasUnresolvedLogisticsException: projectedCase.hasUnresolvedLogisticsException,
+          hasPendingReturnExceptionDecision: projectedCase.hasPendingReturnExceptionDecision,
         }]) ?? '无需售后操作';
       }
       result.set(orderId, [...cases.values()]);
@@ -566,6 +591,7 @@ function buildProjection(
     returnLogisticsStatuses: projectedCase.returnLogisticsStatuses,
     carrierClaimStatuses: projectedCase.carrierClaimStatuses,
     hasUnresolvedLogisticsException: projectedCase.hasUnresolvedLogisticsException,
+    hasPendingReturnExceptionDecision: projectedCase.hasPendingReturnExceptionDecision,
   })));
   const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
   const carrierClaimStatuses = new Set<CarrierClaimStatus>();

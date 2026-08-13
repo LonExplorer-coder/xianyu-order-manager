@@ -154,6 +154,17 @@ export function AftersalesCasePanel({
                     )} · {logisticsExceptionStageLabel(returnRecord.currentException.stage)}
                   </strong>
                   <span>{returnRecord.currentException.reason}</span>
+                  {aftersalesCase.coordination.returnException?.exceptionId
+                    === returnRecord.currentException.id && (
+                    <span>
+                      退货异常处理：{aftersalesCase.coordination.returnException.decision
+                        ? returnExceptionDecisionLabel(
+                          aftersalesCase.coordination.returnException.decision,
+                        )
+                        : '待选择'}
+                      {' · '}影响 {aftersalesCase.coordination.returnException.affectedQuantity} 件
+                    </span>
+                  )}
                 </div>
               )}
               <ul aria-label="退货商品真实数量">
@@ -234,6 +245,21 @@ export function AftersalesCasePanel({
                 >
                   {returnRecord.currentException ? '推进退货物流异常' : '登记退货物流异常'}
                 </button>
+                {aftersalesCase.coordination.returnException?.decision
+                  && aftersalesCase.coordination.returnException.exceptionId
+                    === returnRecord.currentException?.id && (
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setProgressTarget({
+                      aftersalesCase,
+                      kind: 'decide_return_logistics_exception',
+                      returnRecordId: returnRecord.id,
+                    })}
+                  >
+                    更改退货异常处理
+                  </button>
+                )}
                 {!returnRecord.carrierClaim && carrierClaimAvailable(returnRecord.currentException) && (
                   <button
                     className="button button--quiet"
@@ -352,6 +378,13 @@ export function AftersalesCasePanel({
                   onClick={() => setProgressTarget({
                     aftersalesCase,
                     kind: primaryProgressAction(aftersalesCase) as ProgressAftersalesCaseInput['kind'],
+                    ...(primaryProgressAction(aftersalesCase)
+                      === 'decide_return_logistics_exception'
+                      ? {
+                        returnRecordId:
+                          aftersalesCase.coordination.returnException?.returnRecordId,
+                      }
+                      : {}),
                   })}
                 >
                   {progressActionLabel(primaryProgressAction(aftersalesCase) as ProgressAftersalesCaseInput['kind'])}
@@ -418,7 +451,8 @@ export function AftersalesCasePanel({
             </ol>
           </details>
           {(aftersalesCase.coordination.handlingDirectionTimeline.length > 0
-            || aftersalesCase.coordination.interception) && (
+            || aftersalesCase.coordination.interception
+            || aftersalesCase.coordination.returnException?.timeline.length) && (
             <details className="shipment-record-card__timeline">
               <summary>售后协调完整历史</summary>
               <ol>
@@ -436,6 +470,18 @@ export function AftersalesCasePanel({
                   <li key={`interception-${index}-${event.occurredAt}`}>
                     <strong>{interceptionEventLabel(event.kind)}</strong>
                     <span>{event.reason}</span>
+                    <small>{formatDateTime(event.occurredAt)}</small>
+                  </li>
+                ))}
+                {aftersalesCase.coordination.returnException?.timeline.map((event, index) => (
+                  <li key={`return-exception-decision-${index}-${event.occurredAt}`}>
+                    <strong>{event.kind === 'selected'
+                      ? '选择退货异常处理'
+                      : '更改退货异常处理'}</strong>
+                    <span>
+                      {event.before ? `${returnExceptionDecisionLabel(event.before)} → ` : ''}
+                      {returnExceptionDecisionLabel(event.after)} · {event.reason}
+                    </span>
                     <small>{formatDateTime(event.occurredAt)}</small>
                   </li>
                 ))}
@@ -460,6 +506,10 @@ export function AftersalesCasePanel({
 function primaryProgressAction(
   aftersalesCase: AftersalesCase,
 ): ProgressAftersalesCaseInput['kind'] | null {
+  if (aftersalesCase.coordination.returnException
+    && aftersalesCase.coordination.returnException.decision === null) {
+    return 'decide_return_logistics_exception';
+  }
   if (aftersalesCase.status === 'ready_to_complete') {
     return returnFactProgressAction(aftersalesCase) ?? 'complete';
   }
@@ -486,8 +536,10 @@ function primaryProgressAction(
     && aftersalesCase.returns.length > 0
     && aftersalesCase.returns.every((record) => (
       record.status === 'inspected'
-      || isConfirmedLost(record)
       || record.carrierClaim !== null
+      || (record.status === 'in_transit' && !isConfirmedLost(record))
+      || (record.id === aftersalesCase.coordination.returnException?.returnRecordId
+        && aftersalesCase.coordination.returnException.decision !== null)
     ))
   ) {
     return 'confirm_refund';
@@ -499,9 +551,6 @@ function primaryProgressAction(
     return 'inspect_return';
   }
   if (aftersalesCase.status === 'waiting_refund' && returnRecord?.status === 'inspected') {
-    return 'confirm_refund';
-  }
-  if (aftersalesCase.status === 'waiting_refund' && returnRecord && isConfirmedLost(returnRecord)) {
     return 'confirm_refund';
   }
   return null;
@@ -532,11 +581,24 @@ function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string 
     update_return_logistics_status: '更新退货物流状态',
     record_return_logistics_exception: '登记退货物流异常',
     progress_return_logistics_exception: '推进退货物流异常',
+    decide_return_logistics_exception: '选择退货异常处理',
     open_carrier_claim: '建立承运索赔',
     resolve_carrier_claim: '登记索赔结果',
     confirm_carrier_compensation: '确认实际赔付',
   };
   return labels[kind];
+}
+
+function returnExceptionDecisionLabel(
+  decision: NonNullable<AftersalesCase['coordination']['returnException']>['decision'],
+): string {
+  return {
+    wait_investigation: '等待调查',
+    refund_in_advance: '先行退款',
+    partial_refund: '部分退款',
+    reject_refund: '拒绝退款',
+    negotiate: '继续协商',
+  }[decision ?? 'wait_investigation'];
 }
 
 function aftersalesWorkflowLabel(workflow: AftersalesCase['workflow']): string {

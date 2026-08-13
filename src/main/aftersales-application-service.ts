@@ -18,12 +18,15 @@ import {
 import {
   coordinateAftersales,
   isAftersalesHandlingDirection,
+  isAftersalesReturnExceptionDecision,
   statusForHandlingDirection,
   type AftersalesHandlingDirection,
   type AftersalesHandlingDirectionEvent,
   type AftersalesInterception,
   type AftersalesInterceptionEvent,
   type AftersalesPhysicalControl,
+  type AftersalesReturnExceptionDecisionEvent,
+  type AftersalesReturnExceptionEvidence,
   type AftersalesSourcePackageEvidence,
 } from '../core/aftersales-coordination';
 import {
@@ -261,6 +264,7 @@ export class AftersalesApplicationService {
       || prepared.kind === 'update_return_logistics_status'
       || prepared.kind === 'record_return_logistics_exception'
       || prepared.kind === 'progress_return_logistics_exception'
+      || prepared.kind === 'decide_return_logistics_exception'
       || prepared.kind === 'open_carrier_claim'
       || prepared.kind === 'resolve_carrier_claim'
       || prepared.kind === 'confirm_carrier_compensation';
@@ -630,6 +634,9 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'record_return_logistics_exception') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
+      if (returnRecord.status !== 'in_transit') {
+        throw new Error('退货已实际收到，少件、空包、错货或破损请通过退货检查差异记录');
+      }
       this.workspace.transaction(() => {
         this.logisticsExceptionService().openException({
           subject: { direction: 'return', packageId: returnRecord.id },
@@ -686,6 +693,47 @@ export class AftersalesApplicationService {
       });
       return this.get(current.id);
     }
+    if (prepared.kind === 'decide_return_logistics_exception') {
+      const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
+      const coordinated = current.coordination.returnException;
+      if (!returnRecord || !coordinated
+        || coordinated.returnRecordId !== returnRecord.id
+        || coordinated.exceptionId !== prepared.exceptionId) {
+        throw new Error('当前售后没有待处理的退货物流异常');
+      }
+      if (coordinated.decision === prepared.decision) {
+        throw new Error('退货物流异常处理选择没有变化');
+      }
+      const latestOccurredAt = coordinated.timeline.at(-1)?.occurredAt
+        ?? returnRecord.logisticsExceptions.find(({ id }) => id === prepared.exceptionId)?.occurredAt;
+      if (!latestOccurredAt) throw new Error('退货物流异常缺少发生时间');
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        latestOccurredAt,
+        '异常处理选择时间不能早于异常事实或上次选择',
+      );
+      this.workspace.transaction(() => {
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_return_exception_decision_events (
+            id, case_id, exception_id, return_record_id, kind,
+            before_decision, after_decision, occurred_at, reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          current.id,
+          prepared.exceptionId,
+          returnRecord.id,
+          coordinated.decision === null ? 'selected' : 'changed',
+          coordinated.decision,
+          prepared.decision,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+        this.advanceCase(current, current.status, prepared.reason, now);
+      });
+      return this.get(current.id);
+    }
     if (prepared.kind === 'receive_return') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (
@@ -698,8 +746,11 @@ export class AftersalesApplicationService {
       ) {
         throw new Error('当前退货记录尚不能确认收到');
       }
-      if (confirmedLoss(returnRecord)) {
-        throw new Error('请先把已找回包裹的物流异常推进为已找回或已解决');
+      if (hasUnresolvedConfirmedLoss(returnRecord)) {
+        throw new Error('退货已确认丢失，不能登记实际收到或检查');
+      }
+      if (hasUnresolvedReceiptDispute(returnRecord)) {
+        throw new Error('退货签收扫描存在争议，不能代替卖家登记实际收到');
       }
       assertOccurredAtNotBefore(
         prepared.occurredAt,
@@ -939,12 +990,17 @@ export class AftersalesApplicationService {
       const refund = current.refund;
       const explicitOnlyRefund = current.workflow === 'return_refund'
         && current.coordination.handlingDirection === 'only_refund';
+      const exceptionDecision = current.coordination.returnException?.decision ?? null;
+      const exceptionRefundSupported = exceptionDecision !== null;
       const returnDecisionSupported = explicitOnlyRefund || (
         current.returns.length > 0
         && current.returns.every((returnRecord) => (
           returnRecord.status === 'inspected'
-          || confirmedLoss(returnRecord)
           || returnRecord.carrierClaim !== null
+          || (returnRecord.status === 'in_transit'
+            && !hasUnresolvedConfirmedLoss(returnRecord))
+          || (returnRecord.id === current.coordination.returnException?.returnRecordId
+            && exceptionRefundSupported)
         ))
       );
       if (
@@ -963,14 +1019,17 @@ export class AftersalesApplicationService {
       const earliestRefundAt = explicitOnlyRefund
         ? current.occurredAt
         : current.workflow === 'return_refund'
-        ? latestReturnDecisionEvidenceAt(current.returns)
+        ? current.coordination.returnException?.timeline.at(-1)?.occurredAt
+          ?? latestReturnDecisionEvidenceAt(current.returns)
         : current.occurredAt;
       if (!earliestRefundAt) throw new Error('退货记录缺少检查、丢件或索赔时间');
       assertOccurredAtNotBefore(
         prepared.occurredAt,
         earliestRefundAt,
         current.workflow === 'return_refund' && !explicitOnlyRefund
-          ? current.returns.some(confirmedLoss)
+          ? current.coordination.returnException?.timeline.length
+            ? '实际退款时间不能早于退货异常处理选择时间'
+            : current.returns.some(hasUnresolvedConfirmedLoss)
             ? '实际退款时间不能早于退货丢件确认时间'
             : current.returns.some(({ carrierClaim }) => carrierClaim !== null)
               ? '实际退款时间不能早于承运索赔建立时间'
@@ -1234,6 +1293,7 @@ export class AftersalesApplicationService {
     });
     const refund = this.getRefund(caseId);
     const returns = this.getReturns(caseId);
+    const returnException = this.getReturnExceptionEvidence(caseId, returns);
     return {
       id: asString(row.id),
       shipmentRecordId: asString(row.shipment_record_id),
@@ -1251,6 +1311,10 @@ export class AftersalesApplicationService {
         interception: this.getInterception(caseId),
         handlingDirectionTimeline: this.getHandlingDirectionTimeline(caseId),
         refundStatus: refund?.status ?? null,
+        returnException,
+        returnExceptionDecisionTimeline: returnException
+          ? this.getReturnExceptionDecisionTimeline(caseId, returnException.exceptionId)
+          : [],
       }),
       timeline,
       createdAt: asString(row.created_at),
@@ -1372,6 +1436,70 @@ export class AftersalesApplicationService {
       };
     });
     return { status: timeline.at(-1)?.kind as AftersalesInterception['status'], timeline };
+  }
+
+  private getReturnExceptionEvidence(
+    caseId: string,
+    returns: AftersalesCase['returns'],
+  ): AftersalesReturnExceptionEvidence | null {
+    for (const returnRecord of [...returns].reverse()) {
+      const caseItems = returnRecord.items.filter((item) => item.aftersalesCaseId === caseId);
+      if (caseItems.length === 0) continue;
+      const itemIds = new Set(caseItems.map(({ id }) => id));
+      const exception = [...returnRecord.logisticsExceptions].reverse().find((candidate) => (
+        candidate.stage !== 'recovered'
+        && candidate.stage !== 'resolved'
+        && (candidate.impact.scope === 'package'
+          || candidate.impact.items.some(({ sourceItemId }) => itemIds.has(sourceItemId)))
+      ));
+      if (!exception) continue;
+      const affectedQuantity = exception.impact.scope === 'package'
+        ? caseItems.reduce((total, item) => total + item.quantity, 0)
+        : exception.impact.items.reduce((total, affectedItem) => (
+          itemIds.has(affectedItem.sourceItemId) ? total + affectedItem.quantity : total
+        ), 0);
+      return {
+        exceptionId: exception.id,
+        returnRecordId: returnRecord.id,
+        exceptionType: exception.exceptionType,
+        stage: exception.stage,
+        affectedQuantity,
+      };
+    }
+    return null;
+  }
+
+  private getReturnExceptionDecisionTimeline(
+    caseId: string,
+    exceptionId: string,
+  ): AftersalesReturnExceptionDecisionEvent[] {
+    const rows = this.workspace.database.prepare(`
+      SELECT kind, exception_id, return_record_id, before_decision,
+             after_decision, occurred_at, reason, created_at
+      FROM aftersales_return_exception_decision_events
+      WHERE case_id = ? AND exception_id = ?
+      ORDER BY sequence
+    `).all(caseId, exceptionId) as unknown as SqlRow[];
+    return rows.map((row) => {
+      const kind = asString(row.kind);
+      const before = row.before_decision === null ? null : asString(row.before_decision);
+      const after = asString(row.after_decision);
+      if ((kind !== 'selected' && kind !== 'changed')
+        || (before !== null && !isAftersalesReturnExceptionDecision(before))
+        || !isAftersalesReturnExceptionDecision(after)) {
+        throw new Error('数据库退货异常处理选择事件错误');
+      }
+      return {
+        kind,
+        exceptionId: asString(row.exception_id),
+        returnRecordId: asString(row.return_record_id),
+        before,
+        after,
+        occurredAt: asString(row.occurred_at),
+        reason: asString(row.reason),
+        createdAt: asString(row.created_at),
+      };
+    });
   }
 
   private getRefund(caseId: string): AftersalesCase['refund'] {
@@ -2110,7 +2238,7 @@ function latestReturnDecisionEvidenceAt(returns: AftersalesCase['returns']): str
       ));
     if (loss) return [loss.occurredAt];
     const claimOpened = returnRecord.carrierClaim?.timeline.find(({ kind }) => kind === 'opened');
-    return claimOpened ? [claimOpened.occurredAt] : [];
+    return claimOpened ? [claimOpened.occurredAt] : [returnRecord.occurredAt];
   });
   if (occurredAt.length === 0) return null;
   return occurredAt.reduce((latest, candidate) => (
@@ -2118,7 +2246,21 @@ function latestReturnDecisionEvidenceAt(returns: AftersalesCase['returns']): str
   ));
 }
 
-function confirmedLoss(returnRecord: AftersalesCase['returns'][number]): boolean {
-  const exception = returnRecord.currentException;
-  return exception?.exceptionType === 'lost' && exception.stage === 'confirmed';
+function hasUnresolvedConfirmedLoss(
+  returnRecord: AftersalesCase['returns'][number],
+): boolean {
+  return returnRecord.logisticsExceptions.some((exception) => (
+    exception.exceptionType === 'lost' && exception.stage === 'confirmed'
+  ));
+}
+
+function hasUnresolvedReceiptDispute(
+  returnRecord: AftersalesCase['returns'][number],
+): boolean {
+  return returnRecord.logisticsExceptions.some((exception) => (
+    (exception.exceptionType === 'delivery_dispute'
+      || exception.exceptionType === 'misdelivered')
+    && exception.stage !== 'recovered'
+    && exception.stage !== 'resolved'
+  ));
 }

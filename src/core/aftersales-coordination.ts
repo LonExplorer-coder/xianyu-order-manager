@@ -1,4 +1,8 @@
-import type { OutboundLogisticsStatus } from './logistics-exceptions';
+import type {
+  LogisticsExceptionStage,
+  LogisticsExceptionType,
+  OutboundLogisticsStatus,
+} from './logistics-exceptions';
 import type { ShipmentRecord } from './shipment-records';
 
 export type AftersalesHandlingDirection =
@@ -27,6 +31,39 @@ export type AftersalesInterception = {
   status: AftersalesInterceptionEvent['kind'];
   timeline: AftersalesInterceptionEvent[];
 };
+
+export type AftersalesReturnExceptionDecision =
+  | 'wait_investigation'
+  | 'refund_in_advance'
+  | 'partial_refund'
+  | 'reject_refund'
+  | 'negotiate';
+
+export type AftersalesReturnExceptionDecisionEvent = {
+  kind: 'selected' | 'changed';
+  exceptionId: string;
+  returnRecordId: string;
+  before: AftersalesReturnExceptionDecision | null;
+  after: AftersalesReturnExceptionDecision;
+  occurredAt: string;
+  reason: string;
+  createdAt: string;
+};
+
+export type AftersalesReturnExceptionEvidence = {
+  exceptionId: string;
+  returnRecordId: string;
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+  affectedQuantity: number;
+};
+
+export type AftersalesReturnExceptionCoordination =
+  AftersalesReturnExceptionEvidence & {
+    decision: AftersalesReturnExceptionDecision | null;
+    availableDecisions: AftersalesReturnExceptionDecision[];
+    timeline: AftersalesReturnExceptionDecisionEvent[];
+  };
 
 export type AftersalesHandlingDirectionEvent = {
   kind: 'selected' | 'changed';
@@ -61,6 +98,7 @@ export type AftersalesCoordination = {
   handlingDirectionTimeline: AftersalesHandlingDirectionEvent[];
   sourcePackages: AftersalesSourcePackageEvidence[];
   interception: AftersalesInterception | null;
+  returnException: AftersalesReturnExceptionCoordination | null;
 };
 
 export const AFTERSALES_HANDLING_DIRECTIONS = [
@@ -72,11 +110,26 @@ export const AFTERSALES_HANDLING_DIRECTIONS = [
   'buyer_return',
 ] as const satisfies readonly AftersalesHandlingDirection[];
 
+export const AFTERSALES_RETURN_EXCEPTION_DECISIONS = [
+  'wait_investigation',
+  'refund_in_advance',
+  'partial_refund',
+  'reject_refund',
+  'negotiate',
+] as const satisfies readonly AftersalesReturnExceptionDecision[];
+
 export function isAftersalesHandlingDirection(
   value: unknown,
 ): value is AftersalesHandlingDirection {
   return typeof value === 'string'
     && (AFTERSALES_HANDLING_DIRECTIONS as readonly string[]).includes(value);
+}
+
+export function isAftersalesReturnExceptionDecision(
+  value: unknown,
+): value is AftersalesReturnExceptionDecision {
+  return typeof value === 'string'
+    && (AFTERSALES_RETURN_EXCEPTION_DECISIONS as readonly string[]).includes(value);
 }
 
 export function coordinateAftersales(input: {
@@ -85,10 +138,20 @@ export function coordinateAftersales(input: {
   interception: AftersalesInterception | null;
   handlingDirectionTimeline?: AftersalesHandlingDirectionEvent[];
   refundStatus?: 'pending' | 'confirmed' | 'cancelled' | null;
+  returnException?: AftersalesReturnExceptionEvidence | null;
+  returnExceptionDecisionTimeline?: AftersalesReturnExceptionDecisionEvent[];
 }): AftersalesCoordination {
   const physicalControl = physicalControlForSourcePackages(input.sourcePackages);
   const availableDirections = availableAftersalesDirections(physicalControl);
-  const { currentTodo, risk } = actionFor({
+  const returnException = input.returnException
+    ? coordinateReturnException(
+      input.returnException,
+      input.returnExceptionDecisionTimeline ?? [],
+    )
+    : null;
+  const { currentTodo, risk } = returnException
+    ? actionForReturnException(returnException, input.refundStatus ?? null)
+    : actionFor({
     physicalControl,
     hasConfirmedLoss: input.sourcePackages.some((sourcePackage) => (
       sourcePackage.items.some(({ confirmedLostQuantity }) => confirmedLostQuantity > 0)
@@ -96,7 +159,7 @@ export function coordinateAftersales(input: {
     handlingDirection: input.handlingDirection,
     interception: input.interception,
     refundStatus: input.refundStatus ?? null,
-  });
+    });
   return {
     handlingDirection: input.handlingDirection,
     physicalControl,
@@ -106,6 +169,82 @@ export function coordinateAftersales(input: {
     handlingDirectionTimeline: input.handlingDirectionTimeline ?? [],
     sourcePackages: input.sourcePackages,
     interception: input.interception,
+    returnException,
+  };
+}
+
+function coordinateReturnException(
+  evidence: AftersalesReturnExceptionEvidence,
+  timeline: AftersalesReturnExceptionDecisionEvent[],
+): AftersalesReturnExceptionCoordination {
+  return {
+    ...evidence,
+    decision: timeline.at(-1)?.after ?? null,
+    availableDecisions: [...AFTERSALES_RETURN_EXCEPTION_DECISIONS],
+    timeline,
+  };
+}
+
+function actionForReturnException(
+  exception: AftersalesReturnExceptionCoordination,
+  refundStatus: 'pending' | 'confirmed' | 'cancelled' | null,
+): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
+  if (exception.exceptionType === 'delivery_dispute') {
+    return {
+      currentTodo: '退货签收存在争议，请先核对实际收到并处理承运异常',
+      risk: '签收扫描不等于卖家实际收到，不能直接进入检查',
+    };
+  }
+  if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') {
+    return {
+      currentTodo: '处理退货物流异常并明确买家侧处理选择',
+      risk: `退货物流异常影响 ${exception.affectedQuantity} 件商品`,
+    };
+  }
+  const risk = '退货商品未回到卖家控制中，不能登记收到或检查';
+  if (exception.decision === 'wait_investigation') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '实际退款已确认，继续等待承运调查'
+        : '继续等待承运调查，实际退款尚未发生',
+      risk,
+    };
+  }
+  if (exception.decision === 'refund_in_advance') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '先行实际退款已确认，继续处理退货物流异常'
+        : '核对并确认先行实际退款，承运异常继续独立处理',
+      risk,
+    };
+  }
+  if (exception.decision === 'partial_refund') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '部分实际退款已确认，继续处理退货物流异常'
+        : '核对并确认部分实际退款，承运异常继续独立处理',
+      risk,
+    };
+  }
+  if (exception.decision === 'reject_refund') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '已记录实际退款，原拒绝退款选择与异常继续保留'
+        : '已选择拒绝退款，继续处理退货物流异常',
+      risk,
+    };
+  }
+  if (exception.decision === 'negotiate') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '实际退款已确认，承运异常继续独立处理'
+        : '继续与买家协商，承运异常独立处理',
+      risk,
+    };
+  }
+  return {
+    currentTodo: '退货已确认丢失，请选择退款处理并继续承运异常处理',
+    risk,
   };
 }
 
