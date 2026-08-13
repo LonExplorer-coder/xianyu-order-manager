@@ -4036,7 +4036,7 @@ function hasCompleteVersion33Schema(database: DatabaseSync): boolean {
 }
 
 function normalizeSchemaSql(sql: string): string {
-  return sql.trim().replace(/;$/u, '').replace(/\s+/gu, ' ').toLowerCase();
+  return sql.trim().replace(/;$/u, '').replace(/\s+/gu, ' ');
 }
 
 function hasCompleteVersion31Schema(database: DatabaseSync): boolean {

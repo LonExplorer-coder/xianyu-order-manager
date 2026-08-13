@@ -147,6 +147,39 @@ describe('数据库升级', () => {
       .toThrow('检测到不完整的 v33 退货异常协调结构');
   });
 
+  it('拒绝仅改变校验字符串大小写的伪 v33 结构', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v33-literal-case-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      const schema = database.prepare(`
+        SELECT name, sql
+        FROM sqlite_schema
+        WHERE name IN (
+          'aftersales_return_exception_decision_events',
+          'aftersales_return_exception_decisions_by_case',
+          'aftersales_return_exception_decision_identity_is_valid_on_insert',
+          'aftersales_return_exception_decisions_are_immutable_on_update',
+          'aftersales_return_exception_decisions_are_immutable_on_delete'
+        )
+        ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name
+      `).all() as Array<{ name: string; sql: string }>;
+      removeVersion33ExtensionArtifacts(database);
+      database.exec(schema.map(({ name, sql }) => (
+        name === 'aftersales_return_exception_decision_events'
+          ? sql.replaceAll("'selected'", "'SELECTED'")
+            .replaceAll("'changed'", "'CHANGED'")
+          : sql
+      )).join(';\n'));
+    } finally {
+      database.close();
+    }
+
+    expect(() => Workspace.open(dataDirectory))
+      .toThrow('检测到不完整的 v33 退货异常协调结构');
+  });
+
   it('将带关联数据的 v1 数据库完整、幂等地升级到 v33 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
