@@ -746,9 +746,6 @@ export class AftersalesApplicationService {
       ) {
         throw new Error('当前退货记录尚不能确认收到');
       }
-      if (hasUnresolvedConfirmedLoss(returnRecord)) {
-        throw new Error('退货已确认丢失，不能登记实际收到或检查');
-      }
       if (hasUnresolvedReceiptDispute(returnRecord)) {
         throw new Error('退货签收扫描存在争议，不能代替卖家登记实际收到');
       }
@@ -771,6 +768,7 @@ export class AftersalesApplicationService {
         receivedItems.map(({ returnRecordItemId }) => returnRecordItemId),
         '请完整填写当前退货包裹每件商品的实际收到数量',
       );
+      assertReceivedQuantitiesOutsideConfirmedLoss(returnRecord, receivedItems);
       const discrepancies = prepared.discrepancies ?? [];
       assertDiscrepancyItemIds(returnRecord.items.map(({ id }) => id), discrepancies);
       this.workspace.transaction(() => {
@@ -994,6 +992,9 @@ export class AftersalesApplicationService {
       const exceptionRefundSupported = exceptionDecision !== null;
       const returnDecisionSupported = explicitOnlyRefund || (
         current.returns.length > 0
+        && !(current.coordination.returnException?.exceptionType === 'lost'
+          && current.coordination.returnException.stage === 'confirmed'
+          && exceptionDecision === null)
         && current.returns.every((returnRecord) => (
           returnRecord.status === 'inspected'
           || returnRecord.carrierClaim !== null
@@ -1293,7 +1294,15 @@ export class AftersalesApplicationService {
     });
     const refund = this.getRefund(caseId);
     const returns = this.getReturns(caseId);
-    const returnException = this.getReturnExceptionEvidence(caseId, returns);
+    const returnExceptions = this.getReturnExceptionEvidenceHistory(caseId, returns).map(
+      (exception) => ({
+        ...exception,
+        decisionTimeline: this.getReturnExceptionDecisionTimeline(
+          caseId,
+          exception.exceptionId,
+        ),
+      }),
+    );
     return {
       id: asString(row.id),
       shipmentRecordId: asString(row.shipment_record_id),
@@ -1311,10 +1320,7 @@ export class AftersalesApplicationService {
         interception: this.getInterception(caseId),
         handlingDirectionTimeline: this.getHandlingDirectionTimeline(caseId),
         refundStatus: refund?.status ?? null,
-        returnException,
-        returnExceptionDecisionTimeline: returnException
-          ? this.getReturnExceptionDecisionTimeline(caseId, returnException.exceptionId)
-          : [],
+        returnExceptions,
       }),
       timeline,
       createdAt: asString(row.created_at),
@@ -1438,35 +1444,34 @@ export class AftersalesApplicationService {
     return { status: timeline.at(-1)?.kind as AftersalesInterception['status'], timeline };
   }
 
-  private getReturnExceptionEvidence(
+  private getReturnExceptionEvidenceHistory(
     caseId: string,
     returns: AftersalesCase['returns'],
-  ): AftersalesReturnExceptionEvidence | null {
-    for (const returnRecord of [...returns].reverse()) {
+  ): AftersalesReturnExceptionEvidence[] {
+    const evidence: AftersalesReturnExceptionEvidence[] = [];
+    for (const returnRecord of returns) {
       const caseItems = returnRecord.items.filter((item) => item.aftersalesCaseId === caseId);
       if (caseItems.length === 0) continue;
       const itemIds = new Set(caseItems.map(({ id }) => id));
-      const exception = [...returnRecord.logisticsExceptions].reverse().find((candidate) => (
-        candidate.stage !== 'recovered'
-        && candidate.stage !== 'resolved'
-        && (candidate.impact.scope === 'package'
-          || candidate.impact.items.some(({ sourceItemId }) => itemIds.has(sourceItemId)))
-      ));
-      if (!exception) continue;
-      const affectedQuantity = exception.impact.scope === 'package'
-        ? caseItems.reduce((total, item) => total + item.quantity, 0)
-        : exception.impact.items.reduce((total, affectedItem) => (
-          itemIds.has(affectedItem.sourceItemId) ? total + affectedItem.quantity : total
-        ), 0);
-      return {
-        exceptionId: exception.id,
-        returnRecordId: returnRecord.id,
-        exceptionType: exception.exceptionType,
-        stage: exception.stage,
-        affectedQuantity,
-      };
+      for (const exception of returnRecord.logisticsExceptions) {
+        if (!(exception.impact.scope === 'package'
+          || exception.impact.items.some(({ sourceItemId }) => itemIds.has(sourceItemId)))
+        ) continue;
+        const affectedQuantity = exception.impact.scope === 'package'
+          ? caseItems.reduce((total, item) => total + item.quantity, 0)
+          : exception.impact.items.reduce((total, affectedItem) => (
+            itemIds.has(affectedItem.sourceItemId) ? total + affectedItem.quantity : total
+          ), 0);
+        evidence.push({
+          exceptionId: exception.id,
+          returnRecordId: returnRecord.id,
+          exceptionType: exception.exceptionType,
+          stage: exception.stage,
+          affectedQuantity,
+        });
+      }
     }
-    return null;
+    return evidence;
   }
 
   private getReturnExceptionDecisionTimeline(
@@ -2252,6 +2257,37 @@ function hasUnresolvedConfirmedLoss(
   return returnRecord.logisticsExceptions.some((exception) => (
     exception.exceptionType === 'lost' && exception.stage === 'confirmed'
   ));
+}
+
+function assertReceivedQuantitiesOutsideConfirmedLoss(
+  returnRecord: AftersalesCase['returns'][number],
+  receivedItems: readonly { returnRecordItemId: string; receivedQuantity: number }[],
+): void {
+  const planned = new Map(returnRecord.items.map((item) => [item.id, item.quantity]));
+  const lostQuantities = new Map<string, number>();
+  for (const exception of returnRecord.logisticsExceptions) {
+    if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') continue;
+    if (exception.impact.scope === 'package') {
+      for (const item of returnRecord.items) lostQuantities.set(item.id, item.quantity);
+      continue;
+    }
+    for (const affected of exception.impact.items) {
+      lostQuantities.set(
+        affected.sourceItemId,
+        Math.min(
+          planned.get(affected.sourceItemId) ?? 0,
+          (lostQuantities.get(affected.sourceItemId) ?? 0) + affected.quantity,
+        ),
+      );
+    }
+  }
+  for (const received of receivedItems) {
+    const maximumReceivable = (planned.get(received.returnRecordItemId) ?? 0)
+      - (lostQuantities.get(received.returnRecordItemId) ?? 0);
+    if (received.receivedQuantity > maximumReceivable) {
+      throw new Error('退货已确认丢失，不能登记实际收到或检查');
+    }
+  }
 }
 
 function hasUnresolvedReceiptDispute(

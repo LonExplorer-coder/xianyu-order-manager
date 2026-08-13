@@ -508,7 +508,7 @@ function testAftersalesCoordination(
   handlingDirection: AftersalesCase['coordination']['handlingDirection'] = null,
   overrides: Partial<AftersalesCase['coordination']> = {},
 ): AftersalesCase['coordination'] {
-  return {
+  const coordination: Omit<AftersalesCase['coordination'], 'returnExceptionHistory'> = {
     handlingDirection,
     physicalControl: 'carrier',
     currentTodo: '继续跟进售后',
@@ -519,6 +519,11 @@ function testAftersalesCoordination(
     interception: null,
     returnException: null,
     ...overrides,
+  };
+  return {
+    ...coordination,
+    returnExceptionHistory: overrides.returnExceptionHistory
+      ?? (coordination.returnException ? [coordination.returnException] : []),
   };
 }
 
@@ -2396,14 +2401,14 @@ describe('订单管理工作台', () => {
       updatedAt: '2026-08-13T08:50:00.000Z',
     };
     const openedException = {
-      id: 'return-exception-ui-damaged',
+      id: 'return-exception-ui-delivery-dispute',
       direction: 'return' as const,
       packageId: returnRecord.id,
-      exceptionType: 'damaged' as const,
+      exceptionType: 'delivery_dispute' as const,
       stage: 'pending_verification' as const,
       revision: 1,
       impact: { scope: 'package' as const },
-      reason: '退货包裹外箱破损待核实',
+      reason: '退货显示签收但仓库未收到',
       occurredAt: '2026-08-14T10:00:00+08:00',
       timeline: [],
       createdAt: '2026-08-14T10:00:00+08:00',
@@ -2418,7 +2423,7 @@ describe('订单管理工作台', () => {
         returnException: {
           exceptionId: openedException.id,
           returnRecordId: returnRecord.id,
-          exceptionType: 'damaged',
+          exceptionType: 'delivery_dispute',
           stage: 'pending_verification',
           affectedQuantity: 1,
           decision: null,
@@ -2439,7 +2444,7 @@ describe('订单管理工作台', () => {
       ...openedException,
       stage: 'investigating' as const,
       revision: 2,
-      reason: '承运方正在调查破损环节',
+      reason: '承运方正在调查签收人和地点',
     };
     const investigating: AftersalesCase = {
       ...exceptional,
@@ -2449,6 +2454,9 @@ describe('订单管理工作台', () => {
         returnException: exceptional.coordination.returnException
           ? { ...exceptional.coordination.returnException, stage: 'investigating' }
           : null,
+        returnExceptionHistory: exceptional.coordination.returnException
+          ? [{ ...exceptional.coordination.returnException, stage: 'investigating' }]
+          : [],
       },
       returns: [{
         ...returnRecord,
@@ -2478,12 +2486,46 @@ describe('订单管理工作台', () => {
             }],
           }
           : null,
+        returnExceptionHistory: investigating.coordination.returnException
+          ? [{
+            ...investigating.coordination.returnException,
+            decision: 'negotiate',
+            timeline: [{
+              kind: 'selected',
+              exceptionId: openedException.id,
+              returnRecordId: returnRecord.id,
+              before: null,
+              after: 'negotiate',
+              occurredAt: '2026-08-14T10:30:00+08:00',
+              reason: '先与买家协商处理方案',
+              createdAt: '2026-08-14T02:30:00.000Z',
+            }],
+          }]
+          : [],
       },
+    };
+    const resolvedCase: AftersalesCase = {
+      ...decided,
+      revision: 5,
+      coordination: {
+        ...decided.coordination,
+        currentTodo: '确认收到退货',
+        risk: null,
+        returnException: null,
+      },
+      returns: [{
+        ...returnRecord,
+        currentException: { ...investigatingException, stage: 'resolved', revision: 3 },
+        logisticsExceptions: [
+          { ...investigatingException, stage: 'resolved', revision: 3 },
+        ],
+      }],
     };
     const progressAftersalesCase = vi.fn()
       .mockResolvedValueOnce(exceptional)
       .mockResolvedValueOnce(investigating)
-      .mockResolvedValueOnce(decided);
+      .mockResolvedValueOnce(decided)
+      .mockResolvedValueOnce(resolvedCase);
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
@@ -2506,11 +2548,11 @@ describe('订单管理工作台', () => {
     const recordDialog = screen.getByRole('dialog', { name: '登记退货物流异常' });
     await user.selectOptions(
       within(recordDialog).getByRole('combobox', { name: '退货物流异常类型' }),
-      'damaged',
+      'delivery_dispute',
     );
     await user.type(
       within(recordDialog).getByRole('textbox', { name: '异常说明' }),
-      '退货包裹外箱破损待核实',
+      '退货显示签收但仓库未收到',
     );
     await user.click(within(recordDialog).getByRole('button', { name: '确认登记' }));
     await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(1, {
@@ -2518,11 +2560,11 @@ describe('订单管理工作台', () => {
       caseId: pending.id,
       expectedRevision: 1,
       returnRecordId: returnRecord.id,
-      exceptionType: 'damaged',
+      exceptionType: 'delivery_dispute',
       stage: 'pending_verification',
       impact: { scope: 'package' },
       occurredAt: expect.any(String),
-      reason: '退货包裹外箱破损待核实',
+      reason: '退货显示签收但仓库未收到',
     }));
     expect(shipmentHistory).toHaveTextContent(
       '当前待办：处理退货物流异常并明确买家侧处理选择',
@@ -2532,7 +2574,7 @@ describe('订单管理工作台', () => {
     const progressDialog = screen.getByRole('dialog', { name: '推进退货物流异常' });
     await user.type(
       within(progressDialog).getByRole('textbox', { name: '阶段说明' }),
-      '承运方正在调查破损环节',
+      '承运方正在调查签收人和地点',
     );
     await user.click(within(progressDialog).getByRole('button', { name: '确认推进' }));
     await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(2, {
@@ -2544,10 +2586,10 @@ describe('订单管理工作台', () => {
       expectedExceptionRevision: 1,
       stage: 'investigating',
       occurredAt: expect.any(String),
-      reason: '承运方正在调查破损环节',
+      reason: '承运方正在调查签收人和地点',
     }));
     expect(caseRegion).toHaveTextContent('退货包裹 · 运输中');
-    expect(caseRegion).toHaveTextContent('物流异常 · 运输破损 · 调查中');
+    expect(caseRegion).toHaveTextContent('物流异常 · 签收争议 · 调查中');
 
     await user.click(within(caseRegion).getByRole('button', { name: '选择退货异常处理' }));
     const decisionDialog = screen.getByRole('dialog', { name: '选择退货异常处理' });
@@ -2572,6 +2614,23 @@ describe('订单管理工作台', () => {
     }));
     expect(caseRegion).toHaveTextContent('退货异常处理：继续协商 · 影响 1 件');
     expect(caseRegion).toHaveTextContent('先与买家协商处理方案');
+    expect(within(caseRegion).queryByRole('button', { name: '确认收到退货' }))
+      .not.toBeInTheDocument();
+
+    await user.click(within(caseRegion).getByRole('button', { name: '推进退货物流异常' }));
+    const resolvedDialog = screen.getByRole('dialog', { name: '推进退货物流异常' });
+    await user.selectOptions(
+      within(resolvedDialog).getByRole('combobox', { name: '退货物流异常处理阶段' }),
+      'resolved',
+    );
+    await user.type(
+      within(resolvedDialog).getByRole('textbox', { name: '阶段说明' }),
+      '承运方已核清并解决签收争议',
+    );
+    await user.click(within(resolvedDialog).getByRole('button', { name: '确认推进' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenCalledTimes(4));
+    expect(caseRegion).toHaveTextContent('选择退货异常处理');
+    expect(caseRegion).toHaveTextContent('继续协商 · 先与买家协商处理方案');
   });
 
   it('在退货退款处理单中逐步登记退货物流、收到和检查结果', async () => {

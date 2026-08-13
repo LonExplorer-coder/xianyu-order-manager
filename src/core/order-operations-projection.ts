@@ -205,14 +205,14 @@ export function aftersalesTodoForCases(
   if (activeCases.some(({ status }) => status === 'waiting_refund')) {
     return '确认退款';
   }
+  if (cases.some(({ hasPendingReturnExceptionDecision }) => hasPendingReturnExceptionDecision)) {
+    return '选择退货异常退款处理';
+  }
   if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('pending'))) {
     return '跟进承运索赔';
   }
   if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('approved'))) {
     return '确认承运赔付';
-  }
-  if (cases.some(({ hasPendingReturnExceptionDecision }) => hasPendingReturnExceptionDecision)) {
-    return '选择退货异常退款处理';
   }
   if (cases.some(({ hasUnresolvedLogisticsException }) => hasUnresolvedLogisticsException)) {
     return '处理退货物流异常';

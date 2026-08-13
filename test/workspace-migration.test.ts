@@ -47,6 +47,38 @@ describe('数据库升级', () => {
     } finally {
       migrated.close();
     }
+
+    const malformed = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      removeVersion33ExtensionArtifacts(malformed);
+      malformed.exec(`
+        CREATE TABLE aftersales_return_exception_decision_events (
+          sequence INTEGER PRIMARY KEY,
+          id TEXT NOT NULL,
+          case_id TEXT NOT NULL,
+          exception_id TEXT NOT NULL,
+          return_record_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          before_decision TEXT,
+          after_decision TEXT NOT NULL,
+          occurred_at TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX aftersales_return_exception_decisions_by_case
+        ON aftersales_return_exception_decision_events (case_id, exception_id, sequence);
+        CREATE TRIGGER aftersales_return_exception_decision_identity_is_valid_on_insert
+        BEFORE INSERT ON aftersales_return_exception_decision_events BEGIN SELECT 1; END;
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_update
+        BEFORE UPDATE ON aftersales_return_exception_decision_events BEGIN SELECT 1; END;
+        CREATE TRIGGER aftersales_return_exception_decisions_are_immutable_on_delete
+        BEFORE DELETE ON aftersales_return_exception_decision_events BEGIN SELECT 1; END;
+      `);
+    } finally {
+      malformed.close();
+    }
+    expect(() => Workspace.open(dataDirectory))
+      .toThrow('检测到不完整的 v33 退货异常协调结构');
   });
 
   it('将带关联数据的 v1 数据库完整、幂等地升级到 v33 并保留来源、字段与模板约束', async () => {

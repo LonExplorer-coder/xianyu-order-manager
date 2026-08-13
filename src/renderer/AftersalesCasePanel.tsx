@@ -452,7 +452,9 @@ export function AftersalesCasePanel({
           </details>
           {(aftersalesCase.coordination.handlingDirectionTimeline.length > 0
             || aftersalesCase.coordination.interception
-            || aftersalesCase.coordination.returnException?.timeline.length) && (
+            || aftersalesCase.coordination.returnExceptionHistory.some(
+              ({ timeline }) => timeline.length > 0,
+            )) && (
             <details className="shipment-record-card__timeline">
               <summary>售后协调完整历史</summary>
               <ol>
@@ -473,17 +475,19 @@ export function AftersalesCasePanel({
                     <small>{formatDateTime(event.occurredAt)}</small>
                   </li>
                 ))}
-                {aftersalesCase.coordination.returnException?.timeline.map((event, index) => (
-                  <li key={`return-exception-decision-${index}-${event.occurredAt}`}>
-                    <strong>{event.kind === 'selected'
-                      ? '选择退货异常处理'
-                      : '更改退货异常处理'}</strong>
-                    <span>
-                      {event.before ? `${returnExceptionDecisionLabel(event.before)} → ` : ''}
-                      {returnExceptionDecisionLabel(event.after)} · {event.reason}
-                    </span>
-                    <small>{formatDateTime(event.occurredAt)}</small>
-                  </li>
+                {aftersalesCase.coordination.returnExceptionHistory.flatMap((exception) => (
+                  exception.timeline.map((event, index) => (
+                    <li key={`return-exception-decision-${exception.exceptionId}-${index}`}>
+                      <strong>{event.kind === 'selected'
+                        ? '选择退货异常处理'
+                        : '更改退货异常处理'}</strong>
+                      <span>
+                        {event.before ? `${returnExceptionDecisionLabel(event.before)} → ` : ''}
+                        {returnExceptionDecisionLabel(event.after)} · {event.reason}
+                      </span>
+                      <small>{formatDateTime(event.occurredAt)}</small>
+                    </li>
+                  ))
                 ))}
               </ol>
             </details>
@@ -515,7 +519,7 @@ function primaryProgressAction(
   }
   if (aftersalesCase.status === 'cancelled' || aftersalesCase.status === 'completed') {
     const terminalReturn = aftersalesCase.returns[0];
-    if (terminalReturn?.status === 'in_transit' && !isConfirmedLost(terminalReturn)) {
+    if (terminalReturn?.status === 'in_transit' && canReceiveReturn(terminalReturn)) {
       return 'receive_return';
     }
     if (terminalReturn?.status === 'received') return 'inspect_return';
@@ -545,7 +549,7 @@ function primaryProgressAction(
     return 'confirm_refund';
   }
   if (aftersalesCase.status === 'waiting_return' && returnRecord?.status === 'in_transit') {
-    return 'receive_return';
+    return canReceiveReturn(returnRecord) ? 'receive_return' : null;
   }
   if (aftersalesCase.status === 'waiting_inspection' && returnRecord?.status === 'received') {
     return 'inspect_return';
@@ -560,7 +564,7 @@ function returnFactProgressAction(
   aftersalesCase: AftersalesCase,
 ): 'receive_return' | 'inspect_return' | null {
   const returnRecord = aftersalesCase.returns[0];
-  if (returnRecord?.status === 'in_transit' && !isConfirmedLost(returnRecord)) {
+  if (returnRecord?.status === 'in_transit' && canReceiveReturn(returnRecord)) {
     return 'receive_return';
   }
   if (returnRecord?.status === 'received') return 'inspect_return';
@@ -698,6 +702,29 @@ function carrierClaimEventLabel(
 function isConfirmedLost(returnRecord: AftersalesCase['returns'][number]): boolean {
   return returnRecord.currentException?.exceptionType === 'lost'
     && returnRecord.currentException.stage === 'confirmed';
+}
+
+function canReceiveReturn(returnRecord: AftersalesCase['returns'][number]): boolean {
+  if (returnRecord.logisticsExceptions.some((exception) => (
+    (exception.exceptionType === 'delivery_dispute'
+      || exception.exceptionType === 'misdelivered')
+    && exception.stage !== 'recovered'
+    && exception.stage !== 'resolved'
+  ))) return false;
+  const lostByItem = new Map<string, number>();
+  for (const exception of returnRecord.logisticsExceptions) {
+    if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') continue;
+    if (exception.impact.scope === 'package') return false;
+    for (const affected of exception.impact.items) {
+      lostByItem.set(
+        affected.sourceItemId,
+        (lostByItem.get(affected.sourceItemId) ?? 0) + affected.quantity,
+      );
+    }
+  }
+  return returnRecord.items.some((item) => (
+    (lostByItem.get(item.id) ?? 0) < item.quantity
+  ));
 }
 
 function carrierClaimAvailable(

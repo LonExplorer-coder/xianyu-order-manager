@@ -3401,6 +3401,29 @@ describe('退货异常跨流程协调', () => {
         returnException: { decision: 'partial_refund' },
       },
     });
+    const recovered = application.progressAftersalesCase({
+      kind: 'progress_return_logistics_exception',
+      caseId: refunded.id,
+      expectedRevision: refunded.revision,
+      returnRecordId: returnRecord.id,
+      exceptionId: refunded.returns[0].currentException?.id as string,
+      expectedExceptionRevision: refunded.returns[0].currentException?.revision as number,
+      stage: 'recovered',
+      occurredAt: '2026-08-14T23:10:00+08:00',
+      reason: '承运方后续找回退货包裹',
+    });
+    expect(recovered.coordination).toMatchObject({
+      returnException: null,
+      returnExceptionHistory: [expect.objectContaining({
+        exceptionId: lost.coordination.returnException?.exceptionId,
+        stage: 'recovered',
+        decision: 'partial_refund',
+        timeline: [
+          expect.objectContaining({ after: 'wait_investigation' }),
+          expect.objectContaining({ after: 'partial_refund' }),
+        ],
+      })],
+    });
   });
 
   it('退货运输中先确认实际退款后仍可独立记录丢件', async () => {
@@ -3572,10 +3595,25 @@ describe('退货异常跨流程协调', () => {
         risk: '签收扫描不等于卖家实际收到，不能直接进入检查',
       },
     });
-    expect(() => application.progressAftersalesCase({
-      kind: 'receive_return',
+    const waiting = application.progressAftersalesCase({
+      kind: 'decide_return_logistics_exception',
       caseId: disputed.id,
       expectedRevision: disputed.revision,
+      returnRecordId: registered.returns[0].id,
+      exceptionId: disputed.coordination.returnException?.exceptionId,
+      decision: 'wait_investigation',
+      occurredAt: '2026-08-14T23:45:00+08:00',
+      reason: '等待承运方核查签收人和签收地点',
+    });
+    expect(waiting.coordination).toMatchObject({
+      currentTodo: '继续等待承运调查，实际退款尚未发生',
+      risk: '签收扫描不等于卖家实际收到，不能直接进入检查',
+      returnException: { decision: 'wait_investigation' },
+    });
+    expect(() => application.progressAftersalesCase({
+      kind: 'receive_return',
+      caseId: waiting.id,
+      expectedRevision: waiting.revision,
       returnRecordId: registered.returns[0].id,
       occurredAt: '2026-08-14T23:50:00+08:00',
       reason: '仅依据签收扫描尝试确认收到',
@@ -4025,10 +4063,64 @@ describe('退货物流与承运索赔', () => {
     });
     expect(application.getOrder(secondItem.orderId).operations.aftersalesCases[0]
       .returnPackages[0].currentException).toBeNull();
+    const firstCaseAfterDamage = application.queryAftersalesCases({
+      shipmentRecordId: shipment.record.id,
+    }).find(({ id }) => id === firstCase.id) as NonNullable<ReturnType<
+      LocalApplication['queryAftersalesCases']
+    >[number]>;
+    const lost = application.progressAftersalesCase({
+      kind: 'record_return_logistics_exception',
+      caseId: firstCase.id,
+      expectedRevision: firstCaseAfterDamage.revision,
+      returnRecordId: combined.returns[0].id,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: firstReturnItemId, quantity: 1 }],
+      },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-13T22:14:30+08:00',
+      reason: '承运方确认只丢失第一张订单的退货商品',
+    });
+    expect(application.getOrder(firstItem.orderId).operations.aftersalesCases[0]
+      .returnPackages[0].currentException).toMatchObject({
+      exceptionType: 'lost',
+      affectedQuantity: 1,
+    });
+    expect(application.getOrder(secondItem.orderId).operations.aftersalesCases[0]
+      .returnPackages[0].currentException).toBeNull();
+    const database = (application as unknown as {
+      workspace: { database: DatabaseSync };
+    }).workspace.database;
+    expect(() => database.prepare(`
+      INSERT INTO aftersales_return_exception_decision_events (
+        id, case_id, exception_id, return_record_id, kind,
+        before_decision, after_decision, occurred_at, reason, created_at
+      ) VALUES (
+        $id, $caseId, $exceptionId, $returnRecordId,
+        'selected', NULL, 'wait_investigation', $occurredAt, $reason, $createdAt
+      )
+    `).run(
+      {
+        $id: String(randomUUID()),
+        $caseId: secondCase.id,
+        $exceptionId: lost.coordination.returnException?.exceptionId as string,
+        $returnRecordId: combined.returns[0].id,
+        $occurredAt: '2026-08-13T22:14:40+08:00',
+        $reason: '不应把第一张订单的商品级异常关联给第二张订单',
+        $createdAt: '2026-08-13T14:14:40.000Z',
+      },
+    )).toThrow(/return exception decision identity mismatch/u);
+    const firstCaseBeforeClaim = application.queryAftersalesCases({
+      shipmentRecordId: shipment.record.id,
+    }).find(({ id }) => id === firstCase.id) as NonNullable<ReturnType<
+      LocalApplication['queryAftersalesCases']
+    >[number]>;
     const claimedReturn = application.progressAftersalesCase({
       kind: 'open_carrier_claim',
-      caseId: secondCase.id,
-      expectedRevision: damaged.revision,
+      caseId: firstCase.id,
+      expectedRevision: firstCaseBeforeClaim.revision,
       returnRecordId: combined.returns[0].id,
       requestedAmountCents: 600,
       occurredAt: '2026-08-13T22:15:00+08:00',
@@ -4042,13 +4134,15 @@ describe('退货物流与承运索赔', () => {
     const received = application.progressAftersalesCase({
       kind: 'receive_return',
       caseId: secondCase.id,
-      expectedRevision: claimedReturn.revision,
+      expectedRevision: application.queryAftersalesCases({
+        shipmentRecordId: shipment.record.id,
+      }).find(({ id }) => id === secondCase.id)?.revision,
       returnRecordId: combined.returns[0].id,
       occurredAt: '2026-08-13T22:20:00+08:00',
       reason: '合装包裹整体到达并逐项清点',
       items: combined.returns[0].items.map((item) => ({
         returnRecordItemId: item.id,
-        receivedQuantity: item.quantity,
+        receivedQuantity: item.id === firstReturnItemId ? 0 : item.quantity,
       })),
       discrepancies: [{
         kind: 'missing',
@@ -4058,7 +4152,7 @@ describe('退货物流与承运索赔', () => {
       }],
     });
     expect(received.returns[0].items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ aftersalesCaseId: firstCase.id, receivedQuantity: 1 }),
+      expect.objectContaining({ aftersalesCaseId: firstCase.id, receivedQuantity: 0 }),
       expect.objectContaining({ aftersalesCaseId: secondCase.id, receivedQuantity: 1 }),
     ]));
     expect(application.queryAftersalesCases({ shipmentRecordId: shipment.record.id }))
@@ -4605,12 +4699,25 @@ describe('退货物流与承运索赔', () => {
         }],
       });
     expect(application.getOrder(sourceItem.orderId).operations.currentTodo)
+      .toBe('选择退货异常退款处理');
+
+    const decided = application.progressAftersalesCase({
+      kind: 'decide_return_logistics_exception',
+      caseId: claimOpened.id,
+      expectedRevision: claimOpened.revision,
+      returnRecordId: returnPackage.id,
+      exceptionId: claimOpened.coordination.returnException?.exceptionId,
+      decision: 'refund_in_advance',
+      occurredAt: '2026-08-14T11:15:00+08:00',
+      reason: '承运索赔未结束，买家侧先行退款',
+    });
+    expect(application.getOrder(sourceItem.orderId).operations.currentTodo)
       .toBe('跟进承运索赔');
 
     const refunded = application.progressAftersalesCase({
       kind: 'confirm_refund',
-      caseId: claimOpened.id,
-      expectedRevision: claimOpened.revision,
+      caseId: decided.id,
+      expectedRevision: decided.revision,
       actualRefundCents: 1_000,
       occurredAt: '2026-08-14T11:20:00+08:00',
       note: '承运索赔未结束，先按平台判责给买家退款',

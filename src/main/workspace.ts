@@ -3941,12 +3941,23 @@ function migrateToVersion33(database: DatabaseSync): void {
         WHEN NOT EXISTS (
           SELECT 1
           FROM logistics_exception_matters AS exceptions
-          JOIN aftersales_return_record_items AS items
-            ON items.return_record_id = NEW.return_record_id
           WHERE exceptions.id = NEW.exception_id
             AND exceptions.direction = 'return'
             AND exceptions.return_record_id = NEW.return_record_id
-            AND items.aftersales_case_id = NEW.case_id
+            AND EXISTS (
+              SELECT 1
+              FROM aftersales_return_record_items AS case_items
+              WHERE case_items.return_record_id = NEW.return_record_id
+                AND case_items.aftersales_case_id = NEW.case_id
+                AND (
+                  json_extract(exceptions.impact_json, '$.scope') = 'package'
+                  OR EXISTS (
+                    SELECT 1
+                    FROM json_each(exceptions.impact_json, '$.items') AS affected_item
+                    WHERE json_extract(affected_item.value, '$.sourceItemId') = case_items.id
+                  )
+                )
+            )
         )
         BEGIN
           SELECT RAISE(ABORT, 'return exception decision identity mismatch');
@@ -3996,8 +4007,82 @@ function version33SchemaState(database: DatabaseSync): 'absent' | 'complete' | '
   if (rows.length === 0) return 'absent';
   if (rows.length === requiredObjects.size && rows.every((row) => (
     requiredObjects.get(row.name) === row.type
-  ))) return 'complete';
+  )) && hasCompleteVersion33Schema(database)) return 'complete';
   return 'partial';
+}
+
+function hasCompleteVersion33Schema(database: DatabaseSync): boolean {
+  const columns = database.prepare(`
+    PRAGMA table_info(aftersales_return_exception_decision_events)
+  `).all() as Array<{
+    name: string;
+    type: string;
+    notnull: number;
+    pk: number;
+  }>;
+  const expectedColumns = [
+    'sequence', 'id', 'case_id', 'exception_id', 'return_record_id', 'kind',
+    'before_decision', 'after_decision', 'occurred_at', 'reason', 'created_at',
+  ];
+  if (columns.map(({ name }) => name).join(',') !== expectedColumns.join(',')) return false;
+  if (columns[0]?.type !== 'INTEGER' || columns[0]?.pk !== 1) return false;
+  if (columns.slice(1).some(({ type }) => type !== 'TEXT')) return false;
+  if (columns.filter(({ name }) => name !== 'sequence' && name !== 'before_decision')
+    .some(({ notnull }) => notnull !== 1)) return false;
+
+  const foreignKeys = database.prepare(`
+    PRAGMA foreign_key_list(aftersales_return_exception_decision_events)
+  `).all() as Array<{ from: string; table: string; to: string; on_delete: string }>;
+  const expectedForeignKeys = new Set([
+    'case_id:aftersales_cases:id:RESTRICT',
+    'exception_id:logistics_exception_matters:id:RESTRICT',
+    'return_record_id:aftersales_return_records:id:RESTRICT',
+  ]);
+  if (foreignKeys.length !== expectedForeignKeys.size || foreignKeys.some((foreignKey) => (
+    !expectedForeignKeys.has(
+      `${foreignKey.from}:${foreignKey.table}:${foreignKey.to}:${foreignKey.on_delete}`,
+    )
+  ))) return false;
+
+  const indexColumns = database.prepare(`
+    PRAGMA index_info(aftersales_return_exception_decisions_by_case)
+  `).all() as Array<{ name: string }>;
+  if (indexColumns.map(({ name }) => name).join(',') !== 'case_id,exception_id,sequence') {
+    return false;
+  }
+  const schemaRows = database.prepare(`
+    SELECT name, lower(sql) AS sql
+    FROM sqlite_schema
+    WHERE name IN (
+      'aftersales_return_exception_decision_events',
+      'aftersales_return_exception_decision_identity_is_valid_on_insert',
+      'aftersales_return_exception_decisions_are_immutable_on_update',
+      'aftersales_return_exception_decisions_are_immutable_on_delete'
+    )
+  `).all() as Array<{ name: string; sql: string | null }>;
+  const sqlByName = new Map(schemaRows.map((row) => [row.name, row.sql ?? '']));
+  const tableSql = sqlByName.get('aftersales_return_exception_decision_events') ?? '';
+  if (!tableSql.includes("kind in ('selected', 'changed')")
+    || !tableSql.includes("'wait_investigation'")
+    || !tableSql.includes('before_decision <> after_decision')
+    || !tableSql.includes('strict')) return false;
+  const identitySql = sqlByName.get(
+    'aftersales_return_exception_decision_identity_is_valid_on_insert',
+  ) ?? '';
+  if (!identitySql.includes('before insert')
+    || !identitySql.includes('json_each(exceptions.impact_json')
+    || !identitySql.includes('case_items.aftersales_case_id = new.case_id')
+    || !identitySql.includes("json_extract(exceptions.impact_json, '$.scope') = 'package'")) {
+    return false;
+  }
+  const updateSql = sqlByName.get(
+    'aftersales_return_exception_decisions_are_immutable_on_update',
+  ) ?? '';
+  const deleteSql = sqlByName.get(
+    'aftersales_return_exception_decisions_are_immutable_on_delete',
+  ) ?? '';
+  return updateSql.includes('before update') && updateSql.includes('raise(abort')
+    && deleteSql.includes('before delete') && deleteSql.includes('raise(abort');
 }
 
 function hasCompleteVersion31Schema(database: DatabaseSync): boolean {

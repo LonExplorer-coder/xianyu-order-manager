@@ -99,6 +99,7 @@ export type AftersalesCoordination = {
   sourcePackages: AftersalesSourcePackageEvidence[];
   interception: AftersalesInterception | null;
   returnException: AftersalesReturnExceptionCoordination | null;
+  returnExceptionHistory: AftersalesReturnExceptionCoordination[];
 };
 
 export const AFTERSALES_HANDLING_DIRECTIONS = [
@@ -138,17 +139,18 @@ export function coordinateAftersales(input: {
   interception: AftersalesInterception | null;
   handlingDirectionTimeline?: AftersalesHandlingDirectionEvent[];
   refundStatus?: 'pending' | 'confirmed' | 'cancelled' | null;
-  returnException?: AftersalesReturnExceptionEvidence | null;
-  returnExceptionDecisionTimeline?: AftersalesReturnExceptionDecisionEvent[];
+  returnExceptions?: Array<AftersalesReturnExceptionEvidence & {
+    decisionTimeline: AftersalesReturnExceptionDecisionEvent[];
+  }>;
 }): AftersalesCoordination {
   const physicalControl = physicalControlForSourcePackages(input.sourcePackages);
   const availableDirections = availableAftersalesDirections(physicalControl);
-  const returnException = input.returnException
-    ? coordinateReturnException(
-      input.returnException,
-      input.returnExceptionDecisionTimeline ?? [],
-    )
-    : null;
+  const returnExceptionHistory = (input.returnExceptions ?? []).map((exception) => (
+    coordinateReturnException(exception, exception.decisionTimeline)
+  ));
+  const returnException = [...returnExceptionHistory].reverse().find((exception) => (
+    exception.stage !== 'recovered' && exception.stage !== 'resolved'
+  )) ?? null;
   const { currentTodo, risk } = returnException
     ? actionForReturnException(returnException, input.refundStatus ?? null)
     : actionFor({
@@ -170,6 +172,7 @@ export function coordinateAftersales(input: {
     sourcePackages: input.sourcePackages,
     interception: input.interception,
     returnException,
+    returnExceptionHistory,
   };
 }
 
@@ -189,19 +192,21 @@ function actionForReturnException(
   exception: AftersalesReturnExceptionCoordination,
   refundStatus: 'pending' | 'confirmed' | 'cancelled' | null,
 ): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
-  if (exception.exceptionType === 'delivery_dispute') {
+  const risk = exception.exceptionType === 'delivery_dispute'
+    ? '签收扫描不等于卖家实际收到，不能直接进入检查'
+    : exception.exceptionType === 'lost' && exception.stage === 'confirmed'
+      ? '退货商品未回到卖家控制中，不能登记收到或检查'
+      : `退货物流异常影响 ${exception.affectedQuantity} 件商品`;
+  if (exception.decision === null) {
     return {
-      currentTodo: '退货签收存在争议，请先核对实际收到并处理承运异常',
-      risk: '签收扫描不等于卖家实际收到，不能直接进入检查',
+      currentTodo: exception.exceptionType === 'delivery_dispute'
+        ? '退货签收存在争议，请先核对实际收到并处理承运异常'
+        : exception.exceptionType === 'lost' && exception.stage === 'confirmed'
+          ? '退货已确认丢失，请选择退款处理并继续承运异常处理'
+          : '处理退货物流异常并明确买家侧处理选择',
+      risk,
     };
   }
-  if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') {
-    return {
-      currentTodo: '处理退货物流异常并明确买家侧处理选择',
-      risk: `退货物流异常影响 ${exception.affectedQuantity} 件商品`,
-    };
-  }
-  const risk = '退货商品未回到卖家控制中，不能登记收到或检查';
   if (exception.decision === 'wait_investigation') {
     return {
       currentTodo: refundStatus === 'confirmed'
@@ -242,10 +247,7 @@ function actionForReturnException(
       risk,
     };
   }
-  return {
-    currentTodo: '退货已确认丢失，请选择退款处理并继续承运异常处理',
-    risk,
-  };
+  return { currentTodo: '处理退货物流异常', risk };
 }
 
 export function statusForHandlingDirection(
