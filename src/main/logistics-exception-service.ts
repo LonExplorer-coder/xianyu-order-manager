@@ -5,6 +5,7 @@ import {
   supportsCarrierClaim,
   type CarrierClaim,
   type LogisticsDirection,
+  type LogisticsExceptionImpact,
   type LogisticsStatus,
 } from '../core/logistics-exceptions';
 import { Workspace } from './workspace';
@@ -23,6 +24,7 @@ export class LogisticsExceptionService {
     subject: LogisticsSubject;
     currentStatus: LogisticsStatus;
     latestOccurredAt: string;
+    impact: LogisticsExceptionImpact;
     requestedAmountCents: number;
     occurredAt: string;
     reason: string;
@@ -43,14 +45,15 @@ export class LogisticsExceptionService {
         INSERT INTO carrier_claims (
           id, direction, shipment_package_id, return_record_id,
           status, revision, requested_amount_cents, approved_amount_cents,
-          reason, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'pending', 1, ?, NULL, ?, ?, ?)
+          impact_json, reason, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', 1, ?, NULL, ?, ?, ?, ?)
       `).run(
         claimId,
         input.subject.direction,
         input.subject.direction === 'outbound' ? input.subject.packageId : null,
         input.subject.direction === 'return' ? input.subject.packageId : null,
         input.requestedAmountCents,
+        JSON.stringify(input.impact),
         input.reason,
         now,
         now,

@@ -3538,12 +3538,17 @@ export class LocalApplication {
     if (shipmentPackage.revision !== prepared.expectedRevision) {
       throw new Error('包裹物流已在其他操作中更新，请刷新后重试');
     }
+    const physicalReceiptAt = [...shipmentPackage.timeline].reverse().find((event) => (
+      event.kind === 'status_changed' && event.afterStatus === 'delivered'
+    ))?.occurredAt ?? (shipmentPackage.logisticsStatus === 'delivered'
+      ? shipmentPackage.createdAt
+      : null);
     const statusChange = prepareLogisticsStatusChange({
       direction: 'outbound',
       currentStatus: shipmentPackage.logisticsStatus,
       nextStatus: prepared.logisticsStatus,
       carrierAcceptedAt: shipmentPackage.carrierAcceptedAt,
-      physicalReceiptAt: null,
+      physicalReceiptAt,
       carrierAcceptanceConfirmed: prepared.carrierAcceptanceConfirmed ?? false,
       carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
       occurredAt: prepared.occurredAt,
@@ -3634,6 +3639,7 @@ export class LocalApplication {
         currentStatus: shipmentPackage.logisticsStatus,
         latestOccurredAt: shipmentPackage.timeline.at(-1)?.occurredAt
           ?? shipmentPackage.createdAt,
+        impact: shipmentPackage.currentException?.impact ?? { scope: 'package' },
         requestedAmountCents: prepared.requestedAmountCents,
         occurredAt: prepared.occurredAt,
         reason: prepared.reason,

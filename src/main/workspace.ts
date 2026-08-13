@@ -3447,10 +3447,25 @@ function migrateToVersion30(database: DatabaseSync): void {
         SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
       END;
 
+      DROP TRIGGER IF EXISTS shipment_package_logistics_changes_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS shipment_package_logistics_changes_are_immutable_on_delete;
+
       ${addLogisticsChangeOccurredAt}
       UPDATE shipment_package_logistics_change_events
       SET occurred_at = created_at
       WHERE occurred_at = '';
+
+      CREATE TRIGGER shipment_package_logistics_changes_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_logistics_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics changes are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_logistics_changes_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_logistics_change_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics changes are immutable');
+      END;
 
       DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_update;
       DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_delete;
@@ -3468,6 +3483,7 @@ function migrateToVersion30(database: DatabaseSync): void {
         revision INTEGER NOT NULL CHECK (revision >= 1),
         requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
         approved_amount_cents INTEGER CHECK (approved_amount_cents > 0),
+        impact_json TEXT NOT NULL CHECK (json_valid(impact_json)),
         reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -3484,11 +3500,13 @@ function migrateToVersion30(database: DatabaseSync): void {
 
       INSERT INTO carrier_claims_v30 (
         id, direction, shipment_package_id, return_record_id, status, revision,
-        requested_amount_cents, approved_amount_cents, reason, created_at, updated_at
+        requested_amount_cents, approved_amount_cents, impact_json,
+        reason, created_at, updated_at
       )
       SELECT
         id, 'return', NULL, return_record_id, status, revision,
-        requested_amount_cents, approved_amount_cents, reason, created_at, updated_at
+        requested_amount_cents, approved_amount_cents, '{"scope":"package"}',
+        reason, created_at, updated_at
       FROM carrier_claims;
 
       DROP TABLE carrier_claims;

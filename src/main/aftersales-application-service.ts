@@ -742,6 +742,9 @@ export class AftersalesApplicationService {
         currentStatus: returnRecord.logisticsStatus,
         latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
           ?? returnRecord.occurredAt,
+        impact: [...returnRecord.timeline].reverse().find((event) => (
+          event.kind === 'logistics_status_updated'
+        ))?.impact ?? { scope: 'package' },
         requestedAmountCents: prepared.requestedAmountCents,
         occurredAt: prepared.occurredAt,
         reason: prepared.reason,

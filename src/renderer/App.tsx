@@ -2707,11 +2707,13 @@ function ShipmentRecordsSection({
                         0,
                       )} 件指定商品`}</span>
                     <small>{shipmentPackage.currentException.reason}</small>
-                    {shipmentPackage.carrierClaim && (
-                      <span>承运索赔：{carrierClaimStatusLabel(
-                        shipmentPackage.carrierClaim.status,
-                      )}</span>
-                    )}
+                  </div>
+                )}
+                {shipmentPackage.carrierClaim && (
+                  <div className="shipment-package-exception" role="status">
+                    <strong>承运索赔</strong>
+                    <span>{carrierClaimStatusLabel(shipmentPackage.carrierClaim.status)}</span>
+                    <small>{shipmentPackage.carrierClaim.reason}</small>
                   </div>
                 )}
                 {shipmentPackage.status === 'active' && (
@@ -2732,10 +2734,9 @@ function ShipmentRecordsSection({
                     >
                       更正物流
                     </button>
-                    {shipmentPackage.currentException
-                      && (!shipmentPackage.carrierClaim
-                        || shipmentPackage.carrierClaim.status === 'pending'
-                        || shipmentPackage.carrierClaim.status === 'approved') && (
+                    {((shipmentPackage.currentException && !shipmentPackage.carrierClaim)
+                      || shipmentPackage.carrierClaim?.status === 'pending'
+                      || shipmentPackage.carrierClaim?.status === 'approved') && (
                       <button
                         className="button button--quiet"
                         type="button"
@@ -2937,19 +2938,20 @@ function UpdateShipmentPackageLogisticsStatusDialog({
     const quantity = affectedQuantities[item.id] ?? 0;
     return quantity > 0 ? [{ sourceItemId: item.id, quantity }] : [];
   });
-  const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus
-    || carrierAcceptanceConfirmed
-    || (exceptional && impactScope === 'items'
-      && JSON.stringify(selectedAffectedItems)
-        !== JSON.stringify(target.shipmentPackage.currentException?.impact.scope === 'items'
-          ? target.shipmentPackage.currentException.impact.items
-          : []));
   const missingLossEvidence = logisticsStatus === 'lost'
     && !target.shipmentPackage.carrierAcceptedAt
     && !carrierAcceptanceConfirmed;
   const missingAffectedItems = exceptional
     && impactScope === 'items'
     && selectedAffectedItems.length === 0;
+  const nextImpact = exceptional && impactScope === 'items'
+    ? { scope: 'items' as const, items: selectedAffectedItems }
+    : { scope: 'package' as const };
+  const currentImpact = target.shipmentPackage.currentException?.impact ?? { scope: 'package' as const };
+  const impactChanged = JSON.stringify(nextImpact) !== JSON.stringify(currentImpact);
+  const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus
+    || carrierAcceptanceConfirmed
+    || (exceptional && impactChanged);
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement

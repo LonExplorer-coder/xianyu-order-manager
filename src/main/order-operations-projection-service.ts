@@ -88,6 +88,7 @@ export class OrderOperationsProjectionService {
           LIMIT 1
         ) AS latest_status_occurred_at,
         claims.status AS outbound_carrier_claim_status,
+        claims.impact_json AS outbound_carrier_claim_impact_json,
         cancellations.id AS cancellation_event_id,
         cancellations.reason AS cancellation_reason,
         items.id AS shipment_package_item_id,
@@ -124,6 +125,10 @@ export class OrderOperationsProjectionService {
       reason: string;
       occurredAt: string;
     }>();
+    const packageClaimFacts = new Map<string, {
+      status: CarrierClaimStatus;
+      impact: ReturnType<typeof parseProjectedLogisticsImpact>;
+    }>();
     for (const row of rows) {
       const orderId = asString(row.order_id);
       const records = recordsByOrder.get(orderId) ?? new Map();
@@ -157,11 +162,20 @@ export class OrderOperationsProjectionService {
             ? null
             : asString(row.cancellation_reason),
           currentException: null,
-          carrierClaimStatus: parseOptionalCarrierClaimStatus(
-            row.outbound_carrier_claim_status,
-          ),
+          carrierClaimStatus: null,
           items: [],
         };
+        const claimStatus = parseOptionalCarrierClaimStatus(
+          row.outbound_carrier_claim_status,
+        );
+        if (claimStatus) {
+          packageClaimFacts.set(`${orderId}\u0000${packageId}`, {
+            status: claimStatus,
+            impact: parseProjectedLogisticsImpact(
+              parseJsonRecord(row.outbound_carrier_claim_impact_json),
+            ),
+          });
+        }
         if (
           row.latest_status_payload_json !== null
           && row.latest_status_reason !== null
@@ -193,11 +207,11 @@ export class OrderOperationsProjectionService {
         const itemIds = new Set(shipmentPackage.items.map(({ shipmentPackageItemId }) => (
           shipmentPackageItemId
         )));
-        const affectedQuantity = impact.scope === 'package'
-          ? shipmentPackage.items.reduce((total, item) => total + item.quantity, 0)
-          : impact.items
-            .filter((item) => itemIds.has(item.sourceItemId))
-            .reduce((total, item) => total + item.quantity, 0);
+        const affectedQuantity = affectedQuantityForImpact(
+          impact,
+          itemIds,
+          shipmentPackage.items.reduce((total, item) => total + item.quantity, 0),
+        );
         if (affectedQuantity === 0) continue;
         shipmentPackage.currentException = {
           direction: 'outbound',
@@ -206,6 +220,16 @@ export class OrderOperationsProjectionService {
           reason: facts.reason,
           occurredAt: facts.occurredAt,
         };
+      }
+      for (const [packageId, shipmentPackage] of packages) {
+        const claimFacts = packageClaimFacts.get(`${orderId}\u0000${packageId}`);
+        if (!claimFacts) continue;
+        const itemIds = new Set(shipmentPackage.items.map(({ shipmentPackageItemId }) => (
+          shipmentPackageItemId
+        )));
+        if (affectedQuantityForImpact(claimFacts.impact, itemIds, 1) > 0) {
+          shipmentPackage.carrierClaimStatus = claimFacts.status;
+        }
       }
     }
     for (const [orderId, records] of recordsByOrder) result.set(orderId, [...records.values()]);
@@ -349,6 +373,7 @@ export class OrderOperationsProjectionService {
           LIMIT 1
         ) AS latest_status_occurred_at,
         claims.status AS carrier_claim_status,
+        claims.impact_json AS carrier_claim_impact_json,
         return_items.quantity AS planned_quantity,
         return_items.received_quantity,
         return_items.accepted_quantity,
@@ -381,6 +406,10 @@ export class OrderOperationsProjectionService {
       reason: string;
       occurredAt: string;
     }>();
+    const packageClaimFacts = new Map<string, {
+      status: CarrierClaimStatus;
+      impact: ReturnType<typeof parseProjectedLogisticsImpact>;
+    }>();
     for (const row of returnRows) {
       const orderId = asString(row.order_id);
       const caseId = asString(row.case_id);
@@ -404,9 +433,18 @@ export class OrderOperationsProjectionService {
           logisticsStatus,
           currentException: null,
           discrepancies: [],
-          carrierClaimStatus: parseOptionalCarrierClaimStatus(row.carrier_claim_status),
+          carrierClaimStatus: null,
           items: [],
         };
+        const claimStatus = parseOptionalCarrierClaimStatus(row.carrier_claim_status);
+        if (claimStatus) {
+          packageClaimFacts.set(key, {
+            status: claimStatus,
+            impact: parseProjectedLogisticsImpact(
+              parseJsonRecord(row.carrier_claim_impact_json),
+            ),
+          });
+        }
         packages.set(key, returnPackage);
         projectedCase.value.returnPackages.push(returnPackage);
         if (
@@ -441,11 +479,11 @@ export class OrderOperationsProjectionService {
       const exceptionFacts = packageExceptionPayloads.get(key);
       if (exceptionFacts) {
         const impact = parseProjectedLogisticsImpact(exceptionFacts.payload.impact);
-        const affectedQuantity = impact.scope === 'package'
-          ? returnPackage.items.reduce((total, item) => total + item.plannedQuantity, 0)
-          : impact.items
-            .filter((item) => itemIds.has(item.sourceItemId))
-            .reduce((total, item) => total + item.quantity, 0);
+        const affectedQuantity = affectedQuantityForImpact(
+          impact,
+          itemIds,
+          returnPackage.items.reduce((total, item) => total + item.plannedQuantity, 0),
+        );
         if (affectedQuantity > 0) {
           returnPackage.currentException = {
             direction: 'return',
@@ -456,8 +494,28 @@ export class OrderOperationsProjectionService {
           };
         }
       }
+      const claimFacts = packageClaimFacts.get(key);
+      if (
+        claimFacts
+        && affectedQuantityForImpact(claimFacts.impact, itemIds, 1) > 0
+      ) {
+        returnPackage.carrierClaimStatus = claimFacts.status;
+      }
     }
-    for (const [orderId, cases] of casesByOrder) result.set(orderId, [...cases.values()]);
+    for (const [orderId, cases] of casesByOrder) {
+      for (const projectedCase of cases.values()) {
+        projectedCase.carrierClaimStatuses = projectedCase.value.returnPackages.flatMap(
+          ({ carrierClaimStatus }) => carrierClaimStatus ? [carrierClaimStatus] : [],
+        );
+        projectedCase.value.currentTodo = aftersalesTodoForCases([{
+          status: projectedCase.value.status,
+          returnStatuses: projectedCase.returnStatuses,
+          returnLogisticsStatuses: projectedCase.returnLogisticsStatuses,
+          carrierClaimStatuses: projectedCase.carrierClaimStatuses,
+        }]) ?? '无需售后操作';
+      }
+      result.set(orderId, [...cases.values()]);
+    }
     return result;
   }
 }
@@ -614,6 +672,18 @@ function parseProjectedLogisticsImpact(value: unknown):
       return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
     }),
   };
+}
+
+function affectedQuantityForImpact(
+  impact: ReturnType<typeof parseProjectedLogisticsImpact>,
+  visibleItemIds: ReadonlySet<string>,
+  packageQuantity: number,
+): number {
+  return impact.scope === 'package'
+    ? packageQuantity
+    : impact.items
+      .filter((item) => visibleItemIds.has(item.sourceItemId))
+      .reduce((total, item) => total + item.quantity, 0);
 }
 
 function parseOptionalCarrierClaimStatus(value: unknown): CarrierClaimStatus | null {

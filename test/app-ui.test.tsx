@@ -1314,6 +1314,27 @@ describe('订单管理工作台', () => {
         },
       })),
     };
+    const recoveredClaimRecord: ShipmentRecord = {
+      ...claimRecord,
+      packages: claimRecord.packages.map((shipmentPackage) => ({
+        ...shipmentPackage,
+        revision: 3,
+        logisticsStatus: 'delivered',
+        currentException: null,
+      })),
+    };
+    updateShipmentPackageLogisticsStatus
+      .mockReset()
+      .mockResolvedValueOnce({
+        record: exceptionalRecord,
+        archive: { ...shipmentArchiveForGroup(group), records: [exceptionalRecord] },
+        projection: { groups: [], attentionOrders: [] },
+      })
+      .mockResolvedValueOnce({
+        record: recoveredClaimRecord,
+        archive: { ...shipmentArchiveForGroup(group), records: [recoveredClaimRecord] },
+        projection: { groups: [], attentionOrders: [] },
+      });
     const progressShipmentPackageCarrierClaim = vi.fn().mockResolvedValue({
       record: claimRecord,
       archive: { ...shipmentArchiveForGroup(group), records: [claimRecord] },
@@ -1362,6 +1383,17 @@ describe('订单管理工作台', () => {
     }));
     expect(history).toHaveTextContent('正向物流异常 · 运输破损');
     expect(history).toHaveTextContent('当前待办：处理物流异常');
+    await user.click(within(history).getByRole('button', {
+      name: '更新物流状态 包裹 1 运输破损',
+    }));
+    dialog = screen.getByRole('dialog', { name: '更新包裹物流状态' });
+    await user.click(within(dialog).getByRole('radio', { name: '整个包裹' }));
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '状态更新原因' }),
+      '复核后确认破损影响整个包裹',
+    );
+    expect(within(dialog).getByRole('button', { name: '确认更新' })).toBeEnabled();
+    await user.click(within(dialog).getByRole('button', { name: '取消' }));
     await user.click(within(history).getByRole('button', { name: '建立承运索赔' }));
     dialog = screen.getByRole('dialog', { name: '建立承运索赔' });
     await user.type(within(dialog).getByRole('spinbutton', { name: '承运索赔金额' }), '10');
@@ -1376,6 +1408,20 @@ describe('订单管理工作台', () => {
       reason: '就受损商品申请索赔',
     }));
     expect(history).toHaveTextContent('当前待办：跟进承运索赔');
+    await user.click(within(history).getByRole('button', {
+      name: '更新物流状态 包裹 1 运输破损',
+    }));
+    dialog = screen.getByRole('dialog', { name: '更新包裹物流状态' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '物流状态' }), 'delivered');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '状态更新原因' }),
+      '包裹随后正常送达，但承运索赔继续处理',
+    );
+    await user.click(within(dialog).getByRole('button', { name: '确认更新' }));
+    expect(history).not.toHaveTextContent('正向物流异常 · 运输破损');
+    expect(history).toHaveTextContent(/承运索赔\s*处理中/u);
+    await user.click(within(history).getByRole('button', { name: '登记索赔结果' }));
+    expect(screen.getByRole('dialog', { name: '登记索赔结果' })).toBeVisible();
   });
 
   it('按物流状态筛选发货组档案而不改变发货情况分组', async () => {
