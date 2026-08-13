@@ -2874,7 +2874,12 @@ function shipmentRecordsCurrentAction(
   const currentAftersalesAction = aftersalesCurrentAction(records, cases);
   if (currentAftersalesAction) return currentAftersalesAction;
   const statuses = new Set(activeShipmentLogisticsStatuses(records));
-  return shipmentTodoForStatuses(statuses);
+  const carrierClaimStatuses = new Set(records
+    .filter(({ status }) => status === 'active')
+    .flatMap(({ packages }) => packages)
+    .filter(({ status }) => status === 'active')
+    .flatMap(({ carrierClaim }) => carrierClaim ? [carrierClaim.status] : []));
+  return shipmentTodoForStatuses(statuses, carrierClaimStatuses);
 }
 
 function shipmentRecordCurrentAction(

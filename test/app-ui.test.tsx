@@ -1361,6 +1361,7 @@ describe('订单管理工作台', () => {
       },
     }));
     expect(history).toHaveTextContent('正向物流异常 · 运输破损');
+    expect(history).toHaveTextContent('当前待办：处理物流异常');
     await user.click(within(history).getByRole('button', { name: '建立承运索赔' }));
     dialog = screen.getByRole('dialog', { name: '建立承运索赔' });
     await user.type(within(dialog).getByRole('spinbutton', { name: '承运索赔金额' }), '10');
@@ -1374,6 +1375,7 @@ describe('订单管理工作台', () => {
       requestedAmountCents: 1_000,
       reason: '就受损商品申请索赔',
     }));
+    expect(history).toHaveTextContent('当前待办：跟进承运索赔');
   });
 
   it('按物流状态筛选发货组档案而不改变发货情况分组', async () => {

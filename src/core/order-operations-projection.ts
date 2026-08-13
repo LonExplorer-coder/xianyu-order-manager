@@ -237,7 +237,12 @@ export function shipmentTodoForStatuses(
     return '无需物流操作';
   }
   if (statuses.has('lost')) return '处理丢件';
-  if (statuses.has('exception')) return '处理物流异常';
+  if (
+    statuses.has('delivery_dispute')
+    || statuses.has('damaged')
+    || statuses.has('misdelivered')
+    || statuses.has('exception')
+  ) return '处理物流异常';
   if (statuses.has('intercepting')) return '跟进拦截结果';
   if (statuses.has('intercepted_returned')) return '确认退回货物';
   if (statuses.has('awaiting_carrier')) return '确认承运方接收';
