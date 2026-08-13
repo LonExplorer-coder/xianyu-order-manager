@@ -326,6 +326,8 @@ flowchart TD
 
 提出拦截请求不等于商品已经回来，只有实际收到并检查后才能决定库存去向。
 
+拦截请求、拦截成功和拦截失败分别追加记录。拦截成功后，原正向包裹还必须出现实际退回卖家的正常运输事实，系统才开放“拦截退回检查”；检查不建立虚假的买家退货包裹。拦截失败且原包裹已由买家签收时，必须明确转为买家退回或仅退款。
+
 ### 8.6 丢件处理
 
 ```text
@@ -337,6 +339,16 @@ flowchart TD
 ```
 
 丢件不会产生退货入库。补发仍是一次新出库；承运方赔付则是一笔独立收入记录。
+
+对正向包裹而言，“运输中”就可以发起售后，无需先登记物流异常。当丢件、错投、破损或其他异常已确认后，用户必须对受影响的具体商品和数量选择：
+
+- 继续等待承运调查；
+- 追回或重新派送原包裹；
+- 仅退款；
+- 直接补发；
+- 退款并补发。
+
+退款和承运索赔各自确认，互不替代。任何补发选择都先建立一个与该异常唯一关联的新处理轮次，再由用户建立新补发记录；不直接改订单履约投影，也不把“选择补发”写成“已发出”。原包裹后来找回时，只追加找回与最终去向，已发生的退款、补发和索赔保持不变。
 
 ### 8.7 部分退货或部分退款
 
@@ -722,7 +734,7 @@ flowchart TD
 
 当前 [Issue #52](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/52) 已完成包裹、部分发货与作废边界决策；[Issue #18](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/18) 可以据此实施发货记录、包裹商品明细和发货快照。
 
-截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线；[Issue #57](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/57) 已交付按发货快照商品与数量建立、修改和查询的售后处理单、售后概览、可处理数量校验与不可变处理时间线；[Issue #58](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/58) 已交付精确到商品与数量的仅退款和退货退款向导；[Issue #59](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/59) 已交付换货、直接补发、独立补发记录和多轮售后链路。物流、售后、退货、补发和资金事实分别保存，不会互相猜测；库存流水和完整财务模块仍由后续任务承接。
+截至当前实现，[Issue #56](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/56) 已在包裹层交付七种人工物流状态、状态筛选、当前待办和不可变物流时间线；[Issue #57](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/57) 已交付按发货快照商品与数量建立、修改和查询的售后处理单、售后概览、可处理数量校验与不可变处理时间线；[Issue #58](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/58) 已交付精确到商品与数量的仅退款和退货退款向导；[Issue #59](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/59) 已交付换货、直接补发、独立补发记录和多轮售后链路；[Issue #60](https://github.com/LonExplorer-coder/xianyu-order-manager/issues/60) 已交付正向异常的商品级处理选择、独立退款与索赔、补发轮次以及拦截退回检查。物流、售后、退货、补发和资金事实分别保存，不会互相猜测；库存流水和完整财务模块仍由后续任务承接。
 
 ## 18. 推荐的渐进实施顺序
 

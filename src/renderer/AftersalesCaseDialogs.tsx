@@ -22,6 +22,7 @@ import {
   physicalControlForSourcePackages,
   sourcePackageEvidenceFromShipmentRecord,
   type AftersalesHandlingDirection,
+  type AftersalesOutboundExceptionDecision,
   type AftersalesReturnExceptionDecision,
 } from '../core/aftersales-coordination';
 import { normalizeShanghaiDateTime } from '../core/order-normalization';
@@ -411,6 +412,9 @@ export function ProgressAftersalesCaseDialog({
   const [returnExceptionDecision, setReturnExceptionDecision] = useState<
     AftersalesReturnExceptionDecision
   >(aftersalesCase.coordination.returnException?.decision ?? 'wait_investigation');
+  const [outboundExceptionDecision, setOutboundExceptionDecision] = useState<
+    AftersalesOutboundExceptionDecision
+  >(aftersalesCase.coordination.outboundException?.decision ?? 'wait_investigation');
   const activeExceptionType = kind === 'progress_return_logistics_exception'
     ? returnRecord?.currentException?.exceptionType
     : exceptionType;
@@ -420,6 +424,10 @@ export function ProgressAftersalesCaseDialog({
     direction !== aftersalesCase.coordination.handlingDirection
       && !(direction === 'intercept'
         && aftersalesCase.coordination.interception?.status === 'requested')
+      && !(aftersalesCase.coordination.interception?.status === 'failed'
+        && aftersalesCase.coordination.physicalControl === 'buyer'
+        && direction !== 'buyer_return'
+        && direction !== 'only_refund')
   ));
   const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection>(
     conversionDirections[0] ?? 'waiting',
@@ -446,6 +454,14 @@ export function ProgressAftersalesCaseDialog({
   const [differenceNote, setDifferenceNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const outboundExceptionPackage = aftersalesCase.coordination.sourcePackages.find(({ packageId }) => (
+    packageId === aftersalesCase.coordination.outboundException?.packageId
+  ));
+  const interceptedReturnPackage = aftersalesCase.coordination.sourcePackages.find(({ packageId }) => (
+    packageId === aftersalesCase.coordination.outboundException?.packageId
+  )) ?? aftersalesCase.coordination.sourcePackages.find(({ logisticsStatus: status }) => (
+    status === 'returned'
+  ));
   const amountCents = yuanToCents(amountYuan);
   const needsAmount = kind === 'confirm_refund'
     || kind === 'open_carrier_claim'
@@ -477,7 +493,11 @@ export function ProgressAftersalesCaseDialog({
       && !carrierConfirmedLoss)
     && !(kind === 'update_return_logistics_status'
       && logisticsStatus === 'awaiting_carrier'
-      && (carrierAcceptanceConfirmed || returnRecord?.carrierAcceptedAt != null)),
+      && (carrierAcceptanceConfirmed || returnRecord?.carrierAcceptedAt != null))
+    && (kind !== 'decide_outbound_logistics_exception'
+      || (aftersalesCase.coordination.outboundException && outboundExceptionPackage))
+    && (kind !== 'inspect_intercepted_return'
+      || (interceptedReturnPackage && interceptedReturnPackage.items.length > 0)),
   );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -496,6 +516,29 @@ export function ProgressAftersalesCaseDialog({
       const targetId = returnRecord?.id as string;
       let input: ProgressAftersalesCaseInput;
       switch (kind) {
+        case 'decide_outbound_logistics_exception':
+          input = {
+            kind, ...common,
+            packageId: outboundExceptionPackage?.packageId as string,
+            exceptionId: aftersalesCase.coordination.outboundException?.exceptionId as string,
+            decision: outboundExceptionDecision,
+            occurredAt: normalizedOccurredAt as string,
+            reason,
+          };
+          break;
+        case 'inspect_intercepted_return':
+          input = {
+            kind, ...common,
+            packageId: interceptedReturnPackage?.packageId as string,
+            result: inspectionResult,
+            occurredAt: normalizedOccurredAt as string,
+            reason,
+            items: (interceptedReturnPackage?.items ?? []).map((item) => ({
+              shipmentPackageItemId: item.shipmentPackageItemId,
+              quantity: item.quantity,
+            })),
+          };
+          break;
         case 'create_replacement_shipment':
           input = {
             kind, ...common,
@@ -884,6 +927,60 @@ export function ProgressAftersalesCaseDialog({
               <option value="negotiate">继续协商</option>
             </select>
           </label>
+        )}
+        {kind === 'decide_outbound_logistics_exception' && (
+          <>
+            <label>
+              <span>正向异常处理选择</span>
+              <select
+                aria-label="正向异常处理选择"
+                value={outboundExceptionDecision}
+                disabled={saving}
+                onChange={(event) => setOutboundExceptionDecision(
+                  event.target.value as AftersalesOutboundExceptionDecision,
+                )}
+              >
+                <option value="wait_investigation">继续等待调查</option>
+                <option value="recover_or_redeliver">追回或重新派送</option>
+                <option value="refund_only">仅退款</option>
+                <option value="replacement">直接补发</option>
+                <option value="refund_and_replacement">退款并补发</option>
+              </select>
+            </label>
+            {outboundExceptionPackage && (
+              <p>
+                影响范围：{outboundExceptionPackage.items.map((item) => (
+                  `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} × ${item.quantity}`
+                )).join('；')}
+              </p>
+            )}
+          </>
+        )}
+        {kind === 'inspect_intercepted_return' && interceptedReturnPackage && (
+          <fieldset>
+            <legend>拦截退回商品检查</legend>
+            <label>
+              <span>检查结果</span>
+              <select
+                aria-label="拦截退回检查结果"
+                value={inspectionResult}
+                disabled={saving}
+                onChange={(event) => setInspectionResult(event.target.value as ReturnInspectionResult)}
+              >
+                <option value="resellable">可再次销售</option>
+                <option value="defective">瑕疵品</option>
+                <option value="scrapped">报废</option>
+                <option value="other">其他</option>
+              </select>
+            </label>
+            <ul>
+              {interceptedReturnPackage.items.map((item) => (
+                <li key={item.shipmentPackageItemId}>
+                  {item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''} × {item.quantity}
+                </li>
+              ))}
+            </ul>
+          </fieldset>
         )}
         {kind === 'resolve_carrier_claim' && (
           <label>
@@ -1297,6 +1394,20 @@ function normalizeActionDateTime(value: string): string {
 }
 
 function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
+  if (kind === 'decide_outbound_logistics_exception') return {
+    title: '选择正向异常处理',
+    description: '买家侧处理与承运调查、索赔分别推进；补发将建立新的处理轮次和发货记录。',
+    timeLabel: '处理选择时间',
+    reasonLabel: '选择原因',
+    confirmLabel: '确认选择',
+  };
+  if (kind === 'inspect_intercepted_return') return {
+    title: '检查拦截退回商品',
+    description: '只有原正向包裹已真实退回卖家才能检查；不会伪造买家退货记录。',
+    timeLabel: '检查时间',
+    reasonLabel: '检查说明',
+    confirmLabel: '确认检查',
+  };
   if (kind === 'create_replacement_shipment') return {
     title: '建立本轮补发记录',
     description: '补发会建立新的正向发货记录与包裹，原发货记录保持不变。',

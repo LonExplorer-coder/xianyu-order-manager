@@ -2724,7 +2724,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 34 });
+        .toEqual({ version: 35 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
@@ -5931,7 +5931,7 @@ describe('售后处理单', () => {
     expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('delivered');
   });
 
-  it('原正向包裹确认丢失后只提示调查退款或补发且补发仅形成待办', async () => {
+  it('原正向包裹确认丢失后要求明确买家侧处理并为补发建立轮次', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
     const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
@@ -5987,8 +5987,15 @@ describe('售后处理单', () => {
       coordination: {
         handlingDirection: 'waiting',
         physicalControl: 'confirmed_lost',
-        currentTodo: '原正向包裹已确认丢失，请选择退款、补发或继续调查',
-        risk: '原正向包裹确认丢失，商品不在买家控制中',
+        currentTodo: '正向物流异常已确认，请明确买家侧处理选择',
+        risk: '正向丢件影响 1 件商品',
+        outboundException: {
+          packageId: sourcePackage.id,
+          exceptionType: 'lost',
+          stage: 'confirmed',
+          affectedQuantity: 1,
+          decision: null,
+        },
         availableDirections: ['waiting', 'only_refund', 'replacement'],
         sourcePackages: [expect.objectContaining({
           packageId: sourcePackage.id,
@@ -6025,8 +6032,8 @@ describe('售后处理单', () => {
     });
     expect(mixed.coordination).toMatchObject({
       physicalControl: 'mixed',
-      currentTodo: '部分商品已确认丢失，请选择退款、补发或继续调查',
-      risk: '同一售后内商品实物控制关系不一致',
+      currentTodo: '正向物流异常已确认，请明确买家侧处理选择',
+      risk: '正向丢件影响 1 件商品',
       availableDirections: ['waiting', 'only_refund', 'replacement'],
       sourcePackages: [{
         packageId: sourcePackage.id,
@@ -6047,24 +6054,62 @@ describe('售后处理单', () => {
     });
 
     const replacementPending = application.progressAftersalesCase({
-      kind: 'change_handling_direction',
+      kind: 'decide_outbound_logistics_exception',
       caseId: lost.id,
       expectedRevision: lost.revision,
-      handlingDirection: 'replacement',
+      packageId: sourcePackage.id,
+      exceptionId: lost.coordination.outboundException?.exceptionId as string,
+      decision: 'replacement',
       occurredAt: '2026-08-14T21:20:00+08:00',
       reason: '与买家确认选择补发，待后续建立新发货记录',
     });
     expect(replacementPending).toMatchObject({
       status: 'waiting_replacement',
       returns: [],
-      refund: { status: 'pending', actualRecord: null },
+      refund: { status: 'cancelled', actualRecord: null },
       coordination: {
         handlingDirection: 'replacement',
-        currentTodo: '已选择补发，待后续建立新的补发发货记录',
-        risk: '原正向包裹已确认丢失，本任务尚未建立补发发货记录',
+        currentTodo: '建立并跟进独立补发记录，原正向异常继续独立处理',
+        risk: '正向丢件影响 1 件商品',
+        outboundException: { decision: 'replacement' },
       },
+      rounds: expect.arrayContaining([
+        expect.objectContaining({ workflow: 'direct_replacement' }),
+      ]),
     });
     expect(application.queryShipmentRecords()).toHaveLength(1);
+    const replacementRound = replacementPending.rounds.at(-1);
+    if (!replacementRound || replacementRound.workflow !== 'direct_replacement') {
+      throw new Error('测试前置缺少正向异常补发轮次');
+    }
+    const replacement = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: replacementPending.id,
+      expectedRevision: replacementPending.revision,
+      occurredAt: '2026-08-14T21:30:00+08:00',
+      reason: '按已确认丢失数量建立补发记录',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-CONFIRMED-LOST-REPLACEMENT-0001',
+        items: replacementRound.items.map((item) => ({
+          roundItemId: item.id,
+          quantity: item.quantity,
+        })),
+      }],
+    });
+    const replacementPackage = replacement.rounds.at(-1)?.replacementShipment?.packages[0];
+    if (!replacementPackage) throw new Error('测试前置缺少补发包裹');
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: replacement.rounds.at(-1)?.replacementShipment?.id as string,
+      packageId: replacementPackage.id,
+      expectedRevision: replacementPackage.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T22:00:00+08:00',
+      reason: '补发包裹已由买家签收',
+    });
+    expect(application.queryAftersalesCases({ shipmentRecordId: shipment.record.id })
+      .find(({ id }) => id === lost.id))
+      .toMatchObject({ status: 'ready_to_complete', refund: { status: 'cancelled' } });
   });
 
   it('不同正向包裹分别签收和运输中时不会伪造部分丢件事实', async () => {

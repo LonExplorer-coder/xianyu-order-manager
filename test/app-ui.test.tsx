@@ -529,6 +529,9 @@ function testAftersalesCoordination(
     handlingDirectionTimeline: [],
     sourcePackages: [],
     interception: null,
+    outboundException: null,
+    outboundExceptionHistory: [],
+    interceptedReturnInspection: null,
     returnException: null,
     ...overrides,
   };
@@ -2187,6 +2190,131 @@ describe('订单管理工作台', () => {
     expect(caseRegion).toHaveTextContent('拦截失败');
     expect(caseRegion).toHaveTextContent('核对并确认实际退款');
     expect(within(caseRegion).getByRole('button', { name: '确认实际退款' })).toBeEnabled();
+  });
+
+  it('在桌面端将正向异常作为主待办并提交商品级处理选择', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourcePackage = record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const outboundException: NonNullable<
+      AftersalesCase['coordination']['outboundException']
+    > = {
+      exceptionId: 'outbound-exception-ui-1',
+      packageId: sourcePackage.id,
+      exceptionType: 'lost' as const,
+      stage: 'confirmed' as const,
+      affectedQuantity: 1,
+      occurredAt: '2026-08-14T09:10:00+08:00',
+      decision: null,
+      availableDecisions: [
+        'wait_investigation', 'recover_or_redeliver', 'refund_only',
+        'replacement', 'refund_and_replacement',
+      ],
+      timeline: [],
+    };
+    const pending: AftersalesCase = {
+      ...emptyAftersalesRounds,
+      id: 'aftersales-outbound-exception-ui-1',
+      shipmentRecordId: record.id,
+      workflow: 'return_refund',
+      status: 'processing',
+      revision: 2,
+      reason: '正向包裹其中一件已确认丢失',
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      items: [{
+        id: 'aftersales-outbound-exception-item-ui-1',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: sourcePackage.id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: {
+        pendingItemId: 'outbound-refund-ui-1',
+        requestedAmountCents: 1_000,
+        status: 'pending',
+        actualRecord: null,
+        createdAt: '2026-08-14T01:00:00.000Z',
+      },
+      returns: [],
+      coordination: testAftersalesCoordination('waiting', {
+        physicalControl: 'confirmed_lost',
+        currentTodo: '正向物流异常已确认，请明确买家侧处理选择',
+        risk: '正向丢件影响 1 件商品',
+        sourcePackages: [{
+          packageId: sourcePackage.id,
+          shippingCarrier: sourcePackage.shippingCarrier,
+          trackingNumber: sourcePackage.trackingNumber,
+          logisticsStatus: 'in_transit',
+          confirmedLost: true,
+          items: [{
+            shipmentPackageItemId: sourceItem.id,
+            sourceTitle: sourceItem.sourceTitle,
+            sourceSpec: sourceItem.sourceSpec,
+            quantity: 1,
+            confirmedLostQuantity: 1,
+          }],
+        }],
+        outboundException,
+        outboundExceptionHistory: [outboundException],
+      }),
+      timeline: [],
+      createdAt: '2026-08-14T01:00:00.000Z',
+      updatedAt: '2026-08-14T01:10:00.000Z',
+    };
+    const progressAftersalesCase = vi.fn().mockResolvedValue({
+      ...pending,
+      revision: 3,
+      status: 'waiting_replacement',
+      coordination: {
+        ...pending.coordination,
+        outboundException: { ...outboundException, decision: 'refund_and_replacement' },
+      },
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([pending]),
+      progressAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const caseRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${pending.id}`,
+    });
+    expect(caseRegion).toHaveTextContent('当前待办：正向物流异常已确认');
+    expect(caseRegion).toHaveTextContent('未解决风险：正向丢件影响 1 件商品');
+    await user.click(within(caseRegion).getByRole('button', { name: '选择正向异常处理' }));
+    const dialog = screen.getByRole('dialog', { name: '选择正向异常处理' });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '正向异常处理选择' }),
+      'refund_and_replacement',
+    );
+    await user.type(within(dialog).getByRole('textbox', { name: '选择原因' }), '先退款并按丢失数量补发');
+    await user.click(within(dialog).getByRole('button', { name: '确认选择' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenCalledWith({
+      kind: 'decide_outbound_logistics_exception',
+      caseId: pending.id,
+      expectedRevision: 2,
+      packageId: sourcePackage.id,
+      exceptionId: outboundException.exceptionId,
+      decision: 'refund_and_replacement',
+      occurredAt: expect.any(String),
+      reason: '先退款并按丢失数量补发',
+    }));
   });
 
   it('用真实本地应用投影在桌面端补登终态未决拦截结果', async () => {

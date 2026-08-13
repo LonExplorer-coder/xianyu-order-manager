@@ -12,6 +12,7 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
+import { removeVersion35ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
 
@@ -478,6 +479,7 @@ describe('换货、直接补发与多轮售后', () => {
     const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
     try {
+      removeVersion35ExtensionArtifacts(legacy);
       legacy.exec(`
         PRAGMA foreign_keys = OFF;
         DROP TRIGGER IF EXISTS aftersales_processing_rounds_are_immutable_on_update;
@@ -553,7 +555,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 34 });
+        .toEqual({ version: 35 });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);

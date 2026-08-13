@@ -11,9 +11,13 @@ import type {
 import { isReturnLogisticsStatus } from './logistics-exceptions';
 import {
   isAftersalesHandlingDirection,
+  isAftersalesInterceptedReturnInspectionResult,
+  isAftersalesOutboundExceptionDecision,
   isAftersalesReturnExceptionDecision,
   type AftersalesCoordination,
   type AftersalesHandlingDirection,
+  type AftersalesInterceptedReturnInspectionResult,
+  type AftersalesOutboundExceptionDecision,
   type AftersalesReturnExceptionDecision,
 } from './aftersales-coordination';
 import type { ShipmentRecord } from './shipment-records';
@@ -203,6 +207,26 @@ export type AftersalesReturnRecord = {
 };
 
 export type ProgressAftersalesCaseInput =
+  | {
+    kind: 'decide_outbound_logistics_exception';
+    caseId: string;
+    expectedRevision: number;
+    packageId: string;
+    exceptionId: string;
+    decision: AftersalesOutboundExceptionDecision;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'inspect_intercepted_return';
+    caseId: string;
+    expectedRevision: number;
+    packageId: string;
+    result: AftersalesInterceptedReturnInspectionResult;
+    occurredAt: string;
+    reason: string;
+    items: AftersalesCaseItemInput[];
+  }
   | {
     kind: 'create_replacement_shipment';
     caseId: string;
@@ -633,6 +657,50 @@ export function normalizeProgressAftersalesCaseInput(
     caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
     expectedRevision: revision(record.expectedRevision),
   };
+  if (record.kind === 'decide_outbound_logistics_exception') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'packageId', 'exceptionId',
+        'decision', 'occurredAt', 'reason',
+      ],
+      '选择正向物流异常处理参数',
+    );
+    if (!isAftersalesOutboundExceptionDecision(record.decision)) {
+      throw new Error('正向物流异常处理选择无效');
+    }
+    return {
+      kind: 'decide_outbound_logistics_exception',
+      ...common,
+      packageId: boundedText(record.packageId, 200, '正向包裹标识无效'),
+      exceptionId: boundedText(record.exceptionId, 200, '物流异常标识无效'),
+      decision: record.decision,
+      occurredAt: dateTime(record.occurredAt, '异常处理选择时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的异常处理选择原因'),
+    };
+  }
+  if (record.kind === 'inspect_intercepted_return') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'packageId', 'result',
+        'occurredAt', 'reason', 'items',
+      ],
+      '检查拦截退回商品参数',
+    );
+    if (!isAftersalesInterceptedReturnInspectionResult(record.result)) {
+      throw new Error('拦截退回检查结果无效');
+    }
+    return {
+      kind: 'inspect_intercepted_return',
+      ...common,
+      packageId: boundedText(record.packageId, 200, '正向包裹标识无效'),
+      result: record.result,
+      occurredAt: dateTime(record.occurredAt, '拦截退回检查时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的拦截退回检查说明'),
+      items: itemInputs(record.items),
+    };
+  }
   if (record.kind === 'create_replacement_shipment') {
     rejectUnknownKeys(
       record,

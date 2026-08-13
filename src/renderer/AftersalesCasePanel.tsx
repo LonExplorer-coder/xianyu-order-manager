@@ -69,6 +69,60 @@ export function AftersalesCasePanel({
               </li>
             ))}
           </ul>
+          <div
+            className="shipment-record-card__coordination"
+            aria-label="售后当前协调"
+            role="status"
+          >
+            <strong>当前待办：{aftersalesCase.coordination.currentTodo}</strong>
+            {aftersalesCase.coordination.risk && (
+              <span className="shipment-record-card__coordination-risk">
+                未解决风险：{aftersalesCase.coordination.risk}
+              </span>
+            )}
+            <span>
+              处理方向：{aftersalesCase.coordination.handlingDirection
+                ? aftersalesHandlingDirectionLabel(aftersalesCase.coordination.handlingDirection)
+                : '待明确'}
+              {' · '}实物控制：{aftersalesPhysicalControlLabel(aftersalesCase.coordination.physicalControl)}
+            </span>
+          </div>
+          {aftersalesCase.coordination.outboundException && (
+            <div className="shipment-record-card__return-exception" aria-label="正向物流异常" role="status">
+              <strong>
+                正向物流异常 · {logisticsExceptionTypeLabel(
+                  aftersalesCase.coordination.outboundException.exceptionType,
+                )} · {logisticsExceptionStageLabel(
+                  aftersalesCase.coordination.outboundException.stage,
+                )}
+              </strong>
+              <span>
+                影响 {aftersalesCase.coordination.outboundException.affectedQuantity} 件
+                {' · '}买家侧处理：{aftersalesCase.coordination.outboundException.decision
+                  ? outboundExceptionDecisionLabel(
+                    aftersalesCase.coordination.outboundException.decision,
+                  )
+                  : '待选择'}
+              </span>
+            </div>
+          )}
+          {aftersalesCase.coordination.interceptedReturnInspection && (
+            <div className="shipment-record-card__aftersales-facts" aria-label="拦截退回检查事实">
+              <span>
+                拦截退回已检查 · <strong>{inspectionResultLabel(
+                  aftersalesCase.coordination.interceptedReturnInspection.result,
+                )}</strong>
+              </span>
+              <span>
+                {aftersalesCase.coordination.interceptedReturnInspection.items.reduce(
+                  (sum, item) => sum + item.quantity,
+                  0,
+                )} 件 · {formatDateTime(
+                  aftersalesCase.coordination.interceptedReturnInspection.occurredAt,
+                )}
+              </span>
+            </div>
+          )}
           {aftersalesCase.rounds?.some(({ workflow }) => workflow !== 'legacy') && (
             <section className="shipment-record-card__coordination" aria-label="售后实物流转汇总">
               <strong>当前第 {aftersalesCase.fulfillment.currentRoundNumber} 轮 · {aftersalesCase.coordination.currentTodo}</strong>
@@ -95,26 +149,6 @@ export function AftersalesCasePanel({
               </ol>
             </section>
           )}
-          {aftersalesCase.workflow === 'return_refund' && (
-            <div
-              className="shipment-record-card__coordination"
-              aria-label="在途售后协调"
-              role="status"
-            >
-              <strong>当前待办：{aftersalesCase.coordination.currentTodo}</strong>
-              <span>
-                处理方向：{aftersalesCase.coordination.handlingDirection
-                  ? aftersalesHandlingDirectionLabel(aftersalesCase.coordination.handlingDirection)
-                  : '待明确'}
-                {' · '}实物控制：{aftersalesPhysicalControlLabel(aftersalesCase.coordination.physicalControl)}
-              </span>
-              {aftersalesCase.coordination.risk && (
-                <span className="shipment-record-card__coordination-risk">
-                  风险：{aftersalesCase.coordination.risk}
-                </span>
-              )}
-            </div>
-          )}
           {aftersalesCase.coordination.sourcePackages.length > 0 && (
             <div className="shipment-record-card__source-packages" aria-label="原正向包裹与商品数量">
               {aftersalesCase.coordination.sourcePackages.map((sourcePackage) => (
@@ -127,6 +161,15 @@ export function AftersalesCasePanel({
                     实际流转：{shipmentLogisticsStatusLabel(sourcePackage.logisticsStatus)}
                     {sourcePackage.confirmedLost ? ' · 已确认丢失' : ''}
                   </p>
+                  {sourcePackage.carrierClaim && (
+                    <p>
+                      承运索赔：{carrierClaimStatusLabel(sourcePackage.carrierClaim.status)}
+                      {' · '}申请 {formatMoney(sourcePackage.carrierClaim.requestedAmountCents)}
+                      {sourcePackage.carrierClaim.actualCompensationCents !== null
+                        ? ` · 实际赔付 ${formatMoney(sourcePackage.carrierClaim.actualCompensationCents)}`
+                        : ''}
+                    </p>
+                  )}
                   <ul>
                     {sourcePackage.items.map((item) => (
                       <li key={item.shipmentPackageItemId}>
@@ -442,6 +485,18 @@ export function AftersalesCasePanel({
                   )}
                 </button>
               )}
+              {aftersalesCase.refund?.status === 'pending'
+                && aftersalesCase.coordination.outboundException?.decision
+                  === 'refund_and_replacement'
+                && primaryProgressAction(aftersalesCase) !== 'confirm_refund' && (
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => setProgressTarget({ aftersalesCase, kind: 'confirm_refund' })}
+                >
+                  {progressActionLabel('confirm_refund')}
+                </button>
+              )}
               {aftersalesCase.status === 'ready_to_complete'
                 && primaryProgressAction(aftersalesCase) !== 'complete' && (
                 <button
@@ -491,6 +546,10 @@ export function AftersalesCasePanel({
           </details>
           {(aftersalesCase.coordination.handlingDirectionTimeline.length > 0
             || aftersalesCase.coordination.interception
+            || aftersalesCase.coordination.outboundExceptionHistory.some(
+              ({ timeline }) => timeline.length > 0,
+            )
+            || aftersalesCase.coordination.interceptedReturnInspection
             || aftersalesCase.coordination.returnExceptionHistory.some(
               ({ timeline }) => timeline.length > 0,
             )) && (
@@ -514,6 +573,33 @@ export function AftersalesCasePanel({
                     <small>{formatDateTime(event.occurredAt)}</small>
                   </li>
                 ))}
+                {aftersalesCase.coordination.outboundExceptionHistory.flatMap((exception) => (
+                  exception.timeline.map((event, index) => (
+                    <li key={`outbound-exception-decision-${exception.exceptionId}-${index}`}>
+                      <strong>{event.kind === 'selected'
+                        ? '选择正向异常处理'
+                        : '更改正向异常处理'}</strong>
+                      <span>
+                        {event.before ? `${outboundExceptionDecisionLabel(event.before)} → ` : ''}
+                        {outboundExceptionDecisionLabel(event.after)} · {event.reason}
+                      </span>
+                      <small>{formatDateTime(event.occurredAt)}</small>
+                    </li>
+                  ))
+                ))}
+                {aftersalesCase.coordination.interceptedReturnInspection && (
+                  <li key={`intercepted-return-inspection-${aftersalesCase.coordination.interceptedReturnInspection.packageId}`}>
+                    <strong>检查拦截退回商品</strong>
+                    <span>
+                      {inspectionResultLabel(
+                        aftersalesCase.coordination.interceptedReturnInspection.result,
+                      )} · {aftersalesCase.coordination.interceptedReturnInspection.reason}
+                    </span>
+                    <small>{formatDateTime(
+                      aftersalesCase.coordination.interceptedReturnInspection.occurredAt,
+                    )}</small>
+                  </li>
+                )}
                 {aftersalesCase.coordination.returnExceptionHistory.flatMap((exception) => (
                   exception.timeline.map((event, index) => (
                     <li key={`return-exception-decision-${exception.exceptionId}-${index}`}>
@@ -549,6 +635,25 @@ export function AftersalesCasePanel({
 function primaryProgressAction(
   aftersalesCase: AftersalesCase,
 ): ProgressAftersalesCaseInput['kind'] | null {
+  if (aftersalesCase.coordination.outboundException
+    && aftersalesCase.coordination.outboundException.decision === null) {
+    return 'decide_outbound_logistics_exception';
+  }
+  if (aftersalesCase.coordination.interception?.status === 'succeeded'
+    && aftersalesCase.coordination.physicalControl === 'seller'
+    && aftersalesCase.coordination.interceptedReturnInspection === null) {
+    return 'inspect_intercepted_return';
+  }
+  const outboundDecision = aftersalesCase.coordination.outboundException?.decision;
+  if (aftersalesCase.refund?.status === 'pending'
+    && outboundDecision === 'refund_only') {
+    return 'confirm_refund';
+  }
+  if (aftersalesCase.refund?.status === 'pending'
+    && outboundDecision === 'refund_and_replacement'
+    && aftersalesCase.rounds.at(-1)?.replacementShipment) {
+    return 'confirm_refund';
+  }
   if (aftersalesCase.coordination.returnException
     && aftersalesCase.coordination.returnException.decision === null) {
     return 'decide_return_logistics_exception';
@@ -637,6 +742,8 @@ function returnFactProgressAction(
 
 function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string {
   const labels: Record<ProgressAftersalesCaseInput['kind'], string> = {
+    decide_outbound_logistics_exception: '选择正向异常处理',
+    inspect_intercepted_return: '检查拦截退回商品',
     create_replacement_shipment: '建立本轮补发',
     start_next_round: '登记新一轮问题',
     record_interception_result: '登记拦截结果',
@@ -657,6 +764,18 @@ function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string 
     confirm_carrier_compensation: '确认实际赔付',
   };
   return labels[kind];
+}
+
+function outboundExceptionDecisionLabel(
+  decision: NonNullable<AftersalesCase['coordination']['outboundException']>['decision'],
+): string {
+  return {
+    wait_investigation: '继续等待调查',
+    recover_or_redeliver: '追回或重新派送',
+    refund_only: '仅退款',
+    replacement: '直接补发',
+    refund_and_replacement: '退款并补发',
+  }[decision ?? 'wait_investigation'];
 }
 
 function returnExceptionDecisionLabel(

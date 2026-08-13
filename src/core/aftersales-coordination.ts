@@ -39,6 +39,55 @@ export type AftersalesReturnExceptionDecision =
   | 'reject_refund'
   | 'negotiate';
 
+export type AftersalesOutboundExceptionDecision =
+  | 'wait_investigation'
+  | 'recover_or_redeliver'
+  | 'refund_only'
+  | 'replacement'
+  | 'refund_and_replacement';
+
+export type AftersalesOutboundExceptionDecisionEvent = {
+  kind: 'selected' | 'changed';
+  exceptionId: string;
+  packageId: string;
+  before: AftersalesOutboundExceptionDecision | null;
+  after: AftersalesOutboundExceptionDecision;
+  occurredAt: string;
+  reason: string;
+  createdAt: string;
+};
+
+export type AftersalesOutboundExceptionEvidence = {
+  exceptionId: string;
+  packageId: string;
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+  affectedQuantity: number;
+  occurredAt: string;
+};
+
+export type AftersalesOutboundExceptionCoordination =
+  AftersalesOutboundExceptionEvidence & {
+    decision: AftersalesOutboundExceptionDecision | null;
+    availableDecisions: AftersalesOutboundExceptionDecision[];
+    timeline: AftersalesOutboundExceptionDecisionEvent[];
+  };
+
+export type AftersalesInterceptedReturnInspectionResult =
+  | 'resellable'
+  | 'defective'
+  | 'scrapped'
+  | 'other';
+
+export type AftersalesInterceptedReturnInspection = {
+  packageId: string;
+  result: AftersalesInterceptedReturnInspectionResult;
+  items: Array<{ shipmentPackageItemId: string; quantity: number }>;
+  occurredAt: string;
+  reason: string;
+  createdAt: string;
+};
+
 export type AftersalesReturnExceptionDecisionEvent = {
   kind: 'selected' | 'changed';
   exceptionId: string;
@@ -80,6 +129,12 @@ export type AftersalesSourcePackageEvidence = {
   trackingNumber: string;
   logisticsStatus: OutboundLogisticsStatus;
   confirmedLost: boolean;
+  carrierClaim?: {
+    status: 'pending' | 'approved' | 'rejected' | 'paid';
+    requestedAmountCents: number;
+    approvedAmountCents: number | null;
+    actualCompensationCents: number | null;
+  } | null;
   items: Array<{
     shipmentPackageItemId: string;
     sourceTitle: string;
@@ -98,6 +153,9 @@ export type AftersalesCoordination = {
   handlingDirectionTimeline: AftersalesHandlingDirectionEvent[];
   sourcePackages: AftersalesSourcePackageEvidence[];
   interception: AftersalesInterception | null;
+  outboundException: AftersalesOutboundExceptionCoordination | null;
+  outboundExceptionHistory: AftersalesOutboundExceptionCoordination[];
+  interceptedReturnInspection: AftersalesInterceptedReturnInspection | null;
   returnException: AftersalesReturnExceptionCoordination | null;
   returnExceptionHistory: AftersalesReturnExceptionCoordination[];
 };
@@ -119,6 +177,14 @@ export const AFTERSALES_RETURN_EXCEPTION_DECISIONS = [
   'negotiate',
 ] as const satisfies readonly AftersalesReturnExceptionDecision[];
 
+export const AFTERSALES_OUTBOUND_EXCEPTION_DECISIONS = [
+  'wait_investigation',
+  'recover_or_redeliver',
+  'refund_only',
+  'replacement',
+  'refund_and_replacement',
+] as const satisfies readonly AftersalesOutboundExceptionDecision[];
+
 export function isAftersalesHandlingDirection(
   value: unknown,
 ): value is AftersalesHandlingDirection {
@@ -133,6 +199,22 @@ export function isAftersalesReturnExceptionDecision(
     && (AFTERSALES_RETURN_EXCEPTION_DECISIONS as readonly string[]).includes(value);
 }
 
+export function isAftersalesOutboundExceptionDecision(
+  value: unknown,
+): value is AftersalesOutboundExceptionDecision {
+  return typeof value === 'string'
+    && (AFTERSALES_OUTBOUND_EXCEPTION_DECISIONS as readonly string[]).includes(value);
+}
+
+export function isAftersalesInterceptedReturnInspectionResult(
+  value: unknown,
+): value is AftersalesInterceptedReturnInspectionResult {
+  return value === 'resellable'
+    || value === 'defective'
+    || value === 'scrapped'
+    || value === 'other';
+}
+
 export function coordinateAftersales(input: {
   handlingDirection: AftersalesHandlingDirection | null;
   sourcePackages: AftersalesSourcePackageEvidence[];
@@ -142,6 +224,10 @@ export function coordinateAftersales(input: {
   returnExceptions?: Array<AftersalesReturnExceptionEvidence & {
     decisionTimeline: AftersalesReturnExceptionDecisionEvent[];
   }>;
+  outboundExceptions?: Array<AftersalesOutboundExceptionEvidence & {
+    decisionTimeline: AftersalesOutboundExceptionDecisionEvent[];
+  }>;
+  interceptedReturnInspection?: AftersalesInterceptedReturnInspection | null;
 }): AftersalesCoordination {
   const physicalControl = physicalControlForSourcePackages(input.sourcePackages);
   const availableDirections = availableAftersalesDirections(physicalControl);
@@ -151,8 +237,24 @@ export function coordinateAftersales(input: {
   const returnException = [...returnExceptionHistory].reverse().find((exception) => (
     exception.stage !== 'recovered' && exception.stage !== 'resolved'
   )) ?? null;
+  const outboundExceptionHistory = (input.outboundExceptions ?? []).map((exception) => ({
+    ...exception,
+    decision: exception.decisionTimeline.at(-1)?.after ?? null,
+    availableDecisions: [...AFTERSALES_OUTBOUND_EXCEPTION_DECISIONS],
+    timeline: exception.decisionTimeline,
+  }));
+  const outboundException = [...outboundExceptionHistory].reverse().find((exception) => (
+    exception.stage === 'confirmed'
+  )) ?? null;
   const { currentTodo, risk } = returnException
     ? actionForReturnException(returnException, input.refundStatus ?? null)
+    : input.interceptedReturnInspection
+      ? {
+        currentTodo: '拦截退回商品已检查，请明确退款、补发或其他后续处理',
+        risk: null,
+      }
+    : outboundException
+      ? actionForOutboundException(outboundException, input.refundStatus ?? null)
     : actionFor({
     physicalControl,
     hasConfirmedLoss: input.sourcePackages.some((sourcePackage) => (
@@ -171,8 +273,44 @@ export function coordinateAftersales(input: {
     handlingDirectionTimeline: input.handlingDirectionTimeline ?? [],
     sourcePackages: input.sourcePackages,
     interception: input.interception,
+    outboundException,
+    outboundExceptionHistory,
+    interceptedReturnInspection: input.interceptedReturnInspection ?? null,
     returnException,
     returnExceptionHistory,
+  };
+}
+
+function actionForOutboundException(
+  exception: AftersalesOutboundExceptionCoordination,
+  refundStatus: 'pending' | 'confirmed' | 'cancelled' | null,
+): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
+  const risk = `正向${exception.exceptionType === 'lost' ? '丢件' : '物流异常'}影响 ${exception.affectedQuantity} 件商品`;
+  if (exception.decision === null) {
+    return { currentTodo: '正向物流异常已确认，请明确买家侧处理选择', risk };
+  }
+  if (exception.decision === 'wait_investigation') {
+    return { currentTodo: '继续等待承运调查，买家退款与补发尚未发生', risk };
+  }
+  if (exception.decision === 'recover_or_redeliver') {
+    return { currentTodo: '继续追回或重新派送原正向包裹', risk };
+  }
+  if (exception.decision === 'refund_only') {
+    return {
+      currentTodo: refundStatus === 'confirmed'
+        ? '实际退款已确认，继续处理正向物流异常和承运索赔'
+        : '核对并确认实际退款，正向物流异常继续独立处理',
+      risk,
+    };
+  }
+  if (exception.decision === 'replacement') {
+    return { currentTodo: '建立并跟进独立补发记录，原正向异常继续独立处理', risk };
+  }
+  return {
+    currentTodo: refundStatus === 'confirmed'
+      ? '实际退款已确认，继续建立或跟进独立补发记录'
+      : '确认实际退款并建立独立补发记录',
+    risk,
   };
 }
 
@@ -304,6 +442,13 @@ export function sourcePackageEvidenceFromShipmentRecord(
       confirmedLost: items.every(({ confirmedLostQuantity, quantity }) => (
         confirmedLostQuantity === quantity
       )),
+      carrierClaim: shipmentPackage.carrierClaim ? {
+        status: shipmentPackage.carrierClaim.status,
+        requestedAmountCents: shipmentPackage.carrierClaim.requestedAmountCents,
+        approvedAmountCents: shipmentPackage.carrierClaim.approvedAmountCents,
+        actualCompensationCents:
+          shipmentPackage.carrierClaim.actualCompensation?.amountCents ?? null,
+      } : null,
       items,
     }];
   });

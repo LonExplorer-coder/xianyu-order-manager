@@ -298,16 +298,29 @@ describe('发货组 Electron IPC', () => {
         items: [{ roundItemId: 'round-item-1', quantity: 1 }],
       }],
     };
+    const outboundExceptionDecisionInput = {
+      kind: 'decide_outbound_logistics_exception',
+      caseId: 'aftersales-1',
+      expectedRevision: 4,
+      packageId: 'shipment-package-1',
+      exceptionId: 'outbound-exception-1',
+      decision: 'refund_and_replacement',
+      occurredAt: '2026-08-13T10:30:00+08:00',
+      reason: '买家退款并按异常数量补发',
+    };
 
     await expect(invoke('aftersales-cases:create', createInput)).resolves.toEqual(created);
     await expect(invoke('aftersales-cases:update', updateInput)).resolves.toEqual(updated);
     await expect(invoke('aftersales-cases:progress', progressInput)).resolves.toEqual(progressed);
     await expect(invoke('aftersales-cases:progress', replacementInput)).resolves.toEqual(progressed);
+    await expect(invoke('aftersales-cases:progress', outboundExceptionDecisionInput))
+      .resolves.toEqual(progressed);
     await expect(invoke('aftersales-cases:query', query)).resolves.toEqual([updated]);
     expect(createAftersalesCase).toHaveBeenCalledWith(createInput);
     expect(updateAftersalesCase).toHaveBeenCalledWith(updateInput);
     expect(progressAftersalesCase).toHaveBeenNthCalledWith(1, progressInput);
     expect(progressAftersalesCase).toHaveBeenNthCalledWith(2, replacementInput);
+    expect(progressAftersalesCase).toHaveBeenNthCalledWith(3, outboundExceptionDecisionInput);
     expect(queryAftersalesCases).toHaveBeenCalledWith(query);
   });
 
@@ -383,6 +396,14 @@ describe('发货组 Electron IPC', () => {
       occurredAt: '2026-08-15T10:00:00+08:00',
       reason: '承运方回传已签收',
     });
+    await expect(invoke('aftersales-cases:progress', {
+      kind: 'change_handling_direction',
+      caseId: failed.id,
+      expectedRevision: failed.revision,
+      handlingDirection: 'replacement',
+      occurredAt: '2026-08-15T10:05:00+08:00',
+      reason: '不应绕过买家签收后的明确处理',
+    })).rejects.toThrow('只能明确转为买家退回或仅退款');
     const changed = await invoke('aftersales-cases:progress', {
       kind: 'change_handling_direction',
       caseId: failed.id,
