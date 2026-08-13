@@ -15,9 +15,29 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
-import { removeVersion31ExtensionArtifacts } from './version31-fixture';
+import {
+  removeVersion31ExtensionArtifacts,
+  removeVersion32ExtensionArtifacts,
+} from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
+
+function confirmBuyerControl(
+  application: LocalApplication,
+  shipment: ReturnType<LocalApplication['confirmShipment']>,
+): void {
+  let current = shipment.record;
+  for (const shipmentPackage of shipment.record.packages) {
+    current = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'delivered',
+      reason: '测试前置：买家已签收原正向包裹',
+    }).record;
+  }
+  shipment.record = current;
+}
 
 class SequenceRecognizer implements Recognizer {
   public constructor(private readonly results: RecognitionResult[]) {}
@@ -2603,6 +2623,7 @@ describe('发货记录', () => {
     const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
     try {
+      removeVersion32ExtensionArtifacts(legacy);
       legacy.exec('PRAGMA ignore_check_constraints = ON;');
       legacy.prepare(`
         UPDATE shipment_packages
@@ -2703,7 +2724,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 31 });
+        .toEqual({ version: 32 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
@@ -3200,10 +3221,20 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
+    expect(() => application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      occurredAt: '2026-08-13T20:59:00+08:00',
+      reason: '即使买家已签收也不能默认退回',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    })).toThrow('请根据当前实物控制关系明确选择售后处理方向');
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T21:00:00+08:00',
       reason: '买家退回一件商品',
       requestedRefundCents: 1_000,
@@ -3301,9 +3332,11 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T20:00:00+08:00',
       reason: '买家退回一件商品',
       requestedRefundCents: 1_000,
@@ -3477,10 +3510,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const [firstItem, secondItem] = shipment.record.packages[0].items;
     const firstCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T22:00:00+08:00',
       reason: '第一张订单退货',
       requestedRefundCents: 1_000,
@@ -3489,6 +3524,7 @@ describe('退货物流与承运索赔', () => {
     const secondCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T22:01:00+08:00',
       reason: '第二张订单与第一张订单合装退货',
       requestedRefundCents: 500,
@@ -3678,10 +3714,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T14:00:00+08:00',
       reason: '验证退货正常运输与异常分离',
       requestedRefundCents: 1_000,
@@ -3758,10 +3796,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T23:00:00+08:00',
       reason: '两件商品需要退回检查',
       requestedRefundCents: 2_000,
@@ -3916,10 +3956,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T08:00:00+08:00',
       reason: '买家准备寄回商品',
       requestedRefundCents: 1_000,
@@ -4036,6 +4078,7 @@ describe('退货物流与承运索赔', () => {
     const combinedAfterLoss = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T09:11:00+08:00',
       reason: '另一件商品原本与丢失包裹合装',
       requestedRefundCents: 500,
@@ -4083,10 +4126,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T10:00:00+08:00',
       reason: '退货途中发生丢件',
       requestedRefundCents: 1_000,
@@ -4291,6 +4336,7 @@ describe('退货物流与承运索赔', () => {
     const rejectedCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T12:00:00+08:00',
       reason: '另一件退货发生运输异常',
       requestedRefundCents: 500,
@@ -4423,10 +4469,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T14:00:00+08:00',
       reason: '验证旧版退货索赔迁移',
       requestedRefundCents: 1_000,
@@ -4571,10 +4619,12 @@ describe('退货物流与承运索赔', () => {
       .toMatchObject({
       packages: [{
         trackingNumber: 'SF-V29-RETURN-CLAIM-CORRECTED',
-        timeline: [expect.objectContaining({
+        timeline: expect.arrayContaining([expect.objectContaining({
           kind: 'logistics_corrected',
-          occurredAt: correctedShipment.record.packages[0].timeline[0].createdAt,
-        })],
+          occurredAt: correctedShipment.record.packages[0].timeline.find((event) => (
+            event.kind === 'logistics_corrected'
+          ))?.createdAt,
+        })]),
       }],
       });
     const migratedClaimRow = new DatabaseSync(
@@ -4613,10 +4663,12 @@ describe('退货物流与承运索赔', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-12T10:00:00+08:00',
       reason: '旧版退货退款事实',
       requestedRefundCents: 1_000,
@@ -4761,6 +4813,14 @@ describe('退货物流与承运索赔', () => {
     const restored = migrated.queryAftersalesCases({ shipmentRecordId: shipment.record.id })[0];
     expect(restored).toMatchObject({
       status: 'completed',
+      coordination: {
+        handlingDirection: 'buyer_return',
+        physicalControl: 'buyer',
+        handlingDirectionTimeline: [expect.objectContaining({
+          kind: 'selected',
+          after: 'buyer_return',
+        })],
+      },
       refund: {
         status: 'confirmed',
         actualRecord: { amountCents: 900, note: '旧版人工确认实际退款' },
@@ -4788,6 +4848,765 @@ describe('退货物流与承运索赔', () => {
 });
 
 describe('售后处理单', () => {
+  it('将真实 v31 旧售后保守升级为处理方向且阻止非法半结构', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-v31-aftersales-direction-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V31-AFTERSALES-DIRECTION',
+        items: shipmentItems,
+      }],
+    });
+    confirmBuyerControl(application, shipment);
+    const [firstItem, secondItem] = shipment.record.packages[0].items;
+    const general = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      occurredAt: '2026-08-14T08:00:00+08:00',
+      reason: '旧版一般售后',
+      items: [{ shipmentPackageItemId: firstItem.id, quantity: 1 }],
+    });
+    application.updateAftersalesCase({
+      caseId: general.id,
+      expectedRevision: general.revision,
+      status: 'completed',
+      reason: general.reason,
+      items: [{ shipmentPackageItemId: firstItem.id, quantity: 1 }],
+      changeReason: '测试前置：一般售后已完成并释放数量',
+    });
+    const refundOnly = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'refund_only',
+      occurredAt: '2026-08-14T08:10:00+08:00',
+      reason: '旧版仅退款',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId: secondItem.id, quantity: 1 }],
+    });
+    const ambiguousReturn = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T08:20:00+08:00',
+      reason: '旧版只有等待退回状态，没有退货实物',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId: firstItem.id, quantity: 1 }],
+    });
+    const concreteReturn = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T08:30:00+08:00',
+      reason: '旧版已有买家退货实物',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId: secondItem.id, quantity: 1 }],
+    });
+    const registeredReturn = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: concreteReturn.id,
+      expectedRevision: concreteReturn.revision,
+      shippingCarrier: '圆通速递',
+      trackingNumber: 'YT-V31-RETURN-EVIDENCE',
+      occurredAt: '2026-08-14T08:40:00+08:00',
+      reason: '旧版已登记买家退货运单',
+    });
+    application.close();
+
+    const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      removeVersion32ExtensionArtifacts(legacy);
+      legacy.exec(`
+        CREATE TABLE aftersales_interception_events (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL
+        ) STRICT;
+      `);
+    } finally {
+      legacy.close();
+    }
+    await expect(createApplication(root, false))
+      .rejects.toThrow('检测到不完整的 v32 在途售后协调结构');
+    const repair = new DatabaseSync(databasePath);
+    try {
+      expect(repair.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 31 });
+      expect((repair.prepare('PRAGMA table_info(aftersales_cases)').all() as Array<{
+        name: string;
+      }>).map(({ name }) => name)).not.toContain('handling_direction');
+      repair.exec('DROP TABLE aftersales_interception_events;');
+    } finally {
+      repair.close();
+    }
+
+    const migrated = await createApplication(root, false);
+    const cases = new Map(migrated.queryAftersalesCases({ shipmentRecordId: shipment.record.id })
+      .map((aftersalesCase) => [aftersalesCase.id, aftersalesCase]));
+    expect(cases.get(general.id)?.coordination).toMatchObject({
+      handlingDirection: null,
+      handlingDirectionTimeline: [],
+    });
+    expect(cases.get(refundOnly.id)).toMatchObject({
+      status: 'waiting_refund',
+      coordination: { handlingDirection: null, handlingDirectionTimeline: [] },
+    });
+    expect(cases.get(ambiguousReturn.id)).toMatchObject({
+      status: 'processing',
+      coordination: {
+        handlingDirection: 'waiting',
+        handlingDirectionTimeline: [expect.objectContaining({
+          kind: 'selected',
+          after: 'waiting',
+        })],
+      },
+    });
+    expect(cases.get(registeredReturn.id)).toMatchObject({
+      status: 'waiting_return',
+      coordination: {
+        handlingDirection: 'buyer_return',
+        handlingDirectionTimeline: [expect.objectContaining({
+          kind: 'selected',
+          after: 'buyer_return',
+        })],
+      },
+    });
+    migrated.close();
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryAftersalesCases({ shipmentRecordId: shipment.record.id }))
+      .toEqual([...cases.values()]);
+  });
+
+  it('运输中退货退款明确选择申请拦截且不伪造退货实物', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-in-transit-aftersales-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-IN-TRANSIT-AFTERSALES-0001',
+        items: shipmentItems,
+      }],
+    });
+    const sourcePackage = shipment.record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const input = {
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund' as const,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '买家收货地址有误，希望截回商品',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    };
+
+    expect(() => application.createAftersalesCase(input))
+      .toThrow('请根据当前实物控制关系明确选择售后处理方向');
+
+    const created = application.createAftersalesCase({
+      ...input,
+      handlingDirection: 'intercept',
+    });
+
+    expect(created).toMatchObject({
+      workflow: 'return_refund',
+      status: 'processing',
+      returns: [],
+      coordination: {
+        handlingDirection: 'intercept',
+        physicalControl: 'carrier',
+        currentTodo: '拦截请求待确认，继续跟踪原正向包裹',
+        risk: '拦截结果未确认，不应假定原正向包裹已收回',
+        availableDirections: ['waiting', 'intercept', 'refuse', 'only_refund', 'replacement'],
+        sourcePackages: [{
+          packageId: sourcePackage.id,
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-IN-TRANSIT-AFTERSALES-0001',
+          logisticsStatus: 'in_transit',
+          confirmedLost: false,
+          items: [{
+            shipmentPackageItemId: sourceItem.id,
+            sourceTitle: sourceItem.sourceTitle,
+            sourceSpec: sourceItem.sourceSpec,
+            quantity: 1,
+          }],
+        }],
+        interception: {
+          status: 'requested',
+          timeline: [{
+            kind: 'requested',
+            occurredAt: '2026-08-14T10:00:00+08:00',
+            reason: '买家收货地址有误,希望截回商品',
+          }],
+        },
+      },
+    });
+    expect(application.queryShipmentRecords()[0].packages[0]).toMatchObject({
+      id: sourcePackage.id,
+      logisticsStatus: 'in_transit',
+      trackingNumber: 'SF-IN-TRANSIT-AFTERSALES-0001',
+    });
+
+    const succeeded = application.progressAftersalesCase({
+      kind: 'record_interception_result',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      result: 'succeeded',
+      occurredAt: '2026-08-14T10:10:00+08:00',
+      reason: '承运方已确认拦截成功',
+    });
+    expect(succeeded).toMatchObject({
+      status: 'processing',
+      returns: [],
+      coordination: {
+        handlingDirection: 'intercept',
+        currentTodo: '拦截成功，继续核对原正向包裹的退回实物',
+        interception: {
+          status: 'succeeded',
+          timeline: [
+            expect.objectContaining({ kind: 'requested' }),
+            expect.objectContaining({ kind: 'succeeded' }),
+          ],
+        },
+      },
+    });
+    expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('in_transit');
+
+    application.close();
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      expect(() => database.prepare(`
+        UPDATE aftersales_handling_direction_events SET reason = '被篡改' WHERE case_id = ?
+      `).run(created.id)).toThrow(/immutable/u);
+      expect(() => database.prepare(`
+        DELETE FROM aftersales_interception_events WHERE case_id = ?
+      `).run(created.id)).toThrow(/immutable/u);
+    } finally {
+      database.close();
+    }
+    const reopened = await createApplication(root, false);
+    expect(reopened.queryAftersalesCases({ shipmentRecordId: shipment.record.id })[0])
+      .toEqual(succeeded);
+  });
+
+  it('拦截失败与后续签收分别留痕并显式转为买家寄回', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-INTERCEPTION-FAILED-0001',
+        items: shipmentItems,
+      }],
+    });
+    const sourcePackage = shipment.record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-14T19:00:00+08:00',
+      reason: '买家要求改变收货安排',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+
+    const waiting = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      handlingDirection: 'waiting',
+      occurredAt: '2026-08-14T19:05:00+08:00',
+      reason: '先继续等待，但仍保留已申请的拦截事项',
+    });
+    const failed = application.progressAftersalesCase({
+      kind: 'record_interception_result',
+      caseId: waiting.id,
+      expectedRevision: waiting.revision,
+      result: 'failed',
+      occurredAt: '2026-08-14T19:10:00+08:00',
+      reason: '承运方回复已进入末端配送，无法拦截',
+    });
+    expect(failed).toMatchObject({
+      status: 'processing',
+      revision: 3,
+      returns: [],
+      coordination: {
+        handlingDirection: 'waiting',
+        currentTodo: '继续跟踪原正向包裹并等待处理决定',
+        interception: {
+          status: 'failed',
+          timeline: [
+            expect.objectContaining({ kind: 'requested' }),
+            expect.objectContaining({
+              kind: 'failed',
+              occurredAt: '2026-08-14T19:10:00+08:00',
+              reason: '承运方回复已进入末端配送,无法拦截',
+            }),
+          ],
+        },
+      },
+    });
+
+    const another = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-14T19:11:00+08:00',
+      reason: '另一件商品申请拦截',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId: sourcePackage.items[1].id, quantity: 1 }],
+    });
+    const anotherWaiting = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: another.id,
+      expectedRevision: another.revision,
+      handlingDirection: 'waiting',
+      occurredAt: '2026-08-14T19:12:00+08:00',
+      reason: '暂时继续等待，但不撤销拦截请求',
+    });
+    expect(() => application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: anotherWaiting.id,
+      expectedRevision: anotherWaiting.revision,
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-14T19:13:00+08:00',
+      reason: '尝试重复建立拦截请求',
+    })).toThrow('已有待确认的拦截请求，请先登记结果');
+    const cancelled = application.progressAftersalesCase({
+      kind: 'cancel',
+      caseId: anotherWaiting.id,
+      expectedRevision: anotherWaiting.revision,
+      reason: '买家撤销退款请求，但拦截回执仍需保留',
+    });
+    expect(cancelled).toMatchObject({
+      status: 'cancelled',
+      coordination: {
+        currentTodo: '拦截请求待确认，继续跟踪原正向包裹',
+        risk: '拦截结果未确认，不应假定原正向包裹已收回',
+        interception: { status: 'requested' },
+      },
+    });
+    const resultAfterCancellation = application.progressAftersalesCase({
+      kind: 'record_interception_result',
+      caseId: cancelled.id,
+      expectedRevision: cancelled.revision,
+      result: 'succeeded',
+      occurredAt: '2026-08-14T19:14:00+08:00',
+      reason: '售后取消后承运方才回复拦截成功',
+    });
+    expect(resultAfterCancellation).toMatchObject({
+      status: 'cancelled',
+      coordination: { interception: { status: 'succeeded' } },
+    });
+
+    const completionPending = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-14T19:15:00+08:00',
+      reason: '先申请拦截，后与买家协调仅退款',
+      requestedRefundCents: 400,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    const completionRefundDirection = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: completionPending.id,
+      expectedRevision: completionPending.revision,
+      handlingDirection: 'only_refund',
+      occurredAt: '2026-08-14T19:16:00+08:00',
+      reason: '改为仅退款，但仍等待已发出的拦截回执',
+    });
+    expect(completionRefundDirection.coordination).toMatchObject({
+      currentTodo: '拦截请求待确认，继续跟踪原正向包裹',
+      interception: { status: 'requested' },
+    });
+    const completionRefunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: completionRefundDirection.id,
+      expectedRevision: completionRefundDirection.revision,
+      actualRefundCents: 400,
+      occurredAt: '2026-08-14T19:17:00+08:00',
+      note: '已核对平台实际退款',
+    });
+    const completed = application.progressAftersalesCase({
+      kind: 'complete',
+      caseId: completionRefunded.id,
+      expectedRevision: completionRefunded.revision,
+      reason: '退款售后已结案，拦截回执继续独立跟踪',
+    });
+    expect(completed).toMatchObject({
+      status: 'completed',
+      coordination: {
+        currentTodo: '实际退款已确认，拦截请求仍待确认',
+        risk: '拦截结果未确认，不应假定原正向包裹已收回',
+        interception: { status: 'requested' },
+      },
+    });
+    const resultAfterCompletion = application.progressAftersalesCase({
+      kind: 'record_interception_result',
+      caseId: completed.id,
+      expectedRevision: completed.revision,
+      result: 'failed',
+      occurredAt: '2026-08-14T19:18:00+08:00',
+      reason: '售后完成后承运方回复拦截失败',
+    });
+    expect(resultAfterCompletion).toMatchObject({
+      status: 'completed',
+      coordination: { interception: { status: 'failed' } },
+    });
+
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: sourcePackage.id,
+      expectedRevision: sourcePackage.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T19:20:00+08:00',
+      reason: '买家确认原包裹已签收',
+    });
+    expect(application.queryAftersalesCases({ shipmentRecordId: shipment.record.id })
+      .find(({ id }) => id === failed.id))
+      .toMatchObject({
+        status: 'processing',
+        coordination: {
+          physicalControl: 'buyer',
+          currentTodo: '原正向包裹已签收，请显式转换售后处理方向',
+        },
+      });
+
+    const converted = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: failed.id,
+      expectedRevision: failed.revision,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T19:30:00+08:00',
+      reason: '拦截失败且买家已签收，改为买家寄回',
+    });
+    expect(converted).toMatchObject({
+      status: 'waiting_return',
+      revision: 4,
+      returns: [],
+      coordination: {
+        handlingDirection: 'buyer_return',
+        physicalControl: 'buyer',
+        currentTodo: '等待买家退回',
+        handlingDirectionTimeline: [
+          expect.objectContaining({
+            kind: 'selected',
+            before: null,
+            after: 'intercept',
+            occurredAt: '2026-08-14T19:00:00+08:00',
+          }),
+          expect.objectContaining({
+            kind: 'changed',
+            before: 'intercept',
+            after: 'waiting',
+            occurredAt: '2026-08-14T19:05:00+08:00',
+          }),
+          expect.objectContaining({
+            kind: 'changed',
+            before: 'waiting',
+            after: 'buyer_return',
+            occurredAt: '2026-08-14T19:30:00+08:00',
+            reason: '拦截失败且买家已签收,改为买家寄回',
+          }),
+        ],
+      },
+    });
+    expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('delivered');
+  });
+
+  it('在途选择仅退款可先确认实际退款并在后续签收时提示收回风险', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '中通快递',
+        trackingNumber: 'ZT-REFUND-BEFORE-DELIVERY-0001',
+        items: shipmentItems,
+      }],
+    });
+    const sourcePackage = shipment.record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'only_refund',
+      occurredAt: '2026-08-14T20:00:00+08:00',
+      reason: '买家急需退款，商家同意先行处理',
+      requestedRefundCents: 900,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    expect(created).toMatchObject({
+      status: 'waiting_refund',
+      returns: [],
+      refund: { status: 'pending', requestedAmountCents: 900, actualRecord: null },
+      coordination: {
+        handlingDirection: 'only_refund',
+        physicalControl: 'carrier',
+        risk: '商品仍在运输中，退款与收回实物需分别跟踪',
+      },
+    });
+
+    const refunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      actualRefundCents: 850,
+      occurredAt: '2026-08-14T20:10:00+08:00',
+      note: '已核对平台退款记录',
+    });
+    expect(refunded).toMatchObject({
+      status: 'ready_to_complete',
+      returns: [],
+      refund: {
+        status: 'confirmed',
+        requestedAmountCents: 900,
+        actualRecord: { amountCents: 850 },
+      },
+      coordination: {
+        currentTodo: '实际退款已确认，继续跟踪并收回原正向包裹',
+        risk: '买家已退款，原商品仍在运输中',
+      },
+    });
+
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: sourcePackage.id,
+      expectedRevision: sourcePackage.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T20:20:00+08:00',
+      reason: '先行退款后买家确认原包裹已签收',
+    });
+    const delivered = application.queryAftersalesCases({ shipmentRecordId: shipment.record.id })[0];
+    expect(delivered).toMatchObject({
+      status: 'ready_to_complete',
+      returns: [],
+      refund: { status: 'confirmed', actualRecord: { amountCents: 850 } },
+      coordination: {
+        physicalControl: 'buyer',
+        currentTodo: '买家已退款且原商品已签收，请跟进收回商品',
+        risk: '资金已退出，原商品仍在买家控制中',
+      },
+    });
+    expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('delivered');
+  });
+
+  it('原正向包裹确认丢失后只提示调查退款或补发且补发仅形成待办', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '圆通速递',
+        trackingNumber: 'YT-CONFIRMED-LOST-AFTERSALES-0001',
+        items: shipmentItems,
+      }],
+    });
+    const sourcePackage = shipment.record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'waiting',
+      occurredAt: '2026-08-14T21:00:00+08:00',
+      reason: '包裹长时间未更新，先继续等待调查',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+
+    const accepted = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: sourcePackage.id,
+      expectedRevision: sourcePackage.revision,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T21:05:00+08:00',
+      reason: '已核对承运方揽收证据',
+    });
+    application.recordShipmentPackageLogisticsException({
+      recordId: shipment.record.id,
+      packageId: sourcePackage.id,
+      expectedRevision: accepted.record.packages[0].revision,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'items', items: [{ sourceItemId: sourceItem.id, quantity: 1 }] },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-14T21:10:00+08:00',
+      reason: '承运方已书面确认该商品丢失',
+    });
+    const lost = application.queryAftersalesCases({ shipmentRecordId: shipment.record.id })[0];
+    expect(lost).toMatchObject({
+      status: 'processing',
+      returns: [],
+      coordination: {
+        handlingDirection: 'waiting',
+        physicalControl: 'confirmed_lost',
+        currentTodo: '原正向包裹已确认丢失，请选择退款、补发或继续调查',
+        risk: '原正向包裹确认丢失，商品不在买家控制中',
+        availableDirections: ['waiting', 'only_refund', 'replacement'],
+        sourcePackages: [expect.objectContaining({
+          packageId: sourcePackage.id,
+          logisticsStatus: 'in_transit',
+          confirmedLost: true,
+          items: [expect.objectContaining({
+            shipmentPackageItemId: sourceItem.id,
+            quantity: 1,
+          })],
+        })],
+      },
+    });
+    expect(() => application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: lost.id,
+      expectedRevision: lost.revision,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T21:20:00+08:00',
+      reason: '试图要求买家寄回已丢失商品',
+    })).toThrow('当前实物流转证据不允许该售后处理方向');
+
+    const unaffectedItem = sourcePackage.items[1];
+    const mixed = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'waiting',
+      occurredAt: '2026-08-14T21:15:00+08:00',
+      reason: '同一包裹中一件已丢失，另一件仍在运输',
+      requestedRefundCents: 1_500,
+      items: [
+        { shipmentPackageItemId: sourceItem.id, quantity: 1 },
+        { shipmentPackageItemId: unaffectedItem.id, quantity: 1 },
+      ],
+    });
+    expect(mixed.coordination).toMatchObject({
+      physicalControl: 'mixed',
+      currentTodo: '部分商品已确认丢失，请选择退款、补发或继续调查',
+      risk: '同一售后内商品实物控制关系不一致',
+      availableDirections: ['waiting', 'only_refund', 'replacement'],
+      sourcePackages: [{
+        packageId: sourcePackage.id,
+        confirmedLost: false,
+        items: [
+          expect.objectContaining({
+            shipmentPackageItemId: sourceItem.id,
+            quantity: 1,
+            confirmedLostQuantity: 1,
+          }),
+          expect.objectContaining({
+            shipmentPackageItemId: unaffectedItem.id,
+            quantity: 1,
+            confirmedLostQuantity: 0,
+          }),
+        ],
+      }],
+    });
+
+    const replacementPending = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: lost.id,
+      expectedRevision: lost.revision,
+      handlingDirection: 'replacement',
+      occurredAt: '2026-08-14T21:20:00+08:00',
+      reason: '与买家确认选择补发，待后续建立新发货记录',
+    });
+    expect(replacementPending).toMatchObject({
+      status: 'waiting_replacement',
+      returns: [],
+      refund: { status: 'pending', actualRecord: null },
+      coordination: {
+        handlingDirection: 'replacement',
+        currentTodo: '已选择补发，待后续建立新的补发发货记录',
+        risk: '原正向包裹已确认丢失，本任务尚未建立补发发货记录',
+      },
+    });
+    expect(application.queryShipmentRecords()).toHaveLength(1);
+  });
+
+  it('不同正向包裹分别签收和运输中时不会伪造部分丢件事实', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: shipmentItems.map((item, index) => ({
+        shippingCarrier: '顺丰速运',
+        trackingNumber: `SF-MIXED-CONTROL-${index + 1}`,
+        items: [item],
+      })),
+    });
+    const deliveredPackage = shipment.record.packages[0];
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: deliveredPackage.id,
+      expectedRevision: deliveredPackage.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T22:00:00+08:00',
+      reason: '其中一个包裹已由买家签收',
+    });
+
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'waiting',
+      occurredAt: '2026-08-14T22:10:00+08:00',
+      reason: '两个包裹实际流转不一致，先分别核实',
+      requestedRefundCents: 1_500,
+      items: shipment.record.packages.map((shipmentPackage) => ({
+        shipmentPackageItemId: shipmentPackage.items[0].id,
+        quantity: 1,
+      })),
+    });
+
+    expect(created.coordination).toMatchObject({
+      physicalControl: 'mixed',
+      currentTodo: '所选商品的实物控制关系不一致，请逐件核实并选择后续处理方向',
+      risk: '同一售后内商品实物控制关系不一致',
+      sourcePackages: expect.arrayContaining([
+        expect.objectContaining({ logisticsStatus: 'delivered', confirmedLost: false }),
+        expect.objectContaining({ logisticsStatus: 'in_transit', confirmedLost: false }),
+      ]),
+    });
+    expect(created.coordination.currentTodo).not.toContain('丢失');
+    expect(created.coordination.risk).not.toContain('丢失');
+  });
+
   it('原始订单按商品与数量聚合跨订单包裹、撤销包裹和售后待办', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];
@@ -5280,6 +6099,7 @@ describe('售后处理单', () => {
     expect(created).toMatchObject({
       workflow: 'refund_only',
       status: 'waiting_refund',
+      coordination: { handlingDirection: null, handlingDirectionTimeline: [] },
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
       refund: {
         requestedAmountCents: 600,
@@ -5404,6 +6224,7 @@ describe('售后处理单', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
@@ -5441,6 +6262,7 @@ describe('售后处理单', () => {
     const returnRefund = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T20:35:00+08:00',
       reason: '买家寄回商品后取消退款申请',
       requestedRefundCents: 1_000,
@@ -5509,7 +6331,7 @@ describe('售后处理单', () => {
       }],
     });
     expect(application.getOrder(sourceItem.orderId).operations.currentTodo)
-      .toBe('跟进运输进度');
+      .toBe('无需物流操作');
     const laterCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       occurredAt: '2026-08-13T20:40:00+08:00',
@@ -5555,10 +6377,12 @@ describe('售后处理单', () => {
         items: shipmentItems,
       }],
     });
+    confirmBuyerControl(application, shipment);
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
+      handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T21:00:00+08:00',
       reason: '一件商品破损，需要退回后退款',
       requestedRefundCents: 1_000,
@@ -5699,7 +6523,7 @@ describe('售后处理单', () => {
       returns: [{ status: 'inspected', inspection: { result: 'defective' } }],
     });
     expect(application.queryShipmentRecords()[0].packages[0]).toMatchObject({
-      logisticsStatus: 'in_transit',
+      logisticsStatus: 'delivered',
       trackingNumber: 'SF-RETURN-REFUND-ORIGINAL',
     });
 

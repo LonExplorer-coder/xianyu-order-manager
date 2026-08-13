@@ -2,6 +2,10 @@
 
 import '@testing-library/jest-dom/vitest';
 
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,8 +20,12 @@ import type {
   OrderDraft,
   OrderSummary,
   OriginalOrder,
+  RecognitionAttempt,
   RecognitionBatchItemStatus,
   RecognitionBatchView,
+  RecognitionResult,
+  Recognizer,
+  RecognizerSource,
   SourceSnapshot,
 } from '../src/core/contracts';
 import type {
@@ -30,6 +38,7 @@ import type { ShipmentGroupProjection } from '../src/core/shipment-groups';
 import type { ShipmentGroupArchive, ShipmentRecord } from '../src/core/shipment-records';
 import type { AftersalesCase } from '../src/core/aftersales-cases';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
+import { LocalApplication } from '../src/main/local-application';
 import { App } from '../src/renderer/App';
 
 afterEach(cleanup);
@@ -492,6 +501,23 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     testCandidateVerificationConnection: vi.fn(),
     getCandidateAdjudicationAudit: vi.fn().mockResolvedValue([]),
     ...desktopApiOverrides,
+  };
+}
+
+function testAftersalesCoordination(
+  handlingDirection: AftersalesCase['coordination']['handlingDirection'] = null,
+  overrides: Partial<AftersalesCase['coordination']> = {},
+): AftersalesCase['coordination'] {
+  return {
+    handlingDirection,
+    physicalControl: 'carrier',
+    currentTodo: '继续跟进售后',
+    risk: null,
+    availableDirections: ['waiting', 'intercept', 'refuse', 'only_refund', 'replacement'],
+    handlingDirectionTimeline: [],
+    sourcePackages: [],
+    interception: null,
+    ...overrides,
   };
 }
 
@@ -1527,6 +1553,7 @@ describe('订单管理工作台', () => {
       }],
       refund: null,
       returns: [],
+      coordination: testAftersalesCoordination(),
       timeline: [{
         kind: 'created',
         resultRevision: 1,
@@ -1635,6 +1662,7 @@ describe('订单管理工作台', () => {
         createdAt: '2026-08-13T06:00:00.000Z',
       },
       returns: [],
+      coordination: testAftersalesCoordination('only_refund'),
       timeline: [{
         kind: 'created',
         resultRevision: 1,
@@ -1699,6 +1727,442 @@ describe('订单管理工作台', () => {
     expect(history).toHaveTextContent('其中一件商品破损');
   });
 
+  it('在桌面端按原正向包裹协调运输中售后并保留转换历史', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourcePackage = record.packages[0];
+    const sourceItem = sourcePackage.items[0];
+    const packageEvidence: AftersalesCase['coordination']['sourcePackages'][number] = {
+      packageId: sourcePackage.id,
+      shippingCarrier: sourcePackage.shippingCarrier,
+      trackingNumber: sourcePackage.trackingNumber,
+      logisticsStatus: 'in_transit',
+      confirmedLost: false,
+      items: [{
+        shipmentPackageItemId: sourceItem.id,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        confirmedLostQuantity: 0,
+      }],
+    };
+    const selectedDirection = {
+      kind: 'selected' as const,
+      before: null,
+      after: 'intercept' as const,
+      occurredAt: '2026-08-13T15:00:00+08:00',
+      reason: '包裹仍在运输中，先申请拦截',
+      createdAt: '2026-08-13T07:00:00.000Z',
+    };
+    const created: AftersalesCase = {
+      id: 'aftersales-ui-interception',
+      shipmentRecordId: record.id,
+      workflow: 'return_refund',
+      status: 'processing',
+      revision: 1,
+      reason: '运输中商品破损，需协调售后',
+      occurredAt: '2026-08-13T15:00:00+08:00',
+      items: [{
+        id: 'aftersales-item-ui-interception',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: sourcePackage.id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: {
+        pendingItemId: 'pending-ui-interception',
+        requestedAmountCents: 1_000,
+        status: 'pending',
+        actualRecord: null,
+        createdAt: '2026-08-13T07:00:00.000Z',
+      },
+      returns: [],
+      coordination: testAftersalesCoordination('intercept', {
+        physicalControl: 'carrier',
+        currentTodo: '拦截请求待确认，继续跟踪原正向包裹',
+        risk: '商品仍在运输中，拦截结果未确认',
+        sourcePackages: [packageEvidence],
+        handlingDirectionTimeline: [selectedDirection],
+        interception: {
+          status: 'requested',
+          timeline: [{
+            kind: 'requested',
+            occurredAt: '2026-08-13T15:00:00+08:00',
+            reason: '包裹仍在运输中，先申请拦截',
+            createdAt: '2026-08-13T07:00:00.000Z',
+          }],
+        },
+      }),
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'processing',
+        reason: '运输中商品破损，需协调售后',
+        occurredAt: '2026-08-13T15:00:00+08:00',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        createdAt: '2026-08-13T07:00:00.000Z',
+      }],
+      createdAt: '2026-08-13T07:00:00.000Z',
+      updatedAt: '2026-08-13T07:00:00.000Z',
+    };
+    const failed: AftersalesCase = {
+      ...created,
+      revision: 2,
+      coordination: testAftersalesCoordination('intercept', {
+        physicalControl: 'carrier',
+        currentTodo: '拦截失败，请转换为买家寄回、仅退款、补发或继续等待',
+        risk: '拦截失败，原正向包裹仍可能送达买家',
+        sourcePackages: [packageEvidence],
+        handlingDirectionTimeline: [selectedDirection],
+        interception: {
+          status: 'failed',
+          timeline: [
+            ...(created.coordination.interception?.timeline ?? []),
+            {
+              kind: 'failed',
+              occurredAt: '2026-08-13T15:10:00+08:00',
+              reason: '承运方回复包裹已进入末端，拦截失败',
+              createdAt: '2026-08-13T07:10:00.000Z',
+            },
+          ],
+        },
+      }),
+    };
+    const changed: AftersalesCase = {
+      ...failed,
+      status: 'waiting_refund',
+      revision: 3,
+      coordination: testAftersalesCoordination('only_refund', {
+        physicalControl: 'carrier',
+        currentTodo: '核对并确认实际退款',
+        risk: '商品仍在运输中，退款与收回实物需分别跟踪',
+        sourcePackages: [packageEvidence],
+        interception: failed.coordination.interception,
+        handlingDirectionTimeline: [selectedDirection, {
+          kind: 'changed',
+          before: 'intercept',
+          after: 'only_refund',
+          occurredAt: '2026-08-13T15:20:00+08:00',
+          reason: '买家急需处理，改为仅退款并继续追回包裹',
+          createdAt: '2026-08-13T07:20:00.000Z',
+        }],
+      }),
+    };
+    const createAftersalesCase = vi.fn().mockResolvedValue(created);
+    const progressAftersalesCase = vi.fn()
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(changed);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([]),
+      createAftersalesCase,
+      progressAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    await user.click(within(history).getByRole('button', { name: '建立售后处理单' }));
+    const createDialog = screen.getByRole('dialog', { name: '建立售后处理单' });
+    await user.selectOptions(within(createDialog).getByLabelText('售后处理方式'), 'return_refund');
+    fireEvent.change(within(createDialog).getByLabelText('售后发生时间'), {
+      target: { value: '2026-08-13T15:00:00' },
+    });
+    await user.type(within(createDialog).getByLabelText('问题原因'), created.reason);
+    fireEvent.change(within(createDialog).getByLabelText('申请退款金额'), {
+      target: { value: '10' },
+    });
+    fireEvent.change(within(createDialog).getByLabelText(
+      `${sourceItem.orderNumber} ${sourceItem.sourceTitle} 售后数量`,
+    ), { target: { value: '1' } });
+    expect(createDialog).toHaveTextContent(sourcePackage.trackingNumber);
+    expect(createDialog).toHaveTextContent('运输中');
+    const createButton = within(createDialog).getByRole('button', { name: '确认建立' });
+    expect(createButton).toBeDisabled();
+    await user.selectOptions(within(createDialog).getByLabelText('售后处理方向'), 'intercept');
+    await user.click(createButton);
+    await waitFor(() => expect(createAftersalesCase).toHaveBeenCalledWith({
+      shipmentRecordId: record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-13T15:00:00+08:00',
+      reason: created.reason,
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    }));
+
+    const caseRegion = await screen.findByRole('region', { name: `售后处理单 ${created.id}` });
+    expect(caseRegion).toHaveTextContent(created.coordination.currentTodo);
+    expect(caseRegion).toHaveTextContent(created.coordination.risk as string);
+    expect(caseRegion).toHaveTextContent(sourcePackage.trackingNumber);
+    await user.click(within(caseRegion).getByRole('button', { name: '登记拦截结果' }));
+    const resultDialog = screen.getByRole('dialog', { name: '登记拦截结果' });
+    await user.selectOptions(within(resultDialog).getByLabelText('拦截结果'), 'failed');
+    fireEvent.change(within(resultDialog).getByLabelText('拦截结果时间'), {
+      target: { value: '2026-08-13T15:10:00' },
+    });
+    await user.type(within(resultDialog).getByLabelText('拦截结果说明'), '承运方回复包裹已进入末端，拦截失败');
+    await user.click(within(resultDialog).getByRole('button', { name: '确认结果' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(1, {
+      kind: 'record_interception_result',
+      caseId: created.id,
+      expectedRevision: 1,
+      result: 'failed',
+      occurredAt: '2026-08-13T15:10:00+08:00',
+      reason: '承运方回复包裹已进入末端，拦截失败',
+    }));
+    expect(caseRegion).toHaveTextContent(failed.coordination.risk as string);
+
+    await user.click(within(caseRegion).getByRole('button', { name: '转换处理方向' }));
+    const directionDialog = screen.getByRole('dialog', { name: '转换售后处理方向' });
+    await user.selectOptions(within(directionDialog).getByLabelText('新售后处理方向'), 'only_refund');
+    fireEvent.change(within(directionDialog).getByLabelText('处理方向转换时间'), {
+      target: { value: '2026-08-13T15:20:00' },
+    });
+    await user.type(within(directionDialog).getByLabelText('转换原因'), '买家急需处理，改为仅退款并继续追回包裹');
+    await user.click(within(directionDialog).getByRole('button', { name: '确认转换' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(2, {
+      kind: 'change_handling_direction',
+      caseId: created.id,
+      expectedRevision: 2,
+      handlingDirection: 'only_refund',
+      occurredAt: '2026-08-13T15:20:00+08:00',
+      reason: '买家急需处理，改为仅退款并继续追回包裹',
+    }));
+    expect(caseRegion).toHaveTextContent('拦截失败');
+    expect(caseRegion).toHaveTextContent('核对并确认实际退款');
+    expect(within(caseRegion).getByRole('button', { name: '确认实际退款' })).toBeEnabled();
+  });
+
+  it('用真实本地应用投影在桌面端补登终态未决拦截结果', async () => {
+    const user = userEvent.setup();
+    const applicationRoot = await mkdtemp(join(tmpdir(), 'xianyu-terminal-interception-ui-'));
+    const recognitionResult: RecognitionResult = {
+      platform: 'xianyu',
+      sellerAccount: '桌面终态拦截测试账号',
+      orderNumber: 'XY-TERMINAL-INTERCEPTION-UI-0001',
+      alipayTransactionNumber: 'ALI-TERMINAL-INTERCEPTION-UI-0001',
+      buyerNickname: '桌面测试买家',
+      recipient: '林青',
+      phone: '13800000001',
+      phoneNormalized: '13800000001',
+      addressOriginal: '广东省深圳市南山区海风路1号',
+      addressNormalized: '广东省深圳市南山区海风路1号',
+      province: '广东省',
+      city: '深圳市',
+      district: '南山区',
+      orderedAtOriginal: '2026-08-13 14:00:00',
+      orderedAtNormalized: '2026-08-13T14:00:00+08:00',
+      paidAtOriginal: '2026-08-13 14:00:08',
+      paidAtNormalized: '2026-08-13T14:00:08+08:00',
+      productTotalCents: 2_000,
+      shippingFeeCents: 0,
+      amountCents: 2_000,
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+      items: [{
+        sourceTitle: '终态拦截测试商品',
+        sourceSpec: '两件',
+        unitPriceCents: 1_000,
+        quantity: 2,
+        quantityInferred: false,
+      }],
+    };
+    const recognizer: Recognizer = {
+      async recognize(_source: RecognizerSource): Promise<RecognitionAttempt> {
+        return {
+          result: recognitionResult,
+          evidences: [{
+            provider: 'controlled',
+            model: 'controlled',
+            requestId: '',
+            schemaVersion: 1,
+            rawResponse: JSON.stringify(recognitionResult),
+          }],
+        };
+      },
+    };
+    const application = new LocalApplication(recognizer);
+    try {
+      const uploadDirectory = join(applicationRoot, '上传');
+      await mkdir(uploadDirectory, { recursive: true });
+      const sourcePath = join(uploadDirectory, '终态拦截订单.png');
+      await writeFile(sourcePath, Buffer.from('terminal-interception-ui'));
+      application.openDataDirectory(join(applicationRoot, '数据'));
+      const batch = await application.submitRecognitionBatch([sourcePath]);
+      application.confirmDraft(batch.drafts[0]);
+      const group = application.queryShipmentGroups().groups[0];
+      const groupItem = group.orders[0].items[0];
+      const shipment = application.confirmShipment({
+        groupId: group.id,
+        expectedRemainingItems: [{
+          orderId: group.orders[0].id,
+          orderItemId: groupItem.id,
+          quantity: groupItem.quantity,
+        }],
+        packages: [{
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-TERMINAL-INTERCEPTION-UI-0001',
+          items: [{
+            orderId: group.orders[0].id,
+            orderItemId: groupItem.id,
+            quantity: groupItem.quantity,
+          }],
+        }],
+      });
+      const sourceItem = shipment.record.packages[0].items[0];
+      const cancellationPending = application.createAftersalesCase({
+        shipmentRecordId: shipment.record.id,
+        workflow: 'return_refund',
+        handlingDirection: 'intercept',
+        occurredAt: '2026-08-13T15:00:00+08:00',
+        reason: '取消路径先申请拦截',
+        requestedRefundCents: 1_000,
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      });
+      const cancellationWaiting = application.progressAftersalesCase({
+        kind: 'change_handling_direction',
+        caseId: cancellationPending.id,
+        expectedRevision: cancellationPending.revision,
+        handlingDirection: 'waiting',
+        occurredAt: '2026-08-13T15:05:00+08:00',
+        reason: '暂时继续等待，但不撤销已申请的拦截',
+      });
+      const cancelled = application.progressAftersalesCase({
+        kind: 'cancel',
+        caseId: cancellationWaiting.id,
+        expectedRevision: cancellationWaiting.revision,
+        reason: '买家撤销售后，拦截回执仍待跟踪',
+      });
+      const completionPending = application.createAftersalesCase({
+        shipmentRecordId: shipment.record.id,
+        workflow: 'return_refund',
+        handlingDirection: 'intercept',
+        occurredAt: '2026-08-13T15:10:00+08:00',
+        reason: '完成路径先申请拦截',
+        requestedRefundCents: 1_000,
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+      });
+      const refundDirection = application.progressAftersalesCase({
+        kind: 'change_handling_direction',
+        caseId: completionPending.id,
+        expectedRevision: completionPending.revision,
+        handlingDirection: 'only_refund',
+        occurredAt: '2026-08-13T15:15:00+08:00',
+        reason: '改为仅退款，拦截回执仍待跟踪',
+      });
+      const refunded = application.progressAftersalesCase({
+        kind: 'confirm_refund',
+        caseId: refundDirection.id,
+        expectedRevision: refundDirection.revision,
+        actualRefundCents: 1_000,
+        occurredAt: '2026-08-13T15:20:00+08:00',
+        note: '已核对平台实际退款',
+      });
+      const completed = application.progressAftersalesCase({
+        kind: 'complete',
+        caseId: refunded.id,
+        expectedRevision: refunded.revision,
+        reason: '退款处理已结案，拦截回执继续独立跟踪',
+      });
+      expect([cancelled, completed]).toEqual([
+        expect.objectContaining({
+          status: 'cancelled',
+          coordination: expect.objectContaining({
+            currentTodo: '拦截请求待确认，继续跟踪原正向包裹',
+            interception: expect.objectContaining({ status: 'requested' }),
+          }),
+        }),
+        expect.objectContaining({
+          status: 'completed',
+          coordination: expect.objectContaining({
+            currentTodo: '实际退款已确认，拦截请求仍待确认',
+            interception: expect.objectContaining({ status: 'requested' }),
+          }),
+        }),
+      ]);
+
+      const progressAftersalesCase = vi.fn(async (input) => (
+        application.progressAftersalesCase(input)
+      ));
+      const api = createApi({
+        getBootstrapState: vi.fn().mockResolvedValue({
+          kind: 'ready',
+          dataDirectory: join(applicationRoot, '数据'),
+          orders: application.listOrders(),
+        }),
+        listOrders: vi.fn(async () => application.listOrders()),
+        queryOrders: vi.fn(async (query, customFieldDefinitionIds) => (
+          application.queryOrders(query, customFieldDefinitionIds)
+        )),
+        queryShipmentGroups: vi.fn(async () => application.queryShipmentGroups()),
+        queryShipmentGroupArchives: vi.fn(async () => application.queryShipmentGroupArchives()),
+        queryAftersalesCases: vi.fn(async () => application.queryAftersalesCases()),
+        progressAftersalesCase,
+      });
+
+      render(<App api={api} />);
+      await user.click(await screen.findByRole('button', { name: '发货组' }));
+      for (const [index, terminalCase] of [cancelled, completed].entries()) {
+        const terminalStatus = terminalCase.status;
+        const caseRegion = await screen.findByRole('region', {
+          name: `售后处理单 ${terminalCase.id}`,
+        });
+        expect(caseRegion).toHaveTextContent(terminalCase.coordination.currentTodo);
+        expect(caseRegion).toHaveTextContent(terminalStatus === 'completed' ? '已完成' : '已取消');
+        await user.click(within(caseRegion).getByRole('button', { name: '登记拦截结果' }));
+        const dialog = screen.getByRole('dialog', { name: '登记拦截结果' });
+        fireEvent.change(within(dialog).getByLabelText('拦截结果时间'), {
+          target: { value: `2026-08-13T15:${40 + index}:00` },
+        });
+        const resultReason = `承运方补充回复已拦截-${terminalStatus}`;
+        await user.type(within(dialog).getByLabelText('拦截结果说明'), resultReason);
+        await user.click(within(dialog).getByRole('button', { name: '确认结果' }));
+
+        await waitFor(() => {
+          const projected = application.queryAftersalesCases()
+            .find(({ id }) => id === terminalCase.id);
+          expect(projected).toMatchObject({
+            status: terminalStatus,
+            coordination: {
+              interception: {
+                status: 'succeeded',
+                timeline: expect.arrayContaining([
+                  expect.objectContaining({ kind: 'requested' }),
+                  expect.objectContaining({ kind: 'succeeded', reason: resultReason }),
+                ]),
+              },
+            },
+          });
+        });
+        const updatedRegion = screen.getByRole('region', {
+          name: `售后处理单 ${terminalCase.id}`,
+        });
+        expect(updatedRegion).toHaveTextContent(terminalStatus === 'completed' ? '已完成' : '已取消');
+        expect(within(updatedRegion).queryByRole('button', { name: '登记拦截结果' }))
+          .not.toBeInTheDocument();
+      }
+      expect(progressAftersalesCase).toHaveBeenCalledTimes(2);
+    } finally {
+      application.close();
+    }
+  });
+
   it('在仅退款处理单中确认实际金额后再显式完成售后', async () => {
     const user = userEvent.setup();
     const group = singleShipmentGroupProjection().groups[0];
@@ -1733,6 +2197,7 @@ describe('订单管理工作台', () => {
         createdAt: '2026-08-13T08:00:00.000Z',
       },
       returns: [],
+      coordination: testAftersalesCoordination('only_refund'),
       timeline: [{
         kind: 'created',
         resultRevision: 1,
@@ -1924,6 +2389,7 @@ describe('订单管理工作台', () => {
       }],
       refund: null,
       returns: [returnRecord],
+      coordination: testAftersalesCoordination('buyer_return'),
       timeline: [],
       createdAt: '2026-08-13T08:50:00.000Z',
       updatedAt: '2026-08-13T08:50:00.000Z',
@@ -2067,6 +2533,7 @@ describe('订单管理工作台', () => {
         createdAt: '2026-08-13T09:00:00.000Z',
       },
       returns: [],
+      coordination: testAftersalesCoordination('buyer_return'),
       timeline: [{
         kind: 'created',
         resultRevision: 1,
@@ -2564,6 +3031,7 @@ describe('订单管理工作台', () => {
       }],
       refund: null,
       returns: [],
+      coordination: testAftersalesCoordination(),
       timeline: [{
         kind: 'created',
         resultRevision: 1,
@@ -4257,6 +4725,7 @@ describe('订单管理工作台', () => {
       }],
       refund: null,
       returns: [],
+      coordination: testAftersalesCoordination(),
       timeline: [],
       createdAt: '2026-08-13T10:30:00.000Z',
       updatedAt: '2026-08-13T10:30:00.000Z',

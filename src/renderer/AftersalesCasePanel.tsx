@@ -7,12 +7,15 @@ import type {
 } from '../core/aftersales-cases';
 import type { ShipmentRecord } from '../core/shipment-records';
 import {
+  aftersalesHandlingDirectionLabel,
+  aftersalesPhysicalControlLabel,
   aftersalesStatusLabel,
   carrierClaimStatusLabel,
   returnDiscrepancyLabel,
   returnLogisticsStatusLabel,
   returnQuantityDifferenceSummary,
 } from './aftersales-presentation';
+import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
 import { ProgressAftersalesCaseDialog } from './AftersalesCaseDialogs';
 import {
   logisticsExceptionStageLabel,
@@ -66,6 +69,55 @@ export function AftersalesCasePanel({
               </li>
             ))}
           </ul>
+          {aftersalesCase.workflow === 'return_refund' && (
+            <div
+              className="shipment-record-card__coordination"
+              aria-label="在途售后协调"
+              role="status"
+            >
+              <strong>当前待办：{aftersalesCase.coordination.currentTodo}</strong>
+              <span>
+                处理方向：{aftersalesCase.coordination.handlingDirection
+                  ? aftersalesHandlingDirectionLabel(aftersalesCase.coordination.handlingDirection)
+                  : '待明确'}
+                {' · '}实物控制：{aftersalesPhysicalControlLabel(aftersalesCase.coordination.physicalControl)}
+              </span>
+              {aftersalesCase.coordination.risk && (
+                <span className="shipment-record-card__coordination-risk">
+                  风险：{aftersalesCase.coordination.risk}
+                </span>
+              )}
+            </div>
+          )}
+          {aftersalesCase.coordination.sourcePackages.length > 0 && (
+            <div className="shipment-record-card__source-packages" aria-label="原正向包裹与商品数量">
+              {aftersalesCase.coordination.sourcePackages.map((sourcePackage) => (
+                <article key={sourcePackage.packageId}>
+                  <header>
+                    <strong>原正向包裹 · {sourcePackage.shippingCarrier}</strong>
+                    <span>{sourcePackage.trackingNumber}</span>
+                  </header>
+                  <p>
+                    实际流转：{shipmentLogisticsStatusLabel(sourcePackage.logisticsStatus)}
+                    {sourcePackage.confirmedLost ? ' · 已确认丢失' : ''}
+                  </p>
+                  <ul>
+                    {sourcePackage.items.map((item) => (
+                      <li key={item.shipmentPackageItemId}>
+                        <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                        <strong>
+                          × {item.quantity}
+                          {item.confirmedLostQuantity > 0
+                            ? ` · 已确认丢失 ${item.confirmedLostQuantity}`
+                            : ''}
+                        </strong>
+                      </li>
+                    ))}
+                  </ul>
+                </article>
+              ))}
+            </div>
+          )}
           {aftersalesCase.refund && (
             <div className="shipment-record-card__aftersales-facts" aria-label="退款事实">
               <span>申请退款 <strong>{formatMoney(aftersalesCase.refund.requestedAmountCents)}</strong></span>
@@ -251,7 +303,8 @@ export function AftersalesCasePanel({
             </section>
           ))}
           {(aftersalesCase.status === 'completed' || aftersalesCase.status === 'cancelled')
-            && !primaryProgressAction(aftersalesCase) ? (
+            && !primaryProgressAction(aftersalesCase)
+            && aftersalesCase.coordination.interception?.status !== 'requested' ? (
             <small>后续独立问题请另行建立售后处理单</small>
           ) : aftersalesCase.workflow === 'general' ? (
             <button
@@ -263,6 +316,35 @@ export function AftersalesCasePanel({
             </button>
           ) : (
             <div className="shipment-record-card__aftersales-actions">
+              {aftersalesCase.coordination.interception?.status === 'requested' && (
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => setProgressTarget({
+                    aftersalesCase,
+                    kind: 'record_interception_result',
+                  })}
+                >
+                  {progressActionLabel('record_interception_result')}
+                </button>
+              )}
+              {aftersalesCase.workflow === 'return_refund'
+                && aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled'
+                && aftersalesCase.coordination.availableDirections.some((direction) => (
+                  direction !== aftersalesCase.coordination.handlingDirection
+                )) && (
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => setProgressTarget({
+                    aftersalesCase,
+                    kind: 'change_handling_direction',
+                  })}
+                >
+                  {progressActionLabel('change_handling_direction')}
+                </button>
+              )}
               {primaryProgressAction(aftersalesCase) && (
                 <button
                   className="button button--primary"
@@ -335,6 +417,31 @@ export function AftersalesCasePanel({
               ))}
             </ol>
           </details>
+          {(aftersalesCase.coordination.handlingDirectionTimeline.length > 0
+            || aftersalesCase.coordination.interception) && (
+            <details className="shipment-record-card__timeline">
+              <summary>售后协调完整历史</summary>
+              <ol>
+                {aftersalesCase.coordination.handlingDirectionTimeline.map((event, index) => (
+                  <li key={`direction-${index}-${event.occurredAt}`}>
+                    <strong>{event.kind === 'selected' ? '选择处理方向' : '转换处理方向'}</strong>
+                    <span>
+                      {event.before ? `${aftersalesHandlingDirectionLabel(event.before)} → ` : ''}
+                      {aftersalesHandlingDirectionLabel(event.after)} · {event.reason}
+                    </span>
+                    <small>{formatDateTime(event.occurredAt)}</small>
+                  </li>
+                ))}
+                {aftersalesCase.coordination.interception?.timeline.map((event, index) => (
+                  <li key={`interception-${index}-${event.occurredAt}`}>
+                    <strong>{interceptionEventLabel(event.kind)}</strong>
+                    <span>{event.reason}</span>
+                    <small>{formatDateTime(event.occurredAt)}</small>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
         </section>
       ))}
       {progressTarget && (
@@ -368,6 +475,10 @@ function primaryProgressAction(
     return 'confirm_refund';
   }
   if (aftersalesCase.workflow !== 'return_refund') return null;
+  if (aftersalesCase.coordination.handlingDirection === 'only_refund'
+    && aftersalesCase.status === 'waiting_refund') {
+    return 'confirm_refund';
+  }
   const returnRecord = aftersalesCase.returns[0];
   if (aftersalesCase.status === 'waiting_return' && !returnRecord) return 'register_return';
   if (
@@ -409,6 +520,8 @@ function returnFactProgressAction(
 
 function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string {
   const labels: Record<ProgressAftersalesCaseInput['kind'], string> = {
+    record_interception_result: '登记拦截结果',
+    change_handling_direction: '转换处理方向',
     register_return: '登记退货物流',
     receive_return: '确认收到退货',
     inspect_return: '记录退货检查',
@@ -432,6 +545,16 @@ function aftersalesWorkflowLabel(workflow: AftersalesCase['workflow']): string {
     : workflow === 'return_refund'
       ? '退货退款'
       : '一般处理';
+}
+
+function interceptionEventLabel(
+  kind: NonNullable<AftersalesCase['coordination']['interception']>['timeline'][number]['kind'],
+): string {
+  return {
+    requested: '已申请拦截',
+    succeeded: '拦截成功',
+    failed: '拦截失败',
+  }[kind];
 }
 
 function returnStatusLabel(status: AftersalesCase['returns'][number]['status']): string {

@@ -1933,6 +1933,48 @@ select:focus-visible {
   color: var(--navy-900);
 }
 
+.shipment-record-card__coordination {
+  display: grid;
+  gap: 4px;
+  margin-top: 9px;
+  padding: 10px 12px;
+  border-left: 3px solid #c56b2c;
+  background: #fff3df;
+  color: var(--navy-700);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.shipment-record-card__coordination > strong,
+.shipment-record-card__coordination-risk {
+  color: #7c401a;
+}
+
+.shipment-record-card__source-packages,
+.aftersales-case-dialog__source-packages {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.shipment-record-card__source-packages > article,
+.aftersales-case-dialog__source-packages > article {
+  padding: 9px 10px;
+  border: 1px solid rgb(184 134 11 / 20%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 72%);
+}
+
+.shipment-record-card__source-packages header,
+.aftersales-case-dialog__source-packages > article > strong,
+.aftersales-case-dialog__source-packages > article > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--navy-700);
+  font-size: 9px;
+}
+
 .shipment-record-card__return-record {
   margin-top: 9px;
   padding: 10px;
@@ -2156,6 +2198,17 @@ select:focus-visible {
 .aftersales-case-dialog__items > label > small {
   color: var(--navy-500);
   text-align: right;
+}
+
+.aftersales-case-dialog__coordination {
+  padding: 12px !important;
+  border: 1px solid rgb(184 134 11 / 24%) !important;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.aftersales-case-dialog__coordination > label {
+  margin-top: 12px;
 }
 
 .shipment-group-adjustment-dialog header h2 {

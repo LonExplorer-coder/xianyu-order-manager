@@ -16,6 +16,18 @@ import {
   type AftersalesReturnDiscrepancy,
 } from '../core/aftersales-cases';
 import {
+  coordinateAftersales,
+  isAftersalesHandlingDirection,
+  statusForHandlingDirection,
+  type AftersalesHandlingDirection,
+  type AftersalesHandlingDirectionEvent,
+  type AftersalesInterception,
+  type AftersalesInterceptionEvent,
+  type AftersalesPhysicalControl,
+  type AftersalesSourcePackageEvidence,
+} from '../core/aftersales-coordination';
+import {
+  isOutboundLogisticsStatus,
   prepareLogisticsCorrection,
   prepareLogisticsStatusChange,
 } from '../core/logistics-exceptions';
@@ -31,12 +43,24 @@ export class AftersalesApplicationService {
     const prepared = normalizeCreateAftersalesCaseInput(input);
     const sourceItems = this.resolveSourceItems(prepared.shipmentRecordId, prepared.items);
     this.assertQuantitiesAvailable(prepared.items, sourceItems);
+    const sourcePackages = sourcePackageEvidence(prepared.items, sourceItems);
+    const initialCoordination = coordinateAftersales({
+      handlingDirection: null,
+      sourcePackages,
+      interception: null,
+    });
+    const handlingDirection = initialHandlingDirection({
+      workflow: prepared.workflow,
+      requested: prepared.handlingDirection,
+      physicalControl: initialCoordination.physicalControl,
+      availableDirections: initialCoordination.availableDirections,
+    });
     const caseId = randomUUID();
-    const initialStatus = prepared.workflow === 'general'
-      ? 'processing'
-      : prepared.workflow === 'return_refund'
-        ? 'waiting_return'
-        : 'waiting_refund';
+    const initialStatus = prepared.workflow === 'refund_only'
+      ? 'waiting_refund'
+      : handlingDirection === null
+        ? 'processing'
+      : statusForHandlingDirection(handlingDirection);
     const now = new Date().toISOString();
     const snapshot: AftersalesCaseSnapshot = {
       status: initialStatus,
@@ -46,15 +70,16 @@ export class AftersalesApplicationService {
     this.workspace.transaction(() => {
       this.workspace.database.prepare(`
         INSERT INTO aftersales_cases (
-          id, shipment_record_id, workflow, status, revision, reason,
+          id, shipment_record_id, workflow, status, revision, reason, handling_direction,
           occurred_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
       `).run(
         caseId,
         prepared.shipmentRecordId,
         prepared.workflow,
         initialStatus,
         prepared.reason,
+        handlingDirection,
         prepared.occurredAt,
         now,
         now,
@@ -66,6 +91,28 @@ export class AftersalesApplicationService {
       `);
       for (const item of prepared.items) {
         insertItem.run(randomUUID(), caseId, item.shipmentPackageItemId, item.quantity);
+      }
+      if (handlingDirection !== null) {
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_handling_direction_events (
+            id, case_id, kind, before_direction, after_direction,
+            occurred_at, reason, created_at
+          ) VALUES (?, ?, 'selected', NULL, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          caseId,
+          handlingDirection,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+      }
+      if (handlingDirection === 'intercept') {
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_interception_events (
+            id, case_id, kind, occurred_at, reason, created_at
+          ) VALUES (?, ?, 'requested', ?, ?, ?)
+        `).run(randomUUID(), caseId, prepared.occurredAt, prepared.reason, now);
       }
       if (prepared.workflow !== 'general') {
         const pendingItemId = randomUUID();
@@ -207,7 +254,8 @@ export class AftersalesApplicationService {
     if (current.revision !== prepared.expectedRevision) {
       throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
     }
-    const continuesClosedReturn = prepared.kind === 'receive_return'
+    const continuesClosedReturn = prepared.kind === 'record_interception_result'
+      || prepared.kind === 'receive_return'
       || prepared.kind === 'inspect_return'
       || prepared.kind === 'correct_return_logistics'
       || prepared.kind === 'update_return_logistics_status'
@@ -223,6 +271,77 @@ export class AftersalesApplicationService {
       throw new Error('已经结束的售后处理单不能继续推进');
     }
     const now = new Date().toISOString();
+    if (prepared.kind === 'record_interception_result') {
+      if (
+        current.workflow !== 'return_refund'
+        || current.coordination.interception?.status !== 'requested'
+      ) {
+        throw new Error('当前售后没有待确认的拦截请求');
+      }
+      const latestInterceptionAt = current.coordination.interception.timeline.at(-1)?.occurredAt;
+      if (!latestInterceptionAt) throw new Error('拦截请求缺少发生时间');
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        latestInterceptionAt,
+        '拦截结果时间不能早于拦截请求时间',
+      );
+      this.workspace.transaction(() => {
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_interception_events (
+            id, case_id, kind, occurred_at, reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          current.id,
+          prepared.result,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+        this.advanceCase(current, current.status, prepared.reason, now);
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'change_handling_direction') {
+      if (current.workflow !== 'return_refund') {
+        throw new Error('当前售后处理方式不能转换处理方向');
+      }
+      const beforeDirection = current.coordination.handlingDirection;
+      if (!beforeDirection) throw new Error('当前售后缺少处理方向');
+      if (beforeDirection === prepared.handlingDirection) {
+        throw new Error('售后处理方向没有变化');
+      }
+      if (current.returns.length > 0) {
+        throw new Error('已有买家退货实物记录，请按退货流程继续处理');
+      }
+      if (
+        prepared.handlingDirection === 'intercept'
+        && current.coordination.interception?.status === 'requested'
+      ) {
+        throw new Error('已有待确认的拦截请求，请先登记结果');
+      }
+      if (!current.coordination.availableDirections.includes(prepared.handlingDirection)) {
+        throw new Error('当前实物流转证据不允许该售后处理方向');
+      }
+      const latestDirectionAt = current.coordination.handlingDirectionTimeline.at(-1)?.occurredAt
+        ?? current.occurredAt;
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        latestDirectionAt,
+        '处理方向转换时间不能早于上一条方向事件',
+      );
+      this.workspace.transaction(() => {
+        this.advanceHandlingDirection({
+          current,
+          beforeDirection,
+          afterDirection: prepared.handlingDirection,
+          occurredAt: prepared.occurredAt,
+          reason: prepared.reason,
+          now,
+        });
+      });
+      return this.get(current.id);
+    }
     if (prepared.kind === 'register_return') {
       if (
         current.workflow !== 'return_refund' ||
@@ -818,12 +937,16 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'confirm_refund') {
       const refund = current.refund;
-      const returnDecisionSupported = current.returns.length > 0
+      const explicitOnlyRefund = current.workflow === 'return_refund'
+        && current.coordination.handlingDirection === 'only_refund';
+      const returnDecisionSupported = explicitOnlyRefund || (
+        current.returns.length > 0
         && current.returns.every((returnRecord) => (
           returnRecord.status === 'inspected'
           || confirmedLoss(returnRecord)
           || returnRecord.carrierClaim !== null
-      ));
+        ))
+      );
       if (
         current.workflow === 'return_refund' &&
         !returnDecisionSupported
@@ -837,14 +960,16 @@ export class AftersalesApplicationService {
       if (!refundStatusReady || refund?.status !== 'pending') {
         throw new Error('当前售后尚不能确认实际退款');
       }
-      const earliestRefundAt = current.workflow === 'return_refund'
+      const earliestRefundAt = explicitOnlyRefund
+        ? current.occurredAt
+        : current.workflow === 'return_refund'
         ? latestReturnDecisionEvidenceAt(current.returns)
         : current.occurredAt;
       if (!earliestRefundAt) throw new Error('退货记录缺少检查、丢件或索赔时间');
       assertOccurredAtNotBefore(
         prepared.occurredAt,
         earliestRefundAt,
-        current.workflow === 'return_refund'
+        current.workflow === 'return_refund' && !explicitOnlyRefund
           ? current.returns.some(confirmedLoss)
             ? '实际退款时间不能早于退货丢件确认时间'
             : current.returns.some(({ carrierClaim }) => carrierClaim !== null)
@@ -968,6 +1093,26 @@ export class AftersalesApplicationService {
           items.*,
           packages.id AS source_package_id,
           packages.shipment_record_id,
+          packages.position AS source_package_position,
+          packages.shipping_carrier AS source_shipping_carrier,
+          packages.tracking_number AS source_tracking_number,
+          packages.logistics_status AS source_logistics_status,
+          COALESCE((
+            SELECT MAX(CASE
+              WHEN json_extract(exceptions.impact_json, '$.scope') = 'package'
+                THEN items.quantity
+              ELSE COALESCE((
+                SELECT json_extract(affected_item.value, '$.quantity')
+                FROM json_each(exceptions.impact_json, '$.items') AS affected_item
+                WHERE json_extract(affected_item.value, '$.sourceItemId') = items.id
+                LIMIT 1
+              ), 0)
+            END)
+            FROM logistics_exception_matters AS exceptions
+            WHERE exceptions.shipment_package_id = packages.id
+              AND exceptions.exception_type = 'lost'
+              AND exceptions.stage = 'confirmed'
+          ), 0) AS source_confirmed_lost_quantity,
           cancellations.id AS cancellation_event_id
         FROM shipment_package_items AS items
         JOIN shipment_packages AS packages ON packages.id = items.package_id
@@ -1087,6 +1232,8 @@ export class AftersalesApplicationService {
         createdAt: asString(eventRow.created_at),
       };
     });
+    const refund = this.getRefund(caseId);
+    const returns = this.getReturns(caseId);
     return {
       id: asString(row.id),
       shipmentRecordId: asString(row.shipment_record_id),
@@ -1096,12 +1243,135 @@ export class AftersalesApplicationService {
       reason: asString(row.reason),
       occurredAt,
       items,
-      refund: this.getRefund(caseId),
-      returns: this.getReturns(caseId),
+      refund,
+      returns,
+      coordination: coordinateAftersales({
+        handlingDirection: asNullableHandlingDirection(row.handling_direction),
+        sourcePackages: this.getSourcePackageEvidence(caseId),
+        interception: this.getInterception(caseId),
+        handlingDirectionTimeline: this.getHandlingDirectionTimeline(caseId),
+        refundStatus: refund?.status ?? null,
+      }),
       timeline,
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
     };
+  }
+
+  private getSourcePackageEvidence(caseId: string): AftersalesSourcePackageEvidence[] {
+    const rows = this.workspace.database.prepare(`
+      SELECT
+        packages.id AS package_id,
+        packages.shipping_carrier,
+        packages.tracking_number,
+        packages.logistics_status,
+        case_items.quantity,
+        shipment_items.id AS shipment_package_item_id,
+        shipment_items.source_title,
+        shipment_items.source_spec,
+        COALESCE((
+          SELECT MAX(CASE
+            WHEN json_extract(exceptions.impact_json, '$.scope') = 'package'
+              THEN case_items.quantity
+            ELSE COALESCE((
+              SELECT json_extract(affected_item.value, '$.quantity')
+              FROM json_each(exceptions.impact_json, '$.items') AS affected_item
+              WHERE json_extract(affected_item.value, '$.sourceItemId') = shipment_items.id
+              LIMIT 1
+            ), 0)
+          END)
+          FROM logistics_exception_matters AS exceptions
+          WHERE exceptions.shipment_package_id = packages.id
+            AND exceptions.exception_type = 'lost'
+            AND exceptions.stage = 'confirmed'
+        ), 0) AS confirmed_lost_quantity
+      FROM aftersales_case_items AS case_items
+      JOIN shipment_package_items AS shipment_items
+        ON shipment_items.id = case_items.shipment_package_item_id
+      JOIN shipment_packages AS packages ON packages.id = shipment_items.package_id
+      WHERE case_items.case_id = ?
+      ORDER BY packages.position, packages.id, shipment_items.position, shipment_items.id
+    `).all(caseId) as unknown as SqlRow[];
+    const packages = new Map<string, AftersalesSourcePackageEvidence>();
+    for (const row of rows) {
+      const packageId = asString(row.package_id);
+      const logisticsStatus = asString(row.logistics_status);
+      if (!isOutboundLogisticsStatus(logisticsStatus)) {
+        throw new Error('数据库原正向包裹物流状态错误');
+      }
+      const sourcePackage = packages.get(packageId) ?? {
+        packageId,
+        shippingCarrier: asString(row.shipping_carrier),
+        trackingNumber: asString(row.tracking_number),
+        logisticsStatus,
+        confirmedLost: false,
+        items: [],
+      };
+      const quantity = asNumber(row.quantity);
+      const confirmedLostQuantity = Math.min(
+        quantity,
+        asNumber(row.confirmed_lost_quantity),
+      );
+      sourcePackage.items.push({
+        shipmentPackageItemId: asString(row.shipment_package_item_id),
+        sourceTitle: asString(row.source_title),
+        sourceSpec: asString(row.source_spec),
+        quantity,
+        confirmedLostQuantity,
+      });
+      sourcePackage.confirmedLost = sourcePackage.items.every((item) => (
+        item.confirmedLostQuantity === item.quantity
+      ));
+      packages.set(packageId, sourcePackage);
+    }
+    return [...packages.values()];
+  }
+
+  private getHandlingDirectionTimeline(caseId: string): AftersalesHandlingDirectionEvent[] {
+    const rows = this.workspace.database.prepare(`
+      SELECT kind, before_direction, after_direction, occurred_at, reason, created_at
+      FROM aftersales_handling_direction_events
+      WHERE case_id = ?
+      ORDER BY sequence
+    `).all(caseId) as unknown as SqlRow[];
+    return rows.map((row) => {
+      const kind = asString(row.kind);
+      if (kind !== 'selected' && kind !== 'changed') {
+        throw new Error('数据库售后处理方向事件错误');
+      }
+      return {
+        kind,
+        before: asNullableHandlingDirection(row.before_direction),
+        after: asNullableHandlingDirection(row.after_direction)
+          ?? invalidStoredHandlingDirection(),
+        occurredAt: asString(row.occurred_at),
+        reason: asString(row.reason),
+        createdAt: asString(row.created_at),
+      };
+    });
+  }
+
+  private getInterception(caseId: string): AftersalesInterception | null {
+    const rows = this.workspace.database.prepare(`
+      SELECT kind, occurred_at, reason, created_at
+      FROM aftersales_interception_events
+      WHERE case_id = ?
+      ORDER BY sequence
+    `).all(caseId) as unknown as SqlRow[];
+    if (rows.length === 0) return null;
+    const timeline = rows.map((row): AftersalesInterceptionEvent => {
+      const kind = asString(row.kind);
+      if (kind !== 'requested' && kind !== 'succeeded' && kind !== 'failed') {
+        throw new Error('数据库拦截事项事件错误');
+      }
+      return {
+        kind,
+        occurredAt: asString(row.occurred_at),
+        reason: asString(row.reason),
+        createdAt: asString(row.created_at),
+      };
+    });
+    return { status: timeline.at(-1)?.kind as AftersalesInterception['status'], timeline };
   }
 
   private getRefund(caseId: string): AftersalesCase['refund'] {
@@ -1380,6 +1650,76 @@ export class AftersalesApplicationService {
     );
   }
 
+  private advanceHandlingDirection(input: {
+    current: AftersalesCase;
+    beforeDirection: AftersalesHandlingDirection;
+    afterDirection: AftersalesHandlingDirection;
+    occurredAt: string;
+    reason: string;
+    now: string;
+  }): void {
+    const nextStatus = statusForHandlingDirection(input.afterDirection);
+    const before: AftersalesCaseSnapshot = {
+      status: input.current.status,
+      reason: input.current.reason,
+      items: input.current.items.map(({ shipmentPackageItemId, quantity }) => ({
+        shipmentPackageItemId,
+        quantity,
+      })),
+    };
+    const after: AftersalesCaseSnapshot = { ...before, status: nextStatus };
+    const updated = this.workspace.database.prepare(`
+      UPDATE aftersales_cases
+      SET handling_direction = ?, status = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      input.afterDirection,
+      nextStatus,
+      input.now,
+      input.current.id,
+      input.current.revision,
+    );
+    if (updated.changes !== 1) {
+      throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
+    }
+    this.workspace.database.prepare(`
+      INSERT INTO aftersales_case_events (
+        id, case_id, kind, base_revision, result_revision,
+        before_snapshot_json, after_snapshot_json, change_reason, created_at
+      ) VALUES (?, ?, 'updated', ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      input.current.id,
+      input.current.revision,
+      input.current.revision + 1,
+      JSON.stringify(before),
+      JSON.stringify(after),
+      input.reason,
+      input.now,
+    );
+    this.workspace.database.prepare(`
+      INSERT INTO aftersales_handling_direction_events (
+        id, case_id, kind, before_direction, after_direction,
+        occurred_at, reason, created_at
+      ) VALUES (?, ?, 'changed', ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      input.current.id,
+      input.beforeDirection,
+      input.afterDirection,
+      input.occurredAt,
+      input.reason,
+      input.now,
+    );
+    if (input.afterDirection === 'intercept') {
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_interception_events (
+          id, case_id, kind, occurred_at, reason, created_at
+        ) VALUES (?, ?, 'requested', ?, ?, ?)
+      `).run(randomUUID(), input.current.id, input.occurredAt, input.reason, input.now);
+    }
+  }
+
   private advanceCasesForReturnRecord(
     returnRecordId: string,
     current: AftersalesCase,
@@ -1399,6 +1739,70 @@ export class AftersalesApplicationService {
       this.advanceCase(linkedCase, statusForCase(linkedCase), changeReason, now);
     }
   }
+}
+
+function initialHandlingDirection(input: {
+  workflow: AftersalesCase['workflow'];
+  requested: AftersalesHandlingDirection | undefined;
+  physicalControl: AftersalesPhysicalControl;
+  availableDirections: readonly AftersalesHandlingDirection[];
+}): AftersalesHandlingDirection | null {
+  if (input.workflow === 'general') {
+    if (input.requested !== undefined) throw new Error('一般处理不能选择专用售后处理方向');
+    return null;
+  }
+  if (input.workflow === 'refund_only') {
+    if (input.requested !== undefined) throw new Error('仅退款处理不能选择退货退款处理方向');
+    return null;
+  }
+  const requested = input.requested;
+  if (!requested) {
+    throw new Error('请根据当前实物控制关系明确选择售后处理方向');
+  }
+  if (!input.availableDirections.includes(requested)) {
+    throw new Error('当前实物流转证据不允许该售后处理方向');
+  }
+  return requested;
+}
+
+function sourcePackageEvidence(
+  inputs: readonly AftersalesCaseItemInput[],
+  sourceItems: ReadonlyMap<string, SqlRow>,
+): AftersalesSourcePackageEvidence[] {
+  const packages = new Map<string, AftersalesSourcePackageEvidence>();
+  for (const input of inputs) {
+    const row = sourceItems.get(input.shipmentPackageItemId);
+    if (!row) throw new Error('发货快照商品不存在');
+    const packageId = asString(row.source_package_id);
+    const logisticsStatus = asString(row.source_logistics_status);
+    if (!isOutboundLogisticsStatus(logisticsStatus)) {
+      throw new Error('数据库原正向包裹物流状态错误');
+    }
+    const sourcePackage = packages.get(packageId) ?? {
+      packageId,
+      shippingCarrier: asString(row.source_shipping_carrier),
+      trackingNumber: asString(row.source_tracking_number),
+      logisticsStatus,
+      confirmedLost: false,
+      items: [],
+    };
+    const confirmedLostQuantity = Math.min(
+      input.quantity,
+      asNumber(row.source_confirmed_lost_quantity),
+    );
+    sourcePackage.items.push({
+      shipmentPackageItemId: input.shipmentPackageItemId,
+      sourceTitle: asString(row.source_title),
+      sourceSpec: asString(row.source_spec),
+      quantity: input.quantity,
+      confirmedLostQuantity,
+    });
+    sourcePackage.confirmedLost = sourcePackage.items.every((item) => (
+      item.confirmedLostQuantity === item.quantity
+    ));
+    packages.set(packageId, sourcePackage);
+  }
+  return [...packages.values()];
 }
 
 function asString(value: string | number | null | undefined): string {
@@ -1423,6 +1827,18 @@ function asAftersalesWorkflow(
 ): AftersalesCase['workflow'] {
   if (isAftersalesWorkflow(value)) return value;
   throw new Error('数据库售后处理方式错误');
+}
+
+function asNullableHandlingDirection(
+  value: string | number | null | undefined,
+): AftersalesHandlingDirection | null {
+  if (value === null || value === undefined) return null;
+  if (isAftersalesHandlingDirection(value)) return value;
+  throw new Error('数据库售后处理方向错误');
+}
+
+function invalidStoredHandlingDirection(): never {
+  throw new Error('数据库售后处理方向错误');
 }
 
 function asReturnInspectionResult(

@@ -184,6 +184,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 29) migrateToVersion29(database);
   if (row.version < 30) migrateToVersion30(database);
   if (row.version < 31) migrateToVersion31(database);
+  if (row.version < 32) migrateToVersion32(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3721,6 +3722,178 @@ function migrateToVersion31(database: DatabaseSync): void {
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
   }
+}
+
+function migrateToVersion32(database: DatabaseSync): void {
+  const schemaState = version32SchemaState(database);
+  if (schemaState === 'partial') {
+    throw new Error('检测到不完整的 v32 在途售后协调结构');
+  }
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    if (schemaState === 'complete') {
+      assertForeignKeyIntegrity(database);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (32, ?)')
+        .run(new Date().toISOString());
+      database.exec('COMMIT;');
+      return;
+    }
+    database.exec(`
+      ALTER TABLE aftersales_cases ADD COLUMN handling_direction TEXT CHECK (
+        handling_direction IS NULL OR handling_direction IN (
+          'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+        )
+      );
+
+      UPDATE aftersales_cases
+      SET handling_direction = CASE
+        WHEN workflow = 'refund_only' THEN NULL
+        WHEN workflow = 'return_refund' AND status = 'waiting_replacement'
+          THEN 'replacement'
+        WHEN workflow = 'return_refund' AND (
+          EXISTS (
+            SELECT 1
+            FROM aftersales_return_record_items AS return_items
+            WHERE return_items.aftersales_case_id = aftersales_cases.id
+          )
+        )
+          THEN 'buyer_return'
+        WHEN workflow = 'return_refund' AND (
+          status IN ('waiting_refund', 'ready_to_complete')
+          OR EXISTS (
+            SELECT 1
+            FROM financial_records AS records
+            WHERE records.aftersales_case_id = aftersales_cases.id
+              AND records.kind = 'aftersales_refund'
+          )
+        )
+          THEN 'only_refund'
+        WHEN workflow = 'return_refund' THEN 'waiting'
+        ELSE NULL
+      END;
+
+      UPDATE aftersales_cases
+      SET status = 'processing'
+      WHERE workflow = 'return_refund'
+        AND handling_direction = 'waiting'
+        AND status = 'waiting_return';
+
+      CREATE TABLE aftersales_handling_direction_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+        before_direction TEXT CHECK (
+          before_direction IS NULL OR before_direction IN (
+            'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+          )
+        ),
+        after_direction TEXT NOT NULL CHECK (after_direction IN (
+          'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+        )),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (kind = 'selected' AND before_direction IS NULL)
+          OR (kind = 'changed' AND before_direction IS NOT NULL
+            AND before_direction <> after_direction)
+        )
+      ) STRICT;
+
+      CREATE INDEX aftersales_direction_events_by_case
+      ON aftersales_handling_direction_events (case_id, sequence);
+
+      INSERT INTO aftersales_handling_direction_events (
+        id, case_id, kind, before_direction, after_direction,
+        occurred_at, reason, created_at
+      )
+      SELECT
+        'v32-direction-' || id, id, 'selected', NULL, handling_direction,
+        occurred_at, '数据库升级：按已有售后处理方式和状态保守保留处理方向', created_at
+      FROM aftersales_cases
+      WHERE handling_direction IS NOT NULL;
+
+      CREATE TABLE aftersales_interception_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('requested', 'succeeded', 'failed')),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX aftersales_interception_events_by_case
+      ON aftersales_interception_events (case_id, sequence);
+
+      CREATE TRIGGER aftersales_direction_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_handling_direction_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales handling direction events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_direction_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_handling_direction_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales handling direction events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_interception_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_interception_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales interception events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_interception_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_interception_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales interception events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (32, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  }
+}
+
+function version32SchemaState(database: DatabaseSync): 'absent' | 'complete' | 'partial' {
+  const hasHandlingDirection = (database.prepare('PRAGMA table_info(aftersales_cases)').all() as Array<{
+    name: string;
+  }>).some(({ name }) => name === 'handling_direction');
+  const requiredObjects = new Map<string, 'table' | 'index' | 'trigger'>([
+    ['aftersales_handling_direction_events', 'table'],
+    ['aftersales_interception_events', 'table'],
+    ['aftersales_direction_events_by_case', 'index'],
+    ['aftersales_interception_events_by_case', 'index'],
+    ['aftersales_direction_events_are_immutable_on_update', 'trigger'],
+    ['aftersales_direction_events_are_immutable_on_delete', 'trigger'],
+    ['aftersales_interception_events_are_immutable_on_update', 'trigger'],
+    ['aftersales_interception_events_are_immutable_on_delete', 'trigger'],
+  ]);
+  const rows = database.prepare(`
+    SELECT type, name
+    FROM sqlite_schema
+    WHERE name IN (${[...requiredObjects].map(() => '?').join(', ')})
+  `).all(...requiredObjects.keys()) as Array<{ type: string; name: string }>;
+  const matchingObjectCount = rows.filter((row) => (
+    requiredObjects.get(row.name) === row.type
+  )).length;
+  if (!hasHandlingDirection && rows.length === 0) return 'absent';
+  if (hasHandlingDirection
+    && rows.length === requiredObjects.size
+    && matchingObjectCount === requiredObjects.size) return 'complete';
+  return 'partial';
 }
 
 function hasCompleteVersion31Schema(database: DatabaseSync): boolean {

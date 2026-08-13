@@ -17,9 +17,19 @@ import type {
   ProgressAftersalesCaseInput,
   ReturnInspectionResult,
 } from '../core/aftersales-cases';
+import {
+  availableAftersalesDirections,
+  physicalControlForSourcePackages,
+  sourcePackageEvidenceFromShipmentRecord,
+  type AftersalesHandlingDirection,
+} from '../core/aftersales-coordination';
 import { normalizeShanghaiDateTime } from '../core/order-normalization';
+import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
 import type { ShipmentRecord } from '../core/shipment-records';
-import { AFTERSALES_STATUS_OPTIONS } from './aftersales-presentation';
+import {
+  AFTERSALES_STATUS_OPTIONS,
+  aftersalesHandlingDirectionLabel,
+} from './aftersales-presentation';
 import {
   LOGISTICS_EXCEPTION_TYPE_OPTIONS,
   logisticsExceptionStageLabel,
@@ -47,6 +57,7 @@ export function CreateAftersalesCaseDialog({
   const sourceItems = activeShipmentRecordItems(record);
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [workflow, setWorkflow] = useState<AftersalesWorkflow>('general');
+  const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection | ''>('');
   const [requestedRefundYuan, setRequestedRefundYuan] = useState('');
   const [reason, setReason] = useState('');
   const [quantities, setQuantities] = useState<Record<string, number>>(
@@ -55,12 +66,23 @@ export function CreateAftersalesCaseDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const selectedItems = selectedItemInputs(sourceItems, quantities);
+  const sourcePackages = sourcePackageEvidenceFromShipmentRecord(record, quantities);
+  const physicalControl = sourcePackages.length > 0
+    ? physicalControlForSourcePackages(sourcePackages)
+    : null;
+  const availableDirections = physicalControl
+    ? availableAftersalesDirections(physicalControl)
+    : [];
+  const effectiveHandlingDirection = handlingDirection;
   const requestedRefundCents = yuanToCents(requestedRefundYuan);
   const canSubmit = Boolean(
     reason.trim() &&
     occurredAt &&
     selectedItems.length > 0 &&
-    (workflow === 'general' || requestedRefundCents !== null),
+    (workflow === 'general' || requestedRefundCents !== null) &&
+    (workflow !== 'return_refund'
+      || (effectiveHandlingDirection !== ''
+        && availableDirections.includes(effectiveHandlingDirection))),
   );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -79,7 +101,12 @@ export function CreateAftersalesCaseDialog({
         reason,
         ...(workflow === 'general'
           ? {}
-          : { requestedRefundCents: requestedRefundCents as number }),
+          : {
+            requestedRefundCents: requestedRefundCents as number,
+            ...(workflow === 'return_refund'
+              ? { handlingDirection: effectiveHandlingDirection as AftersalesHandlingDirection }
+              : {}),
+          }),
         items: selectedItems,
       }));
     } catch (value) {
@@ -114,7 +141,10 @@ export function CreateAftersalesCaseDialog({
             aria-label="售后处理方式"
             value={workflow}
             disabled={saving}
-            onChange={(event) => setWorkflow(event.target.value as AftersalesWorkflow)}
+            onChange={(event) => {
+              setWorkflow(event.target.value as AftersalesWorkflow);
+              setHandlingDirection('');
+            }}
           >
             <option value="general">一般处理</option>
             <option value="refund_only">仅退款</option>
@@ -154,6 +184,56 @@ export function CreateAftersalesCaseDialog({
           saving={saving}
           onChange={setQuantities}
         />
+        {workflow === 'return_refund' && selectedItems.length > 0 && (
+          <fieldset className="aftersales-case-dialog__coordination">
+            <legend>原正向包裹与实物流转</legend>
+            <div className="aftersales-case-dialog__source-packages">
+              {sourcePackages.map((sourcePackage) => (
+                <article key={sourcePackage.packageId}>
+                  <strong>
+                    {sourcePackage.shippingCarrier} · {sourcePackage.trackingNumber}
+                  </strong>
+                  <span>
+                    {shipmentLogisticsStatusLabel(sourcePackage.logisticsStatus)}
+                    {sourcePackage.confirmedLost ? ' · 已确认丢失' : ''}
+                  </span>
+                  <ul>
+                    {sourcePackage.items.map((item) => (
+                      <li key={item.shipmentPackageItemId}>
+                        <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                        <strong>
+                          × {item.quantity}
+                          {item.confirmedLostQuantity > 0
+                            ? ` · 已确认丢失 ${item.confirmedLostQuantity}`
+                            : ''}
+                        </strong>
+                      </li>
+                    ))}
+                  </ul>
+                </article>
+              ))}
+            </div>
+            <label>
+              <span>售后处理方向</span>
+              <select
+                aria-label="售后处理方向"
+                value={effectiveHandlingDirection}
+                disabled={saving}
+                onChange={(event) => setHandlingDirection(
+                  event.target.value as AftersalesHandlingDirection | '',
+                )}
+              >
+                <option value="">请明确选择处理方向</option>
+                {availableDirections.map((direction) => (
+                  <option key={direction} value={direction}>
+                    {aftersalesHandlingDirectionLabel(direction)}
+                  </option>
+                ))}
+              </select>
+              <small>{physicalControlCopy(physicalControl)}</small>
+            </label>
+          </fieldset>
+        )}
         <DialogFooter saving={saving} canSubmit={canSubmit} error={error} onClose={onClose} action="create" />
       </form>
     </div>,
@@ -317,6 +397,15 @@ export function ProgressAftersalesCaseDialog({
     ? returnRecord?.currentException?.exceptionType
     : exceptionType;
   const [claimOutcome, setClaimOutcome] = useState<'approved' | 'rejected'>('approved');
+  const [interceptionResult, setInterceptionResult] = useState<'succeeded' | 'failed'>('succeeded');
+  const conversionDirections = aftersalesCase.coordination.availableDirections.filter((direction) => (
+    direction !== aftersalesCase.coordination.handlingDirection
+      && !(direction === 'intercept'
+        && aftersalesCase.coordination.interception?.status === 'requested')
+  ));
+  const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection>(
+    conversionDirections[0] ?? 'waiting',
+  );
   const [inspectionResult, setInspectionResult] = useState<ReturnInspectionResult>('resellable');
   const [inspectionResults, setInspectionResults] = useState<Record<string, ReturnInspectionResult>>(
     Object.fromEntries((returnRecord?.items ?? []).map((item) => [
@@ -382,6 +471,18 @@ export function ProgressAftersalesCaseDialog({
       const targetId = returnRecord?.id as string;
       let input: ProgressAftersalesCaseInput;
       switch (kind) {
+        case 'record_interception_result':
+          input = {
+            kind, ...common, result: interceptionResult,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'change_handling_direction':
+          input = {
+            kind, ...common, handlingDirection,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
         case 'register_return':
           input = {
             kind, ...common, shippingCarrier, trackingNumber,
@@ -526,6 +627,41 @@ export function ProgressAftersalesCaseDialog({
               disabled={saving}
               onChange={(event) => setOccurredAt(event.target.value)}
             />
+          </label>
+        )}
+        {kind === 'record_interception_result' && (
+          <label>
+            <span>拦截结果</span>
+            <select
+              aria-label="拦截结果"
+              value={interceptionResult}
+              disabled={saving}
+              onChange={(event) => setInterceptionResult(
+                event.target.value as 'succeeded' | 'failed',
+              )}
+            >
+              <option value="succeeded">拦截成功</option>
+              <option value="failed">拦截失败</option>
+            </select>
+          </label>
+        )}
+        {kind === 'change_handling_direction' && (
+          <label>
+            <span>新售后处理方向</span>
+            <select
+              aria-label="新售后处理方向"
+              value={handlingDirection}
+              disabled={saving}
+              onChange={(event) => setHandlingDirection(
+                event.target.value as AftersalesHandlingDirection,
+              )}
+            >
+              {conversionDirections.map((direction) => (
+                  <option key={direction} value={direction}>
+                    {aftersalesHandlingDirectionLabel(direction)}
+                  </option>
+              ))}
+            </select>
           </label>
         )}
         {(kind === 'register_return' || kind === 'correct_return_logistics') && (
@@ -984,6 +1120,18 @@ function activeShipmentRecordItems(record: ShipmentRecord): ShipmentItem[] {
     .flatMap(({ items }) => items);
 }
 
+function physicalControlCopy(
+  physicalControl: ReturnType<typeof physicalControlForSourcePackages> | null,
+): string {
+  return {
+    carrier: '商品仍由承运方控制，不会默认等待买家退回。',
+    buyer: '原正向包裹已签收，商品由买家控制，请明确选择处理方向。',
+    seller: '原正向包裹已退回卖家，请按实际处理。',
+    confirmed_lost: '原正向包裹已确认丢失，只可选择继续调查、仅退款或补发。',
+    mixed: '所选商品的实物控制关系不一致，请保守选择后续方向。',
+  }[physicalControl ?? 'mixed'];
+}
+
 function selectedItemInputs(
   sourceItems: readonly ShipmentItem[],
   quantities: Readonly<Record<string, number>>,
@@ -1024,6 +1172,20 @@ function normalizeActionDateTime(value: string): string {
 }
 
 function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
+  if (kind === 'record_interception_result') return {
+    title: '登记拦截结果',
+    description: '只记录承运方已确认的成功或失败，不自动退款或改写包裹物流。',
+    timeLabel: '拦截结果时间',
+    reasonLabel: '拦截结果说明',
+    confirmLabel: '确认结果',
+  };
+  if (kind === 'change_handling_direction') return {
+    title: '转换售后处理方向',
+    description: '根据当前实物流转显式选择后续，前后方向、原因和时间会完整保留。',
+    timeLabel: '处理方向转换时间',
+    reasonLabel: '转换原因',
+    confirmLabel: '确认转换',
+  };
   if (kind === 'register_return') return {
     title: '登记退货物流',
     description: '这里只记录买家寄回的实物流转，不改变原包裹物流。',

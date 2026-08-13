@@ -9,6 +9,11 @@ import type {
   ReturnLogisticsStatus,
 } from './logistics-exceptions';
 import { isReturnLogisticsStatus } from './logistics-exceptions';
+import {
+  isAftersalesHandlingDirection,
+  type AftersalesCoordination,
+  type AftersalesHandlingDirection,
+} from './aftersales-coordination';
 
 export type AftersalesStatus =
   | 'processing'
@@ -189,6 +194,22 @@ export type AftersalesReturnRecord = {
 
 export type ProgressAftersalesCaseInput =
   | {
+    kind: 'record_interception_result';
+    caseId: string;
+    expectedRevision: number;
+    result: 'succeeded' | 'failed';
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'change_handling_direction';
+    caseId: string;
+    expectedRevision: number;
+    handlingDirection: AftersalesHandlingDirection;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
     kind: 'register_return';
     caseId: string;
     expectedRevision: number;
@@ -322,6 +343,7 @@ export type AftersalesCaseItemInput = {
 export type CreateAftersalesCaseInput = {
   shipmentRecordId: string;
   workflow?: AftersalesWorkflow;
+  handlingDirection?: AftersalesHandlingDirection;
   occurredAt: string;
   reason: string;
   requestedRefundCents?: number;
@@ -394,6 +416,7 @@ export type AftersalesCase = {
   items: AftersalesCaseItem[];
   refund: AftersalesRefund | null;
   returns: AftersalesReturnRecord[];
+  coordination: AftersalesCoordination;
   timeline: AftersalesCaseEvent[];
   createdAt: string;
   updatedAt: string;
@@ -443,6 +466,7 @@ export function normalizeCreateAftersalesCaseInput(
     [
       'shipmentRecordId',
       'workflow',
+      'handlingDirection',
       'occurredAt',
       'reason',
       'requestedRefundCents',
@@ -461,6 +485,13 @@ export function normalizeCreateAftersalesCaseInput(
   return {
     shipmentRecordId: boundedText(record.shipmentRecordId, 200, '发货记录标识无效'),
     workflow,
+    ...(record.handlingDirection === undefined
+      ? {}
+      : {
+        handlingDirection: isAftersalesHandlingDirection(record.handlingDirection)
+          ? record.handlingDirection
+          : invalidHandlingDirection(),
+      }),
     occurredAt: dateTime(record.occurredAt, '售后发生时间无效'),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的问题原因'),
     ...(requestedRefundCents === undefined ? {} : { requestedRefundCents }),
@@ -512,6 +543,40 @@ export function normalizeProgressAftersalesCaseInput(
     caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
     expectedRevision: revision(record.expectedRevision),
   };
+  if (record.kind === 'record_interception_result') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'result', 'occurredAt', 'reason'],
+      '登记拦截结果参数',
+    );
+    if (record.result !== 'succeeded' && record.result !== 'failed') {
+      throw new Error('拦截结果无效');
+    }
+    return {
+      kind: 'record_interception_result',
+      ...common,
+      result: record.result,
+      occurredAt: dateTime(record.occurredAt, '拦截结果时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的拦截结果说明'),
+    };
+  }
+  if (record.kind === 'change_handling_direction') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'handlingDirection', 'occurredAt', 'reason'],
+      '转换售后处理方向参数',
+    );
+    if (!isAftersalesHandlingDirection(record.handlingDirection)) {
+      throw new Error('售后处理方向无效');
+    }
+    return {
+      kind: 'change_handling_direction',
+      ...common,
+      handlingDirection: record.handlingDirection,
+      occurredAt: dateTime(record.occurredAt, '处理方向转换时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的处理方向转换原因'),
+    };
+  }
   if (record.kind === 'register_return') {
     rejectUnknownKeys(
       record,
@@ -950,6 +1015,10 @@ function nonNegativeQuantity(value: unknown, message: string): number {
 
 function assertUnique(values: readonly string[], message: string): void {
   if (new Set(values).size !== values.length) throw new Error(message);
+}
+
+function invalidHandlingDirection(): never {
+  throw new Error('售后处理方向无效');
 }
 
 function booleanValue(value: unknown, message: string): boolean {

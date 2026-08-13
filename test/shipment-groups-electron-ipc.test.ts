@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import type { RecognitionResult } from '../src/core/contracts';
+import type { AftersalesCase } from '../src/core/aftersales-cases';
 import { DesktopSession } from '../src/main/desktop-session';
 import { LocalApplication } from '../src/main/local-application';
 import { OcrSettingsService } from '../src/main/ocr-settings';
@@ -294,6 +295,109 @@ describe('发货组 Electron IPC', () => {
     expect(updateAftersalesCase).toHaveBeenCalledWith(updateInput);
     expect(progressAftersalesCase).toHaveBeenCalledWith(progressInput);
     expect(queryAftersalesCases).toHaveBeenCalledWith(query);
+  });
+
+  it('通过真实 DesktopSession 与 SQLite 协调在途售后', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-aftersales-coordination-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '在途售后订单.png');
+    await writeFile(sourcePath, Buffer.from('aftersales-coordination-ipc-source'));
+    const recognition = completeRecognition();
+    const seeder = new LocalApplication(new ControlledRecognizer(recognition));
+    seeder.openDataDirectory(dataDirectory);
+    const [draft] = (await seeder.submitRecognitionBatch([sourcePath])).drafts;
+    seeder.confirmDraft(draft);
+    const group = seeder.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = seeder.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-AFTERSALES-COORDINATION-IPC',
+        items: remainingItems,
+      }],
+    });
+    seeder.close();
+
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+    registerIpcHandlers(session);
+
+    const sourcePackage = shipment.record.packages[0];
+    const created = await invoke('aftersales-cases:create', {
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-15T09:00:00+08:00',
+      reason: '包裹运输中申请拦截',
+      requestedRefundCents: 800,
+      items: [{ shipmentPackageItemId: sourcePackage.items[0].id, quantity: 1 }],
+    }) as AftersalesCase;
+    expect(created).toMatchObject({
+      status: 'processing',
+      returns: [],
+      coordination: {
+        handlingDirection: 'intercept',
+        physicalControl: 'carrier',
+        interception: { status: 'requested' },
+      },
+    });
+
+    const failed = await invoke('aftersales-cases:progress', {
+      kind: 'record_interception_result',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      result: 'failed',
+      occurredAt: '2026-08-15T09:10:00+08:00',
+      reason: '承运方确认拦截失败',
+    }) as AftersalesCase;
+    await invoke('shipment-records:update-package-logistics-status', {
+      recordId: shipment.record.id,
+      packageId: sourcePackage.id,
+      expectedRevision: sourcePackage.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-15T10:00:00+08:00',
+      reason: '承运方回传已签收',
+    });
+    const changed = await invoke('aftersales-cases:progress', {
+      kind: 'change_handling_direction',
+      caseId: failed.id,
+      expectedRevision: failed.revision,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-15T10:10:00+08:00',
+      reason: '拦截失败且买家已签收，改为买家寄回',
+    }) as AftersalesCase;
+
+    expect(changed).toMatchObject({
+      status: 'waiting_return',
+      returns: [],
+      coordination: {
+        handlingDirection: 'buyer_return',
+        physicalControl: 'buyer',
+        interception: { status: 'failed' },
+        handlingDirectionTimeline: [
+          expect.objectContaining({ kind: 'selected', after: 'intercept' }),
+          expect.objectContaining({
+            kind: 'changed',
+            before: 'intercept',
+            after: 'buyer_return',
+          }),
+        ],
+      },
+    });
+    await expect(invoke('aftersales-cases:query', {
+      shipmentRecordId: shipment.record.id,
+    })).resolves.toEqual([changed]);
   });
 });
 

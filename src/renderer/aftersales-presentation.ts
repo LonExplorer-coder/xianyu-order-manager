@@ -13,6 +13,10 @@ import {
 } from '../core/order-operations-projection';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import type { ShipmentRecord } from '../core/shipment-records';
+import type {
+  AftersalesHandlingDirection,
+  AftersalesPhysicalControl,
+} from '../core/aftersales-coordination';
 
 export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
   value: AftersalesStatus;
@@ -22,6 +26,29 @@ export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
   .map((value) => ({ value, label: aftersalesStatusLabel(value) }));
 
 export { aftersalesStatusLabel };
+
+export function aftersalesHandlingDirectionLabel(
+  direction: AftersalesHandlingDirection,
+): string {
+  return {
+    waiting: '继续等待',
+    intercept: '申请拦截',
+    refuse: '约定拒收',
+    only_refund: '仅退款',
+    replacement: '补发',
+    buyer_return: '买家寄回',
+  }[direction];
+}
+
+export function aftersalesPhysicalControlLabel(control: AftersalesPhysicalControl): string {
+  return {
+    carrier: '承运方',
+    buyer: '买家',
+    seller: '卖家',
+    confirmed_lost: '已确认丢失',
+    mixed: '多种状态',
+  }[control];
+}
 
 export function returnLogisticsStatusLabel(status: AftersalesReturnLogisticsStatus): string {
   return {
