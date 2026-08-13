@@ -733,7 +733,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -788,7 +788,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -874,7 +874,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1014,7 +1014,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1213,7 +1213,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1393,7 +1393,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1530,7 +1530,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1657,7 +1657,7 @@ describe('发货记录', () => {
         BEGIN
           SELECT RAISE(ABORT, 'shipment records are immutable');
         END;
-        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1766,7 +1766,7 @@ describe('发货记录', () => {
         ALTER TABLE shipment_group_archives_v19_fixture RENAME TO shipment_group_archives;
         CREATE INDEX shipment_group_archives_by_source_group
         ON shipment_group_archives (source_group_id, status, created_at, id);
-        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -1841,7 +1841,7 @@ describe('发货记录', () => {
         DROP TRIGGER shipment_records_require_archive_on_insert;
         ALTER TABLE shipment_records DROP COLUMN shipment_group_archive_id;
         DROP TABLE shipment_group_archives;
-        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
         COMMIT;
       `);
     } finally {
@@ -1948,7 +1948,7 @@ describe('发货记录', () => {
         SET fulfillment_status = 'pending_shipment'
         WHERE id = ?
       `).run(firstOrder.id);
-      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29)').run();
+      database.prepare('DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30)').run();
     } finally {
       database.close();
     }
@@ -2375,6 +2375,113 @@ describe('发货记录', () => {
 
     const reopened = await createApplication(root, false);
     expect(reopened.queryShipmentRecords()).toEqual([result.record]);
+  });
+
+  it('正向发货通过共同模块登记商品级异常、索赔和实际赔付', async () => {
+    const application = await createApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const [firstOrder, secondOrder] = group.orders;
+    const firstItem = firstOrder.items[0];
+    const secondItem = secondOrder.items[0];
+    const confirmation = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: [
+        { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: firstItem.quantity },
+        { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: secondItem.quantity },
+      ],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-OUTBOUND-EXCEPTION-001',
+        items: [
+          { orderId: firstOrder.id, orderItemId: firstItem.id, quantity: firstItem.quantity },
+          { orderId: secondOrder.id, orderItemId: secondItem.id, quantity: secondItem.quantity },
+        ],
+      }],
+    });
+    const shipmentPackage = confirmation.record.packages[0];
+
+    const exceptional = application.updateShipmentPackageLogisticsStatus({
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'damaged',
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      reason: '承运方反馈外包装损坏，仅影响第一笔订单的一件商品',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
+      },
+    });
+
+    expect(exceptional.record.packages[0]).toMatchObject({
+      logisticsStatus: 'damaged',
+      currentException: {
+        direction: 'outbound',
+        logisticsStatus: 'damaged',
+        impact: {
+          scope: 'items',
+          items: [{ sourceItemId: shipmentPackage.items[0].id, quantity: 1 }],
+        },
+      },
+      carrierClaim: null,
+    });
+    expect(application.getOrder(firstOrder.id).operations.shipmentRecords[0].packages[0])
+      .toMatchObject({
+        currentException: {
+          direction: 'outbound',
+          logisticsStatus: 'damaged',
+          affectedQuantity: 1,
+        },
+      });
+    expect(application.getOrder(secondOrder.id).operations.shipmentRecords[0].packages[0])
+      .toMatchObject({ currentException: null });
+
+    const opened = application.progressShipmentPackageCarrierClaim({
+      kind: 'open',
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedRevision: exceptional.record.packages[0].revision,
+      requestedAmountCents: 1_000,
+      occurredAt: '2026-08-14T09:10:00+08:00',
+      reason: '就受损商品向承运方索赔',
+    });
+    expect(opened.record.packages[0].carrierClaim).toMatchObject({
+      status: 'pending',
+      requestedAmountCents: 1_000,
+    });
+    const approved = application.progressShipmentPackageCarrierClaim({
+      kind: 'resolve',
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedClaimRevision: 1,
+      outcome: 'approved',
+      approvedAmountCents: 800,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '承运方同意赔付八元',
+    });
+    const compensated = application.progressShipmentPackageCarrierClaim({
+      kind: 'confirm_compensation',
+      recordId: confirmation.record.id,
+      packageId: shipmentPackage.id,
+      expectedClaimRevision: approved.record.packages[0].carrierClaim?.revision ?? 0,
+      amountCents: 700,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      note: '实际到账七元',
+    });
+
+    expect(compensated.record.packages[0].carrierClaim).toMatchObject({
+      status: 'paid',
+      requestedAmountCents: 1_000,
+      approvedAmountCents: 800,
+      actualCompensation: { amountCents: 700 },
+      timeline: [
+        expect.objectContaining({ kind: 'opened' }),
+        expect.objectContaining({ kind: 'approved' }),
+        expect.objectContaining({ kind: 'compensation_confirmed' }),
+      ],
+    });
+    expect(application.getOrder(firstOrder.id).order.fulfillmentStatus).toBe('shipped');
+    expect(application.queryAftersalesCases()).toEqual([]);
   });
 
   it('自动签收随物流更正回退，订单不再保留独立人工终态', async () => {
@@ -2843,10 +2950,45 @@ describe('退货物流与承运索赔', () => {
         }),
       ]));
 
+    const carrierAccepted = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: secondCase.id,
+      expectedRevision: combined.revision,
+      returnRecordId: combined.returns[0].id,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-13T22:13:00+08:00',
+      reason: '承运方确认接收合装退货包裹',
+    });
+    const firstReturnItemId = combined.returns[0].items.find((item) => (
+      item.shipmentPackageItemId === firstItem.id
+    ))?.id as string;
+    const damaged = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: secondCase.id,
+      expectedRevision: carrierAccepted.revision,
+      returnRecordId: combined.returns[0].id,
+      logisticsStatus: 'damaged',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: firstReturnItemId, quantity: 1 }],
+      },
+      occurredAt: '2026-08-13T22:14:00+08:00',
+      reason: '合装运输中只有第一张订单的商品外包装破损',
+    });
+    expect(application.getOrder(firstItem.orderId).operations.aftersalesCases[0]
+      .returnPackages[0].currentException).toMatchObject({
+      direction: 'return',
+      logisticsStatus: 'damaged',
+      affectedQuantity: 1,
+    });
+    expect(application.getOrder(secondItem.orderId).operations.aftersalesCases[0]
+      .returnPackages[0].currentException).toBeNull();
+
     const received = application.progressAftersalesCase({
       kind: 'receive_return',
       caseId: secondCase.id,
-      expectedRevision: combined.revision,
+      expectedRevision: damaged.revision,
       returnRecordId: combined.returns[0].id,
       occurredAt: '2026-08-13T22:20:00+08:00',
       reason: '合装包裹整体到达并逐项清点',
@@ -2858,9 +3000,7 @@ describe('退货物流与承运索赔', () => {
         kind: 'missing',
         quantity: 1,
         note: '第一张订单的退货商品少一件',
-        returnRecordItemId: combined.returns[0].items.find((item) => (
-          item.shipmentPackageItemId === firstItem.id
-        ))?.id as string,
+        returnRecordItemId: firstReturnItemId,
       }],
     });
     expect(received.returns[0].items).toEqual(expect.arrayContaining([
@@ -3252,6 +3392,10 @@ describe('退货物流与承运索赔', () => {
       returnRecordId: returnPackage.id,
       logisticsStatus: 'lost',
       carrierConfirmedLoss: true,
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: returnPackage.items[0].id, quantity: 1 }],
+      },
       occurredAt: '2026-08-14T11:00:00+08:00',
       reason: '承运方确认包裹遗失',
     });
@@ -3278,6 +3422,12 @@ describe('退货物流与承运索赔', () => {
           shippingCarrier: '中通快递',
           trackingNumber: 'ZT-CARRIER-CLAIM-0001',
           logisticsStatus: 'lost',
+          currentException: {
+            direction: 'return',
+            logisticsStatus: 'lost',
+            affectedQuantity: 1,
+            reason: '承运方确认包裹遗失',
+          },
           carrierClaimStatus: 'pending',
           items: [{
             shipmentPackageItemId: sourceItem.id,
@@ -3520,6 +3670,135 @@ describe('退货物流与承运索赔', () => {
     }
   });
 
+  it('从 v29 升级共同物流异常模块时保留退货索赔与事件时间线', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-return-claim-v30-migration-'));
+    const application = await createApplication(root);
+    const group = application.queryShipmentGroups().groups[0];
+    const shipmentItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const shipment = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: shipmentItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-V29-RETURN-CLAIM',
+        items: shipmentItems,
+      }],
+    });
+    const sourceItem = shipment.record.packages[0].items[0];
+    const created = application.createAftersalesCase({
+      shipmentRecordId: shipment.record.id,
+      workflow: 'return_refund',
+      occurredAt: '2026-08-14T14:00:00+08:00',
+      reason: '验证旧版退货索赔迁移',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-V29-RETURN-CLAIM',
+      occurredAt: '2026-08-14T14:10:00+08:00',
+      reason: '登记退货运单',
+    });
+    const accepted = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: registered.returns[0].id,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T14:20:00+08:00',
+      reason: '承运方确认揽收',
+    });
+    const exceptional = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: accepted.id,
+      expectedRevision: accepted.revision,
+      returnRecordId: accepted.returns[0].id,
+      logisticsStatus: 'damaged',
+      occurredAt: '2026-08-14T14:30:00+08:00',
+      reason: '运输途中破损',
+    });
+    const claimed = application.progressAftersalesCase({
+      kind: 'open_carrier_claim',
+      caseId: exceptional.id,
+      expectedRevision: exceptional.revision,
+      returnRecordId: exceptional.returns[0].id,
+      requestedAmountCents: 900,
+      occurredAt: '2026-08-14T14:40:00+08:00',
+      reason: '向承运方申请赔付',
+    });
+    const claimBefore = claimed.returns[0].carrierClaim;
+    if (!claimBefore) throw new Error('测试前置条件：退货承运索赔未建立');
+    application.close();
+
+    const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_update;
+        DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_delete;
+        DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_update;
+        DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_delete;
+        CREATE TABLE carrier_claims_v29_fixture (
+          id TEXT PRIMARY KEY,
+          return_record_id TEXT NOT NULL UNIQUE
+            REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'paid')),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+          approved_amount_cents INTEGER CHECK (approved_amount_cents > 0),
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO carrier_claims_v29_fixture (
+          id, return_record_id, status, revision, requested_amount_cents,
+          approved_amount_cents, reason, created_at, updated_at
+        )
+        SELECT
+          id, return_record_id, status, revision, requested_amount_cents,
+          approved_amount_cents, reason, created_at, updated_at
+        FROM carrier_claims
+        WHERE direction = 'return';
+        DROP TABLE carrier_claims;
+        ALTER TABLE carrier_claims_v29_fixture RENAME TO carrier_claims;
+        DELETE FROM schema_migrations WHERE version = 30;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+      `);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await createApplication(root, false);
+    const migrated = reopened.queryAftersalesCases({}).find(({ id }) => id === claimed.id);
+    expect(migrated?.returns[0].carrierClaim).toEqual(claimBefore);
+    const migratedClaimRow = new DatabaseSync(
+      join(root, '数据', 'xianyu-order-manager.sqlite3'),
+    );
+    try {
+      expect(migratedClaimRow.prepare(`
+        SELECT direction, shipment_package_id, return_record_id
+        FROM carrier_claims
+        WHERE id = ?
+      `).get(claimBefore.id)).toEqual({
+        direction: 'return',
+        shipment_package_id: null,
+        return_record_id: registered.returns[0].id,
+      });
+    } finally {
+      migratedClaimRow.close();
+    }
+  });
+
   it('把真实 v28 退货、收到、检查和退款事实升级为退货包裹且保持幂等', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-return-v28-migration-'));
     const application = await createApplication(root);
@@ -3673,7 +3952,7 @@ describe('退货物流与承运索赔', () => {
         ALTER TABLE aftersales_return_records_v28_fixture RENAME TO aftersales_return_records;
         ALTER TABLE aftersales_return_record_items_v28_fixture RENAME TO aftersales_return_record_items;
         ALTER TABLE aftersales_return_record_events_v28_fixture RENAME TO aftersales_return_record_events;
-        DELETE FROM schema_migrations WHERE version = 29;
+        DELETE FROM schema_migrations WHERE version >= 29;
         COMMIT;
         PRAGMA foreign_keys = ON;
       `);
@@ -3782,6 +4061,8 @@ describe('售后处理单', () => {
           shippingCarrier: '顺丰速运',
           trackingNumber: 'SF-ORDER-PROJECTION-A',
           cancellationReason: null,
+          currentException: null,
+          carrierClaimStatus: null,
           items: [{
             shipmentPackageItemId: activePackage.items[0].id,
             orderItemId: firstItem.id,
@@ -3797,6 +4078,8 @@ describe('售后处理单', () => {
           shippingCarrier: '中通快递',
           trackingNumber: 'ZT-ORDER-PROJECTION-B',
           cancellationReason: '第二个包裹尚未交寄,撤销后重新安排',
+          currentException: null,
+          carrierClaimStatus: null,
           items: [{
             shipmentPackageItemId: cancelledPackage.items[0].id,
             orderItemId: firstItem.id,

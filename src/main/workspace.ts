@@ -104,6 +104,7 @@ export class Workspace {
   }
 
   public transaction<T>(operation: () => T): T {
+    if (this.database.isTransaction) return operation();
     this.database.exec('BEGIN IMMEDIATE;');
     try {
       const result = operation();
@@ -181,6 +182,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 27) migrateToVersion27(database);
   if (row.version < 28) migrateToVersion28(database);
   if (row.version < 29) migrateToVersion29(database);
+  if (row.version < 30) migrateToVersion30(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3334,6 +3336,191 @@ function migrateToVersion29(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (29, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion30(database: DatabaseSync): void {
+  const logisticsChangeColumns = storedTableColumnNames(
+    database,
+    'shipment_package_logistics_change_events',
+  );
+  const addLogisticsChangeOccurredAt = logisticsChangeColumns.includes('occurred_at')
+    ? ''
+    : `ALTER TABLE shipment_package_logistics_change_events
+         ADD COLUMN occurred_at TEXT NOT NULL DEFAULT '';`;
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE shipment_packages_v30 (
+        id TEXT PRIMARY KEY,
+        shipment_record_id TEXT NOT NULL
+          REFERENCES shipment_records(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        shipping_carrier TEXT NOT NULL,
+        tracking_number TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        logistics_status TEXT NOT NULL DEFAULT 'in_transit'
+          CHECK (logistics_status IN (
+            'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+            'intercepted_returned', 'lost', 'delivery_dispute', 'damaged',
+            'misdelivered', 'exception'
+          )),
+        carrier_accepted_at TEXT,
+        UNIQUE (shipment_record_id, position),
+        CHECK (logistics_status <> 'awaiting_carrier' OR carrier_accepted_at IS NULL)
+      ) STRICT;
+
+      INSERT INTO shipment_packages_v30 (
+        id, shipment_record_id, position, shipping_carrier, tracking_number,
+        revision, created_at, logistics_status, carrier_accepted_at
+      )
+      SELECT
+        id, shipment_record_id, position, shipping_carrier, tracking_number,
+        revision, created_at, logistics_status, NULL
+      FROM shipment_packages;
+
+      DROP TABLE shipment_packages;
+      ALTER TABLE shipment_packages_v30 RENAME TO shipment_packages;
+
+      DROP TRIGGER IF EXISTS shipment_package_logistics_status_events_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS shipment_package_logistics_status_events_are_immutable_on_delete;
+
+      CREATE TABLE shipment_package_logistics_status_events_v30 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        package_id TEXT NOT NULL
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        before_status TEXT NOT NULL CHECK (before_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+          'intercepted_returned', 'lost', 'delivery_dispute', 'damaged',
+          'misdelivered', 'exception'
+        )),
+        after_status TEXT NOT NULL CHECK (after_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+          'intercepted_returned', 'lost', 'delivery_dispute', 'damaged',
+          'misdelivered', 'exception'
+        )),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (package_id, result_revision)
+      ) STRICT;
+
+      INSERT INTO shipment_package_logistics_status_events_v30 (
+        sequence, id, package_id, base_revision, result_revision,
+        before_status, after_status, reason, occurred_at, payload_json, created_at
+      )
+      SELECT
+        sequence, id, package_id, base_revision, result_revision,
+        before_status, after_status, reason, created_at, '{}', created_at
+      FROM shipment_package_logistics_status_events;
+
+      DROP TABLE shipment_package_logistics_status_events;
+      ALTER TABLE shipment_package_logistics_status_events_v30
+        RENAME TO shipment_package_logistics_status_events;
+
+      CREATE TRIGGER shipment_package_logistics_status_events_are_immutable_on_update
+      BEFORE UPDATE ON shipment_package_logistics_status_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+      END;
+
+      CREATE TRIGGER shipment_package_logistics_status_events_are_immutable_on_delete
+      BEFORE DELETE ON shipment_package_logistics_status_events
+      BEGIN
+        SELECT RAISE(ABORT, 'shipment package logistics status events are immutable');
+      END;
+
+      ${addLogisticsChangeOccurredAt}
+      UPDATE shipment_package_logistics_change_events
+      SET occurred_at = created_at
+      WHERE occurred_at = '';
+
+      DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS carrier_claim_events_are_immutable_on_delete;
+      DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS carrier_compensation_records_are_immutable_on_delete;
+
+      CREATE TABLE carrier_claims_v30 (
+        id TEXT PRIMARY KEY,
+        direction TEXT NOT NULL CHECK (direction IN ('outbound', 'return')),
+        shipment_package_id TEXT UNIQUE
+          REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+        return_record_id TEXT UNIQUE
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'paid')),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        approved_amount_cents INTEGER CHECK (approved_amount_cents > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (direction = 'outbound' AND shipment_package_id IS NOT NULL AND return_record_id IS NULL)
+          OR (direction = 'return' AND shipment_package_id IS NULL AND return_record_id IS NOT NULL)
+        ),
+        CHECK (
+          (status = 'pending' AND approved_amount_cents IS NULL)
+          OR (status = 'rejected' AND approved_amount_cents IS NULL)
+          OR (status IN ('approved', 'paid') AND approved_amount_cents IS NOT NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO carrier_claims_v30 (
+        id, direction, shipment_package_id, return_record_id, status, revision,
+        requested_amount_cents, approved_amount_cents, reason, created_at, updated_at
+      )
+      SELECT
+        id, 'return', NULL, return_record_id, status, revision,
+        requested_amount_cents, approved_amount_cents, reason, created_at, updated_at
+      FROM carrier_claims;
+
+      DROP TABLE carrier_claims;
+      ALTER TABLE carrier_claims_v30 RENAME TO carrier_claims;
+
+      CREATE TRIGGER carrier_claim_events_are_immutable_on_update
+      BEFORE UPDATE ON carrier_claim_events
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier claim events are immutable');
+      END;
+
+      CREATE TRIGGER carrier_claim_events_are_immutable_on_delete
+      BEFORE DELETE ON carrier_claim_events
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier claim events are immutable');
+      END;
+
+      CREATE TRIGGER carrier_compensation_records_are_immutable_on_update
+      BEFORE UPDATE ON carrier_compensation_records
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier compensation records are immutable');
+      END;
+
+      CREATE TRIGGER carrier_compensation_records_are_immutable_on_delete
+      BEFORE DELETE ON carrier_compensation_records
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier compensation records are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (30, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

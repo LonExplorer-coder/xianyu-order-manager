@@ -21,6 +21,7 @@ import {
   isShipmentLogisticsStatus,
   type ShipmentLogisticsStatus,
 } from '../core/shipment-records';
+import { supportsCarrierClaim } from '../core/logistics-exceptions';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -65,6 +66,28 @@ export class OrderOperationsProjectionService {
         packages.shipping_carrier,
         packages.tracking_number,
         packages.logistics_status,
+        (
+          SELECT events.payload_json
+          FROM shipment_package_logistics_status_events AS events
+          WHERE events.package_id = packages.id
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_payload_json,
+        (
+          SELECT events.reason
+          FROM shipment_package_logistics_status_events AS events
+          WHERE events.package_id = packages.id
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_reason,
+        (
+          SELECT events.occurred_at
+          FROM shipment_package_logistics_status_events AS events
+          WHERE events.package_id = packages.id
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_occurred_at,
+        claims.status AS outbound_carrier_claim_status,
         cancellations.id AS cancellation_event_id,
         cancellations.reason AS cancellation_reason,
         items.id AS shipment_package_item_id,
@@ -80,6 +103,8 @@ export class OrderOperationsProjectionService {
         ON voids.shipment_record_id = records.id
       LEFT JOIN shipment_package_cancellation_events AS cancellations
         ON cancellations.package_id = packages.id
+      LEFT JOIN carrier_claims AS claims
+        ON claims.direction = 'outbound' AND claims.shipment_package_id = packages.id
       WHERE items.order_id IN (SELECT value FROM json_each(?))
       ORDER BY
         items.order_id,
@@ -93,6 +118,12 @@ export class OrderOperationsProjectionService {
     const result = new Map<string, OrderOperationsShipmentRecord[]>();
     const recordsByOrder = new Map<string, Map<string, OrderOperationsShipmentRecord>>();
     const packagesByOrder = new Map<string, Map<string, OrderOperationsPackage>>();
+    const packageExceptionPayloads = new Map<string, {
+      status: ShipmentLogisticsStatus;
+      payload: Record<string, unknown>;
+      reason: string;
+      occurredAt: string;
+    }>();
     for (const row of rows) {
       const orderId = asString(row.order_id);
       const records = recordsByOrder.get(orderId) ?? new Map();
@@ -114,18 +145,35 @@ export class OrderOperationsProjectionService {
       const packageId = asString(row.package_id);
       let shipmentPackage = packages.get(packageId);
       if (!shipmentPackage) {
+        const logisticsStatus = asShipmentLogisticsStatus(row.logistics_status);
         shipmentPackage = {
           id: packageId,
           position: asNumber(row.package_position),
           status: row.cancellation_event_id === null ? 'active' : 'cancelled',
-          logisticsStatus: asShipmentLogisticsStatus(row.logistics_status),
+          logisticsStatus,
           shippingCarrier: asString(row.shipping_carrier),
           trackingNumber: asString(row.tracking_number),
           cancellationReason: row.cancellation_reason === null
             ? null
             : asString(row.cancellation_reason),
+          currentException: null,
+          carrierClaimStatus: parseOptionalCarrierClaimStatus(
+            row.outbound_carrier_claim_status,
+          ),
           items: [],
         };
+        if (
+          row.latest_status_payload_json !== null
+          && row.latest_status_reason !== null
+          && row.latest_status_occurred_at !== null
+        ) {
+          packageExceptionPayloads.set(`${orderId}\u0000${packageId}`, {
+            status: logisticsStatus,
+            payload: parseJsonRecord(row.latest_status_payload_json),
+            reason: asString(row.latest_status_reason),
+            occurredAt: asString(row.latest_status_occurred_at),
+          });
+        }
         packages.set(packageId, shipmentPackage);
         record.packages.push(shipmentPackage);
       }
@@ -136,6 +184,29 @@ export class OrderOperationsProjectionService {
         sourceSpec: asString(row.source_spec),
         quantity: asNumber(row.quantity),
       });
+    }
+    for (const [orderId, packages] of packagesByOrder) {
+      for (const [packageId, shipmentPackage] of packages) {
+        const facts = packageExceptionPayloads.get(`${orderId}\u0000${packageId}`);
+        if (!facts || !supportsCarrierClaim(facts.status)) continue;
+        const impact = parseProjectedLogisticsImpact(facts.payload.impact);
+        const itemIds = new Set(shipmentPackage.items.map(({ shipmentPackageItemId }) => (
+          shipmentPackageItemId
+        )));
+        const affectedQuantity = impact.scope === 'package'
+          ? shipmentPackage.items.reduce((total, item) => total + item.quantity, 0)
+          : impact.items
+            .filter((item) => itemIds.has(item.sourceItemId))
+            .reduce((total, item) => total + item.quantity, 0);
+        if (affectedQuantity === 0) continue;
+        shipmentPackage.currentException = {
+          direction: 'outbound',
+          logisticsStatus: facts.status,
+          affectedQuantity,
+          reason: facts.reason,
+          occurredAt: facts.occurredAt,
+        };
+      }
     }
     for (const [orderId, records] of recordsByOrder) result.set(orderId, [...records.values()]);
     return result;
@@ -253,6 +324,30 @@ export class OrderOperationsProjectionService {
         return_records.tracking_number,
         return_records.logistics_status,
         return_records.discrepancies_json,
+        (
+          SELECT events.payload_json
+          FROM aftersales_return_record_events AS events
+          WHERE events.return_record_id = return_records.id
+            AND events.kind = 'logistics_status_updated'
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_payload_json,
+        (
+          SELECT events.reason
+          FROM aftersales_return_record_events AS events
+          WHERE events.return_record_id = return_records.id
+            AND events.kind = 'logistics_status_updated'
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_reason,
+        (
+          SELECT events.occurred_at
+          FROM aftersales_return_record_events AS events
+          WHERE events.return_record_id = return_records.id
+            AND events.kind = 'logistics_status_updated'
+          ORDER BY events.result_revision DESC
+          LIMIT 1
+        ) AS latest_status_occurred_at,
         claims.status AS carrier_claim_status,
         return_items.quantity AS planned_quantity,
         return_items.received_quantity,
@@ -281,6 +376,11 @@ export class OrderOperationsProjectionService {
     const packages = new Map<string, OrderOperationsAftersalesCase['returnPackages'][number]>();
     const packageDiscrepancies = new Map<string, AftersalesReturnDiscrepancy[]>();
     const packageItemIds = new Map<string, Set<string>>();
+    const packageExceptionPayloads = new Map<string, {
+      payload: Record<string, unknown>;
+      reason: string;
+      occurredAt: string;
+    }>();
     for (const row of returnRows) {
       const orderId = asString(row.order_id);
       const caseId = asString(row.case_id);
@@ -302,12 +402,25 @@ export class OrderOperationsProjectionService {
           shippingCarrier: asString(row.shipping_carrier),
           trackingNumber: asString(row.tracking_number),
           logisticsStatus,
+          currentException: null,
           discrepancies: [],
           carrierClaimStatus: parseOptionalCarrierClaimStatus(row.carrier_claim_status),
           items: [],
         };
         packages.set(key, returnPackage);
         projectedCase.value.returnPackages.push(returnPackage);
+        if (
+          supportsCarrierClaim(logisticsStatus)
+          && row.latest_status_payload_json !== null
+          && row.latest_status_reason !== null
+          && row.latest_status_occurred_at !== null
+        ) {
+          packageExceptionPayloads.set(key, {
+            payload: parseJsonRecord(row.latest_status_payload_json),
+            reason: asString(row.latest_status_reason),
+            occurredAt: asString(row.latest_status_occurred_at),
+          });
+        }
       }
       packageItemIds.get(key)?.add(asString(row.return_record_item_id));
       returnPackage.items.push({
@@ -325,6 +438,24 @@ export class OrderOperationsProjectionService {
         difference.returnRecordItemId === undefined
         || itemIds.has(difference.returnRecordItemId)
       ));
+      const exceptionFacts = packageExceptionPayloads.get(key);
+      if (exceptionFacts) {
+        const impact = parseProjectedLogisticsImpact(exceptionFacts.payload.impact);
+        const affectedQuantity = impact.scope === 'package'
+          ? returnPackage.items.reduce((total, item) => total + item.plannedQuantity, 0)
+          : impact.items
+            .filter((item) => itemIds.has(item.sourceItemId))
+            .reduce((total, item) => total + item.quantity, 0);
+        if (affectedQuantity > 0) {
+          returnPackage.currentException = {
+            direction: 'return',
+            logisticsStatus: returnPackage.logisticsStatus,
+            affectedQuantity,
+            reason: exceptionFacts.reason,
+            occurredAt: exceptionFacts.occurredAt,
+          };
+        }
+      }
     }
     for (const [orderId, cases] of casesByOrder) result.set(orderId, [...cases.values()]);
     return result;
@@ -343,18 +474,23 @@ function buildProjection(
     carrierClaimStatuses: projectedCase.carrierClaimStatuses,
   })));
   const logisticsStatuses = new Set<ShipmentLogisticsStatus>();
+  const carrierClaimStatuses = new Set<CarrierClaimStatus>();
   for (const record of shipmentRecords) {
     if (record.status === 'voided') continue;
     for (const shipmentPackage of record.packages) {
       if (shipmentPackage.status === 'active') {
         logisticsStatuses.add(shipmentPackage.logisticsStatus);
+        if (shipmentPackage.carrierClaimStatus) {
+          carrierClaimStatuses.add(shipmentPackage.carrierClaimStatus);
+        }
       }
     }
   }
   return {
     shipmentRecords,
     aftersalesCases,
-    currentTodo: aftersalesTodo ?? shipmentTodoForStatuses(logisticsStatuses),
+    currentTodo: aftersalesTodo
+      ?? shipmentTodoForStatuses(logisticsStatuses, carrierClaimStatuses),
   };
 }
 
@@ -433,6 +569,51 @@ function parseJsonArray(value: unknown, message: string): unknown[] {
   }
   if (!Array.isArray(parsed)) throw new Error(message);
   return parsed;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string') throw new Error('数据库物流异常投影格式错误');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error('数据库物流异常投影格式错误', { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('数据库物流异常投影格式错误');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseProjectedLogisticsImpact(value: unknown):
+  | { scope: 'package' }
+  | { scope: 'items'; items: Array<{ sourceItemId: string; quantity: number }> } {
+  if (value === undefined) return { scope: 'package' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('数据库物流异常影响范围投影格式错误');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.scope === 'package') return { scope: 'package' };
+  if (record.scope !== 'items' || !Array.isArray(record.items)) {
+    throw new Error('数据库物流异常影响范围投影格式错误');
+  }
+  return {
+    scope: 'items',
+    items: record.items.map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('数据库物流异常商品投影格式错误');
+      }
+      const item = value as Record<string, unknown>;
+      if (
+        typeof item.sourceItemId !== 'string'
+        || !Number.isSafeInteger(item.quantity)
+        || Number(item.quantity) <= 0
+      ) {
+        throw new Error('数据库物流异常商品投影格式错误');
+      }
+      return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
+    }),
+  };
 }
 
 function parseOptionalCarrierClaimStatus(value: unknown): CarrierClaimStatus | null {

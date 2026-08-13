@@ -1,4 +1,11 @@
 import type { OpenShipmentGroup, ShipmentGroupProjection } from './shipment-groups';
+import {
+  isOutboundLogisticsStatus,
+  OUTBOUND_LOGISTICS_STATUSES,
+  type CarrierClaim,
+  type LogisticsExceptionImpact,
+  type OutboundLogisticsStatus,
+} from './logistics-exceptions';
 
 export type ShipmentItemQuantityInput = {
   orderId: string;
@@ -56,24 +63,28 @@ export type ShipmentPackage = {
   position: number;
   status: 'active' | 'cancelled';
   logisticsStatus: ShipmentLogisticsStatus;
+  carrierAcceptedAt: string | null;
   shippingCarrier: string;
   trackingNumber: string;
   revision: number;
   totalQuantity: number;
   items: ShipmentPackageItem[];
   cancellation: ShipmentCancellation | null;
+  currentException: ShipmentPackageException | null;
+  carrierClaim: CarrierClaim | null;
   timeline: ShipmentPackageTimelineEvent[];
   createdAt: string;
 };
 
-export type ShipmentLogisticsStatus =
-  | 'awaiting_carrier'
-  | 'in_transit'
-  | 'delivered'
-  | 'intercepting'
-  | 'intercepted_returned'
-  | 'lost'
-  | 'exception';
+export type ShipmentLogisticsStatus = OutboundLogisticsStatus;
+
+export type ShipmentPackageException = {
+  direction: 'outbound';
+  logisticsStatus: ShipmentLogisticsStatus;
+  impact: LogisticsExceptionImpact;
+  reason: string;
+  occurredAt: string;
+};
 
 export type ShipmentPackageLogistics = {
   shippingCarrier: string;
@@ -87,6 +98,7 @@ export type ShipmentPackageLogisticsChange = {
   reason: string;
   before: ShipmentPackageLogistics;
   after: ShipmentPackageLogistics;
+  occurredAt: string;
   createdAt: string;
 };
 
@@ -96,7 +108,10 @@ export type ShipmentPackageLogisticsStatusChange = {
   resultRevision: number;
   beforeStatus: ShipmentLogisticsStatus;
   afterStatus: ShipmentLogisticsStatus;
+  carrierAcceptedAt: string | null;
+  impact: LogisticsExceptionImpact;
   reason: string;
+  occurredAt: string;
   createdAt: string;
 };
 
@@ -179,6 +194,7 @@ export type CorrectShipmentPackageLogisticsInput = ShipmentPackageLogistics & {
   recordId: string;
   packageId: string;
   expectedRevision: number;
+  occurredAt: string;
   reason: string;
 };
 
@@ -189,20 +205,48 @@ export type UpdateShipmentPackageLogisticsStatusInput = {
   packageId: string;
   expectedRevision: number;
   logisticsStatus: ShipmentLogisticsStatus;
+  carrierAcceptanceConfirmed?: boolean;
+  carrierConfirmedLoss?: boolean;
+  occurredAt: string;
+  impact: LogisticsExceptionImpact;
   reason: string;
 };
 
 export type ShipmentLogisticsStatusUpdateResult = ShipmentConfirmationResult;
 
-export const SHIPMENT_LOGISTICS_STATUSES = [
-  'awaiting_carrier',
-  'in_transit',
-  'delivered',
-  'intercepting',
-  'intercepted_returned',
-  'lost',
-  'exception',
-] as const satisfies readonly ShipmentLogisticsStatus[];
+export type ProgressShipmentPackageCarrierClaimInput =
+  | {
+    kind: 'open';
+    recordId: string;
+    packageId: string;
+    expectedRevision: number;
+    requestedAmountCents: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'resolve';
+    recordId: string;
+    packageId: string;
+    expectedClaimRevision: number;
+    outcome: 'approved' | 'rejected';
+    approvedAmountCents?: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'confirm_compensation';
+    recordId: string;
+    packageId: string;
+    expectedClaimRevision: number;
+    amountCents: number;
+    occurredAt: string;
+    note: string;
+  };
+
+export type ShipmentCarrierClaimProgressResult = ShipmentConfirmationResult;
+
+export const SHIPMENT_LOGISTICS_STATUSES = OUTBOUND_LOGISTICS_STATUSES;
 
 export function normalizeConfirmShipmentInput(input: unknown): ConfirmShipmentInput {
   const record = asRecord(input, '确认发货参数无效');
@@ -274,6 +318,7 @@ export function normalizeCorrectShipmentPackageLogisticsInput(
       'expectedRevision',
       'shippingCarrier',
       'trackingNumber',
+      'occurredAt',
       'reason',
     ],
     '更正包裹物流参数',
@@ -288,6 +333,7 @@ export function normalizeCorrectShipmentPackageLogisticsInput(
     expectedRevision: Number(expectedRevision),
     shippingCarrier: optionalText(record.shippingCarrier, 200, '承运方过长'),
     trackingNumber: optionalText(record.trackingNumber, 200, '运单号过长'),
+    occurredAt: optionalDateTime(record.occurredAt, '包裹物流更正时间无效'),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的更正原因'),
   };
 }
@@ -298,7 +344,11 @@ export function normalizeUpdateShipmentPackageLogisticsStatusInput(
   const record = asRecord(input, '更新包裹物流状态参数无效');
   rejectUnknownKeys(
     record,
-    ['recordId', 'packageId', 'expectedRevision', 'logisticsStatus', 'reason'],
+    [
+      'recordId', 'packageId', 'expectedRevision', 'logisticsStatus',
+      'carrierAcceptanceConfirmed', 'carrierConfirmedLoss', 'occurredAt',
+      'impact', 'reason',
+    ],
     '更新包裹物流状态参数',
   );
   const expectedRevision = record.expectedRevision;
@@ -313,14 +363,125 @@ export function normalizeUpdateShipmentPackageLogisticsStatusInput(
     packageId: boundedText(record.packageId, 200, '包裹标识无效'),
     expectedRevision: Number(expectedRevision),
     logisticsStatus: record.logisticsStatus,
+    ...(record.carrierAcceptanceConfirmed === undefined
+      ? {}
+      : {
+        carrierAcceptanceConfirmed: booleanValue(
+          record.carrierAcceptanceConfirmed,
+          '承运方揽收确认无效',
+        ),
+      }),
+    ...(record.carrierConfirmedLoss === undefined
+      ? {}
+      : {
+        carrierConfirmedLoss: booleanValue(
+          record.carrierConfirmedLoss,
+          '承运方丢件确认无效',
+        ),
+      }),
+    occurredAt: optionalDateTime(record.occurredAt, '包裹物流状态时间无效'),
+    impact: normalizeLogisticsImpact(record.impact),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的状态更新原因'),
   };
 }
 
+export function normalizeProgressShipmentPackageCarrierClaimInput(
+  input: unknown,
+): ProgressShipmentPackageCarrierClaimInput {
+  const record = asRecord(input, '处理承运索赔参数无效');
+  const common = {
+    recordId: boundedText(record.recordId, 200, '发货记录标识无效'),
+    packageId: boundedText(record.packageId, 200, '包裹标识无效'),
+  };
+  if (record.kind === 'open') {
+    rejectUnknownKeys(record, [
+      'kind', 'recordId', 'packageId', 'expectedRevision',
+      'requestedAmountCents', 'occurredAt', 'reason',
+    ], '建立承运索赔参数');
+    return {
+      kind: 'open',
+      ...common,
+      expectedRevision: positiveRevision(record.expectedRevision),
+      requestedAmountCents: positiveMoney(record.requestedAmountCents, '索赔金额无效'),
+      occurredAt: dateTime(record.occurredAt, '索赔发生时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的索赔原因'),
+    };
+  }
+  if (record.kind === 'resolve') {
+    rejectUnknownKeys(record, [
+      'kind', 'recordId', 'packageId', 'expectedClaimRevision',
+      'outcome', 'approvedAmountCents', 'occurredAt', 'reason',
+    ], '登记承运索赔结果参数');
+    if (record.outcome !== 'approved' && record.outcome !== 'rejected') {
+      throw new Error('承运索赔结果无效');
+    }
+    if (record.outcome === 'approved' && record.approvedAmountCents === undefined) {
+      throw new Error('请填写承运方同意赔付金额');
+    }
+    if (record.outcome === 'rejected' && record.approvedAmountCents !== undefined) {
+      throw new Error('拒赔不能登记同意赔付金额');
+    }
+    return {
+      kind: 'resolve',
+      ...common,
+      expectedClaimRevision: positiveRevision(record.expectedClaimRevision),
+      outcome: record.outcome,
+      ...(record.approvedAmountCents === undefined
+        ? {}
+        : {
+          approvedAmountCents: positiveMoney(
+            record.approvedAmountCents,
+            '承运方同意赔付金额无效',
+          ),
+        }),
+      occurredAt: dateTime(record.occurredAt, '索赔结果时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的索赔结果说明'),
+    };
+  }
+  if (record.kind !== 'confirm_compensation') throw new Error('承运索赔操作无效');
+  rejectUnknownKeys(record, [
+    'kind', 'recordId', 'packageId', 'expectedClaimRevision',
+    'amountCents', 'occurredAt', 'note',
+  ], '确认承运赔付参数');
+  return {
+    kind: 'confirm_compensation',
+    ...common,
+    expectedClaimRevision: positiveRevision(record.expectedClaimRevision),
+    amountCents: positiveMoney(record.amountCents, '实际赔付金额无效'),
+    occurredAt: dateTime(record.occurredAt, '实际赔付时间无效'),
+    note: boundedText(record.note, 500, '请填写 1 至 500 字的实际赔付说明'),
+  };
+}
+
 export function isShipmentLogisticsStatus(value: unknown): value is ShipmentLogisticsStatus {
-  return typeof value === 'string' && (
-    SHIPMENT_LOGISTICS_STATUSES as readonly string[]
-  ).includes(value);
+  return isOutboundLogisticsStatus(value);
+}
+
+function normalizeLogisticsImpact(value: unknown): LogisticsExceptionImpact {
+  if (value === undefined) return { scope: 'package' };
+  const record = asRecord(value, '物流异常影响范围无效');
+  if (record.scope === 'package') {
+    rejectUnknownKeys(record, ['scope'], '物流异常影响范围');
+    return { scope: 'package' };
+  }
+  if (record.scope !== 'items') throw new Error('物流异常影响范围无效');
+  rejectUnknownKeys(record, ['scope', 'items'], '物流异常影响范围');
+  const values = arrayValue(record.items, '请选择受影响商品');
+  if (values.length === 0 || values.length > 10_000) throw new Error('请选择受影响商品');
+  return {
+    scope: 'items',
+    items: values.map((value) => {
+      const item = asRecord(value, '物流异常商品无效');
+      rejectUnknownKeys(item, ['sourceItemId', 'quantity'], '物流异常商品');
+      if (!Number.isSafeInteger(item.quantity) || Number(item.quantity) <= 0) {
+        throw new Error('物流异常商品数量无效');
+      }
+      return {
+        sourceItemId: boundedText(item.sourceItemId, 200, '物流异常商品标识无效'),
+        quantity: Number(item.quantity),
+      };
+    }),
+  };
 }
 
 function itemQuantities(value: unknown, message: string): ShipmentItemQuantityInput[] {
@@ -371,4 +532,32 @@ function optionalText(value: unknown, maximum: number, message: string): string 
   const normalized = value.normalize('NFKC').trim();
   if (normalized.length > maximum) throw new Error(message);
   return normalized;
+}
+
+function optionalDateTime(value: unknown, message: string): string {
+  return value === undefined ? new Date().toISOString() : dateTime(value, message);
+}
+
+function dateTime(value: unknown, message: string): string {
+  if (typeof value !== 'string') throw new Error(message);
+  const normalized = value.normalize('NFKC').trim();
+  if (!normalized || !Number.isFinite(Date.parse(normalized))) throw new Error(message);
+  return normalized;
+}
+
+function booleanValue(value: unknown, message: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(message);
+  return value;
+}
+
+function positiveRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error('版本无效');
+  return Number(value);
+}
+
+function positiveMoney(value: unknown, message: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0 || Number(value) > 100_000_000_000) {
+    throw new Error(message);
+  }
+  return Number(value);
 }

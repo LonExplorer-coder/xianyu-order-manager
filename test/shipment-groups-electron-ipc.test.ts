@@ -158,10 +158,14 @@ describe('发货组 Electron IPC', () => {
     const updateShipmentPackageLogisticsStatus = vi.fn().mockReturnValue({
       record: { id: 'shipment-record-2', logisticsStatus: 'delivered' },
     });
+    const progressShipmentPackageCarrierClaim = vi.fn().mockReturnValue({
+      record: { id: 'shipment-record-2', carrierClaimStatus: 'pending' },
+    });
     registerIpcHandlers({
       cancelShipmentPackages,
       correctShipmentPackageLogistics,
       updateShipmentPackageLogisticsStatus,
+      progressShipmentPackageCarrierClaim,
       onRecognitionBatchesChanged: vi.fn(),
       onOrdersChanged: vi.fn(),
     } as unknown as DesktopSession);
@@ -185,6 +189,15 @@ describe('发货组 Electron IPC', () => {
       logisticsStatus: 'delivered',
       reason: '买家确认签收',
     };
+    const claimInput = {
+      kind: 'open',
+      recordId: 'shipment-record-2',
+      packageId: 'package-2',
+      expectedRevision: 3,
+      requestedAmountCents: 1_000,
+      occurredAt: '2026-08-14T09:00:00+08:00',
+      reason: '就包裹破损申请索赔',
+    };
 
     await expect(invoke('shipment-records:cancel-packages', cancelInput))
       .resolves.toMatchObject({ record: { status: 'voided' } });
@@ -192,9 +205,12 @@ describe('发货组 Electron IPC', () => {
       .resolves.toMatchObject({ record: { id: 'shipment-record-2' } });
     await expect(invoke('shipment-records:update-package-logistics-status', statusInput))
       .resolves.toMatchObject({ record: { logisticsStatus: 'delivered' } });
+    await expect(invoke('shipment-records:progress-package-carrier-claim', claimInput))
+      .resolves.toMatchObject({ record: { carrierClaimStatus: 'pending' } });
     expect(cancelShipmentPackages).toHaveBeenCalledWith(cancelInput);
     expect(correctShipmentPackageLogistics).toHaveBeenCalledWith(correctionInput);
     expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(statusInput);
+    expect(progressShipmentPackageCarrierClaim).toHaveBeenCalledWith(claimInput);
   });
 
   it('通过受控通道建立、更新、推进并查询售后处理单', async () => {

@@ -313,12 +313,15 @@ function shipmentRecordForGroup(
       position: 0,
       status: 'active',
       logisticsStatus: 'in_transit',
+      carrierAcceptedAt: null,
       shippingCarrier: '顺丰速运',
       trackingNumber: 'SF1000000020',
       revision: 1,
       totalQuantity: items.reduce((total, item) => total + item.quantity, 0),
       items,
       cancellation: null,
+      currentException: null,
+      carrierClaim: null,
       timeline: [],
       createdAt,
     }],
@@ -432,6 +435,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     cancelShipmentPackages: vi.fn(),
     correctShipmentPackageLogistics: vi.fn(),
     updateShipmentPackageLogisticsStatus: vi.fn(),
+    progressShipmentPackageCarrierClaim: vi.fn(),
     queryAftersalesCases: vi.fn().mockResolvedValue([]),
     createAftersalesCase: vi.fn(),
     updateAftersalesCase: vi.fn(),
@@ -1111,6 +1115,7 @@ describe('订单管理工作台', () => {
             shippingCarrier: '中通快递',
             trackingNumber: 'ZT2000000030',
           },
+          occurredAt: '2026-08-12T10:08:00.000Z',
           createdAt: '2026-08-12T10:08:00.000Z',
         }],
       })),
@@ -1163,6 +1168,7 @@ describe('订单管理工作台', () => {
       expectedRevision: 1,
       shippingCarrier: '中通快递',
       trackingNumber: 'ZT2000000030',
+      occurredAt: expect.any(String),
       reason: '原单号录入错误',
     });
     expect(history).toHaveTextContent('中通快递 · ZT2000000030');
@@ -1184,7 +1190,10 @@ describe('订单管理工作台', () => {
           resultRevision: 2,
           beforeStatus: 'in_transit',
           afterStatus: 'delivered',
+          carrierAcceptedAt: null,
+          impact: { scope: 'package' },
           reason: '买家确认已经收到包裹',
+          occurredAt: '2026-08-12T10:12:00.000Z',
           createdAt: '2026-08-12T10:12:00.000Z',
         }],
       })),
@@ -1234,12 +1243,137 @@ describe('订单管理工作台', () => {
       packageId: record.packages[0].id,
       expectedRevision: 1,
       logisticsStatus: 'delivered',
+      occurredAt: expect.any(String),
+      impact: { scope: 'package' },
       reason: '买家确认已经收到包裹',
     });
     expect(history).toHaveTextContent('物流：已签收');
     expect(history).toHaveTextContent('当前待办：无需物流操作');
     expect(history).toHaveTextContent('运输中 → 已签收');
     expect(history).toHaveTextContent('买家确认已经收到包裹');
+  });
+
+  it('正向物流异常可精确登记商品数量并继续承运索赔', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const record = shipmentRecordForGroup(group);
+    const sourcePackage = record.packages[0];
+    const exceptionalRecord: ShipmentRecord = {
+      ...record,
+      packages: [{
+        ...sourcePackage,
+        revision: 2,
+        logisticsStatus: 'damaged',
+        currentException: {
+          direction: 'outbound',
+          logisticsStatus: 'damaged',
+          impact: {
+            scope: 'items',
+            items: [{ sourceItemId: sourcePackage.items[0].id, quantity: 1 }],
+          },
+          reason: '外包装破损，仅影响一件商品',
+          occurredAt: '2026-08-14T09:00:00+08:00',
+        },
+        timeline: [{
+          kind: 'status_changed',
+          baseRevision: 1,
+          resultRevision: 2,
+          beforeStatus: 'in_transit',
+          afterStatus: 'damaged',
+          carrierAcceptedAt: null,
+          impact: {
+            scope: 'items',
+            items: [{ sourceItemId: sourcePackage.items[0].id, quantity: 1 }],
+          },
+          reason: '外包装破损，仅影响一件商品',
+          occurredAt: '2026-08-14T09:00:00+08:00',
+          createdAt: '2026-08-14T09:00:00.000Z',
+        }],
+      }],
+    };
+    const updateShipmentPackageLogisticsStatus = vi.fn().mockResolvedValue({
+      record: exceptionalRecord,
+      archive: { ...shipmentArchiveForGroup(group), records: [exceptionalRecord] },
+      projection: { groups: [], attentionOrders: [] },
+    });
+    const claimRecord: ShipmentRecord = {
+      ...exceptionalRecord,
+      packages: exceptionalRecord.packages.map((shipmentPackage) => ({
+        ...shipmentPackage,
+        carrierClaim: {
+          id: 'outbound-claim-ui-1',
+          status: 'pending',
+          revision: 1,
+          requestedAmountCents: 1_000,
+          approvedAmountCents: null,
+          reason: '就受损商品申请索赔',
+          actualCompensation: null,
+          timeline: [],
+          createdAt: '2026-08-14T09:10:00.000Z',
+          updatedAt: '2026-08-14T09:10:00.000Z',
+        },
+      })),
+    };
+    const progressShipmentPackageCarrierClaim = vi.fn().mockResolvedValue({
+      record: claimRecord,
+      archive: { ...shipmentArchiveForGroup(group), records: [claimRecord] },
+      projection: { groups: [], attentionOrders: [] },
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([shipmentArchiveForGroup(group)]),
+      updateShipmentPackageLogisticsStatus,
+      progressShipmentPackageCarrierClaim,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const history = await screen.findByRole('region', { name: '发货记录' });
+    await user.click(within(history).getByRole('button', {
+      name: '更新物流状态 包裹 1 运输中',
+    }));
+    let dialog = screen.getByRole('dialog', { name: '更新包裹物流状态' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '物流状态' }), 'damaged');
+    await user.click(within(dialog).getByRole('radio', { name: '指定商品与数量' }));
+    const quantity = within(dialog).getByRole('spinbutton', {
+      name: `受影响数量 ${sourcePackage.items[0].sourceTitle}`,
+    });
+    await user.clear(quantity);
+    await user.type(quantity, '1');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '状态更新原因' }),
+      '外包装破损，仅影响一件商品',
+    );
+    await user.click(within(dialog).getByRole('button', { name: '确认更新' }));
+
+    expect(updateShipmentPackageLogisticsStatus).toHaveBeenCalledWith(expect.objectContaining({
+      logisticsStatus: 'damaged',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: sourcePackage.items[0].id, quantity: 1 }],
+      },
+    }));
+    expect(history).toHaveTextContent('正向物流异常 · 运输破损');
+    await user.click(within(history).getByRole('button', { name: '建立承运索赔' }));
+    dialog = screen.getByRole('dialog', { name: '建立承运索赔' });
+    await user.type(within(dialog).getByRole('spinbutton', { name: '承运索赔金额' }), '10');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: '承运索赔说明' }),
+      '就受损商品申请索赔',
+    );
+    await user.click(within(dialog).getByRole('button', { name: '确认保存' }));
+    expect(progressShipmentPackageCarrierClaim).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'open',
+      requestedAmountCents: 1_000,
+      reason: '就受损商品申请索赔',
+    }));
   });
 
   it('按物流状态筛选发货组档案而不改变发货情况分组', async () => {
@@ -3867,6 +4001,8 @@ describe('订单管理工作台', () => {
             shippingCarrier: '顺丰速运',
             trackingNumber: 'SF1000000020',
             cancellationReason: null,
+            currentException: null,
+            carrierClaimStatus: null,
             items: [{
               shipmentPackageItemId: shipmentPackage.items[0].id,
               orderItemId: confirmedOrder.items[0].id,
@@ -3897,6 +4033,13 @@ describe('订单管理工作台', () => {
             shippingCarrier: '圆通速递',
             trackingNumber: 'YT-CORRECTED-ORDER-DETAIL',
             logisticsStatus: 'delivery_dispute',
+            currentException: {
+              direction: 'return',
+              logisticsStatus: 'delivery_dispute',
+              affectedQuantity: 1,
+              reason: '退货包裹显示签收，但仓库未收到完整商品',
+              occurredAt: '2026-08-13T11:00:00+08:00',
+            },
             discrepancies: [{ kind: 'missing', quantity: 1, note: '签收后清点少一件' }],
             carrierClaimStatus: 'pending',
             items: [{
@@ -3945,6 +4088,9 @@ describe('订单管理工作台', () => {
     expect(aftersalesSection).toHaveTextContent(/当前待办\s*等待买家退回/u);
     expect(aftersalesSection).toHaveTextContent('圆通速递 · YT-CORRECTED-ORDER-DETAIL');
     expect(aftersalesSection).toHaveTextContent('签收争议');
+    expect(aftersalesSection).toHaveTextContent('退货物流异常 · 签收争议');
+    expect(aftersalesSection).toHaveTextContent('影响 1 件');
+    expect(aftersalesSection).toHaveTextContent('退货包裹显示签收，但仓库未收到完整商品');
     expect(aftersalesSection).toHaveTextContent('计划 2 · 收到 1 · 通过 0');
     expect(aftersalesSection).toHaveTextContent('退货差异：少件 1 件 · 签收后清点少一件');
     expect(aftersalesSection).toHaveTextContent(

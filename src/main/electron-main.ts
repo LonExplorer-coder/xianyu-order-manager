@@ -230,6 +230,10 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     'shipment-records:update-package-logistics-status',
     (_event, input: unknown) => desktopSession.updateShipmentPackageLogisticsStatus(input),
   );
+  ipcMain.handle(
+    'shipment-records:progress-package-carrier-claim',
+    (_event, input: unknown) => desktopSession.progressShipmentPackageCarrierClaim(input),
+  );
   ipcMain.handle('aftersales-cases:query', (_event, input: unknown) => (
     desktopSession.queryAftersalesCases(input)
   ));

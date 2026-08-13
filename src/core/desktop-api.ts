@@ -55,11 +55,13 @@ import type {
   CancelShipmentPackagesInput,
   ConfirmShipmentInput,
   CorrectShipmentPackageLogisticsInput,
+  ProgressShipmentPackageCarrierClaimInput,
   ShipmentCancellationResult,
   ShipmentConfirmationResult,
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
   ShipmentLogisticsStatusUpdateResult,
+  ShipmentCarrierClaimProgressResult,
   UpdateShipmentPackageLogisticsStatusInput,
 } from './shipment-records';
 import type {
@@ -131,6 +133,9 @@ export interface DesktopApi {
   updateShipmentPackageLogisticsStatus(
     input: UpdateShipmentPackageLogisticsStatusInput,
   ): Promise<ShipmentLogisticsStatusUpdateResult>;
+  progressShipmentPackageCarrierClaim(
+    input: ProgressShipmentPackageCarrierClaimInput,
+  ): Promise<ShipmentCarrierClaimProgressResult>;
   queryAftersalesCases(query?: AftersalesCaseQuery): Promise<AftersalesCase[]>;
   createAftersalesCase(input: CreateAftersalesCaseInput): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;

@@ -60,7 +60,7 @@ describe('事实驱动的订单履约', () => {
       DROP TRIGGER original_orders_require_system_order_number_on_insert;
       DROP INDEX original_orders_by_system_order_number;
       ALTER TABLE original_orders DROP COLUMN system_order_number;
-      DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29);
+      DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29, 30);
     `);
     database.exec('PRAGMA ignore_check_constraints = OFF;');
     database.close();
@@ -75,7 +75,7 @@ describe('事实驱动的订单履约', () => {
       `).get(draft.id)).toEqual({ fulfillment_status: 'pending_shipment' });
       expect(upgraded.database.prepare(`
         SELECT MAX(version) AS version FROM schema_migrations
-      `).get()).toEqual({ version: 29 });
+      `).get()).toEqual({ version: 30 });
       expect(() => upgraded.database.prepare(`
         UPDATE original_orders SET fulfillment_status = 'returned' WHERE id = ?
       `).run(order.id)).toThrow();

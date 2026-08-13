@@ -23,6 +23,14 @@ export type OrderOperationsPackage = {
   shippingCarrier: string;
   trackingNumber: string;
   cancellationReason: string | null;
+  currentException: {
+    direction: 'outbound';
+    logisticsStatus: ShipmentLogisticsStatus;
+    affectedQuantity: number;
+    reason: string;
+    occurredAt: string;
+  } | null;
+  carrierClaimStatus: CarrierClaimStatus | null;
   items: OrderOperationsShipmentItem[];
 };
 
@@ -57,6 +65,13 @@ export type OrderOperationsAftersalesCase = {
     shippingCarrier: string;
     trackingNumber: string;
     logisticsStatus: AftersalesReturnLogisticsStatus;
+    currentException: {
+      direction: 'return';
+      logisticsStatus: AftersalesReturnLogisticsStatus;
+      affectedQuantity: number;
+      reason: string;
+      occurredAt: string;
+    } | null;
     discrepancies: AftersalesReturnDiscrepancy[];
     carrierClaimStatus: CarrierClaimStatus | null;
     items: Array<{
@@ -102,6 +117,9 @@ const SHIPMENT_LOGISTICS_STATUS_LABELS: Record<ShipmentLogisticsStatus, string> 
   intercepting: '拦截处理中',
   intercepted_returned: '已拦截退回',
   lost: '丢件',
+  delivery_dispute: '投递争议',
+  damaged: '运输破损',
+  misdelivered: '错投',
   exception: '其他物流异常',
 };
 
@@ -211,7 +229,10 @@ export function aftersalesTodoForCases(
 
 export function shipmentTodoForStatuses(
   statuses: ReadonlySet<ShipmentLogisticsStatus>,
+  carrierClaimStatuses: ReadonlySet<CarrierClaimStatus> = new Set(),
 ): string {
+  if (carrierClaimStatuses.has('pending')) return '跟进承运索赔';
+  if (carrierClaimStatuses.has('approved')) return '确认承运赔付';
   if (statuses.size === 0 || [...statuses].every((status) => status === 'delivered')) {
     return '无需物流操作';
   }

@@ -69,6 +69,7 @@ import type {
   ShipmentGroupArchive,
   ShipmentLogisticsCorrectionResult,
   ShipmentLogisticsStatusUpdateResult,
+  ShipmentCarrierClaimProgressResult,
 } from '../core/shipment-records';
 import type {
   CreateTableTemplateInput,
@@ -427,6 +428,14 @@ export class DesktopSession {
     input: unknown,
   ): ShipmentLogisticsStatusUpdateResult {
     const result = this.requireApplication().updateShipmentPackageLogisticsStatus(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public progressShipmentPackageCarrierClaim(
+    input: unknown,
+  ): ShipmentCarrierClaimProgressResult {
+    const result = this.requireApplication().progressShipmentPackageCarrierClaim(input);
     this.refreshOrders();
     return result;
   }

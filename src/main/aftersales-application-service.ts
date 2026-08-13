@@ -15,6 +15,13 @@ import {
   type AftersalesCaseSnapshot,
   type AftersalesReturnDiscrepancy,
 } from '../core/aftersales-cases';
+import {
+  prepareLogisticsCorrection,
+  prepareLogisticsStatusChange,
+  sameLogisticsExceptionImpact,
+  type LogisticsExceptionImpact,
+} from '../core/logistics-exceptions';
+import { LogisticsExceptionService } from './logistics-exception-service';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -368,24 +375,26 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'correct_return_logistics') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
-      if (
-        returnRecord.shippingCarrier === prepared.shippingCarrier
-        && returnRecord.trackingNumber === prepared.trackingNumber
-      ) {
-        throw new Error('退货物流信息没有变化');
-      }
-      assertOccurredAtNotBefore(
-        prepared.occurredAt,
-        returnRecord.timeline.at(-1)?.occurredAt ?? returnRecord.occurredAt,
-        '退货物流更正时间不能早于上一条退货事件',
-      );
+      const nextLogistics = prepareLogisticsCorrection({
+        current: {
+          shippingCarrier: returnRecord.shippingCarrier,
+          trackingNumber: returnRecord.trackingNumber,
+        },
+        next: {
+          shippingCarrier: prepared.shippingCarrier,
+          trackingNumber: prepared.trackingNumber,
+        },
+        occurredAt: prepared.occurredAt,
+        latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
+          ?? returnRecord.occurredAt,
+      });
       const duplicate = this.workspace.database.prepare(`
         SELECT id
         FROM aftersales_return_records
         WHERE tracking_number = ? COLLATE NOCASE AND id <> ?
         LIMIT 1
       `).get(
-        prepared.trackingNumber,
+        nextLogistics.trackingNumber,
         returnRecord.id,
       ) as SqlRow | undefined;
       if (duplicate) throw new Error('该退货运单已经登记，请核对是否属于合装退货');
@@ -396,8 +405,8 @@ export class AftersalesApplicationService {
               revision = revision + 1, updated_at = ?
           WHERE id = ? AND revision = ?
         `).run(
-          prepared.shippingCarrier,
-          prepared.trackingNumber,
+          nextLogistics.shippingCarrier,
+          nextLogistics.trackingNumber,
           now,
           returnRecord.id,
           returnRecord.revision,
@@ -421,8 +430,8 @@ export class AftersalesApplicationService {
               trackingNumber: returnRecord.trackingNumber,
             },
             after: {
-              shippingCarrier: prepared.shippingCarrier,
-              trackingNumber: prepared.trackingNumber,
+              shippingCarrier: nextLogistics.shippingCarrier,
+              trackingNumber: nextLogistics.trackingNumber,
             },
           }),
           now,
@@ -434,37 +443,32 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'update_return_logistics_status') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
-      const previousEventAt = returnRecord.timeline.at(-1)?.occurredAt ?? returnRecord.occurredAt;
-      assertOccurredAtNotBefore(
-        prepared.occurredAt,
-        previousEventAt,
-        '退货物流状态时间不能早于上一条退货事件',
-      );
-      if (prepared.logisticsStatus === 'lost') {
-        if (returnRecord.status !== 'in_transit') {
-          throw new Error('已收到或检查的退货包裹不能改为丢件');
-        }
-        if (!returnRecord.carrierAcceptedAt) {
-          throw new Error('没有承运方揽收证据，不能登记丢件');
-        }
-        if (!prepared.carrierConfirmedLoss) {
-          throw new Error('请确认承运方已经认定退货包裹遗失');
-        }
-      }
-      if (
-        returnRecord.status !== 'in_transit'
-        && isBeforeReturnReceiptLogisticsStatus(prepared.logisticsStatus)
-      ) {
-        throw new Error('已收到或检查的退货包裹不能回退到收件前的物流状态');
-      }
-      const carrierAcceptedAt = returnRecord.carrierAcceptedAt
-        ?? (prepared.carrierAcceptanceConfirmed ? prepared.occurredAt : null);
-      if (prepared.logisticsStatus === 'awaiting_carrier' && carrierAcceptedAt !== null) {
-        throw new Error('已有承运方揽收证据，不能登记为待承运方接收');
-      }
+      const statusChange = prepareLogisticsStatusChange({
+        direction: 'return',
+        currentStatus: returnRecord.logisticsStatus,
+        nextStatus: prepared.logisticsStatus,
+        carrierAcceptedAt: returnRecord.carrierAcceptedAt,
+        physicalReceiptAt: returnRecord.receivedAt,
+        carrierAcceptanceConfirmed: prepared.carrierAcceptanceConfirmed ?? false,
+        carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
+        occurredAt: prepared.occurredAt,
+        latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
+          ?? returnRecord.occurredAt,
+        impact: prepared.impact ?? { scope: 'package' },
+        availableItems: returnRecord.items.map((item) => ({
+          sourceItemId: item.id,
+          quantity: item.quantity,
+        })),
+      });
       if (
         prepared.logisticsStatus === returnRecord.logisticsStatus
-        && carrierAcceptedAt === returnRecord.carrierAcceptedAt
+        && statusChange.carrierAcceptedAt === returnRecord.carrierAcceptedAt
+        && sameLogisticsExceptionImpact(
+          [...returnRecord.timeline].reverse().find((event) => (
+            event.kind === 'logistics_status_updated'
+          ))?.impact ?? { scope: 'package' },
+          statusChange.impact,
+        )
       ) {
         throw new Error('退货物流状态没有变化');
       }
@@ -476,7 +480,7 @@ export class AftersalesApplicationService {
           WHERE id = ? AND revision = ?
         `).run(
           prepared.logisticsStatus,
-          carrierAcceptedAt,
+          statusChange.carrierAcceptedAt,
           now,
           returnRecord.id,
           returnRecord.revision,
@@ -497,7 +501,8 @@ export class AftersalesApplicationService {
           JSON.stringify({
             before: returnRecord.logisticsStatus,
             after: prepared.logisticsStatus,
-            carrierAcceptedAt,
+            carrierAcceptedAt: statusChange.carrierAcceptedAt,
+            impact: statusChange.impact,
           }),
           now,
         );
@@ -732,44 +737,14 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'open_carrier_claim') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
-      if (!supportsCarrierClaim(returnRecord.logisticsStatus)) {
-        throw new Error('当前退货物流状态不能建立承运索赔');
-      }
-      if (returnRecord.carrierClaim) throw new Error('当前退货包裹已经建立承运索赔');
-      const previousEventAt = returnRecord.timeline.at(-1)?.occurredAt ?? returnRecord.occurredAt;
-      assertOccurredAtNotBefore(
-        prepared.occurredAt,
-        previousEventAt,
-        '承运索赔时间不能早于退货物流异常时间',
-      );
-      const claimId = randomUUID();
-      this.workspace.transaction(() => {
-        this.workspace.database.prepare(`
-          INSERT INTO carrier_claims (
-            id, return_record_id, status, revision, requested_amount_cents,
-            approved_amount_cents, reason, created_at, updated_at
-          ) VALUES (?, ?, 'pending', 1, ?, NULL, ?, ?, ?)
-        `).run(
-          claimId,
-          returnRecord.id,
-          prepared.requestedAmountCents,
-          prepared.reason,
-          now,
-          now,
-        );
-        this.workspace.database.prepare(`
-          INSERT INTO carrier_claim_events (
-            id, claim_id, kind, base_revision, result_revision,
-            occurred_at, reason, amount_cents, created_at
-          ) VALUES (?, ?, 'opened', 0, 1, ?, ?, ?, ?)
-        `).run(
-          randomUUID(),
-          claimId,
-          prepared.occurredAt,
-          prepared.reason,
-          prepared.requestedAmountCents,
-          now,
-        );
+      this.logisticsExceptionService().openClaim({
+        subject: { direction: 'return', packageId: returnRecord.id },
+        currentStatus: returnRecord.logisticsStatus,
+        latestOccurredAt: returnRecord.timeline.at(-1)?.occurredAt
+          ?? returnRecord.occurredAt,
+        requestedAmountCents: prepared.requestedAmountCents,
+        occurredAt: prepared.occurredAt,
+        reason: prepared.reason,
       });
       return this.get(current.id);
     }
@@ -780,46 +755,16 @@ export class AftersalesApplicationService {
       if (claim.status !== 'pending' || claim.revision !== prepared.expectedClaimRevision) {
         throw new Error('承运索赔已在其他操作中更新，请刷新后重试');
       }
-      const previousEventAt = claim.timeline.at(-1)?.occurredAt ?? returnRecord.occurredAt;
-      assertOccurredAtNotBefore(
-        prepared.occurredAt,
-        previousEventAt,
-        '承运索赔结果时间不能早于上一条索赔事件',
-      );
       const approvedAmountCents = prepared.outcome === 'approved'
         ? prepared.approvedAmountCents as number
         : null;
-      this.workspace.transaction(() => {
-        const updated = this.workspace.database.prepare(`
-          UPDATE carrier_claims
-          SET status = ?, revision = revision + 1, approved_amount_cents = ?,
-              reason = ?, updated_at = ?
-          WHERE id = ? AND revision = ? AND status = 'pending'
-        `).run(
-          prepared.outcome,
-          approvedAmountCents,
-          prepared.reason,
-          now,
-          claim.id,
-          claim.revision,
-        );
-        if (updated.changes !== 1) throw new Error('承运索赔已在其他操作中更新');
-        this.workspace.database.prepare(`
-          INSERT INTO carrier_claim_events (
-            id, claim_id, kind, base_revision, result_revision,
-            occurred_at, reason, amount_cents, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          randomUUID(),
-          claim.id,
-          prepared.outcome,
-          claim.revision,
-          claim.revision + 1,
-          prepared.occurredAt,
-          prepared.reason,
-          approvedAmountCents,
-          now,
-        );
+      this.logisticsExceptionService().resolveClaim({
+        subject: { direction: 'return', packageId: returnRecord.id },
+        expectedClaimRevision: claim.revision,
+        outcome: prepared.outcome,
+        approvedAmountCents,
+        occurredAt: prepared.occurredAt,
+        reason: prepared.reason,
       });
       return this.get(current.id);
     }
@@ -830,46 +775,12 @@ export class AftersalesApplicationService {
       if (claim.status !== 'approved' || claim.revision !== prepared.expectedClaimRevision) {
         throw new Error('当前承运索赔尚不能确认实际赔付');
       }
-      const previousEventAt = claim.timeline.at(-1)?.occurredAt ?? returnRecord.occurredAt;
-      assertOccurredAtNotBefore(
-        prepared.occurredAt,
-        previousEventAt,
-        '实际赔付时间不能早于承运方同意赔付时间',
-      );
-      this.workspace.transaction(() => {
-        this.workspace.database.prepare(`
-          INSERT INTO carrier_compensation_records (
-            id, claim_id, amount_cents, occurred_at, note, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
-          randomUUID(),
-          claim.id,
-          prepared.amountCents,
-          prepared.occurredAt,
-          prepared.note,
-          now,
-        );
-        const updated = this.workspace.database.prepare(`
-          UPDATE carrier_claims
-          SET status = 'paid', revision = revision + 1, updated_at = ?
-          WHERE id = ? AND revision = ? AND status = 'approved'
-        `).run(now, claim.id, claim.revision);
-        if (updated.changes !== 1) throw new Error('承运索赔已在其他操作中更新');
-        this.workspace.database.prepare(`
-          INSERT INTO carrier_claim_events (
-            id, claim_id, kind, base_revision, result_revision,
-            occurred_at, reason, amount_cents, created_at
-          ) VALUES (?, ?, 'compensation_confirmed', ?, ?, ?, ?, ?, ?)
-        `).run(
-          randomUUID(),
-          claim.id,
-          claim.revision,
-          claim.revision + 1,
-          prepared.occurredAt,
-          prepared.note,
-          prepared.amountCents,
-          now,
-        );
+      this.logisticsExceptionService().confirmCompensation({
+        subject: { direction: 'return', packageId: returnRecord.id },
+        expectedClaimRevision: claim.revision,
+        amountCents: prepared.amountCents,
+        occurredAt: prepared.occurredAt,
+        note: prepared.note,
       });
       return this.get(current.id);
     }
@@ -1284,6 +1195,7 @@ export class AftersalesApplicationService {
             reason: asString(eventRow.reason),
             before: payload.before,
             after: payload.after,
+            impact: parseStoredLogisticsImpact(payload.impact),
           };
         }
         if (kind === 'received') {
@@ -1379,79 +1291,14 @@ export class AftersalesApplicationService {
   private getCarrierClaim(
     returnRecordId: string,
   ): AftersalesCase['returns'][number]['carrierClaim'] {
-    const row = this.workspace.database.prepare(`
-      SELECT * FROM carrier_claims WHERE return_record_id = ?
-    `).get(returnRecordId) as unknown as SqlRow | undefined;
-    if (!row) return null;
-    const claimId = asString(row.id);
-    const status = asString(row.status);
-    if (status !== 'pending' && status !== 'approved' && status !== 'rejected' && status !== 'paid') {
-      throw new Error('数据库承运索赔状态错误');
-    }
-    const compensationRow = this.workspace.database.prepare(`
-      SELECT * FROM carrier_compensation_records WHERE claim_id = ?
-    `).get(claimId) as unknown as SqlRow | undefined;
-    const eventRows = this.workspace.database.prepare(`
-      SELECT * FROM carrier_claim_events
-      WHERE claim_id = ?
-      ORDER BY result_revision
-    `).all(claimId) as unknown as SqlRow[];
-    const timeline: NonNullable<AftersalesCase['returns'][number]['carrierClaim']>['timeline'] = eventRows
-      .map((eventRow) => {
-        const kind = asString(eventRow.kind);
-        const resultRevision = asNumber(eventRow.result_revision);
-        const common = {
-          occurredAt: asString(eventRow.occurred_at),
-          createdAt: asString(eventRow.created_at),
-        };
-        if (kind === 'opened') return {
-          kind,
-          resultRevision: 1 as const,
-          requestedAmountCents: asNumber(eventRow.amount_cents),
-          reason: asString(eventRow.reason),
-          ...common,
-        };
-        const baseRevision = asNumber(eventRow.base_revision);
-        if (kind === 'approved' || kind === 'rejected') return {
-          kind,
-          baseRevision,
-          resultRevision,
-          approvedAmountCents: eventRow.amount_cents === null
-            ? null
-            : asNumber(eventRow.amount_cents),
-          reason: asString(eventRow.reason),
-          ...common,
-        };
-        if (kind !== 'compensation_confirmed') throw new Error('数据库承运索赔事件错误');
-        return {
-          kind,
-          baseRevision,
-          resultRevision,
-          amountCents: asNumber(eventRow.amount_cents),
-          note: asString(eventRow.reason),
-          ...common,
-        };
-      });
-    return {
-      id: claimId,
-      status,
-      revision: asNumber(row.revision),
-      requestedAmountCents: asNumber(row.requested_amount_cents),
-      approvedAmountCents: row.approved_amount_cents === null
-        ? null
-        : asNumber(row.approved_amount_cents),
-      reason: asString(row.reason),
-      actualCompensation: compensationRow ? {
-        id: asString(compensationRow.id),
-        amountCents: asNumber(compensationRow.amount_cents),
-        occurredAt: asString(compensationRow.occurred_at),
-        note: asString(compensationRow.note),
-        createdAt: asString(compensationRow.created_at),
-      } : null,
-      timeline,
-      createdAt: asString(row.created_at),
-      updatedAt: asString(row.updated_at),
-    };
+    return this.logisticsExceptionService().getClaim({
+      direction: 'return',
+      packageId: returnRecordId,
+    });
+  }
+
+  private logisticsExceptionService(): LogisticsExceptionService {
+    return new LogisticsExceptionService(this.workspace);
   }
 
   private advanceCase(
@@ -1797,26 +1644,33 @@ function isReturnDiscrepancyKind(
     || value === 'missing_accessory' || value === 'unidentified';
 }
 
-function supportsCarrierClaim(
-  status: AftersalesCase['returns'][number]['logisticsStatus'],
-): boolean {
-  return status === 'lost'
-    || status === 'delivery_dispute'
-    || status === 'damaged'
-    || status === 'misdelivered'
-    || status === 'exception'
-    || status === 'returned_to_buyer';
-}
-
-function isBeforeReturnReceiptLogisticsStatus(
-  status: AftersalesCase['returns'][number]['logisticsStatus'],
-): boolean {
-  return status === 'awaiting_carrier'
-    || status === 'in_transit'
-    || status === 'intercepting'
-    || status === 'returned_to_buyer'
-    || status === 'lost'
-    || status === 'misdelivered';
+function parseStoredLogisticsImpact(value: unknown): LogisticsExceptionImpact {
+  if (value === undefined) return { scope: 'package' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('数据库退货物流异常影响范围错误');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.scope === 'package') return { scope: 'package' };
+  if (record.scope !== 'items' || !Array.isArray(record.items)) {
+    throw new Error('数据库退货物流异常影响范围错误');
+  }
+  return {
+    scope: 'items',
+    items: record.items.map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('数据库退货物流异常商品错误');
+      }
+      const item = value as Record<string, unknown>;
+      if (
+        typeof item.sourceItemId !== 'string'
+        || !Number.isSafeInteger(item.quantity)
+        || Number(item.quantity) <= 0
+      ) {
+        throw new Error('数据库退货物流异常商品错误');
+      }
+      return { sourceItemId: item.sourceItemId, quantity: Number(item.quantity) };
+    }),
+  };
 }
 
 function latestReturnDecisionEvidenceAt(returns: AftersalesCase['returns']): string | null {

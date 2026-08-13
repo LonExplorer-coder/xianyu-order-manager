@@ -88,6 +88,7 @@ import {
   ShipmentLogisticsStatus,
   ShipmentRecord,
 } from '../core/shipment-records';
+import { supportsCarrierClaim } from '../core/logistics-exceptions';
 import type {
   AftersalesCase,
   ProgressAftersalesCaseInput,
@@ -1585,6 +1586,11 @@ function ShipmentGroupsWorkspace({
     shipmentPackage: ShipmentRecord['packages'][number];
     packageIndex: number;
   } | null>(null);
+  const [carrierClaimTarget, setCarrierClaimTarget] = useState<{
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  } | null>(null);
   const [aftersalesCreateTarget, setAftersalesCreateTarget] = useState<ShipmentRecord | null>(null);
   const [aftersalesUpdateTarget, setAftersalesUpdateTarget] = useState<{
     record: ShipmentRecord;
@@ -1929,6 +1935,9 @@ function ShipmentGroupsWorkspace({
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
           }}
+          onProgressCarrierClaim={(record, shipmentPackage, packageIndex) => {
+            setCarrierClaimTarget({ record, shipmentPackage, packageIndex });
+          }}
           onCreateAftersales={setAftersalesCreateTarget}
           onUpdateAftersales={(record, aftersalesCase) => {
             setAftersalesUpdateTarget({ record, aftersalesCase });
@@ -1956,6 +1965,9 @@ function ShipmentGroupsWorkspace({
           }}
           onUpdateLogisticsStatus={(record, shipmentPackage, packageIndex) => {
             setLogisticsStatusTarget({ record, shipmentPackage, packageIndex });
+          }}
+          onProgressCarrierClaim={(record, shipmentPackage, packageIndex) => {
+            setCarrierClaimTarget({ record, shipmentPackage, packageIndex });
           }}
           onCreateAftersales={setAftersalesCreateTarget}
           onUpdateAftersales={(record, aftersalesCase) => {
@@ -2016,6 +2028,19 @@ function ShipmentGroupsWorkspace({
             setLogisticsStatusTarget(null);
           }}
           onClose={() => setLogisticsStatusTarget(null)}
+        />
+      )}
+
+      {carrierClaimTarget && (
+        <ShipmentPackageCarrierClaimDialog
+          api={api}
+          target={carrierClaimTarget}
+          onApplied={({ archive, projection: nextProjection }) => {
+            onProjectionChange(nextProjection);
+            replaceArchive(archive);
+            setCarrierClaimTarget(null);
+          }}
+          onClose={() => setCarrierClaimTarget(null)}
         />
       )}
 
@@ -2332,6 +2357,7 @@ function ShipmentArchiveSection({
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onProgressCarrierClaim,
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
@@ -2358,6 +2384,11 @@ function ShipmentArchiveSection({
     packageIndex: number,
   ) => void;
   onUpdateLogisticsStatus: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onProgressCarrierClaim: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
@@ -2525,6 +2556,7 @@ function ShipmentArchiveSection({
                     onCancelPackage={onCancelPackage}
                     onCorrectLogistics={onCorrectLogistics}
                     onUpdateLogisticsStatus={onUpdateLogisticsStatus}
+                    onProgressCarrierClaim={onProgressCarrierClaim}
                     onCreateAftersales={onCreateAftersales}
                     onUpdateAftersales={onUpdateAftersales}
                     onProgressAftersales={onProgressAftersales}
@@ -2546,6 +2578,7 @@ function ShipmentRecordsSection({
   onCancelPackage,
   onCorrectLogistics,
   onUpdateLogisticsStatus,
+  onProgressCarrierClaim,
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
@@ -2565,6 +2598,11 @@ function ShipmentRecordsSection({
     packageIndex: number,
   ) => void;
   onUpdateLogisticsStatus: (
+    record: ShipmentRecord,
+    shipmentPackage: ShipmentRecord['packages'][number],
+    packageIndex: number,
+  ) => void;
+  onProgressCarrierClaim: (
     record: ShipmentRecord,
     shipmentPackage: ShipmentRecord['packages'][number],
     packageIndex: number,
@@ -2657,6 +2695,25 @@ function ShipmentRecordsSection({
                     </li>
                   ))}
                 </ul>
+                {shipmentPackage.currentException && (
+                  <div className="shipment-package-exception" role="status">
+                    <strong>正向物流异常 · {shipmentLogisticsStatusLabel(
+                      shipmentPackage.currentException.logisticsStatus,
+                    )}</strong>
+                    <span>{shipmentPackage.currentException.impact.scope === 'package'
+                      ? `影响整个包裹（${shipmentPackage.totalQuantity} 件）`
+                      : `影响 ${shipmentPackage.currentException.impact.items.reduce(
+                        (total, item) => total + item.quantity,
+                        0,
+                      )} 件指定商品`}</span>
+                    <small>{shipmentPackage.currentException.reason}</small>
+                    {shipmentPackage.carrierClaim && (
+                      <span>承运索赔：{carrierClaimStatusLabel(
+                        shipmentPackage.carrierClaim.status,
+                      )}</span>
+                    )}
+                  </div>
+                )}
                 {shipmentPackage.status === 'active' && (
                   <footer>
                     <button
@@ -2675,6 +2732,26 @@ function ShipmentRecordsSection({
                     >
                       更正物流
                     </button>
+                    {shipmentPackage.currentException
+                      && (!shipmentPackage.carrierClaim
+                        || shipmentPackage.carrierClaim.status === 'pending'
+                        || shipmentPackage.carrierClaim.status === 'approved') && (
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        onClick={() => onProgressCarrierClaim(
+                          record,
+                          shipmentPackage,
+                          packageIndex,
+                        )}
+                      >
+                        {!shipmentPackage.carrierClaim
+                          ? '建立承运索赔'
+                          : shipmentPackage.carrierClaim.status === 'pending'
+                            ? '登记索赔结果'
+                            : '确认承运赔付'}
+                      </button>
+                    )}
                     <button
                       className="button button--quiet"
                       type="button"
@@ -2837,9 +2914,37 @@ function UpdateShipmentPackageLogisticsStatusDialog({
     target.shipmentPackage.logisticsStatus,
   );
   const [reason, setReason] = useState('');
+  const [carrierAcceptanceConfirmed, setCarrierAcceptanceConfirmed] = useState(false);
+  const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
+  const [impactScope, setImpactScope] = useState<'package' | 'items'>(
+    target.shipmentPackage.currentException?.impact.scope ?? 'package',
+  );
+  const [affectedQuantities, setAffectedQuantities] = useState<Record<string, number>>(() => {
+    const impact = target.shipmentPackage.currentException?.impact;
+    return impact?.scope === 'items'
+      ? Object.fromEntries(impact.items.map((item) => [item.sourceItemId, item.quantity]))
+      : {};
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus;
+  const exceptional = supportsCarrierClaim(logisticsStatus);
+  const selectedAffectedItems = target.shipmentPackage.items.flatMap((item) => {
+    const quantity = affectedQuantities[item.id] ?? 0;
+    return quantity > 0 ? [{ sourceItemId: item.id, quantity }] : [];
+  });
+  const changed = logisticsStatus !== target.shipmentPackage.logisticsStatus
+    || carrierAcceptanceConfirmed
+    || (exceptional && impactScope === 'items'
+      && JSON.stringify(selectedAffectedItems)
+        !== JSON.stringify(target.shipmentPackage.currentException?.impact.scope === 'items'
+          ? target.shipmentPackage.currentException.impact.items
+          : []));
+  const missingLossEvidence = logisticsStatus === 'lost'
+    && !target.shipmentPackage.carrierAcceptedAt
+    && !carrierAcceptanceConfirmed;
+  const missingAffectedItems = exceptional
+    && impactScope === 'items'
+    && selectedAffectedItems.length === 0;
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement
@@ -2851,7 +2956,11 @@ function UpdateShipmentPackageLogisticsStatusDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || !changed || !reason.trim()) return;
+    if (
+      saving || !changed || !reason.trim() || missingLossEvidence
+      || (logisticsStatus === 'lost' && !carrierConfirmedLoss)
+      || missingAffectedItems
+    ) return;
     setSaving(true);
     setError('');
     try {
@@ -2860,6 +2969,12 @@ function UpdateShipmentPackageLogisticsStatusDialog({
         packageId: target.shipmentPackage.id,
         expectedRevision: target.shipmentPackage.revision,
         logisticsStatus,
+        ...(carrierAcceptanceConfirmed ? { carrierAcceptanceConfirmed: true } : {}),
+        ...(logisticsStatus === 'lost' ? { carrierConfirmedLoss: true } : {}),
+        occurredAt: new Date().toISOString(),
+        impact: exceptional && impactScope === 'items'
+          ? { scope: 'items', items: selectedAffectedItems }
+          : { scope: 'package' },
         reason,
       });
       onApplied(result);
@@ -2898,10 +3013,88 @@ function UpdateShipmentPackageLogisticsStatusDialog({
             onChange={(event) => setLogisticsStatus(event.target.value as ShipmentLogisticsStatus)}
           >
             {SHIPMENT_LOGISTICS_STATUS_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
+              <option
+                key={option.value}
+                value={option.value}
+                disabled={option.value === 'awaiting_carrier'
+                  && target.shipmentPackage.carrierAcceptedAt !== null}
+              >
+                {option.label}
+              </option>
             ))}
           </select>
         </label>
+        {!target.shipmentPackage.carrierAcceptedAt && logisticsStatus !== 'awaiting_carrier' && (
+          <label className="shipment-package-action-dialog__check">
+            <input
+              type="checkbox"
+              checked={carrierAcceptanceConfirmed}
+              disabled={saving}
+              onChange={(event) => setCarrierAcceptanceConfirmed(event.target.checked)}
+            />
+            <span>我已核对承运方揽收证据</span>
+          </label>
+        )}
+        {logisticsStatus === 'lost' && (
+          <label className="shipment-package-action-dialog__check">
+            <input
+              type="checkbox"
+              checked={carrierConfirmedLoss}
+              disabled={saving}
+              onChange={(event) => setCarrierConfirmedLoss(event.target.checked)}
+            />
+            <span>我已核对承运方的丢件结论</span>
+          </label>
+        )}
+        {exceptional && (
+          <fieldset className="shipment-package-impact">
+            <legend>异常影响范围</legend>
+            <label>
+              <input
+                type="radio"
+                name="shipment-exception-impact"
+                checked={impactScope === 'package'}
+                disabled={saving}
+                onChange={() => setImpactScope('package')}
+              />
+              <span>整个包裹</span>
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="shipment-exception-impact"
+                checked={impactScope === 'items'}
+                disabled={saving}
+                onChange={() => setImpactScope('items')}
+              />
+              <span>指定商品与数量</span>
+            </label>
+            {impactScope === 'items' && (
+              <div className="shipment-package-impact__items">
+                {target.shipmentPackage.items.map((item) => (
+                  <label key={item.id}>
+                    <span>{item.orderNumber} · {item.sourceTitle}
+                      {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                    <input
+                      aria-label={`受影响数量 ${item.sourceTitle}`}
+                      type="number"
+                      min={0}
+                      max={item.quantity}
+                      step={1}
+                      value={affectedQuantities[item.id] ?? 0}
+                      disabled={saving}
+                      onChange={(event) => setAffectedQuantities((current) => ({
+                        ...current,
+                        [item.id]: Number(event.target.value),
+                      }))}
+                    />
+                    <small>/ {item.quantity} 件</small>
+                  </label>
+                ))}
+              </div>
+            )}
+          </fieldset>
+        )}
         <label>
           <span>状态更新原因</span>
           <textarea
@@ -2920,9 +3113,170 @@ function UpdateShipmentPackageLogisticsStatusDialog({
           <button
             className="button button--primary"
             type="submit"
-            disabled={saving || !changed || !reason.trim()}
+            disabled={saving || !changed || !reason.trim() || missingLossEvidence
+              || (logisticsStatus === 'lost' && !carrierConfirmedLoss)
+              || missingAffectedItems}
           >
             {saving ? '正在更新…' : '确认更新'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+function ShipmentPackageCarrierClaimDialog({
+  api,
+  target,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  target: {
+    record: ShipmentRecord;
+    shipmentPackage: ShipmentRecord['packages'][number];
+    packageIndex: number;
+  };
+  onApplied: (result: ShipmentConfirmationResult) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const claim = target.shipmentPackage.carrierClaim;
+  const mode = !claim ? 'open' : claim.status === 'pending'
+    ? 'resolve'
+    : claim.status === 'approved' ? 'confirm_compensation' : null;
+  const [outcome, setOutcome] = useState<'approved' | 'rejected'>('approved');
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, []);
+
+  if (!mode) return null;
+  const amountCents = Math.round(Number(amount) * 100);
+  const amountRequired = mode !== 'resolve' || outcome === 'approved';
+  const validAmount = !amountRequired
+    || (Number.isSafeInteger(amountCents) && amountCents > 0);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !reason.trim() || !validAmount || !mode) return;
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.progressShipmentPackageCarrierClaim(mode === 'open' ? {
+        kind: 'open',
+        recordId: target.record.id,
+        packageId: target.shipmentPackage.id,
+        expectedRevision: target.shipmentPackage.revision,
+        requestedAmountCents: amountCents,
+        occurredAt: new Date().toISOString(),
+        reason,
+      } : mode === 'resolve' ? {
+        kind: 'resolve',
+        recordId: target.record.id,
+        packageId: target.shipmentPackage.id,
+        expectedClaimRevision: claim?.revision ?? 0,
+        outcome,
+        ...(outcome === 'approved' ? { approvedAmountCents: amountCents } : {}),
+        occurredAt: new Date().toISOString(),
+        reason,
+      } : {
+        kind: 'confirm_compensation',
+        recordId: target.record.id,
+        packageId: target.shipmentPackage.id,
+        expectedClaimRevision: claim?.revision ?? 0,
+        amountCents,
+        occurredAt: new Date().toISOString(),
+        note: reason,
+      });
+      onApplied(result);
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
+          <h2 id={headingId}>{mode === 'open'
+            ? '建立承运索赔'
+            : mode === 'resolve' ? '登记索赔结果' : '确认承运赔付'}</h2>
+          <p>只保存承运方索赔与赔付事实；不会自动退款、补发或改写库存。</p>
+        </header>
+        {mode === 'resolve' && (
+          <label>
+            <span>索赔结果</span>
+            <select
+              aria-label="索赔结果"
+              value={outcome}
+              disabled={saving}
+              onChange={(event) => setOutcome(event.target.value as 'approved' | 'rejected')}
+            >
+              <option value="approved">同意赔付</option>
+              <option value="rejected">拒绝赔付</option>
+            </select>
+          </label>
+        )}
+        {amountRequired && (
+          <label>
+            <span>{mode === 'open' ? '申请索赔金额（元）'
+              : mode === 'resolve' ? '同意赔付金额（元）' : '实际赔付金额（元）'}</span>
+            <input
+              aria-label="承运索赔金额"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={amount}
+              disabled={saving}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+          </label>
+        )}
+        <label>
+          <span>{mode === 'confirm_compensation' ? '实际赔付说明' : '索赔说明'}</span>
+          <textarea
+            aria-label="承运索赔说明"
+            value={reason}
+            maxLength={500}
+            disabled={saving}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </label>
+        {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
+        <footer>
+          <button className="button button--quiet" type="button" disabled={saving} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            type="submit"
+            disabled={saving || !reason.trim() || !validAmount}
+          >
+            {saving ? '正在保存…' : '确认保存'}
           </button>
         </footer>
       </form>
@@ -3087,6 +3441,7 @@ function CorrectShipmentPackageLogisticsDialog({
         expectedRevision: target.shipmentPackage.revision,
         shippingCarrier,
         trackingNumber,
+        occurredAt: new Date().toISOString(),
         reason,
       });
       onApplied(result);
@@ -8117,6 +8472,20 @@ function DetailWorkspace({
                               : shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}</span>
                           </div>
                           <p>{shipmentPackageLogisticsLabel(shipmentPackage)}</p>
+                          {shipmentPackage.currentException && (
+                            <p className="shipment-package-exception">
+                              <strong>正向物流异常：{shipmentLogisticsStatusLabel(
+                                shipmentPackage.currentException.logisticsStatus,
+                              )}</strong>
+                              <span>影响 {shipmentPackage.currentException.affectedQuantity} 件</span>
+                              <small>{shipmentPackage.currentException.reason}</small>
+                            </p>
+                          )}
+                          {shipmentPackage.carrierClaimStatus && (
+                            <small>承运索赔：{carrierClaimStatusLabel(
+                              shipmentPackage.carrierClaimStatus,
+                            )}</small>
+                          )}
                           {shipmentPackage.cancellationReason && (
                             <small>撤销原因：{shipmentPackage.cancellationReason}</small>
                           )}
@@ -8182,9 +8551,20 @@ function DetailWorkspace({
                             aria-label={`退货包裹 ${returnPackage.id}`}
                           >
                             <div>
-                          <strong>{returnPackage.shippingCarrier} · {returnPackage.trackingNumber}</strong>
-                          <span>{returnLogisticsStatusLabel(returnPackage.logisticsStatus)}</span>
+                              <strong>退货运输 · {returnPackage.shippingCarrier} · {returnPackage.trackingNumber}</strong>
+                              <span>{returnLogisticsStatusLabel(returnPackage.logisticsStatus)}</span>
                             </div>
+                            {returnPackage.currentException && (
+                              <div className="shipment-package-exception">
+                                <strong>
+                                  退货物流异常 · {returnLogisticsStatusLabel(
+                                    returnPackage.currentException.logisticsStatus,
+                                  )}
+                                </strong>
+                                <span>影响 {returnPackage.currentException.affectedQuantity} 件</span>
+                                <small>{returnPackage.currentException.reason}</small>
+                              </div>
+                            )}
                             <ul>
                               {returnPackage.items.map((item) => (
                                 <li key={item.shipmentPackageItemId}>

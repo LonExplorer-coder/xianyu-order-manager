@@ -62,6 +62,9 @@ const api: DesktopApi = {
   updateShipmentPackageLogisticsStatus: (input) => (
     ipcRenderer.invoke('shipment-records:update-package-logistics-status', input)
   ),
+  progressShipmentPackageCarrierClaim: (input) => (
+    ipcRenderer.invoke('shipment-records:progress-package-carrier-claim', input)
+  ),
   queryAftersalesCases: (query) => ipcRenderer.invoke('aftersales-cases:query', query),
   createAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:create', input),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),

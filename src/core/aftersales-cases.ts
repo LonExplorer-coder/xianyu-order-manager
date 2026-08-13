@@ -1,3 +1,12 @@
+import type {
+  CarrierClaim as SharedCarrierClaim,
+  CarrierClaimEvent as SharedCarrierClaimEvent,
+  CarrierClaimStatus as SharedCarrierClaimStatus,
+  LogisticsExceptionImpact,
+  ReturnLogisticsStatus,
+} from './logistics-exceptions';
+import { isReturnLogisticsStatus } from './logistics-exceptions';
+
 export type AftersalesStatus =
   | 'processing'
   | 'waiting_return'
@@ -15,17 +24,7 @@ export type PendingFinancialItemStatus = 'pending' | 'confirmed' | 'cancelled';
 
 export type AftersalesReturnStatus = 'in_transit' | 'received' | 'inspected';
 
-export type AftersalesReturnLogisticsStatus =
-  | 'awaiting_carrier'
-  | 'in_transit'
-  | 'delivered'
-  | 'intercepting'
-  | 'returned_to_buyer'
-  | 'lost'
-  | 'delivery_dispute'
-  | 'damaged'
-  | 'misdelivered'
-  | 'exception';
+export type AftersalesReturnLogisticsStatus = ReturnLogisticsStatus;
 
 export type AftersalesReturnDiscrepancyKind =
   | 'missing'
@@ -56,7 +55,7 @@ export type AftersalesReturnInspectedItem = {
   note: string;
 };
 
-export type CarrierClaimStatus = 'pending' | 'approved' | 'rejected' | 'paid';
+export type CarrierClaimStatus = SharedCarrierClaimStatus;
 
 export type ReturnInspectionResult = 'resellable' | 'defective' | 'scrapped' | 'other';
 
@@ -153,55 +152,13 @@ export type AftersalesReturnEvent =
     reason: string;
     before: AftersalesReturnLogisticsStatus;
     after: AftersalesReturnLogisticsStatus;
+    impact: LogisticsExceptionImpact;
     createdAt: string;
   };
 
-export type CarrierClaimEvent =
-  | {
-    kind: 'opened';
-    resultRevision: 1;
-    requestedAmountCents: number;
-    reason: string;
-    occurredAt: string;
-    createdAt: string;
-  }
-  | {
-    kind: 'approved' | 'rejected';
-    baseRevision: number;
-    resultRevision: number;
-    approvedAmountCents: number | null;
-    reason: string;
-    occurredAt: string;
-    createdAt: string;
-  }
-  | {
-    kind: 'compensation_confirmed';
-    baseRevision: number;
-    resultRevision: number;
-    amountCents: number;
-    note: string;
-    occurredAt: string;
-    createdAt: string;
-  };
+export type CarrierClaimEvent = SharedCarrierClaimEvent;
 
-export type CarrierClaim = {
-  id: string;
-  status: CarrierClaimStatus;
-  revision: number;
-  requestedAmountCents: number;
-  approvedAmountCents: number | null;
-  reason: string;
-  actualCompensation: {
-    id: string;
-    amountCents: number;
-    occurredAt: string;
-    note: string;
-    createdAt: string;
-  } | null;
-  timeline: CarrierClaimEvent[];
-  createdAt: string;
-  updatedAt: string;
-};
+export type CarrierClaim = SharedCarrierClaim;
 
 export type AftersalesReturnRecord = {
   id: string;
@@ -274,6 +231,7 @@ export type ProgressAftersalesCaseInput =
     expectedRevision: number;
     returnRecordId: string;
     logisticsStatus: AftersalesReturnLogisticsStatus;
+    impact?: LogisticsExceptionImpact;
     carrierAcceptanceConfirmed?: boolean;
     carrierConfirmedLoss?: boolean;
     occurredAt: string;
@@ -617,7 +575,7 @@ export function normalizeProgressAftersalesCaseInput(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'returnRecordId',
-        'logisticsStatus', 'carrierAcceptanceConfirmed', 'carrierConfirmedLoss',
+        'logisticsStatus', 'impact', 'carrierAcceptanceConfirmed', 'carrierConfirmedLoss',
         'occurredAt', 'reason',
       ],
       '更新退货物流状态参数',
@@ -630,6 +588,7 @@ export function normalizeProgressAftersalesCaseInput(
       ...common,
       returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
       logisticsStatus: record.logisticsStatus,
+      ...(record.impact === undefined ? {} : { impact: logisticsImpact(record.impact) }),
       ...(record.carrierAcceptanceConfirmed === undefined
         ? {}
         : {
@@ -874,10 +833,30 @@ function isAftersalesReturnDiscrepancyKind(
 export function isAftersalesReturnLogisticsStatus(
   value: unknown,
 ): value is AftersalesReturnLogisticsStatus {
-  return value === 'awaiting_carrier' || value === 'in_transit' || value === 'delivered'
-    || value === 'intercepting' || value === 'returned_to_buyer' || value === 'lost'
-    || value === 'delivery_dispute' || value === 'damaged' || value === 'misdelivered'
-    || value === 'exception';
+  return isReturnLogisticsStatus(value);
+}
+
+function logisticsImpact(value: unknown): LogisticsExceptionImpact {
+  const record = asRecord(value, '退货物流异常影响范围无效');
+  if (record.scope === 'package') {
+    rejectUnknownKeys(record, ['scope'], '退货物流异常影响范围');
+    return { scope: 'package' };
+  }
+  if (record.scope !== 'items' || !Array.isArray(record.items) || record.items.length === 0) {
+    throw new Error('退货物流异常影响范围无效');
+  }
+  rejectUnknownKeys(record, ['scope', 'items'], '退货物流异常影响范围');
+  return {
+    scope: 'items',
+    items: record.items.map((value) => {
+      const item = asRecord(value, '退货物流异常商品无效');
+      rejectUnknownKeys(item, ['sourceItemId', 'quantity'], '退货物流异常商品');
+      return {
+        sourceItemId: boundedText(item.sourceItemId, 200, '退货物流异常商品标识无效'),
+        quantity: nonNegativeQuantity(item.quantity, '退货物流异常商品数量无效'),
+      };
+    }),
+  };
 }
 
 function nonNegativeQuantity(value: unknown, message: string): number {
