@@ -190,7 +190,7 @@ describe('永久系统订单编号', () => {
         DROP TRIGGER original_orders_require_system_order_number_on_insert;
         DROP INDEX original_orders_by_system_order_number;
         ALTER TABLE original_orders DROP COLUMN system_order_number;
-        DELETE FROM schema_migrations WHERE version IN (27, 28);
+        DELETE FROM schema_migrations WHERE version IN (27, 28, 29);
       `);
     } finally {
       legacy.close();

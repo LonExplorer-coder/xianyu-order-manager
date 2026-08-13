@@ -12,6 +12,8 @@ import type {
   AftersalesCase,
   AftersalesStatus,
   AftersalesWorkflow,
+  AftersalesReturnDiscrepancy,
+  AftersalesReturnLogisticsStatus,
   ProgressAftersalesCaseInput,
   ReturnInspectionResult,
 } from '../core/aftersales-cases';
@@ -263,34 +265,79 @@ export function UpdateAftersalesCaseDialog({
 export function ProgressAftersalesCaseDialog({
   aftersalesCase,
   kind,
+  returnRecordId,
   onProgress,
   onClose,
 }: {
   aftersalesCase: AftersalesCase;
   kind: ProgressAftersalesCaseInput['kind'];
+  returnRecordId?: string;
   onProgress: (input: ProgressAftersalesCaseInput) => Promise<void>;
   onClose: () => void;
 }) {
   const headingId = useId();
   const descriptionId = useId();
   const dialogRef = useDialogFocus();
+  const returnRecord = aftersalesCase.returns.find(({ id }) => id === returnRecordId)
+    ?? aftersalesCase.returns[0];
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [reason, setReason] = useState('');
   const [amountYuan, setAmountYuan] = useState('');
-  const [shippingCarrier, setShippingCarrier] = useState('');
-  const [trackingNumber, setTrackingNumber] = useState('');
+  const [shippingCarrier, setShippingCarrier] = useState(
+    kind === 'correct_return_logistics' ? returnRecord?.shippingCarrier ?? '' : '',
+  );
+  const [trackingNumber, setTrackingNumber] = useState(
+    kind === 'correct_return_logistics' ? returnRecord?.trackingNumber ?? '' : '',
+  );
+  const [combineWithExisting, setCombineWithExisting] = useState(false);
+  const [logisticsStatus, setLogisticsStatus] = useState<AftersalesReturnLogisticsStatus>(
+    returnRecord?.logisticsStatus ?? 'in_transit',
+  );
+  const [carrierAcceptanceConfirmed, setCarrierAcceptanceConfirmed] = useState(false);
+  const [carrierConfirmedLoss, setCarrierConfirmedLoss] = useState(false);
+  const [claimOutcome, setClaimOutcome] = useState<'approved' | 'rejected'>('approved');
   const [inspectionResult, setInspectionResult] = useState<ReturnInspectionResult>('resellable');
+  const [inspectionResults, setInspectionResults] = useState<Record<string, ReturnInspectionResult>>(
+    Object.fromEntries((returnRecord?.items ?? []).map((item) => [
+      item.id,
+      item.inspectionResult ?? 'resellable',
+    ])),
+  );
+  const [receivedQuantities, setReceivedQuantities] = useState<Record<string, number>>(
+    Object.fromEntries((returnRecord?.items ?? []).map((item) => [item.id, item.quantity])),
+  );
+  const [acceptedQuantities, setAcceptedQuantities] = useState<Record<string, number>>(
+    Object.fromEntries((returnRecord?.items ?? []).map((item) => [item.id, item.receivedQuantity])),
+  );
+  const [discrepancies, setDiscrepancies] = useState<AftersalesReturnDiscrepancy[]>(
+    returnRecord?.discrepancies ?? [],
+  );
+  const [differenceKind, setDifferenceKind] = useState<AftersalesReturnDiscrepancy['kind']>('missing');
+  const [differenceReturnRecordItemId, setDifferenceReturnRecordItemId] = useState('');
+  const [differenceQuantity, setDifferenceQuantity] = useState(1);
+  const [differenceNote, setDifferenceNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const amountCents = yuanToCents(amountYuan);
-  const returnRecordId = aftersalesCase.returns[0]?.id;
-  const canSubmit = kind === 'confirm_refund'
-    ? Boolean(reason.trim() && occurredAt && amountCents !== null)
-    : kind === 'register_return'
-      ? Boolean(reason.trim() && occurredAt && shippingCarrier.trim() && trackingNumber.trim())
-      : kind === 'receive_return' || kind === 'inspect_return'
-        ? Boolean(reason.trim() && occurredAt && returnRecordId)
-        : Boolean(reason.trim());
+  const needsAmount = kind === 'confirm_refund'
+    || kind === 'open_carrier_claim'
+    || kind === 'confirm_carrier_compensation'
+    || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved');
+  const needsLogisticsIdentity = kind === 'register_return' || kind === 'correct_return_logistics';
+  const needsReturnRecord = kind === 'receive_return' || kind === 'inspect_return'
+    || kind === 'correct_return_logistics' || kind === 'update_return_logistics_status'
+    || kind === 'open_carrier_claim' || kind === 'resolve_carrier_claim'
+    || kind === 'confirm_carrier_compensation';
+  const canSubmit = Boolean(
+    reason.trim()
+    && (kind === 'complete' || kind === 'cancel' || occurredAt)
+    && (!needsAmount || amountCents !== null)
+    && (!needsLogisticsIdentity || (shippingCarrier.trim() && trackingNumber.trim()))
+    && (!needsReturnRecord || returnRecord)
+    && !(kind === 'update_return_logistics_status'
+      && logisticsStatus === 'awaiting_carrier'
+      && (carrierAcceptanceConfirmed || returnRecord?.carrierAcceptedAt != null)),
+  );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -305,41 +352,90 @@ export function ProgressAftersalesCaseDialog({
       const normalizedOccurredAt = kind === 'complete' || kind === 'cancel'
         ? null
         : normalizeActionDateTime(occurredAt);
-      const input: ProgressAftersalesCaseInput = kind === 'confirm_refund'
-        ? {
-          kind,
-          ...common,
-          actualRefundCents: amountCents as number,
-          occurredAt: normalizedOccurredAt as string,
-          note: reason,
-        }
-        : kind === 'register_return'
-          ? {
-            kind,
-            ...common,
-            shippingCarrier,
-            trackingNumber,
-            occurredAt: normalizedOccurredAt as string,
-            reason,
-          }
-          : kind === 'receive_return'
-            ? {
-              kind,
-              ...common,
-              returnRecordId: returnRecordId as string,
-              occurredAt: normalizedOccurredAt as string,
-              reason,
-            }
-            : kind === 'inspect_return'
-              ? {
-                kind,
-                ...common,
-                returnRecordId: returnRecordId as string,
-                result: inspectionResult,
-                occurredAt: normalizedOccurredAt as string,
-                note: reason,
-              }
-              : { kind, ...common, reason };
+      const targetId = returnRecord?.id as string;
+      let input: ProgressAftersalesCaseInput;
+      switch (kind) {
+        case 'register_return':
+          input = {
+            kind, ...common, shippingCarrier, trackingNumber,
+            ...(combineWithExisting ? { combineWithExisting: true } : {}),
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'receive_return':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            occurredAt: normalizedOccurredAt as string, reason,
+            items: (returnRecord?.items ?? []).map((item) => ({
+              returnRecordItemId: item.id,
+              receivedQuantity: receivedQuantities[item.id] ?? 0,
+            })),
+            discrepancies,
+          };
+          break;
+        case 'inspect_return':
+          input = {
+            kind, ...common, returnRecordId: targetId, result: inspectionResult,
+            occurredAt: normalizedOccurredAt as string, note: reason,
+            items: (returnRecord?.items ?? []).map((item) => ({
+              returnRecordItemId: item.id,
+              acceptedQuantity: acceptedQuantities[item.id] ?? 0,
+              result: inspectionResults[item.id] ?? inspectionResult,
+              note: reason,
+            })),
+            discrepancies,
+          };
+          break;
+        case 'correct_return_logistics':
+          input = {
+            kind, ...common, returnRecordId: targetId, shippingCarrier, trackingNumber,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'update_return_logistics_status':
+          input = {
+            kind, ...common, returnRecordId: targetId, logisticsStatus,
+            carrierAcceptanceConfirmed, carrierConfirmedLoss,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'open_carrier_claim':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            requestedAmountCents: amountCents as number,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'resolve_carrier_claim':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            expectedClaimRevision: returnRecord?.carrierClaim?.revision as number,
+            outcome: claimOutcome,
+            ...(claimOutcome === 'approved'
+              ? { approvedAmountCents: amountCents as number }
+              : {}),
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'confirm_carrier_compensation':
+          input = {
+            kind, ...common, returnRecordId: targetId,
+            expectedClaimRevision: returnRecord?.carrierClaim?.revision as number,
+            amountCents: amountCents as number,
+            occurredAt: normalizedOccurredAt as string, note: reason,
+          };
+          break;
+        case 'confirm_refund':
+          input = {
+            kind, ...common, actualRefundCents: amountCents as number,
+            occurredAt: normalizedOccurredAt as string, note: reason,
+          };
+          break;
+        case 'complete':
+        case 'cancel':
+          input = { kind, ...common, reason };
+          break;
+      }
       await onProgress(input);
       onClose();
     } catch (value) {
@@ -382,7 +478,7 @@ export function ProgressAftersalesCaseDialog({
             />
           </label>
         )}
-        {kind === 'register_return' && (
+        {(kind === 'register_return' || kind === 'correct_return_logistics') && (
           <>
             <label>
               <span>退货承运方</span>
@@ -406,19 +502,122 @@ export function ProgressAftersalesCaseDialog({
             </label>
           </>
         )}
-        {kind === 'confirm_refund' && (
+        {kind === 'register_return' && (
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={combineWithExisting}
+              disabled={saving}
+              onChange={(event) => setCombineWithExisting(event.target.checked)}
+            />
+            <span>确认同一运单属于合装退货，关联到已有退货包裹</span>
+          </label>
+        )}
+        {kind === 'update_return_logistics_status' && (
+          <>
+            <label>
+              <span>最新退货物流状态</span>
+              <select
+                aria-label="最新退货物流状态"
+                value={logisticsStatus}
+                disabled={saving}
+                onChange={(event) => setLogisticsStatus(event.target.value as AftersalesReturnLogisticsStatus)}
+              >
+                {RETURN_LOGISTICS_STATUS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={carrierAcceptanceConfirmed}
+                disabled={saving}
+                onChange={(event) => setCarrierAcceptanceConfirmed(event.target.checked)}
+              />
+              <span>已核对承运方揽收证据</span>
+            </label>
+            {logisticsStatus === 'lost' && (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={carrierConfirmedLoss}
+                  disabled={saving}
+                  onChange={(event) => setCarrierConfirmedLoss(event.target.checked)}
+                />
+                <span>承运方已经确认退货包裹遗失</span>
+              </label>
+            )}
+          </>
+        )}
+        {kind === 'resolve_carrier_claim' && (
           <label>
-            <span>实际退款金额（元）</span>
+            <span>承运索赔结果</span>
+            <select
+              aria-label="承运索赔结果"
+              value={claimOutcome}
+              disabled={saving}
+              onChange={(event) => setClaimOutcome(event.target.value as 'approved' | 'rejected')}
+            >
+              <option value="approved">同意赔付</option>
+              <option value="rejected">拒绝赔付</option>
+            </select>
+          </label>
+        )}
+        {(kind === 'confirm_refund' || kind === 'open_carrier_claim'
+          || kind === 'confirm_carrier_compensation'
+          || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved')) && (
+          <label>
+            <span>{progressAmountLabel(kind)}</span>
             <input
               type="number"
               min="0.01"
               step="0.01"
-              aria-label="实际退款金额"
+              aria-label={progressAmountAriaLabel(kind)}
               value={amountYuan}
               disabled={saving}
               onChange={(event) => setAmountYuan(event.target.value)}
             />
           </label>
+        )}
+        {(kind === 'receive_return' || kind === 'inspect_return') && returnRecord && (
+          <fieldset>
+            <legend>{kind === 'receive_return' ? '各商品实际收到数量' : '各商品检查通过数量'}</legend>
+            <div className="aftersales-case-dialog__items">
+              {returnRecord.items.map((item) => (
+                <label key={item.id}>
+                  <span>
+                    <strong>{item.sourceTitle}</strong>
+                    <small>{item.orderNumber}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</small>
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    aria-label={`${item.sourceTitle} ${kind === 'receive_return' ? '实际收到数量' : '检查通过数量'}`}
+                    value={kind === 'receive_return'
+                      ? receivedQuantities[item.id] ?? 0
+                      : acceptedQuantities[item.id] ?? 0}
+                    disabled={saving}
+                    onChange={(event) => {
+                      const quantity = Math.max(0, Number.parseInt(event.target.value, 10) || 0);
+                      if (kind === 'receive_return') {
+                        setReceivedQuantities({ ...receivedQuantities, [item.id]: quantity });
+                      } else {
+                        setAcceptedQuantities({
+                          ...acceptedQuantities,
+                          [item.id]: Math.min(item.receivedQuantity, quantity),
+                        });
+                      }
+                    }}
+                  />
+                  <small>{kind === 'receive_return'
+                    ? `计划退回 ${item.quantity}`
+                    : `实际收到 ${item.receivedQuantity}`}</small>
+                </label>
+              ))}
+            </div>
+          </fieldset>
         )}
         {kind === 'inspect_return' && (
           <label>
@@ -427,7 +626,13 @@ export function ProgressAftersalesCaseDialog({
               aria-label="退货检查结果"
               value={inspectionResult}
               disabled={saving}
-              onChange={(event) => setInspectionResult(event.target.value as ReturnInspectionResult)}
+              onChange={(event) => {
+                const result = event.target.value as ReturnInspectionResult;
+                setInspectionResult(result);
+                setInspectionResults(Object.fromEntries(
+                  (returnRecord?.items ?? []).map((item) => [item.id, result]),
+                ));
+              }}
             >
               <option value="resellable">可再次销售</option>
               <option value="defective">瑕疵品</option>
@@ -435,6 +640,130 @@ export function ProgressAftersalesCaseDialog({
               <option value="other">其他</option>
             </select>
           </label>
+        )}
+        {kind === 'inspect_return' && returnRecord && (
+          <fieldset>
+            <legend>各商品检查结果</legend>
+            <div className="aftersales-case-dialog__items">
+              {returnRecord.items.map((item) => (
+                <label key={item.id}>
+                  <span>
+                    <strong>{item.sourceTitle}</strong>
+                    <small>{item.sourceSpec || '无款式或规格'}</small>
+                  </span>
+                  <select
+                    aria-label={`${item.sourceTitle} 单项检查结果`}
+                    value={inspectionResults[item.id] ?? inspectionResult}
+                    disabled={saving}
+                    onChange={(event) => setInspectionResults({
+                      ...inspectionResults,
+                      [item.id]: event.target.value as ReturnInspectionResult,
+                    })}
+                  >
+                    <option value="resellable">可再次销售</option>
+                    <option value="defective">瑕疵品</option>
+                    <option value="scrapped">报废</option>
+                    <option value="other">其他</option>
+                  </select>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+        {(kind === 'receive_return' || kind === 'inspect_return') && (
+          <fieldset>
+            <legend>退货检查差异（可选）</legend>
+            <label>
+              <span>差异归属</span>
+              <select
+                aria-label="差异归属"
+                value={differenceReturnRecordItemId}
+                disabled={saving}
+                onChange={(event) => setDifferenceReturnRecordItemId(event.target.value)}
+              >
+                <option value="">整个退货包裹</option>
+                {(returnRecord?.items ?? []).map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>差异类型</span>
+              <select
+                aria-label="差异类型"
+                value={differenceKind}
+                disabled={saving}
+                onChange={(event) => setDifferenceKind(event.target.value as AftersalesReturnDiscrepancy['kind'])}
+              >
+                {RETURN_DISCREPANCY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>差异数量</span>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                aria-label="差异数量"
+                value={differenceQuantity}
+                disabled={saving}
+                onChange={(event) => setDifferenceQuantity(Math.max(0, Number.parseInt(event.target.value, 10) || 0))}
+              />
+            </label>
+            <label>
+              <span>差异说明</span>
+              <input
+                aria-label="差异说明"
+                value={differenceNote}
+                maxLength={500}
+                disabled={saving}
+                onChange={(event) => setDifferenceNote(event.target.value)}
+              />
+            </label>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={saving || !differenceNote.trim()}
+              onClick={() => {
+                setDiscrepancies([...discrepancies, {
+                  kind: differenceKind,
+                  quantity: differenceQuantity,
+                  note: differenceNote.trim(),
+                  ...(differenceReturnRecordItemId
+                    ? { returnRecordItemId: differenceReturnRecordItemId }
+                    : {}),
+                }]);
+                setDifferenceNote('');
+              }}
+            >
+              添加差异
+            </button>
+            {discrepancies.length > 0 && (
+              <ul aria-label="已登记退货差异">
+                {discrepancies.map((difference, index) => (
+                  <li key={`${difference.kind}-${index}`}>
+                    <span>
+                      {difference.returnRecordItemId
+                        ? `${returnRecord?.items.find(({ id }) => id === difference.returnRecordItemId)?.sourceTitle ?? '指定商品'} · `
+                        : '整个包裹 · '}
+                      {returnDiscrepancyOptionLabel(difference.kind)} {difference.quantity} 件 · {difference.note}
+                    </span>
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      onClick={() => setDiscrepancies(discrepancies.filter((_, itemIndex) => itemIndex !== index))}
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </fieldset>
         )}
         <ReasonField label={copy.reasonLabel} value={reason} saving={saving} onChange={setReason} />
         {error && <p className="shipment-group-adjustment-dialog__error" role="alert">{error}</p>}
@@ -649,6 +978,41 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     reasonLabel: '退款确认说明',
     confirmLabel: '确认退款',
   };
+  if (kind === 'correct_return_logistics') return {
+    title: '更正退货物流',
+    description: '当前信息更新为正确值，旧承运方、运单号和更正原因会保留在历史中；已有收到和检查事实不会被清空。',
+    timeLabel: '物流更正时间',
+    reasonLabel: '更正原因',
+    confirmLabel: '确认更正',
+  };
+  if (kind === 'update_return_logistics_status') return {
+    title: '更新退货物流状态',
+    description: '只记录已人工核对的真实物流事实，不会自动判断责任、退款或库存处置。',
+    timeLabel: '状态发生时间',
+    reasonLabel: '状态核对说明',
+    confirmLabel: '确认更新',
+  };
+  if (kind === 'open_carrier_claim') return {
+    title: '建立承运索赔',
+    description: '承运索赔与买家退款分别推进，申请金额不会自动生成退款。',
+    timeLabel: '索赔建立时间',
+    reasonLabel: '索赔原因',
+    confirmLabel: '确认建立',
+  };
+  if (kind === 'resolve_carrier_claim') return {
+    title: '登记承运索赔结果',
+    description: '保留同意或拒赔结果、金额和原因，不反向修改已发生的买家退款。',
+    timeLabel: '索赔结果时间',
+    reasonLabel: '索赔结果说明',
+    confirmLabel: '确认结果',
+  };
+  if (kind === 'confirm_carrier_compensation') return {
+    title: '确认实际赔付',
+    description: '实际到账金额作为独立资金事实保存，供后续财务模块读取。',
+    timeLabel: '实际赔付时间',
+    reasonLabel: '赔付确认说明',
+    confirmLabel: '确认赔付',
+  };
   if (kind === 'complete') return {
     title: '完成售后',
     description: '退款和必要的退货事实已齐全，完成后历史仍保持可查。',
@@ -663,6 +1027,51 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     reasonLabel: '取消原因',
     confirmLabel: '确认取消',
   };
+}
+
+const RETURN_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
+  value: AftersalesReturnLogisticsStatus;
+  label: string;
+}> = [
+  { value: 'awaiting_carrier', label: '待承运方接收' },
+  { value: 'in_transit', label: '运输中' },
+  { value: 'delivered', label: '已签收' },
+  { value: 'intercepting', label: '拦截处理中' },
+  { value: 'returned_to_buyer', label: '已退回买家' },
+  { value: 'lost', label: '丢件' },
+  { value: 'delivery_dispute', label: '签收争议' },
+  { value: 'damaged', label: '运输破损' },
+  { value: 'misdelivered', label: '错投' },
+  { value: 'exception', label: '其他物流异常' },
+];
+
+const RETURN_DISCREPANCY_OPTIONS: ReadonlyArray<{
+  value: AftersalesReturnDiscrepancy['kind'];
+  label: string;
+}> = [
+  { value: 'missing', label: '少件' },
+  { value: 'empty_package', label: '空包' },
+  { value: 'wrong_item', label: '错货' },
+  { value: 'excess', label: '多退' },
+  { value: 'mixed', label: '混装' },
+  { value: 'damaged', label: '损坏' },
+  { value: 'missing_accessory', label: '配件缺失' },
+  { value: 'unidentified', label: '无法识别' },
+];
+
+function returnDiscrepancyOptionLabel(kind: AftersalesReturnDiscrepancy['kind']): string {
+  return RETURN_DISCREPANCY_OPTIONS.find((option) => option.value === kind)?.label ?? kind;
+}
+
+function progressAmountLabel(kind: ProgressAftersalesCaseInput['kind']): string {
+  if (kind === 'confirm_refund') return '实际退款金额（元）';
+  if (kind === 'open_carrier_claim') return '申请索赔金额（元）';
+  if (kind === 'confirm_carrier_compensation') return '实际赔付金额（元）';
+  return '承运方同意赔付金额（元）';
+}
+
+function progressAmountAriaLabel(kind: ProgressAftersalesCaseInput['kind']): string {
+  return progressAmountLabel(kind).replace('（元）', '');
 }
 
 function errorMessage(error: unknown): string {

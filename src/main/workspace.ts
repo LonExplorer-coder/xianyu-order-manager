@@ -180,6 +180,7 @@ function migrate(database: DatabaseSync): void {
   if (row.version < 26) migrateToVersion26(database);
   if (row.version < 27) migrateToVersion27(database);
   if (row.version < 28) migrateToVersion28(database);
+  if (row.version < 29) migrateToVersion29(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -3078,6 +3079,261 @@ function migrateToVersion28(database: DatabaseSync): void {
     assertForeignKeyIntegrity(database);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (28, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK;');
+    } catch {
+      // Preserve migration failure.
+    }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion29(database: DatabaseSync): void {
+  const recordColumns = storedTableColumnNames(database, 'aftersales_return_records');
+  const itemColumns = storedTableColumnNames(database, 'aftersales_return_record_items');
+  const eventColumns = storedTableColumnNames(database, 'aftersales_return_record_events');
+  const carrierClaimTable = database.prepare(`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'carrier_claims'
+  `).get();
+  if (
+    recordColumns.includes('logistics_status')
+    && itemColumns.includes('aftersales_case_id')
+    && eventColumns.includes('payload_json')
+    && carrierClaimTable
+  ) {
+    database
+      .prepare('INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (29, ?)')
+      .run(new Date().toISOString());
+    return;
+  }
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE aftersales_return_records ADD COLUMN logistics_status TEXT NOT NULL
+        DEFAULT 'in_transit' CHECK (logistics_status IN (
+          'awaiting_carrier', 'in_transit', 'delivered', 'intercepting',
+          'returned_to_buyer', 'lost', 'delivery_dispute', 'damaged',
+          'misdelivered', 'exception'
+        ));
+      ALTER TABLE aftersales_return_records ADD COLUMN carrier_accepted_at TEXT;
+      ALTER TABLE aftersales_return_records ADD COLUMN discrepancies_json TEXT NOT NULL
+        DEFAULT '[]' CHECK (json_valid(discrepancies_json));
+
+      UPDATE aftersales_return_records
+      SET logistics_status = CASE
+            WHEN status IN ('received', 'inspected') THEN 'delivered'
+            ELSE 'in_transit'
+          END,
+          carrier_accepted_at = CASE
+            WHEN status IN ('received', 'inspected') THEN received_at
+            ELSE NULL
+          END;
+
+      DROP TRIGGER IF EXISTS aftersales_return_record_items_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS aftersales_return_record_items_are_immutable_on_delete;
+
+      CREATE TABLE aftersales_return_record_items_v29 (
+        id TEXT PRIMARY KEY,
+        return_record_id TEXT NOT NULL
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        aftersales_case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        shipment_package_item_id TEXT NOT NULL
+          REFERENCES shipment_package_items(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        received_quantity INTEGER NOT NULL CHECK (received_quantity >= 0),
+        accepted_quantity INTEGER NOT NULL CHECK (
+          accepted_quantity >= 0 AND accepted_quantity <= received_quantity
+        ),
+        inspection_result TEXT CHECK (
+          inspection_result IS NULL
+          OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+        ),
+        inspection_note TEXT,
+        UNIQUE (return_record_id, aftersales_case_id, shipment_package_item_id),
+        CHECK (
+          (inspection_result IS NULL AND inspection_note IS NULL AND accepted_quantity = 0)
+          OR (
+            inspection_result IS NOT NULL AND inspection_note IS NOT NULL
+            AND length(trim(inspection_note)) BETWEEN 1 AND 500
+          )
+        )
+      ) STRICT;
+
+      INSERT INTO aftersales_return_record_items_v29 (
+        id, return_record_id, aftersales_case_id, shipment_package_item_id,
+        quantity, received_quantity, accepted_quantity,
+        inspection_result, inspection_note
+      )
+      SELECT
+        items.id,
+        items.return_record_id,
+        records.aftersales_case_id,
+        items.shipment_package_item_id,
+        items.quantity,
+        CASE WHEN records.status IN ('received', 'inspected') THEN items.quantity ELSE 0 END,
+        CASE WHEN records.status = 'inspected' THEN items.quantity ELSE 0 END,
+        CASE WHEN records.status = 'inspected' THEN records.inspection_result ELSE NULL END,
+        CASE WHEN records.status = 'inspected' THEN records.inspection_note ELSE NULL END
+      FROM aftersales_return_record_items AS items
+      JOIN aftersales_return_records AS records ON records.id = items.return_record_id;
+
+      DROP TABLE aftersales_return_record_items;
+      ALTER TABLE aftersales_return_record_items_v29
+        RENAME TO aftersales_return_record_items;
+
+      CREATE INDEX aftersales_return_items_by_case
+      ON aftersales_return_record_items (aftersales_case_id, return_record_id, id);
+
+      CREATE TRIGGER aftersales_return_record_item_identity_is_immutable
+      BEFORE UPDATE OF return_record_id, aftersales_case_id, shipment_package_item_id, quantity
+      ON aftersales_return_record_items
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record item identity is immutable');
+      END;
+
+      CREATE TRIGGER aftersales_return_record_items_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_return_record_items
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record items are immutable');
+      END;
+
+      DROP TRIGGER IF EXISTS aftersales_return_record_events_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS aftersales_return_record_events_are_immutable_on_delete;
+
+      CREATE TABLE aftersales_return_record_events_v29 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        return_record_id TEXT NOT NULL
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN (
+          'registered', 'items_combined', 'logistics_corrected',
+          'logistics_status_updated', 'received', 'inspected'
+        )),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        inspection_result TEXT CHECK (
+          inspection_result IS NULL
+          OR inspection_result IN ('resellable', 'defective', 'scrapped', 'other')
+        ),
+        payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (return_record_id, result_revision),
+        CHECK (
+          (kind = 'registered' AND base_revision = 0 AND inspection_result IS NULL)
+          OR (kind <> 'registered' AND base_revision >= 1)
+        )
+      ) STRICT;
+
+      INSERT INTO aftersales_return_record_events_v29 (
+        sequence, id, return_record_id, kind, base_revision, result_revision,
+        occurred_at, reason, inspection_result, payload_json, created_at
+      )
+      SELECT
+        sequence, id, return_record_id, kind, base_revision, result_revision,
+        occurred_at, reason, inspection_result, '{}', created_at
+      FROM aftersales_return_record_events;
+
+      DROP TABLE aftersales_return_record_events;
+      ALTER TABLE aftersales_return_record_events_v29
+        RENAME TO aftersales_return_record_events;
+
+      CREATE TRIGGER aftersales_return_record_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_return_record_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_return_record_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_return_record_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales return record events are immutable');
+      END;
+
+      CREATE TABLE carrier_claims (
+        id TEXT PRIMARY KEY,
+        return_record_id TEXT NOT NULL UNIQUE
+          REFERENCES aftersales_return_records(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'paid')),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        approved_amount_cents INTEGER CHECK (approved_amount_cents > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (status = 'pending' AND approved_amount_cents IS NULL)
+          OR (status = 'rejected' AND approved_amount_cents IS NULL)
+          OR (status IN ('approved', 'paid') AND approved_amount_cents IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE TABLE carrier_claim_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        claim_id TEXT NOT NULL REFERENCES carrier_claims(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN (
+          'opened', 'approved', 'rejected', 'compensation_confirmed'
+        )),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        amount_cents INTEGER CHECK (amount_cents > 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (claim_id, result_revision),
+        CHECK (
+          (kind = 'opened' AND base_revision = 0 AND amount_cents IS NOT NULL)
+          OR (kind = 'approved' AND base_revision >= 1 AND amount_cents IS NOT NULL)
+          OR (kind = 'rejected' AND base_revision >= 1 AND amount_cents IS NULL)
+          OR (kind = 'compensation_confirmed' AND base_revision >= 1 AND amount_cents IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE TABLE carrier_compensation_records (
+        id TEXT PRIMARY KEY,
+        claim_id TEXT NOT NULL UNIQUE REFERENCES carrier_claims(id) ON DELETE RESTRICT,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        occurred_at TEXT NOT NULL,
+        note TEXT NOT NULL CHECK (length(trim(note)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TRIGGER carrier_claim_events_are_immutable_on_update
+      BEFORE UPDATE ON carrier_claim_events
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier claim events are immutable');
+      END;
+
+      CREATE TRIGGER carrier_claim_events_are_immutable_on_delete
+      BEFORE DELETE ON carrier_claim_events
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier claim events are immutable');
+      END;
+
+      CREATE TRIGGER carrier_compensation_records_are_immutable_on_update
+      BEFORE UPDATE ON carrier_compensation_records
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier compensation records are immutable');
+      END;
+
+      CREATE TRIGGER carrier_compensation_records_are_immutable_on_delete
+      BEFORE DELETE ON carrier_compensation_records
+      BEGIN
+        SELECT RAISE(ABORT, 'carrier compensation records are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (29, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

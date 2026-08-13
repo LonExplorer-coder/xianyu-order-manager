@@ -1698,6 +1698,8 @@ describe('订单管理工作台', () => {
       id: 'return-ui-progress',
       status: 'in_transit',
       revision: 1,
+      logisticsStatus: 'awaiting_carrier',
+      carrierAcceptedAt: null,
       shippingCarrier: '圆通速递',
       trackingNumber: 'YT-UI-RETURN-001',
       occurredAt: '2026-08-13T17:10:00+08:00',
@@ -1705,6 +1707,7 @@ describe('订单管理工作台', () => {
       inspection: null,
       items: [{
         id: 'return-item-ui-progress',
+        aftersalesCaseId: pending.id,
         shipmentPackageItemId: sourceItem.id,
         quantity: 1,
         orderId: sourceItem.orderId,
@@ -1712,7 +1715,13 @@ describe('订单管理工作台', () => {
         orderNumber: sourceItem.orderNumber,
         sourceTitle: sourceItem.sourceTitle,
         sourceSpec: sourceItem.sourceSpec,
+        receivedQuantity: 0,
+        acceptedQuantity: 0,
+        inspectionResult: null,
+        inspectionNote: null,
       }],
+      discrepancies: [],
+      carrierClaim: null,
       timeline: [{
         kind: 'registered',
         resultRevision: 1,
@@ -1736,7 +1745,10 @@ describe('订单管理工作台', () => {
         ...returnRecord,
         status: 'received',
         revision: 2,
+        logisticsStatus: 'delivered',
         receivedAt: '2026-08-13T17:20:00+08:00',
+        discrepancies: [{ kind: 'missing', quantity: 1, note: '包裹内少一件' }],
+        items: returnRecord.items.map((item) => ({ ...item, receivedQuantity: 1 })),
         timeline: [...returnRecord.timeline, {
           kind: 'received',
           baseRevision: 1,
@@ -1760,6 +1772,12 @@ describe('订单管理工作台', () => {
           occurredAt: '2026-08-13T17:30:00+08:00',
           note: '检查确认破损，进入瑕疵品待处理',
         },
+        items: received.returns[0].items.map((item) => ({
+          ...item,
+          acceptedQuantity: 1,
+          inspectionResult: 'defective',
+          inspectionNote: '检查确认破损，进入瑕疵品待处理',
+        })),
         timeline: [...received.returns[0].timeline, {
           kind: 'inspected',
           baseRevision: 2,
@@ -1795,14 +1813,109 @@ describe('订单管理工作台', () => {
         ...cancelledReturnRecord,
         status: 'received',
         revision: 2,
+        logisticsStatus: 'delivered',
         receivedAt: '2026-08-13T17:40:00+08:00',
+        items: cancelledReturnRecord.items.map((item) => ({ ...item, receivedQuantity: 1 })),
       }],
+    };
+    const claimPending: AftersalesCase = {
+      ...registered,
+      id: 'aftersales-ui-carrier-claim',
+      status: 'completed',
+      revision: 5,
+      returns: [{
+        ...returnRecord,
+        id: 'return-ui-carrier-claim',
+        logisticsStatus: 'lost',
+        carrierAcceptedAt: '2026-08-13T17:15:00+08:00',
+        carrierClaim: {
+          id: 'carrier-claim-ui',
+          status: 'pending',
+          revision: 1,
+          requestedAmountCents: 1_000,
+          approvedAmountCents: null,
+          reason: '承运方确认丢件，申请赔付',
+          actualCompensation: null,
+          timeline: [{
+            kind: 'opened',
+            resultRevision: 1,
+            requestedAmountCents: 1_000,
+            reason: '承运方确认丢件，申请赔付',
+            occurredAt: '2026-08-13T18:00:00+08:00',
+            createdAt: '2026-08-13T10:00:00.000Z',
+          }],
+          createdAt: '2026-08-13T10:00:00.000Z',
+          updatedAt: '2026-08-13T10:00:00.000Z',
+        },
+      }],
+    };
+    const claimApproved: AftersalesCase = {
+      ...claimPending,
+      returns: [{
+        ...claimPending.returns[0],
+        carrierClaim: {
+          ...claimPending.returns[0].carrierClaim!,
+          status: 'approved',
+          revision: 2,
+          approvedAmountCents: 8_00,
+        },
+      }],
+    };
+    const claimRefundPending: AftersalesCase = {
+      ...registered,
+      id: 'aftersales-ui-claim-refund-pending',
+      status: 'waiting_return',
+      revision: 4,
+      returns: [{
+        ...returnRecord,
+        id: 'return-ui-claim-refund-pending',
+        logisticsStatus: 'exception',
+        carrierAcceptedAt: '2026-08-13T17:15:00+08:00',
+        carrierClaim: {
+          id: 'carrier-claim-ui-refund-pending',
+          status: 'pending',
+          revision: 1,
+          requestedAmountCents: 1_000,
+          approvedAmountCents: null,
+          reason: '物流异常后已建立承运索赔',
+          actualCompensation: null,
+          createdAt: '2026-08-13T10:00:00.000Z',
+          updatedAt: '2026-08-13T10:00:00.000Z',
+          timeline: [{
+            kind: 'opened',
+            resultRevision: 1,
+            requestedAmountCents: 1_000,
+            reason: '物流异常后已建立承运索赔',
+            occurredAt: '2026-08-13T18:00:00+08:00',
+            createdAt: '2026-08-13T10:00:00.000Z',
+          }],
+        },
+      }],
+    };
+    const claimRefunded: AftersalesCase = {
+      ...claimRefundPending,
+      status: 'ready_to_complete',
+      revision: 5,
+      refund: {
+        ...claimRefundPending.refund!,
+        status: 'confirmed',
+        actualRecord: {
+          id: 'refund-ui-claim-pending',
+          kind: 'aftersales_refund',
+          amountCents: 1_000,
+          occurredAt: '2026-08-13T18:10:00+08:00',
+          note: '索赔未结束时先完成买家退款',
+          createdAt: '2026-08-13T10:10:00.000Z',
+        },
+      },
     };
     const progressAftersalesCase = vi.fn()
       .mockResolvedValueOnce(registered)
       .mockResolvedValueOnce(received)
       .mockResolvedValueOnce(inspected)
-      .mockResolvedValueOnce(cancelledReceived);
+      .mockResolvedValueOnce(cancelledReceived)
+      .mockResolvedValueOnce(claimApproved)
+      .mockResolvedValueOnce(claimRefunded);
     const api = createApi({
       getBootstrapState: vi.fn().mockResolvedValue({
         kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
@@ -1811,7 +1924,9 @@ describe('订单管理工作台', () => {
       queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
       queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
       queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
-      queryAftersalesCases: vi.fn().mockResolvedValue([pending, cancelledInTransit]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([
+        pending, cancelledInTransit, claimPending, claimRefundPending,
+      ]),
       progressAftersalesCase,
     });
 
@@ -1842,6 +1957,34 @@ describe('订单管理工作台', () => {
     }));
 
     expect(caseRegion).toHaveTextContent('圆通速递 · YT-UI-RETURN-001');
+    expect(within(caseRegion).getByRole('button', { name: '更正退货物流' })).toBeEnabled();
+    await user.click(within(caseRegion).getByRole('button', { name: '更正退货物流' }));
+    const correctionDialog = screen.getByRole('dialog', { name: '更正退货物流' });
+    expect(within(correctionDialog).getByRole('textbox', { name: '退货承运方' }))
+      .toHaveValue('圆通速递');
+    expect(within(correctionDialog).getByRole('textbox', { name: '退货运单号' }))
+      .toHaveValue('YT-UI-RETURN-001');
+    await user.click(within(correctionDialog).getByRole('button', { name: '返回' }));
+    await user.click(within(caseRegion).getByRole('button', { name: '更新退货物流状态' }));
+    const logisticsDialog = screen.getByRole('dialog', { name: '更新退货物流状态' });
+    expect(within(logisticsDialog).getAllByRole('option').map((option) => option.textContent))
+      .toEqual([
+        '待承运方接收', '运输中', '已签收', '拦截处理中', '已退回买家',
+        '丢件', '签收争议', '运输破损', '错投', '其他物流异常',
+      ]);
+    await user.selectOptions(
+      within(logisticsDialog).getByRole('combobox', { name: '最新退货物流状态' }),
+      'lost',
+    );
+    expect(within(logisticsDialog).getByRole('checkbox', { name: '承运方已经确认退货包裹遗失' }))
+      .toBeEnabled();
+    await user.selectOptions(
+      within(logisticsDialog).getByRole('combobox', { name: '最新退货物流状态' }),
+      'awaiting_carrier',
+    );
+    await user.click(within(logisticsDialog).getByRole('checkbox', { name: '已核对承运方揽收证据' }));
+    expect(within(logisticsDialog).getByRole('button', { name: '确认更新' })).toBeDisabled();
+    await user.click(within(logisticsDialog).getByRole('button', { name: '返回' }));
     expect(within(caseRegion).getByRole('button', { name: '取消售后' })).toBeEnabled();
     await user.click(within(caseRegion).getByRole('button', { name: '确认收到退货' }));
     const receiveDialog = screen.getByRole('dialog', { name: '确认收到退货' });
@@ -1849,7 +1992,19 @@ describe('订单管理工作台', () => {
       target: { value: '2026-08-13T17:20:00' },
     });
     await user.type(within(receiveDialog).getByRole('textbox', { name: '退货收到说明' }), '仓库实际收到');
+    await user.type(within(receiveDialog).getByRole('textbox', { name: '差异说明' }), '包裹内少一件');
+    await user.click(within(receiveDialog).getByRole('button', { name: '添加差异' }));
     await user.click(within(receiveDialog).getByRole('button', { name: '确认收到' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(2, {
+      kind: 'receive_return',
+      caseId: pending.id,
+      expectedRevision: 2,
+      returnRecordId: returnRecord.id,
+      occurredAt: '2026-08-13T17:20:00+08:00',
+      reason: '仓库实际收到',
+      items: [{ returnRecordItemId: returnRecord.items[0].id, receivedQuantity: 1 }],
+      discrepancies: [{ kind: 'missing', quantity: 1, note: '包裹内少一件' }],
+    }));
 
     await user.click(within(caseRegion).getByRole('button', { name: '记录退货检查' }));
     const inspectDialog = screen.getByRole('dialog', { name: '记录退货检查' });
@@ -1873,6 +2028,13 @@ describe('订单管理工作台', () => {
       result: 'defective',
       occurredAt: '2026-08-13T17:30:00+08:00',
       note: '检查确认破损，进入瑕疵品待处理',
+      items: [{
+        returnRecordItemId: returnRecord.items[0].id,
+        acceptedQuantity: 1,
+        result: 'defective',
+        note: '检查确认破损，进入瑕疵品待处理',
+      }],
+      discrepancies: [{ kind: 'missing', quantity: 1, note: '包裹内少一件' }],
     }));
     expect(caseRegion).toHaveTextContent('检查结果：瑕疵品');
     expect(caseRegion).toHaveTextContent('检查确认破损，进入瑕疵品待处理');
@@ -1899,10 +2061,69 @@ describe('订单管理工作台', () => {
       returnRecordId: cancelledReturnRecord.id,
       occurredAt: '2026-08-13T17:40:00+08:00',
       reason: '退款取消后退货仍到达',
+      items: [{
+        returnRecordItemId: cancelledReturnRecord.items[0].id,
+        receivedQuantity: 1,
+      }],
+      discrepancies: [],
     }));
     expect(cancelledRegion).toHaveTextContent('已取消');
     expect(within(cancelledRegion).getByRole('button', { name: '记录退货检查' })).toBeEnabled();
     expect(history).toHaveTextContent('当前待办：检查退回商品');
+
+    const claimRegion = screen.getByRole('region', {
+      name: `售后处理单 ${claimPending.id}`,
+    });
+    expect(claimRegion).toHaveTextContent('承运索赔 处理中');
+    await user.click(within(claimRegion).getByRole('button', { name: '登记索赔结果' }));
+    const claimDialog = screen.getByRole('dialog', { name: '登记承运索赔结果' });
+    fireEvent.change(within(claimDialog).getByLabelText('索赔结果时间'), {
+      target: { value: '2026-08-14T10:00:00' },
+    });
+    fireEvent.change(within(claimDialog).getByRole('spinbutton', { name: '承运方同意赔付金额' }), {
+      target: { value: '8' },
+    });
+    await user.type(within(claimDialog).getByRole('textbox', { name: '索赔结果说明' }), '承运方同意赔付八元');
+    await user.click(within(claimDialog).getByRole('button', { name: '确认结果' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(5, {
+      kind: 'resolve_carrier_claim',
+      caseId: claimPending.id,
+      expectedRevision: claimPending.revision,
+      returnRecordId: claimPending.returns[0].id,
+      expectedClaimRevision: 1,
+      outcome: 'approved',
+      approvedAmountCents: 800,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '承运方同意赔付八元',
+    }));
+
+    const claimRefundRegion = screen.getByRole('region', {
+      name: `售后处理单 ${claimRefundPending.id}`,
+    });
+    expect(within(claimRefundRegion).getByRole('button', { name: '确认收到退货' })).toBeEnabled();
+    await user.click(within(claimRefundRegion).getByRole('button', { name: '确认实际退款' }));
+    const claimRefundDialog = screen.getByRole('dialog', { name: '确认实际退款' });
+    fireEvent.change(within(claimRefundDialog).getByLabelText('实际退款时间'), {
+      target: { value: '2026-08-13T18:10:00' },
+    });
+    fireEvent.change(within(claimRefundDialog).getByRole('spinbutton', { name: '实际退款金额' }), {
+      target: { value: '10' },
+    });
+    await user.type(
+      within(claimRefundDialog).getByRole('textbox', { name: '退款确认说明' }),
+      '索赔未结束时先完成买家退款',
+    );
+    await user.click(within(claimRefundDialog).getByRole('button', { name: '确认退款' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenNthCalledWith(6, {
+      kind: 'confirm_refund',
+      caseId: claimRefundPending.id,
+      expectedRevision: claimRefundPending.revision,
+      actualRefundCents: 1_000,
+      occurredAt: '2026-08-13T18:10:00+08:00',
+      note: '索赔未结束时先完成买家退款',
+    }));
+    expect(within(claimRefundRegion).getByRole('button', { name: '确认收到退货' })).toBeEnabled();
+    expect(within(claimRefundRegion).getByRole('button', { name: '完成售后' })).toBeEnabled();
   });
 
   it('更新售后状态时保留商品数量并要求填写本次变更原因', async () => {
@@ -3670,6 +3891,23 @@ describe('订单管理工作台', () => {
             sourceSpec: confirmedOrder.items[0].sourceSpec,
             quantity: 1,
           }],
+          returnPackages: [{
+            id: 'return-package-order-detail',
+            status: 'inspected',
+            shippingCarrier: '圆通速递',
+            trackingNumber: 'YT-CORRECTED-ORDER-DETAIL',
+            logisticsStatus: 'delivery_dispute',
+            discrepancies: [{ kind: 'missing', quantity: 1, note: '签收后清点少一件' }],
+            carrierClaimStatus: 'pending',
+            items: [{
+              shipmentPackageItemId: shipmentPackage.items[0].id,
+              sourceTitle: confirmedOrder.items[0].sourceTitle,
+              sourceSpec: confirmedOrder.items[0].sourceSpec,
+              plannedQuantity: 2,
+              receivedQuantity: 1,
+              acceptedQuantity: 0,
+            }],
+          }],
         }],
         currentTodo: '等待买家退回',
       },
@@ -3705,6 +3943,14 @@ describe('订单管理工作台', () => {
     expect(aftersalesSection).toHaveTextContent('等待退回');
     expect(aftersalesSection).toHaveTextContent('商品表面破损，需要退回检查');
     expect(aftersalesSection).toHaveTextContent(/当前待办\s*等待买家退回/u);
+    expect(aftersalesSection).toHaveTextContent('圆通速递 · YT-CORRECTED-ORDER-DETAIL');
+    expect(aftersalesSection).toHaveTextContent('签收争议');
+    expect(aftersalesSection).toHaveTextContent('计划 2 · 收到 1 · 通过 0');
+    expect(aftersalesSection).toHaveTextContent('退货差异：少件 1 件 · 签收后清点少一件');
+    expect(aftersalesSection).toHaveTextContent(
+      '数量差异：脱敏测试商品 · 白色：计划与收到相差 1 件；脱敏测试商品 · 白色：收到与检查通过相差 1 件',
+    );
+    expect(aftersalesSection).toHaveTextContent('承运索赔：处理中');
     expect(within(shipmentSection).getByRole('button', { name: '定位发货记录' })).toBeVisible();
 
     await user.click(within(aftersalesSection).getByRole('button', { name: '定位售后处理单' }));

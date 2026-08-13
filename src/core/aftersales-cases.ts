@@ -15,6 +15,49 @@ export type PendingFinancialItemStatus = 'pending' | 'confirmed' | 'cancelled';
 
 export type AftersalesReturnStatus = 'in_transit' | 'received' | 'inspected';
 
+export type AftersalesReturnLogisticsStatus =
+  | 'awaiting_carrier'
+  | 'in_transit'
+  | 'delivered'
+  | 'intercepting'
+  | 'returned_to_buyer'
+  | 'lost'
+  | 'delivery_dispute'
+  | 'damaged'
+  | 'misdelivered'
+  | 'exception';
+
+export type AftersalesReturnDiscrepancyKind =
+  | 'missing'
+  | 'empty_package'
+  | 'wrong_item'
+  | 'excess'
+  | 'mixed'
+  | 'damaged'
+  | 'missing_accessory'
+  | 'unidentified';
+
+export type AftersalesReturnDiscrepancy = {
+  kind: AftersalesReturnDiscrepancyKind;
+  quantity: number;
+  note: string;
+  returnRecordItemId?: string;
+};
+
+export type AftersalesReturnReceivedItem = {
+  returnRecordItemId: string;
+  receivedQuantity: number;
+};
+
+export type AftersalesReturnInspectedItem = {
+  returnRecordItemId: string;
+  acceptedQuantity: number;
+  result: ReturnInspectionResult;
+  note: string;
+};
+
+export type CarrierClaimStatus = 'pending' | 'approved' | 'rejected' | 'paid';
+
 export type ReturnInspectionResult = 'resellable' | 'defective' | 'scrapped' | 'other';
 
 export type AftersalesRefund = {
@@ -36,11 +79,16 @@ export type AftersalesRefundFinancialRecord = {
 
 export type AftersalesReturnItem = AftersalesCaseItemInput & {
   id: string;
+  aftersalesCaseId: string;
   orderId: string;
   orderItemId: string;
   orderNumber: string;
   sourceTitle: string;
   sourceSpec: string;
+  receivedQuantity: number;
+  acceptedQuantity: number;
+  inspectionResult: ReturnInspectionResult | null;
+  inspectionNote: string | null;
 };
 
 export type AftersalesReturnEvent =
@@ -57,6 +105,8 @@ export type AftersalesReturnEvent =
     resultRevision: number;
     occurredAt: string;
     reason: string;
+    items?: AftersalesReturnReceivedItem[];
+    discrepancies?: AftersalesReturnDiscrepancy[];
     createdAt: string;
   }
   | {
@@ -66,13 +116,99 @@ export type AftersalesReturnEvent =
     occurredAt: string;
     result: ReturnInspectionResult;
     note: string;
+    items?: AftersalesReturnInspectedItem[];
+    discrepancies?: AftersalesReturnDiscrepancy[];
+    createdAt: string;
+  }
+  | {
+    kind: 'items_combined';
+    baseRevision: number;
+    resultRevision: number;
+    occurredAt: string;
+    reason: string;
+    items: AftersalesCaseItemInput[];
+    createdAt: string;
+  }
+  | {
+    kind: 'logistics_corrected';
+    baseRevision: number;
+    resultRevision: number;
+    occurredAt: string;
+    reason: string;
+    before: {
+      shippingCarrier: string;
+      trackingNumber: string;
+    };
+    after: {
+      shippingCarrier: string;
+      trackingNumber: string;
+    };
+    createdAt: string;
+  }
+  | {
+    kind: 'logistics_status_updated';
+    baseRevision: number;
+    resultRevision: number;
+    occurredAt: string;
+    reason: string;
+    before: AftersalesReturnLogisticsStatus;
+    after: AftersalesReturnLogisticsStatus;
     createdAt: string;
   };
+
+export type CarrierClaimEvent =
+  | {
+    kind: 'opened';
+    resultRevision: 1;
+    requestedAmountCents: number;
+    reason: string;
+    occurredAt: string;
+    createdAt: string;
+  }
+  | {
+    kind: 'approved' | 'rejected';
+    baseRevision: number;
+    resultRevision: number;
+    approvedAmountCents: number | null;
+    reason: string;
+    occurredAt: string;
+    createdAt: string;
+  }
+  | {
+    kind: 'compensation_confirmed';
+    baseRevision: number;
+    resultRevision: number;
+    amountCents: number;
+    note: string;
+    occurredAt: string;
+    createdAt: string;
+  };
+
+export type CarrierClaim = {
+  id: string;
+  status: CarrierClaimStatus;
+  revision: number;
+  requestedAmountCents: number;
+  approvedAmountCents: number | null;
+  reason: string;
+  actualCompensation: {
+    id: string;
+    amountCents: number;
+    occurredAt: string;
+    note: string;
+    createdAt: string;
+  } | null;
+  timeline: CarrierClaimEvent[];
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type AftersalesReturnRecord = {
   id: string;
   status: AftersalesReturnStatus;
   revision: number;
+  logisticsStatus: AftersalesReturnLogisticsStatus;
+  carrierAcceptedAt: string | null;
   shippingCarrier: string;
   trackingNumber: string;
   occurredAt: string;
@@ -83,6 +219,8 @@ export type AftersalesReturnRecord = {
     note: string;
   } | null;
   items: AftersalesReturnItem[];
+  discrepancies: AftersalesReturnDiscrepancy[];
+  carrierClaim: CarrierClaim | null;
   timeline: AftersalesReturnEvent[];
   createdAt: string;
   updatedAt: string;
@@ -97,6 +235,7 @@ export type ProgressAftersalesCaseInput =
     trackingNumber: string;
     occurredAt: string;
     reason: string;
+    combineWithExisting?: boolean;
   }
   | {
     kind: 'receive_return';
@@ -105,6 +244,8 @@ export type ProgressAftersalesCaseInput =
     returnRecordId: string;
     occurredAt: string;
     reason: string;
+    items?: AftersalesReturnReceivedItem[];
+    discrepancies?: AftersalesReturnDiscrepancy[];
   }
   | {
     kind: 'inspect_return';
@@ -112,6 +253,59 @@ export type ProgressAftersalesCaseInput =
     expectedRevision: number;
     returnRecordId: string;
     result: ReturnInspectionResult;
+    occurredAt: string;
+    note: string;
+    items?: AftersalesReturnInspectedItem[];
+    discrepancies?: AftersalesReturnDiscrepancy[];
+  }
+  | {
+    kind: 'correct_return_logistics';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    shippingCarrier: string;
+    trackingNumber: string;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'update_return_logistics_status';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    logisticsStatus: AftersalesReturnLogisticsStatus;
+    carrierAcceptanceConfirmed?: boolean;
+    carrierConfirmedLoss?: boolean;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'open_carrier_claim';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    requestedAmountCents: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'resolve_carrier_claim';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    expectedClaimRevision: number;
+    outcome: 'approved' | 'rejected';
+    approvedAmountCents?: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'confirm_carrier_compensation';
+    caseId: string;
+    expectedRevision: number;
+    returnRecordId: string;
+    expectedClaimRevision: number;
+    amountCents: number;
     occurredAt: string;
     note: string;
   }
@@ -339,7 +533,7 @@ export function normalizeProgressAftersalesCaseInput(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'shippingCarrier',
-        'trackingNumber', 'occurredAt', 'reason',
+        'trackingNumber', 'occurredAt', 'reason', 'combineWithExisting',
       ],
       '登记退货物流参数',
     );
@@ -350,12 +544,18 @@ export function normalizeProgressAftersalesCaseInput(
       trackingNumber: boundedText(record.trackingNumber, 200, '退货运单号无效'),
       occurredAt: dateTime(record.occurredAt, '退货寄出时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货登记说明'),
+      ...(record.combineWithExisting === undefined
+        ? {}
+        : { combineWithExisting: booleanValue(record.combineWithExisting, '合装退货确认无效') }),
     };
   }
   if (record.kind === 'receive_return') {
     rejectUnknownKeys(
       record,
-      ['kind', 'caseId', 'expectedRevision', 'returnRecordId', 'occurredAt', 'reason'],
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId', 'occurredAt',
+        'reason', 'items', 'discrepancies',
+      ],
       '确认收到退货参数',
     );
     return {
@@ -364,6 +564,10 @@ export function normalizeProgressAftersalesCaseInput(
       returnRecordId: boundedText(record.returnRecordId, 200, '退货记录标识无效'),
       occurredAt: dateTime(record.occurredAt, '退货收到时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货收到说明'),
+      ...(record.items === undefined ? {} : { items: receivedItems(record.items) }),
+      ...(record.discrepancies === undefined
+        ? {}
+        : { discrepancies: returnDiscrepancies(record.discrepancies) }),
     };
   }
   if (record.kind === 'inspect_return') {
@@ -371,7 +575,7 @@ export function normalizeProgressAftersalesCaseInput(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'returnRecordId',
-        'result', 'occurredAt', 'note',
+        'result', 'occurredAt', 'note', 'items', 'discrepancies',
       ],
       '记录退货检查参数',
     );
@@ -383,6 +587,141 @@ export function normalizeProgressAftersalesCaseInput(
       result: record.result,
       occurredAt: dateTime(record.occurredAt, '退货检查时间无效'),
       note: boundedText(record.note, 500, '请填写 1 至 500 字的退货检查说明'),
+      ...(record.items === undefined ? {} : { items: inspectedItems(record.items) }),
+      ...(record.discrepancies === undefined
+        ? {}
+        : { discrepancies: returnDiscrepancies(record.discrepancies) }),
+    };
+  }
+  if (record.kind === 'correct_return_logistics') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'shippingCarrier', 'trackingNumber', 'occurredAt', 'reason',
+      ],
+      '更正退货物流参数',
+    );
+    return {
+      kind: 'correct_return_logistics',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      shippingCarrier: boundedText(record.shippingCarrier, 100, '退货承运方无效'),
+      trackingNumber: boundedText(record.trackingNumber, 200, '退货运单号无效'),
+      occurredAt: dateTime(record.occurredAt, '退货物流更正时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流更正原因'),
+    };
+  }
+  if (record.kind === 'update_return_logistics_status') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'logisticsStatus', 'carrierAcceptanceConfirmed', 'carrierConfirmedLoss',
+        'occurredAt', 'reason',
+      ],
+      '更新退货物流状态参数',
+    );
+    if (!isAftersalesReturnLogisticsStatus(record.logisticsStatus)) {
+      throw new Error('退货物流状态无效');
+    }
+    return {
+      kind: 'update_return_logistics_status',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      logisticsStatus: record.logisticsStatus,
+      ...(record.carrierAcceptanceConfirmed === undefined
+        ? {}
+        : {
+          carrierAcceptanceConfirmed: booleanValue(
+            record.carrierAcceptanceConfirmed,
+            '承运方揽收确认无效',
+          ),
+        }),
+      ...(record.carrierConfirmedLoss === undefined
+        ? {}
+        : {
+          carrierConfirmedLoss: booleanValue(
+            record.carrierConfirmedLoss,
+            '承运方丢件确认无效',
+          ),
+        }),
+      occurredAt: dateTime(record.occurredAt, '退货物流状态时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退货物流状态说明'),
+    };
+  }
+  if (record.kind === 'open_carrier_claim') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'requestedAmountCents', 'occurredAt', 'reason',
+      ],
+      '建立承运索赔参数',
+    );
+    return {
+      kind: 'open_carrier_claim',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      requestedAmountCents: positiveMoney(record.requestedAmountCents, '索赔金额无效'),
+      occurredAt: dateTime(record.occurredAt, '索赔发生时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的索赔原因'),
+    };
+  }
+  if (record.kind === 'resolve_carrier_claim') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'expectedClaimRevision', 'outcome', 'approvedAmountCents',
+        'occurredAt', 'reason',
+      ],
+      '处理承运索赔结果参数',
+    );
+    if (record.outcome !== 'approved' && record.outcome !== 'rejected') {
+      throw new Error('承运索赔结果无效');
+    }
+    if (record.outcome === 'approved' && record.approvedAmountCents === undefined) {
+      throw new Error('请填写承运方同意赔付金额');
+    }
+    if (record.outcome === 'rejected' && record.approvedAmountCents !== undefined) {
+      throw new Error('拒赔不能登记同意赔付金额');
+    }
+    return {
+      kind: 'resolve_carrier_claim',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      expectedClaimRevision: revision(record.expectedClaimRevision),
+      outcome: record.outcome,
+      ...(record.approvedAmountCents === undefined
+        ? {}
+        : {
+          approvedAmountCents: positiveMoney(
+            record.approvedAmountCents,
+            '承运方同意赔付金额无效',
+          ),
+        }),
+      occurredAt: dateTime(record.occurredAt, '索赔结果时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的索赔结果说明'),
+    };
+  }
+  if (record.kind === 'confirm_carrier_compensation') {
+    rejectUnknownKeys(
+      record,
+      [
+        'kind', 'caseId', 'expectedRevision', 'returnRecordId',
+        'expectedClaimRevision', 'amountCents', 'occurredAt', 'note',
+      ],
+      '确认承运赔付参数',
+    );
+    return {
+      kind: 'confirm_carrier_compensation',
+      ...common,
+      returnRecordId: boundedText(record.returnRecordId, 200, '退货包裹标识无效'),
+      expectedClaimRevision: revision(record.expectedClaimRevision),
+      amountCents: positiveMoney(record.amountCents, '实际赔付金额无效'),
+      occurredAt: dateTime(record.occurredAt, '实际赔付时间无效'),
+      note: boundedText(record.note, 500, '请填写 1 至 500 字的实际赔付说明'),
     };
   }
   if (record.kind === 'confirm_refund') {
@@ -443,6 +782,125 @@ function itemInputs(value: unknown): AftersalesCaseItemInput[] {
     throw new Error('同一发货快照商品不能重复选择');
   }
   return items;
+}
+
+function receivedItems(value: unknown): NonNullable<Extract<
+  ProgressAftersalesCaseInput,
+  { kind: 'receive_return' }
+>['items']> {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10_000) {
+    throw new Error('请填写退货商品实际收到数量');
+  }
+  const items = value.map((item) => {
+    const record = asRecord(item, '退货商品收到数量无效');
+    rejectUnknownKeys(record, ['returnRecordItemId', 'receivedQuantity'], '退货商品收到数量');
+    return {
+      returnRecordItemId: boundedText(record.returnRecordItemId, 200, '退货商品标识无效'),
+      receivedQuantity: nonNegativeQuantity(record.receivedQuantity, '退货商品实际收到数量无效'),
+    };
+  });
+  assertUnique(
+    items.map(({ returnRecordItemId }) => returnRecordItemId),
+    '同一退货商品不能重复登记收到数量',
+  );
+  return items;
+}
+
+function inspectedItems(value: unknown): NonNullable<Extract<
+  ProgressAftersalesCaseInput,
+  { kind: 'inspect_return' }
+>['items']> {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10_000) {
+    throw new Error('请填写退货商品检查数量');
+  }
+  const items = value.map((item) => {
+    const record = asRecord(item, '退货商品检查结果无效');
+    rejectUnknownKeys(
+      record,
+      ['returnRecordItemId', 'acceptedQuantity', 'result', 'note'],
+      '退货商品检查结果',
+    );
+    if (!isReturnInspectionResult(record.result)) throw new Error('退货商品检查结果无效');
+    return {
+      returnRecordItemId: boundedText(record.returnRecordItemId, 200, '退货商品标识无效'),
+      acceptedQuantity: nonNegativeQuantity(
+        record.acceptedQuantity,
+        '退货商品检查通过数量无效',
+      ),
+      result: record.result,
+      note: boundedText(record.note, 500, '请填写 1 至 500 字的退货商品检查说明'),
+    };
+  });
+  assertUnique(
+    items.map(({ returnRecordItemId }) => returnRecordItemId),
+    '同一退货商品不能重复登记检查结果',
+  );
+  return items;
+}
+
+function returnDiscrepancies(value: unknown): AftersalesReturnDiscrepancy[] {
+  if (!Array.isArray(value) || value.length > 100) throw new Error('退货检查差异无效');
+  return value.map((item) => {
+    const record = asRecord(item, '退货检查差异无效');
+    rejectUnknownKeys(record, ['kind', 'quantity', 'note', 'returnRecordItemId'], '退货检查差异');
+    if (!isAftersalesReturnDiscrepancyKind(record.kind)) {
+      throw new Error('退货检查差异类型无效');
+    }
+    return {
+      kind: record.kind,
+      quantity: nonNegativeQuantity(record.quantity, '退货检查差异数量无效'),
+      note: boundedText(record.note, 500, '请填写 1 至 500 字的退货检查差异说明'),
+      ...(record.returnRecordItemId === undefined
+        ? {}
+        : {
+          returnRecordItemId: boundedText(
+            record.returnRecordItemId,
+            200,
+            '退货检查差异商品归属无效',
+          ),
+        }),
+    };
+  });
+}
+
+function isAftersalesReturnDiscrepancyKind(
+  value: unknown,
+): value is AftersalesReturnDiscrepancyKind {
+  return value === 'missing' || value === 'empty_package' || value === 'wrong_item'
+    || value === 'excess' || value === 'mixed' || value === 'damaged'
+    || value === 'missing_accessory' || value === 'unidentified';
+}
+
+export function isAftersalesReturnLogisticsStatus(
+  value: unknown,
+): value is AftersalesReturnLogisticsStatus {
+  return value === 'awaiting_carrier' || value === 'in_transit' || value === 'delivered'
+    || value === 'intercepting' || value === 'returned_to_buyer' || value === 'lost'
+    || value === 'delivery_dispute' || value === 'damaged' || value === 'misdelivered'
+    || value === 'exception';
+}
+
+function nonNegativeQuantity(value: unknown, message: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > 1_000_000) {
+    throw new Error(message);
+  }
+  return Number(value);
+}
+
+function assertUnique(values: readonly string[], message: string): void {
+  if (new Set(values).size !== values.length) throw new Error(message);
+}
+
+function booleanValue(value: unknown, message: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(message);
+  return value;
+}
+
+function positiveMoney(value: unknown, message: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0 || Number(value) > 100_000_000_000) {
+    throw new Error(message);
+  }
+  return Number(value);
 }
 
 function dateTime(value: unknown, message: string): string {

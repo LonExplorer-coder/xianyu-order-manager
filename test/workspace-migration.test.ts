@@ -10,7 +10,7 @@ import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 
 describe('数据库升级', () => {
-  it('将带关联数据的 v1 数据库完整、幂等地升级到 v28 并保留来源、字段与模板约束', async () => {
+  it('将带关联数据的 v1 数据库完整、幂等地升级到 v29 并保留来源、字段与模板约束', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v1-migration-'));
     createVersion1Database(dataDirectory);
 
@@ -48,6 +48,7 @@ describe('数据库升级', () => {
       { version: 26 },
       { version: 27 },
       { version: 28 },
+      { version: 29 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -93,6 +94,9 @@ describe('数据库升级', () => {
               'aftersales_return_record_events',
               'aftersales_return_record_items',
               'aftersales_return_records',
+              'carrier_claim_events',
+              'carrier_claims',
+              'carrier_compensation_records',
               'table_templates',
               'table_template_custom_field_dependencies',
               'financial_records',
@@ -119,6 +123,9 @@ describe('数据库升级', () => {
       { name: 'aftersales_return_record_events' },
       { name: 'aftersales_return_record_items' },
       { name: 'aftersales_return_records' },
+      { name: 'carrier_claim_events' },
+      { name: 'carrier_claims' },
+      { name: 'carrier_compensation_records' },
       { name: 'custom_field_definitions' },
       { name: 'custom_field_values' },
       { name: 'financial_records' },
@@ -494,6 +501,7 @@ describe('数据库升级', () => {
       { version: 26 },
       { version: 27 },
       { version: 28 },
+      { version: 29 },
     ]);
     expect(
       (
@@ -747,6 +755,7 @@ describe('数据库升级', () => {
         { version: 26 },
         { version: 27 },
         { version: 28 },
+        { version: 29 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -945,7 +954,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 28 });
+        .toEqual({ version: 29 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1059,7 +1068,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 28 });
+        .toEqual({ version: 29 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1079,12 +1088,12 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
         { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 },
-        { version: 27 }, { version: 28 },
+        { version: 27 }, { version: 28 }, { version: 29 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1118,7 +1127,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 28 });
+        .toEqual({ version: 29 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -1396,7 +1405,7 @@ function downgradeTableTemplatesToVersion10(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+        DELETE FROM schema_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
       `);
       for (const trigger of triggerRows) database.exec(trigger.sql);
       database.exec('COMMIT;');
@@ -1436,7 +1445,7 @@ function downgradeOriginalOrdersToVersion11(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+      DELETE FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
       COMMIT;
     `);
   } finally {
@@ -1473,7 +1482,7 @@ function downgradeOrderDraftsToVersion12(dataDirectory: string): void {
       DROP TABLE IF EXISTS shipment_records;
       DROP TABLE IF EXISTS shipment_group_archives;
       DROP TABLE IF EXISTS shipment_group_adjustment_events;
-      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+      DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
       COMMIT;
     `);
   } catch (error) {
@@ -1687,7 +1696,7 @@ function createVersion9QuantitySourceDatabase(dataDirectory: string): void {
         DROP TABLE IF EXISTS shipment_records;
         DROP TABLE IF EXISTS shipment_group_archives;
         DROP TABLE IF EXISTS shipment_group_adjustment_events;
-        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+        DELETE FROM schema_migrations WHERE version IN (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
       `);
       database.exec('COMMIT;');
     } catch (error) {

@@ -1,4 +1,10 @@
-import type { AftersalesReturnStatus, AftersalesStatus } from './aftersales-cases';
+import type {
+  AftersalesReturnLogisticsStatus,
+  AftersalesReturnDiscrepancy,
+  AftersalesReturnStatus,
+  AftersalesStatus,
+  CarrierClaimStatus,
+} from './aftersales-cases';
 import type { ShipmentLogisticsStatus } from './shipment-records';
 
 export type OrderOperationsShipmentItem = {
@@ -45,6 +51,23 @@ export type OrderOperationsAftersalesCase = {
   occurredAt: string;
   currentTodo: string;
   items: OrderOperationsAftersalesItem[];
+  returnPackages: Array<{
+    id: string;
+    status: AftersalesReturnStatus;
+    shippingCarrier: string;
+    trackingNumber: string;
+    logisticsStatus: AftersalesReturnLogisticsStatus;
+    discrepancies: AftersalesReturnDiscrepancy[];
+    carrierClaimStatus: CarrierClaimStatus | null;
+    items: Array<{
+      shipmentPackageItemId: string;
+      sourceTitle: string;
+      sourceSpec: string;
+      plannedQuantity: number;
+      receivedQuantity: number;
+      acceptedQuantity: number;
+    }>;
+  }>;
 };
 
 export type OrderOperationsProjection = {
@@ -154,20 +177,36 @@ export function aftersalesTodoForCases(
   cases: readonly {
     status: AftersalesStatus;
     returnStatuses: readonly AftersalesReturnStatus[];
+    returnLogisticsStatuses?: readonly AftersalesReturnLogisticsStatus[];
+    carrierClaimStatuses?: readonly CarrierClaimStatus[];
   }[],
 ): string | null {
   const activeCases = cases.filter(({ status }) => status !== 'completed');
-  if (activeCases.some(({ returnStatuses }) => returnStatuses.includes('received'))) {
+  if (cases.some(({ returnStatuses }) => returnStatuses.includes('received'))) {
     return '检查退回商品';
   }
-  if (activeCases.some(({ returnStatuses }) => returnStatuses.includes('in_transit'))) {
+  if (activeCases.some(({ status }) => status === 'waiting_refund')) {
+    return '确认退款';
+  }
+  if (cases.some(({ returnStatuses, returnLogisticsStatuses = [] }) => (
+    returnStatuses.includes('in_transit')
+    && !returnLogisticsStatuses.includes('lost')
+  ))) {
     return '确认收到退货';
   }
-  return aftersalesTodoForStatuses(new Set(
+  const caseTodo = aftersalesTodoForStatuses(new Set(
     activeCases
       .filter(({ status }) => status !== 'cancelled')
       .map(({ status }) => status),
   ));
+  if (caseTodo) return caseTodo;
+  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('pending'))) {
+    return '跟进承运索赔';
+  }
+  if (cases.some(({ carrierClaimStatuses = [] }) => carrierClaimStatuses.includes('approved'))) {
+    return '确认承运赔付';
+  }
+  return null;
 }
 
 export function shipmentTodoForStatuses(

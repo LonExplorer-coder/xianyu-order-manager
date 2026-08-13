@@ -1,7 +1,11 @@
 import {
   AFTERSALES_STATUSES,
   type AftersalesCase,
+  type AftersalesReturnDiscrepancy,
+  type AftersalesReturnLogisticsStatus,
+  type AftersalesReturnStatus,
   type AftersalesStatus,
+  type CarrierClaimStatus,
 } from '../core/aftersales-cases';
 import {
   aftersalesStatusLabel,
@@ -17,6 +21,67 @@ export const AFTERSALES_STATUS_OPTIONS: ReadonlyArray<{
   .map((value) => ({ value, label: aftersalesStatusLabel(value) }));
 
 export { aftersalesStatusLabel };
+
+export function returnLogisticsStatusLabel(status: AftersalesReturnLogisticsStatus): string {
+  return {
+    awaiting_carrier: '待承运方接收',
+    in_transit: '运输中',
+    delivered: '已签收',
+    intercepting: '拦截处理中',
+    returned_to_buyer: '已退回买家',
+    lost: '丢件',
+    delivery_dispute: '签收争议',
+    damaged: '运输破损',
+    misdelivered: '错投',
+    exception: '其他物流异常',
+  }[status];
+}
+
+export function returnDiscrepancyLabel(kind: AftersalesReturnDiscrepancy['kind']): string {
+  return {
+    missing: '少件',
+    empty_package: '空包',
+    wrong_item: '错货',
+    excess: '多退',
+    mixed: '混装',
+    damaged: '损坏',
+    missing_accessory: '配件缺失',
+    unidentified: '无法识别',
+  }[kind];
+}
+
+export function carrierClaimStatusLabel(status: CarrierClaimStatus): string {
+  return { pending: '处理中', approved: '已同意', rejected: '已拒赔', paid: '已赔付' }[status];
+}
+
+export function returnQuantityDifferenceSummary(returnPackage: {
+  status: AftersalesReturnStatus;
+  items: readonly {
+    plannedQuantity?: number;
+    quantity?: number;
+    sourceTitle?: string;
+    sourceSpec?: string;
+    receivedQuantity: number;
+    acceptedQuantity: number;
+  }[];
+}): string[] {
+  return returnPackage.items.flatMap((item) => {
+    const planned = item.plannedQuantity ?? item.quantity ?? 0;
+    const label = item.sourceTitle
+      ? `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''}：`
+      : '';
+    const differences: string[] = [];
+    if (returnPackage.status !== 'in_transit' && item.receivedQuantity < planned) {
+      differences.push(`${label}计划与收到相差 ${planned - item.receivedQuantity} 件`);
+    } else if (returnPackage.status !== 'in_transit' && item.receivedQuantity > planned) {
+      differences.push(`${label}实际多收到 ${item.receivedQuantity - planned} 件`);
+    }
+    if (returnPackage.status === 'inspected' && item.acceptedQuantity < item.receivedQuantity) {
+      differences.push(`${label}收到与检查通过相差 ${item.receivedQuantity - item.acceptedQuantity} 件`);
+    }
+    return differences;
+  });
+}
 
 export function shipmentRecordsAftersalesSummary(
   records: readonly ShipmentRecord[],
@@ -53,6 +118,10 @@ export function aftersalesCurrentAction(
     .map((aftersalesCase) => ({
       status: aftersalesCase.status,
       returnStatuses: aftersalesCase.returns.map(({ status }) => status),
+      returnLogisticsStatuses: aftersalesCase.returns.map(({ logisticsStatus }) => logisticsStatus),
+      carrierClaimStatuses: aftersalesCase.returns.flatMap(({ carrierClaim }) => (
+        carrierClaim ? [carrierClaim.status] : []
+      )),
     }));
   return aftersalesTodoForCases(matchingCases);
 }

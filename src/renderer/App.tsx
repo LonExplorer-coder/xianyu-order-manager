@@ -127,6 +127,10 @@ import {
 import {
   aftersalesCurrentAction,
   aftersalesStatusLabel,
+  carrierClaimStatusLabel,
+  returnDiscrepancyLabel,
+  returnLogisticsStatusLabel,
+  returnQuantityDifferenceSummary,
   shipmentRecordAftersalesSummary,
   shipmentRecordsAftersalesSummary,
 } from './aftersales-presentation';
@@ -1647,10 +1651,26 @@ function ShipmentGroupsWorkspace({
 
   async function progressAftersales(input: ProgressAftersalesCaseInput) {
     const updated = await api.progressAftersalesCase(input);
-    onAftersalesCasesChange([
-      updated,
-      ...aftersalesCases.filter(({ id }) => id !== updated.id),
-    ]);
+    try {
+      const refreshed = await api.queryAftersalesCases();
+      const latestCases = new Map<string, AftersalesCase>();
+      for (const aftersalesCase of [...aftersalesCases, ...refreshed]) {
+        const existing = latestCases.get(aftersalesCase.id);
+        if (!existing || aftersalesCase.revision >= existing.revision) {
+          latestCases.set(aftersalesCase.id, aftersalesCase);
+        }
+      }
+      latestCases.set(updated.id, updated);
+      onAftersalesCasesChange([
+        updated,
+        ...[...latestCases.values()].filter(({ id }) => id !== updated.id),
+      ]);
+    } catch {
+      onAftersalesCasesChange([
+        updated,
+        ...aftersalesCases.filter(({ id }) => id !== updated.id),
+      ]);
+    }
   }
 
   function toggleGroup(groupId: string) {
@@ -8154,6 +8174,48 @@ function DetailWorkspace({
                         </li>
                       ))}
                     </ul>
+                    {aftersalesCase.returnPackages.length > 0 && (
+                      <div className="order-operations-packages">
+                        {aftersalesCase.returnPackages.map((returnPackage) => (
+                          <section
+                            key={returnPackage.id}
+                            aria-label={`退货包裹 ${returnPackage.id}`}
+                          >
+                            <div>
+                          <strong>{returnPackage.shippingCarrier} · {returnPackage.trackingNumber}</strong>
+                          <span>{returnLogisticsStatusLabel(returnPackage.logisticsStatus)}</span>
+                            </div>
+                            <ul>
+                              {returnPackage.items.map((item) => (
+                                <li key={item.shipmentPackageItemId}>
+                                  <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                                  <small>
+                                    计划 {item.plannedQuantity} · 收到 {item.receivedQuantity} · 通过 {item.acceptedQuantity}
+                                  </small>
+                                </li>
+                              ))}
+                            </ul>
+                            {returnPackage.discrepancies.length > 0 && (
+                              <p>
+                                退货差异：{returnPackage.discrepancies.map((difference) => (
+                                  `${returnDiscrepancyLabel(difference.kind)} ${difference.quantity} 件 · ${difference.note}`
+                                )).join('；')}
+                              </p>
+                            )}
+                            {returnQuantityDifferenceSummary(returnPackage).length > 0 && (
+                              <p>
+                                数量差异：{returnQuantityDifferenceSummary(returnPackage).join('；')}
+                              </p>
+                            )}
+                            {returnPackage.carrierClaimStatus && (
+                              <small>
+                                承运索赔：{carrierClaimStatusLabel(returnPackage.carrierClaimStatus)}
+                              </small>
+                            )}
+                          </section>
+                        ))}
+                      </div>
+                    )}
                   </article>
                 ))}
               </div>
