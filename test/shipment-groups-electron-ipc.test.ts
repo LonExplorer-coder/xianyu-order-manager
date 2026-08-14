@@ -287,8 +287,9 @@ describe('发货组 Electron IPC', () => {
       note: '平台确认实际退款',
     };
     const replacementInput = {
-      kind: 'create_replacement_shipment',
+      kind: 'create_replacement_shipment' as const,
       caseId: 'aftersales-1',
+      roundId: 'round-1',
       expectedRevision: 3,
       occurredAt: '2026-08-13T10:20:00+08:00',
       reason: '换货检查完成后补发',

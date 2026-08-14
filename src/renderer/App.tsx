@@ -2809,7 +2809,9 @@ function ShipmentRecordsSection({
                             : '确认承运赔付'}
                       </button>
                     )}
-                    {record.sourceRecordRole !== 'aftersales_replacement' && (
+                    {shipmentPackage.carrierAcceptedAt === null
+                      && shipmentPackage.logisticsStatus !== 'delivered'
+                      && shipmentPackage.logisticsStatus !== 'returned' && (
                       <button
                         className="button button--quiet"
                         type="button"

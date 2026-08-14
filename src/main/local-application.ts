@@ -3386,6 +3386,11 @@ export class LocalApplication {
       const shipmentPackage = packageById.get(packageId);
       if (!shipmentPackage) throw new Error('所选包裹不属于当前发货记录');
       if (shipmentPackage.status === 'cancelled') throw new Error('所选包裹已经撤销');
+      if (shipmentPackage.carrierAcceptedAt !== null
+        || shipmentPackage.logisticsStatus === 'delivered'
+        || shipmentPackage.logisticsStatus === 'returned') {
+        throw new Error('包裹已交寄，请走拦截或后续物流处置');
+      }
       return shipmentPackage;
     });
     const workspace = this.requireWorkspace();
@@ -3445,6 +3450,12 @@ export class LocalApplication {
         archivePartiallyShipped ? null : now,
         now,
         record.archiveId,
+      );
+      this.aftersalesService().synchronizeCancelledReplacementShipment(
+        record.id,
+        packages.map(({ id }) => id),
+        prepared.reason,
+        now,
       );
     });
     const updatedRecord = this.getShipmentRecord(record.id);

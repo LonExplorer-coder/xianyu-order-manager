@@ -39,6 +39,8 @@ export function AftersalesCasePanel({
     aftersalesCase: AftersalesCase;
     kind: ProgressAftersalesCaseInput['kind'];
     returnRecordId?: string;
+    outboundExceptionId?: string;
+    roundId?: string;
   } | null>(null);
   if (aftersalesCases.length === 0) return null;
   return (
@@ -423,6 +425,30 @@ export function AftersalesCasePanel({
                   {progressActionLabel('record_interception_result')}
                 </button>
               )}
+              {aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled'
+                && aftersalesCase.coordination.outboundExceptionHistory
+                  .filter((exception) => exception.stage === 'confirmed')
+                  .map((exception) => {
+                    const isPrimaryUndecided = exception.exceptionId
+                      === aftersalesCase.coordination.outboundException?.exceptionId
+                      && exception.decision === null;
+                    if (isPrimaryUndecided) return null;
+                    return (
+                      <button
+                        key={`outbound-exception-action-${exception.exceptionId}`}
+                        className="button button--quiet"
+                        type="button"
+                        onClick={() => setProgressTarget({
+                          aftersalesCase,
+                          kind: 'decide_outbound_logistics_exception',
+                          outboundExceptionId: exception.exceptionId,
+                        })}
+                      >
+                        {exception.decision ? '更改正向异常处理' : '选择正向异常处理'}
+                      </button>
+                    );
+                  })}
               {aftersalesCase.workflow === 'return_refund'
                 && aftersalesCase.status !== 'completed'
                 && aftersalesCase.status !== 'cancelled'
@@ -454,22 +480,52 @@ export function AftersalesCasePanel({
                           aftersalesCase.coordination.returnException?.returnRecordId,
                       }
                       : {}),
+                    ...(primaryProgressAction(aftersalesCase)
+                      === 'decide_outbound_logistics_exception'
+                      ? {
+                        outboundExceptionId:
+                          aftersalesCase.coordination.outboundException?.exceptionId,
+                      }
+                      : {}),
                   })}
                 >
                   {progressActionLabel(primaryProgressAction(aftersalesCase) as ProgressAftersalesCaseInput['kind'])}
                 </button>
               )}
-              {aftersalesCase.rounds?.at(-1)?.replacementShipment
-                && aftersalesCase.status !== 'completed'
-                && aftersalesCase.status !== 'cancelled' && (
-                <button
-                  className="button button--quiet"
-                  type="button"
-                  onClick={() => setProgressTarget({ aftersalesCase, kind: 'start_next_round' })}
-                >
-                  {progressActionLabel('start_next_round')}
-                </button>
-              )}
+              {aftersalesCase.rounds
+                .filter((round) => round.replacementRequired && !round.replacementShipment)
+                .map((round) => (
+                  <button
+                    key={`create-replacement-${round.id}`}
+                    className="button button--primary"
+                    type="button"
+                    onClick={() => setProgressTarget({
+                      aftersalesCase,
+                      kind: 'create_replacement_shipment',
+                      roundId: round.id,
+                    })}
+                  >
+                    建立第 {round.roundNumber} 轮补发
+                  </button>
+                ))}
+              {aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled'
+                && aftersalesCase.rounds
+                  .filter(({ replacementShipment }) => replacementShipment !== null)
+                  .map((round) => (
+                    <button
+                      key={`start-next-round-${round.id}`}
+                      className="button button--quiet"
+                      type="button"
+                      onClick={() => setProgressTarget({
+                        aftersalesCase,
+                        kind: 'start_next_round',
+                        roundId: round.id,
+                      })}
+                    >
+                      第 {round.roundNumber} 轮补发再次出现问题
+                    </button>
+                  ))}
               {primaryProgressAction(aftersalesCase) === 'confirm_refund'
                 && returnFactProgressAction(aftersalesCase) && (
                 <button
@@ -486,8 +542,10 @@ export function AftersalesCasePanel({
                 </button>
               )}
               {aftersalesCase.refund?.status === 'pending'
-                && aftersalesCase.coordination.outboundException?.decision
-                  === 'refund_and_replacement'
+                && aftersalesCase.coordination.outboundExceptionHistory.some((exception) => (
+                  exception.stage === 'confirmed'
+                  && exception.decision === 'refund_and_replacement'
+                ))
                 && primaryProgressAction(aftersalesCase) !== 'confirm_refund' && (
                 <button
                   className="button button--quiet"
@@ -624,6 +682,8 @@ export function AftersalesCasePanel({
           aftersalesCase={progressTarget.aftersalesCase}
           kind={progressTarget.kind}
           returnRecordId={progressTarget.returnRecordId}
+          outboundExceptionId={progressTarget.outboundExceptionId}
+          roundId={progressTarget.roundId}
           onProgress={onProgress}
           onClose={() => setProgressTarget(null)}
         />
@@ -635,33 +695,8 @@ export function AftersalesCasePanel({
 function primaryProgressAction(
   aftersalesCase: AftersalesCase,
 ): ProgressAftersalesCaseInput['kind'] | null {
-  if (aftersalesCase.coordination.outboundException
-    && aftersalesCase.coordination.outboundException.decision === null) {
-    return 'decide_outbound_logistics_exception';
-  }
-  if (aftersalesCase.coordination.interception?.status === 'succeeded'
-    && aftersalesCase.coordination.physicalControl === 'seller'
-    && aftersalesCase.coordination.interceptedReturnInspection === null) {
-    return 'inspect_intercepted_return';
-  }
-  const outboundDecision = aftersalesCase.coordination.outboundException?.decision;
-  if (aftersalesCase.refund?.status === 'pending'
-    && outboundDecision === 'refund_only') {
-    return 'confirm_refund';
-  }
-  if (aftersalesCase.refund?.status === 'pending'
-    && outboundDecision === 'refund_and_replacement'
-    && aftersalesCase.rounds.at(-1)?.replacementShipment) {
-    return 'confirm_refund';
-  }
-  if (aftersalesCase.coordination.returnException
-    && aftersalesCase.coordination.returnException.decision === null) {
-    return 'decide_return_logistics_exception';
-  }
-  if (aftersalesCase.status === 'ready_to_complete') {
-    return returnFactProgressAction(aftersalesCase) ?? 'complete';
-  }
   if (aftersalesCase.status === 'cancelled' || aftersalesCase.status === 'completed') {
+    if (canInspectInterceptedReturn(aftersalesCase)) return 'inspect_intercepted_return';
     const currentRound = aftersalesCase.rounds?.at(-1);
     const terminalReturn = aftersalesCase.returns.find(({ id }) => (
       currentRound?.returnRecordIds.includes(id)
@@ -671,6 +706,39 @@ function primaryProgressAction(
     }
     if (terminalReturn?.status === 'received') return 'inspect_return';
     return null;
+  }
+  if (aftersalesCase.coordination.outboundException
+    && aftersalesCase.coordination.outboundException.decision === null) {
+    return 'decide_outbound_logistics_exception';
+  }
+  if (canInspectInterceptedReturn(aftersalesCase)) {
+    return 'inspect_intercepted_return';
+  }
+  const confirmedOutboundDecisions = aftersalesCase.coordination.outboundExceptionHistory
+    .filter((exception) => exception.stage === 'confirmed')
+    .map(({ decision }) => decision);
+  const supportsOutboundRefund = confirmedOutboundDecisions.some((decision) => (
+    decision === 'refund_only' || decision === 'refund_and_replacement'
+  ));
+  if (aftersalesCase.refund?.status === 'pending'
+    && confirmedOutboundDecisions.includes('replacement')
+    && !supportsOutboundRefund) {
+    return 'cancel_refund_request';
+  }
+  if (aftersalesCase.refund?.status === 'pending'
+    && confirmedOutboundDecisions.includes('refund_only')) {
+    return 'confirm_refund';
+  }
+  if (aftersalesCase.refund?.status === 'pending'
+    && confirmedOutboundDecisions.includes('refund_and_replacement')) {
+    return 'confirm_refund';
+  }
+  if (aftersalesCase.coordination.returnException
+    && aftersalesCase.coordination.returnException.decision === null) {
+    return 'decide_return_logistics_exception';
+  }
+  if (aftersalesCase.status === 'ready_to_complete') {
+    return returnFactProgressAction(aftersalesCase) ?? 'complete';
   }
   if (aftersalesCase.workflow === 'refund_only' && aftersalesCase.status === 'waiting_refund') {
     return 'confirm_refund';
@@ -690,8 +758,6 @@ function primaryProgressAction(
     if (currentRound.workflow === 'exchange'
       && aftersalesCase.status === 'waiting_inspection'
       && returnRecord?.status === 'received') return 'inspect_return';
-    if (aftersalesCase.status === 'waiting_replacement'
-      && !currentRound.replacementShipment) return 'create_replacement_shipment';
     return null;
   }
   if (aftersalesCase.workflow !== 'return_refund') return null;
@@ -740,8 +806,18 @@ function returnFactProgressAction(
   return null;
 }
 
+function canInspectInterceptedReturn(aftersalesCase: AftersalesCase): boolean {
+  return aftersalesCase.coordination.interception?.status === 'succeeded'
+    && aftersalesCase.coordination.sourcePackages.some((sourcePackage) => (
+      sourcePackage.packageId === aftersalesCase.coordination.interception?.packageId
+      && sourcePackage.logisticsStatus === 'returned'
+    ))
+    && aftersalesCase.coordination.interceptedReturnInspection === null;
+}
+
 function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string {
   const labels: Record<ProgressAftersalesCaseInput['kind'], string> = {
+    cancel_refund_request: '取消本次退款申请',
     decide_outbound_logistics_exception: '选择正向异常处理',
     inspect_intercepted_return: '检查拦截退回商品',
     create_replacement_shipment: '建立本轮补发',

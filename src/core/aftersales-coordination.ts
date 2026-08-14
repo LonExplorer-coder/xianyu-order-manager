@@ -28,6 +28,7 @@ export type AftersalesInterceptionEvent = {
 };
 
 export type AftersalesInterception = {
+  packageId: string | null;
   status: AftersalesInterceptionEvent['kind'];
   timeline: AftersalesInterceptionEvent[];
 };
@@ -52,6 +53,7 @@ export type AftersalesOutboundExceptionDecisionEvent = {
   packageId: string;
   before: AftersalesOutboundExceptionDecision | null;
   after: AftersalesOutboundExceptionDecision;
+  affectedItems: AftersalesOutboundExceptionEvidence['affectedItems'];
   occurredAt: string;
   reason: string;
   createdAt: string;
@@ -59,10 +61,17 @@ export type AftersalesOutboundExceptionDecisionEvent = {
 
 export type AftersalesOutboundExceptionEvidence = {
   exceptionId: string;
+  sourceShipmentRecordId: string;
   packageId: string;
   exceptionType: LogisticsExceptionType;
   stage: LogisticsExceptionStage;
   affectedQuantity: number;
+  affectedItems: Array<{
+    shipmentPackageItemId: string;
+    sourceTitle: string;
+    sourceSpec: string;
+    quantity: number;
+  }>;
   occurredAt: string;
 };
 
@@ -243,9 +252,12 @@ export function coordinateAftersales(input: {
     availableDecisions: [...AFTERSALES_OUTBOUND_EXCEPTION_DECISIONS],
     timeline: exception.decisionTimeline,
   }));
-  const outboundException = [...outboundExceptionHistory].reverse().find((exception) => (
+  const confirmedOutboundExceptions = outboundExceptionHistory.filter((exception) => (
     exception.stage === 'confirmed'
-  )) ?? null;
+  ));
+  const outboundException = [...confirmedOutboundExceptions].reverse().find((exception) => (
+    exception.decision === null
+  )) ?? confirmedOutboundExceptions.at(-1) ?? null;
   const { currentTodo, risk } = returnException
     ? actionForReturnException(returnException, input.refundStatus ?? null)
     : input.interceptedReturnInspection

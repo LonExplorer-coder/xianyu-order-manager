@@ -188,6 +188,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(33)) migrateToVersion33(database);
   if (!versions.has(34)) migrateToVersion34(database);
   if (!versions.has(35)) migrateToVersion35(database);
+  if (!versions.has(36)) migrateToVersion36(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -4258,6 +4259,33 @@ function hasCompleteVersion34Schema(database: DatabaseSync): boolean {
 }
 
 const VERSION_35_SCHEMA_STATEMENTS = {
+  aftersales_interception_packages: `
+    CREATE TABLE aftersales_interception_packages (
+      case_id TEXT PRIMARY KEY REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      shipment_package_id TEXT NOT NULL REFERENCES shipment_packages(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL
+    ) STRICT`,
+  aftersales_interception_package_identity_is_valid_on_insert: `
+    CREATE TRIGGER aftersales_interception_package_identity_is_valid_on_insert
+    BEFORE INSERT ON aftersales_interception_packages
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM aftersales_case_items AS case_items
+      JOIN shipment_package_items AS shipment_items
+        ON shipment_items.id = case_items.shipment_package_item_id
+      WHERE case_items.case_id = NEW.case_id
+        AND shipment_items.package_id = NEW.shipment_package_id
+    ) BEGIN
+      SELECT RAISE(ABORT, 'interception package identity mismatch');
+    END`,
+  aftersales_interception_packages_are_immutable_on_update: `
+    CREATE TRIGGER aftersales_interception_packages_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_interception_packages
+    BEGIN SELECT RAISE(ABORT, 'interception packages are immutable'); END`,
+  aftersales_interception_packages_are_immutable_on_delete: `
+    CREATE TRIGGER aftersales_interception_packages_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_interception_packages
+    BEGIN SELECT RAISE(ABORT, 'interception packages are immutable'); END`,
   aftersales_outbound_exception_decision_events: `
     CREATE TABLE aftersales_outbound_exception_decision_events (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4276,6 +4304,11 @@ const VERSION_35_SCHEMA_STATEMENTS = {
         'wait_investigation', 'recover_or_redeliver', 'refund_only',
         'replacement', 'refund_and_replacement'
       )),
+      affected_items_json TEXT NOT NULL CHECK (
+        json_valid(affected_items_json)
+        AND json_type(affected_items_json) = 'array'
+        AND json_array_length(affected_items_json) > 0
+      ),
       occurred_at TEXT NOT NULL,
       reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
       created_at TEXT NOT NULL,
@@ -4300,19 +4333,95 @@ const VERSION_35_SCHEMA_STATEMENTS = {
         AND exceptions.return_record_id IS NULL
         AND EXISTS (
           SELECT 1
-          FROM aftersales_case_items AS case_items
-          JOIN shipment_package_items AS shipment_items
-            ON shipment_items.id = case_items.shipment_package_item_id
-          WHERE case_items.case_id = NEW.case_id
-            AND shipment_items.package_id = NEW.shipment_package_id
+          FROM shipment_package_items AS shipment_items
+          WHERE shipment_items.package_id = NEW.shipment_package_id
+            AND (
+              EXISTS (
+                SELECT 1 FROM aftersales_case_items AS case_items
+                WHERE case_items.case_id = NEW.case_id
+                  AND case_items.shipment_package_item_id = shipment_items.id
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM aftersales_replacement_items AS replacement_items
+                JOIN aftersales_replacement_shipments AS replacements
+                  ON replacements.id = replacement_items.replacement_shipment_id
+                JOIN aftersales_processing_rounds AS rounds ON rounds.id = replacements.round_id
+                WHERE rounds.case_id = NEW.case_id
+                  AND replacement_items.shipment_package_item_id = shipment_items.id
+              )
+            )
             AND (
               json_extract(exceptions.impact_json, '$.scope') = 'package'
               OR EXISTS (
                 SELECT 1
                 FROM json_each(exceptions.impact_json, '$.items') AS affected_item
                 WHERE json_extract(affected_item.value, '$.sourceItemId')
-                  = case_items.shipment_package_item_id
+                  = shipment_items.id
               )
+            )
+        )
+        AND json_array_length(NEW.affected_items_json) = (
+          SELECT COUNT(DISTINCT json_extract(item.value, '$.shipmentPackageItemId'))
+          FROM json_each(NEW.affected_items_json) AS item
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM json_each(NEW.affected_items_json) AS selected_item
+          WHERE json_type(selected_item.value, '$.quantity') <> 'integer'
+            OR json_extract(selected_item.value, '$.quantity') < 1
+            OR NOT EXISTS (
+              SELECT 1
+              FROM shipment_package_items AS shipment_items
+              WHERE shipment_items.id = json_extract(
+                  selected_item.value, '$.shipmentPackageItemId'
+                )
+                AND shipment_items.package_id = NEW.shipment_package_id
+                AND json_extract(selected_item.value, '$.quantity') = MIN(
+                  COALESCE(
+                    (
+                      SELECT case_items.quantity
+                      FROM aftersales_case_items AS case_items
+                      WHERE case_items.case_id = NEW.case_id
+                        AND case_items.shipment_package_item_id = shipment_items.id
+                    ),
+                    (
+                      SELECT replacement_items.quantity
+                      FROM aftersales_replacement_items AS replacement_items
+                      JOIN aftersales_replacement_shipments AS replacements
+                        ON replacements.id = replacement_items.replacement_shipment_id
+                      JOIN aftersales_processing_rounds AS rounds
+                        ON rounds.id = replacements.round_id
+                      WHERE rounds.case_id = NEW.case_id
+                        AND replacement_items.shipment_package_item_id = shipment_items.id
+                    )
+                  ),
+                  CASE json_extract(exceptions.impact_json, '$.scope')
+                    WHEN 'package' THEN COALESCE(
+                      (
+                        SELECT case_items.quantity
+                        FROM aftersales_case_items AS case_items
+                        WHERE case_items.case_id = NEW.case_id
+                          AND case_items.shipment_package_item_id = shipment_items.id
+                      ),
+                      (
+                        SELECT replacement_items.quantity
+                        FROM aftersales_replacement_items AS replacement_items
+                        JOIN aftersales_replacement_shipments AS replacements
+                          ON replacements.id = replacement_items.replacement_shipment_id
+                        JOIN aftersales_processing_rounds AS rounds
+                          ON rounds.id = replacements.round_id
+                        WHERE rounds.case_id = NEW.case_id
+                          AND replacement_items.shipment_package_item_id = shipment_items.id
+                      )
+                    )
+                    ELSE (
+                      SELECT json_extract(affected_item.value, '$.quantity')
+                      FROM json_each(exceptions.impact_json, '$.items') AS affected_item
+                      WHERE json_extract(affected_item.value, '$.sourceItemId') = shipment_items.id
+                    )
+                  END
+                )
             )
         )
     ) BEGIN
@@ -4326,14 +4435,46 @@ const VERSION_35_SCHEMA_STATEMENTS = {
     CREATE TRIGGER aftersales_outbound_exception_decisions_are_immutable_on_delete
     BEFORE DELETE ON aftersales_outbound_exception_decision_events
     BEGIN SELECT RAISE(ABORT, 'outbound exception decision events are immutable'); END`,
+  aftersales_outbound_exception_refund_links: `
+    CREATE TABLE aftersales_outbound_exception_refund_links (
+      financial_record_id TEXT NOT NULL
+        REFERENCES financial_records(id) ON DELETE RESTRICT,
+      decision_event_id TEXT NOT NULL
+        REFERENCES aftersales_outbound_exception_decision_events(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (financial_record_id, decision_event_id)
+    ) STRICT`,
+  aftersales_outbound_exception_refund_link_identity_is_valid_on_insert: `
+    CREATE TRIGGER aftersales_outbound_exception_refund_link_identity_is_valid_on_insert
+    BEFORE INSERT ON aftersales_outbound_exception_refund_links
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM financial_records AS financial
+      JOIN aftersales_outbound_exception_decision_events AS decision
+        ON decision.id = NEW.decision_event_id
+      WHERE financial.id = NEW.financial_record_id
+        AND financial.aftersales_case_id = decision.case_id
+        AND decision.after_decision IN ('refund_only', 'refund_and_replacement')
+    ) BEGIN
+      SELECT RAISE(ABORT, 'outbound exception refund link identity mismatch');
+    END`,
+  aftersales_outbound_exception_refund_links_are_immutable_on_update: `
+    CREATE TRIGGER aftersales_outbound_exception_refund_links_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_outbound_exception_refund_links
+    BEGIN SELECT RAISE(ABORT, 'outbound exception refund links are immutable'); END`,
+  aftersales_outbound_exception_refund_links_are_immutable_on_delete: `
+    CREATE TRIGGER aftersales_outbound_exception_refund_links_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_outbound_exception_refund_links
+    BEGIN SELECT RAISE(ABORT, 'outbound exception refund links are immutable'); END`,
   aftersales_outbound_exception_replacement_rounds: `
     CREATE TABLE aftersales_outbound_exception_replacement_rounds (
-      exception_id TEXT PRIMARY KEY
+      exception_id TEXT NOT NULL
         REFERENCES logistics_exception_matters(id) ON DELETE RESTRICT,
       case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
       round_id TEXT NOT NULL UNIQUE
         REFERENCES aftersales_processing_rounds(id) ON DELETE RESTRICT,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (exception_id, round_id)
     ) STRICT`,
   aftersales_outbound_exception_replacement_round_identity_is_valid_on_insert: `
     CREATE TRIGGER aftersales_outbound_exception_replacement_round_identity_is_valid_on_insert
@@ -4392,6 +4533,12 @@ const VERSION_35_SCHEMA_STATEMENTS = {
           WHERE interception.case_id = NEW.case_id
             AND interception.kind = 'succeeded'
         )
+        AND EXISTS (
+          SELECT 1
+          FROM aftersales_interception_packages AS interception_package
+          WHERE interception_package.case_id = NEW.case_id
+            AND interception_package.shipment_package_id = NEW.shipment_package_id
+        )
         AND json_array_length(NEW.items_json) = (
           SELECT COUNT(DISTINCT json_extract(selected_item.value, '$.shipmentPackageItemId'))
           FROM json_each(NEW.items_json) AS selected_item
@@ -4412,6 +4559,29 @@ const VERSION_35_SCHEMA_STATEMENTS = {
               AND json_extract(selected_item.value, '$.quantity') BETWEEN 1 AND case_items.quantity
           )
         )
+        AND json_array_length(NEW.items_json) = (
+          SELECT COUNT(*)
+          FROM aftersales_case_items AS case_items
+          JOIN shipment_package_items AS shipment_items
+            ON shipment_items.id = case_items.shipment_package_item_id
+          WHERE case_items.case_id = NEW.case_id
+            AND shipment_items.package_id = NEW.shipment_package_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM aftersales_case_items AS case_items
+          JOIN shipment_package_items AS shipment_items
+            ON shipment_items.id = case_items.shipment_package_item_id
+          WHERE case_items.case_id = NEW.case_id
+            AND shipment_items.package_id = NEW.shipment_package_id
+            AND NOT EXISTS (
+              SELECT 1
+              FROM json_each(NEW.items_json) AS selected_item
+              WHERE json_extract(selected_item.value, '$.shipmentPackageItemId')
+                  = case_items.shipment_package_item_id
+                AND json_extract(selected_item.value, '$.quantity') = case_items.quantity
+            )
+        )
     ) BEGIN
       SELECT RAISE(ABORT, 'intercepted return inspection identity mismatch');
     END`,
@@ -4423,6 +4593,28 @@ const VERSION_35_SCHEMA_STATEMENTS = {
     CREATE TRIGGER aftersales_intercepted_return_inspections_are_immutable_on_delete
     BEFORE DELETE ON aftersales_intercepted_return_inspection_events
     BEGIN SELECT RAISE(ABORT, 'intercepted return inspection events are immutable'); END`,
+} as const;
+
+const VERSION_36_SCHEMA_STATEMENTS = {
+  aftersales_refund_reopening_events: `
+    CREATE TABLE aftersales_refund_reopening_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      pending_item_id TEXT NOT NULL
+        REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+      previous_requested_amount_cents INTEGER NOT NULL CHECK (previous_requested_amount_cents > 0),
+      requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL
+    ) STRICT`,
+  aftersales_refund_reopening_events_are_immutable_on_update: `
+    CREATE TRIGGER aftersales_refund_reopening_events_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_refund_reopening_events
+    BEGIN SELECT RAISE(ABORT, 'refund reopening events are immutable'); END`,
+  aftersales_refund_reopening_events_are_immutable_on_delete: `
+    CREATE TRIGGER aftersales_refund_reopening_events_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_refund_reopening_events
+    BEGIN SELECT RAISE(ABORT, 'refund reopening events are immutable'); END`,
 } as const;
 
 function migrateToVersion35(database: DatabaseSync): void {
@@ -4445,6 +4637,18 @@ function migrateToVersion35(database: DatabaseSync): void {
   try {
     if (rows.length === 0) {
       database.exec(Object.values(VERSION_35_SCHEMA_STATEMENTS).join(';\n'));
+      database.exec(`
+        INSERT INTO aftersales_interception_packages (
+          case_id, shipment_package_id, created_at
+        )
+        SELECT interception.case_id, MIN(shipment_items.package_id), MIN(interception.created_at)
+        FROM aftersales_interception_events AS interception
+        JOIN aftersales_case_items AS case_items ON case_items.case_id = interception.case_id
+        JOIN shipment_package_items AS shipment_items
+          ON shipment_items.id = case_items.shipment_package_item_id
+        GROUP BY interception.case_id
+        HAVING COUNT(DISTINCT shipment_items.package_id) = 1;
+      `);
     }
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (35, ?)')
@@ -4454,6 +4658,220 @@ function migrateToVersion35(database: DatabaseSync): void {
     try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }
     throw error;
   }
+}
+
+function migrateToVersion36(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;');
+  try {
+    const decisionColumns = database.prepare(`
+      PRAGMA table_info(aftersales_outbound_exception_decision_events)
+    `).all() as Array<{ name: string }>;
+    const replacementRoundColumns = database.prepare(`
+      PRAGMA table_info(aftersales_outbound_exception_replacement_rounds)
+    `).all() as Array<{ name: string; pk: number }>;
+    database.exec(`
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_decision_identity_is_valid_on_insert;
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_decisions_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_decisions_are_immutable_on_delete;
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_replacement_round_identity_is_valid_on_insert;
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_replacement_rounds_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS aftersales_outbound_exception_replacement_rounds_are_immutable_on_delete;
+      DROP INDEX IF EXISTS aftersales_outbound_exception_decisions_by_case;
+    `);
+    if (replacementRoundColumns.find(({ name }) => name === 'round_id')?.pk !== 2) {
+      const replacementRoundTableSql = VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_replacement_rounds
+        .replace(
+          'CREATE TABLE aftersales_outbound_exception_replacement_rounds',
+          'CREATE TABLE aftersales_outbound_exception_replacement_rounds_v36',
+        );
+      database.exec(replacementRoundTableSql);
+      database.exec(`
+        INSERT INTO aftersales_outbound_exception_replacement_rounds_v36 (
+          exception_id, case_id, round_id, created_at
+        )
+        SELECT exception_id, case_id, round_id, created_at
+        FROM aftersales_outbound_exception_replacement_rounds;
+        DROP TABLE aftersales_outbound_exception_replacement_rounds;
+        ALTER TABLE aftersales_outbound_exception_replacement_rounds_v36
+          RENAME TO aftersales_outbound_exception_replacement_rounds;
+      `);
+    }
+    if (!decisionColumns.some(({ name }) => name === 'affected_items_json')) {
+      const legacyRows = database.prepare(`
+        SELECT * FROM aftersales_outbound_exception_decision_events ORDER BY sequence
+      `).all() as Array<Record<string, unknown>>;
+      const replacementTableSql = VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_decision_events
+        .replace(
+          'CREATE TABLE aftersales_outbound_exception_decision_events',
+          'CREATE TABLE aftersales_outbound_exception_decision_events_v36',
+        );
+      database.exec(replacementTableSql);
+      const insertDecision = database.prepare(`
+        INSERT INTO aftersales_outbound_exception_decision_events_v36 (
+          sequence, id, case_id, exception_id, shipment_package_id, kind,
+          before_decision, after_decision, affected_items_json,
+          occurred_at, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of legacyRows) {
+        const caseId = String(row.case_id);
+        const packageId = String(row.shipment_package_id);
+        const exceptionRow = database.prepare(`
+          SELECT impact_json FROM logistics_exception_matters WHERE id = ?
+        `).get(String(row.exception_id)) as { impact_json: string } | undefined;
+        const impact = exceptionRow
+          ? JSON.parse(exceptionRow.impact_json) as {
+            scope: 'package' | 'items';
+            items?: Array<{ sourceItemId: string; quantity: number }>;
+          }
+          : null;
+        const caseItems = database.prepare(`
+          SELECT case_items.shipment_package_item_id, case_items.quantity,
+                 shipment_items.source_title, shipment_items.source_spec
+          FROM aftersales_case_items AS case_items
+          JOIN shipment_package_items AS shipment_items
+            ON shipment_items.id = case_items.shipment_package_item_id
+          WHERE case_items.case_id = ? AND shipment_items.package_id = ?
+          ORDER BY case_items.shipment_package_item_id
+        `).all(caseId, packageId) as Array<{
+          shipment_package_item_id: string;
+          quantity: number;
+          source_title: string;
+          source_spec: string;
+        }>;
+        const affectedItems = caseItems.flatMap((item) => {
+          const affectedQuantity = impact?.scope === 'package'
+            ? item.quantity
+            : Math.min(
+              item.quantity,
+              impact?.items?.find(({ sourceItemId }) => (
+                sourceItemId === item.shipment_package_item_id
+              ))?.quantity ?? 0,
+            );
+          return affectedQuantity > 0 ? [{
+            shipmentPackageItemId: item.shipment_package_item_id,
+            sourceTitle: item.source_title,
+            sourceSpec: item.source_spec,
+            quantity: affectedQuantity,
+          }] : [];
+        });
+        if (affectedItems.length === 0) {
+          throw new Error('旧 v35 正向异常选择无法回填受影响商品');
+        }
+        insertDecision.run(
+          Number(row.sequence), String(row.id), caseId, String(row.exception_id), packageId,
+          String(row.kind), row.before_decision as string | null, String(row.after_decision),
+          JSON.stringify(affectedItems), String(row.occurred_at), String(row.reason),
+          String(row.created_at),
+        );
+      }
+      database.exec(`
+        DROP TABLE aftersales_outbound_exception_decision_events;
+        ALTER TABLE aftersales_outbound_exception_decision_events_v36
+          RENAME TO aftersales_outbound_exception_decision_events;
+      `);
+    }
+
+    database.exec([
+      VERSION_35_SCHEMA_STATEMENTS.aftersales_outbound_exception_decisions_by_case,
+      VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_decision_identity_is_valid_on_insert,
+      VERSION_35_SCHEMA_STATEMENTS.aftersales_outbound_exception_decisions_are_immutable_on_update,
+      VERSION_35_SCHEMA_STATEMENTS.aftersales_outbound_exception_decisions_are_immutable_on_delete,
+      VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_replacement_round_identity_is_valid_on_insert,
+      VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_replacement_rounds_are_immutable_on_update,
+      VERSION_35_SCHEMA_STATEMENTS
+        .aftersales_outbound_exception_replacement_rounds_are_immutable_on_delete,
+    ].join(';\n'));
+
+    createMissingSchemaObject(
+      database,
+      'aftersales_interception_packages',
+      VERSION_35_SCHEMA_STATEMENTS.aftersales_interception_packages,
+    );
+    database.exec(`
+      INSERT OR IGNORE INTO aftersales_interception_packages (
+        case_id, shipment_package_id, created_at
+      )
+      SELECT inspections.case_id, inspections.shipment_package_id, inspections.created_at
+      FROM aftersales_intercepted_return_inspection_events AS inspections;
+
+      INSERT OR IGNORE INTO aftersales_interception_packages (
+        case_id, shipment_package_id, created_at
+      )
+      SELECT interception.case_id, MIN(shipment_items.package_id), MIN(interception.created_at)
+      FROM aftersales_interception_events AS interception
+      JOIN aftersales_case_items AS case_items ON case_items.case_id = interception.case_id
+      JOIN shipment_package_items AS shipment_items
+        ON shipment_items.id = case_items.shipment_package_item_id
+      GROUP BY interception.case_id
+      HAVING COUNT(DISTINCT shipment_items.package_id) = 1;
+    `);
+    for (const name of [
+      'aftersales_interception_package_identity_is_valid_on_insert',
+      'aftersales_interception_packages_are_immutable_on_update',
+      'aftersales_interception_packages_are_immutable_on_delete',
+    ] as const) {
+      createMissingSchemaObject(database, name, VERSION_35_SCHEMA_STATEMENTS[name]);
+    }
+
+    for (const name of [
+      'aftersales_outbound_exception_refund_links',
+      'aftersales_outbound_exception_refund_link_identity_is_valid_on_insert',
+      'aftersales_outbound_exception_refund_links_are_immutable_on_update',
+      'aftersales_outbound_exception_refund_links_are_immutable_on_delete',
+    ] as const) {
+      createMissingSchemaObject(database, name, VERSION_35_SCHEMA_STATEMENTS[name]);
+    }
+    database.exec(`
+      INSERT OR IGNORE INTO aftersales_outbound_exception_refund_links (
+        financial_record_id, decision_event_id, created_at
+      )
+      SELECT financial.id, decisions.id, financial.created_at
+      FROM financial_records AS financial
+      JOIN aftersales_outbound_exception_decision_events AS decisions
+        ON decisions.case_id = financial.aftersales_case_id
+      WHERE financial.kind = 'aftersales_refund'
+        AND decisions.after_decision IN ('refund_only', 'refund_and_replacement')
+        AND decisions.sequence = (
+          SELECT MAX(latest.sequence)
+          FROM aftersales_outbound_exception_decision_events AS latest
+          WHERE latest.case_id = decisions.case_id
+            AND latest.exception_id = decisions.exception_id
+            AND julianday(latest.occurred_at) <= julianday(financial.occurred_at)
+        );
+    `);
+    for (const [name, sql] of Object.entries(VERSION_36_SCHEMA_STATEMENTS)) {
+      createMissingSchemaObject(database, name, sql);
+    }
+
+    database.exec(`
+      DROP TRIGGER IF EXISTS aftersales_intercepted_return_inspection_identity_is_valid_on_insert;
+    `);
+    database.exec(
+      VERSION_35_SCHEMA_STATEMENTS.aftersales_intercepted_return_inspection_identity_is_valid_on_insert,
+    );
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (36, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function createMissingSchemaObject(database: DatabaseSync, name: string, sql: string): void {
+  const exists = database.prepare(`
+    SELECT 1 FROM sqlite_schema WHERE name = ?
+  `).get(name);
+  if (!exists) database.exec(sql);
 }
 
 function version33SchemaState(database: DatabaseSync): 'absent' | 'complete' | 'partial' {

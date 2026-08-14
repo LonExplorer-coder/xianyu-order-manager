@@ -1693,6 +1693,7 @@ describe('订单管理工作台', () => {
         id: 'round-ui-replacement',
         roundNumber: 1,
         workflow: 'direct_replacement',
+        replacementRequired: true,
         sourceShipmentRecordId: record.id,
         items: [roundItem],
         returnRecordIds: [],
@@ -1734,7 +1735,7 @@ describe('订单管理工作台', () => {
     const history = await screen.findByRole('region', { name: '发货记录' });
     expect(within(history).getByRole('region', { name: '售后实物流转汇总' }))
       .toHaveTextContent('累计发出 1 件 · 累计退回 0 件 · 买家当前持有 1 件');
-    await user.click(within(history).getByRole('button', { name: '建立本轮补发' }));
+    await user.click(within(history).getByRole('button', { name: '建立第 1 轮补发' }));
     const dialog = screen.getByRole('dialog', { name: '建立本轮补发记录' });
     await user.type(within(dialog).getByRole('textbox', { name: '补发承运方' }), '顺丰速运');
     await user.type(within(dialog).getByRole('textbox', { name: '补发运单号' }), 'SF-UI-REPLACEMENT');
@@ -1744,6 +1745,7 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(progressAftersalesCase).toHaveBeenCalledWith({
       kind: 'create_replacement_shipment',
       caseId: aftersalesCase.id,
+      roundId: aftersalesCase.rounds[0].id,
       expectedRevision: 1,
       occurredAt: expect.any(String),
       reason: '缺件确认后补发',
@@ -1755,7 +1757,7 @@ describe('订单管理工作台', () => {
     }));
   });
 
-  it('补发记录沿用活动父售后概况且不提供另建售后或撤销入口', async () => {
+  it('补发记录沿用活动父售后概况且只开放未交寄作废入口', async () => {
     const user = userEvent.setup();
     const group = singleShipmentGroupProjection().groups[0];
     const archive = shipmentArchiveForGroup(group);
@@ -1811,6 +1813,7 @@ describe('订单管理工作台', () => {
         id: 'round-ui-parent',
         roundNumber: 1,
         workflow: 'direct_replacement',
+        replacementRequired: true,
         sourceShipmentRecordId: sourceRecord.id,
         items: [roundItem],
         returnRecordIds: [],
@@ -1853,9 +1856,9 @@ describe('订单管理工作台', () => {
     expect(replacementCard).toHaveTextContent('售后：等待补发 1');
     expect(within(replacementCard).queryByRole('button', { name: '建立售后处理单' }))
       .not.toBeInTheDocument();
-    expect(within(replacementCard).queryByRole('button', {
+    expect(within(replacementCard).getByRole('button', {
       name: /撤销未交寄包裹/u,
-    })).not.toBeInTheDocument();
+    })).toBeInTheDocument();
     expect(hasActiveParentAftersalesCase(replacementRecord, [{
       ...aftersalesCase,
       status: 'completed',
@@ -2034,6 +2037,7 @@ describe('订单管理工作台', () => {
         sourcePackages: [packageEvidence],
         handlingDirectionTimeline: [selectedDirection],
         interception: {
+          packageId: sourcePackage.id,
           status: 'requested',
           timeline: [{
             kind: 'requested',
@@ -2065,6 +2069,7 @@ describe('订单管理工作台', () => {
         sourcePackages: [packageEvidence],
         handlingDirectionTimeline: [selectedDirection],
         interception: {
+          packageId: sourcePackage.id,
           status: 'failed',
           timeline: [
             ...(created.coordination.interception?.timeline ?? []),
@@ -2138,11 +2143,13 @@ describe('订单管理工作台', () => {
     const createButton = within(createDialog).getByRole('button', { name: '确认建立' });
     expect(createButton).toBeDisabled();
     await user.selectOptions(within(createDialog).getByLabelText('售后处理方向'), 'intercept');
+    await user.selectOptions(within(createDialog).getByLabelText('本次拦截包裹'), sourcePackage.id);
     await user.click(createButton);
     await waitFor(() => expect(createAftersalesCase).toHaveBeenCalledWith({
       shipmentRecordId: record.id,
       workflow: 'return_refund',
       handlingDirection: 'intercept',
+      interceptionPackageId: sourcePackage.id,
       occurredAt: '2026-08-13T15:00:00+08:00',
       reason: created.reason,
       requestedRefundCents: 1_000,
@@ -2203,10 +2210,17 @@ describe('订单管理工作台', () => {
       AftersalesCase['coordination']['outboundException']
     > = {
       exceptionId: 'outbound-exception-ui-1',
+      sourceShipmentRecordId: record.id,
       packageId: sourcePackage.id,
       exceptionType: 'lost' as const,
       stage: 'confirmed' as const,
       affectedQuantity: 1,
+      affectedItems: [{
+        shipmentPackageItemId: sourceItem.id,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+      }],
       occurredAt: '2026-08-14T09:10:00+08:00',
       decision: null,
       availableDecisions: [

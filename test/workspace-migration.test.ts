@@ -9,12 +9,68 @@ import { createOrderTableProjectionPlan } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
 import {
+  downgradeVersion35ToOriginalSchema,
   removeVersion31ExtensionArtifacts,
   removeVersion33ExtensionArtifacts,
   removeVersion35ExtensionArtifacts,
 } from './version31-fixture';
 
 describe('数据库升级', () => {
+  it('将真实早期 v35 结构升级为完整正向异常协调事实', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v35-refund-reopening-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      downgradeVersion35ToOriginalSchema(database);
+      expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 35 });
+      expect(database.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE name LIKE 'aftersales_refund_reopening_events%'
+      `).all()).toEqual([]);
+      expect(database.prepare(`
+        SELECT name FROM pragma_table_info('aftersales_outbound_exception_decision_events')
+        WHERE name = 'affected_items_json'
+      `).get()).toBeUndefined();
+      expect(database.prepare(`
+        SELECT name FROM sqlite_schema WHERE name IN (
+          'aftersales_interception_packages',
+          'aftersales_outbound_exception_refund_links'
+        )
+      `).all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+
+    const migrated = Workspace.open(dataDirectory);
+    try {
+      expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 36 });
+      expect(migrated.database.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE name IN (
+          'aftersales_refund_reopening_events',
+          'aftersales_refund_reopening_events_are_immutable_on_update',
+          'aftersales_refund_reopening_events_are_immutable_on_delete'
+        )
+      `).all()).toHaveLength(3);
+      expect(migrated.database.prepare(`
+        SELECT name FROM pragma_table_info('aftersales_outbound_exception_decision_events')
+        WHERE name = 'affected_items_json'
+      `).get()).toEqual({ name: 'affected_items_json' });
+      expect(migrated.database.prepare(`
+        SELECT name FROM sqlite_schema WHERE name IN (
+          'aftersales_interception_packages',
+          'aftersales_outbound_exception_refund_links'
+        )
+      `).all()).toHaveLength(2);
+      expect(migrated.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+  });
+
   it('将真实 v34 数据库升级为不可变正向异常协调事实', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v34-outbound-coordination-'));
     const current = Workspace.open(dataDirectory);
@@ -31,16 +87,27 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(migrated.database.prepare(`
         SELECT name
         FROM sqlite_schema
         WHERE name IN (
+          'aftersales_interception_packages',
+          'aftersales_interception_package_identity_is_valid_on_insert',
+          'aftersales_interception_packages_are_immutable_on_update',
+          'aftersales_interception_packages_are_immutable_on_delete',
+          'aftersales_refund_reopening_events',
+          'aftersales_refund_reopening_events_are_immutable_on_update',
+          'aftersales_refund_reopening_events_are_immutable_on_delete',
           'aftersales_outbound_exception_decision_events',
           'aftersales_outbound_exception_decisions_by_case',
           'aftersales_outbound_exception_decision_identity_is_valid_on_insert',
           'aftersales_outbound_exception_decisions_are_immutable_on_update',
           'aftersales_outbound_exception_decisions_are_immutable_on_delete',
+          'aftersales_outbound_exception_refund_links',
+          'aftersales_outbound_exception_refund_link_identity_is_valid_on_insert',
+          'aftersales_outbound_exception_refund_links_are_immutable_on_update',
+          'aftersales_outbound_exception_refund_links_are_immutable_on_delete',
           'aftersales_outbound_exception_replacement_rounds',
           'aftersales_outbound_exception_replacement_round_identity_is_valid_on_insert',
           'aftersales_outbound_exception_replacement_rounds_are_immutable_on_update',
@@ -51,7 +118,7 @@ describe('数据库升级', () => {
           'aftersales_intercepted_return_inspections_are_immutable_on_update',
           'aftersales_intercepted_return_inspections_are_immutable_on_delete'
         )
-      `).all()).toHaveLength(14);
+      `).all()).toHaveLength(25);
       expect(migrated.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       migrated.close();
@@ -74,7 +141,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -269,6 +336,7 @@ describe('数据库升级', () => {
       { version: 33 },
       { version: 34 },
       { version: 35 },
+      { version: 36 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -730,6 +798,7 @@ describe('数据库升级', () => {
       { version: 33 },
       { version: 34 },
       { version: 35 },
+      { version: 36 },
     ]);
     expect(
       (
@@ -990,6 +1059,7 @@ describe('数据库升级', () => {
         { version: 33 },
         { version: 34 },
         { version: 35 },
+        { version: 36 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1188,7 +1258,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1302,7 +1372,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1322,7 +1392,7 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
@@ -1332,6 +1402,7 @@ describe('数据库升级', () => {
         { version: 33 },
         { version: 34 },
         { version: 35 },
+        { version: 36 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1365,7 +1436,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{

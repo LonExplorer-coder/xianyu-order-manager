@@ -2434,7 +2434,7 @@ describe('发货记录', () => {
       expectedRevision: shipmentPackage.revision,
       logisticsStatus: 'in_transit',
       carrierAcceptanceConfirmed: true,
-      occurredAt: '2026-08-14T09:00:00+08:00',
+      occurredAt: '2026-08-15T09:00:00+08:00',
       reason: '承运方已确认揽收',
     });
     const opened = application.recordShipmentPackageLogisticsException({
@@ -2444,7 +2444,7 @@ describe('发货记录', () => {
       exceptionType: 'lost',
       stage: 'pending_verification',
       impact: { scope: 'package' },
-      occurredAt: '2026-08-14T10:00:00+08:00',
+      occurredAt: '2026-08-15T10:00:00+08:00',
       reason: '运单长时间无新扫描，先待核实',
     });
     const exception = opened.record.packages[0].logisticsExceptions[0];
@@ -2467,7 +2467,7 @@ describe('发货记录', () => {
           resultRevision: 1,
           stage: 'pending_verification',
           reason: '运单长时间无新扫描,先待核实',
-          occurredAt: '2026-08-14T10:00:00+08:00',
+          occurredAt: '2026-08-15T10:00:00+08:00',
         }],
       }],
     });
@@ -2478,7 +2478,7 @@ describe('发货记录', () => {
       exceptionId: exception.id,
       expectedExceptionRevision: 1,
       stage: 'investigating',
-      occurredAt: '2026-08-14T10:30:00+08:00',
+      occurredAt: '2026-08-15T10:30:00+08:00',
       reason: '已向承运方发起查询',
     });
     const confirmed = application.progressShipmentPackageLogisticsException({
@@ -2488,7 +2488,7 @@ describe('发货记录', () => {
       expectedExceptionRevision: 2,
       stage: 'confirmed',
       carrierConfirmedLoss: true,
-      occurredAt: '2026-08-14T11:00:00+08:00',
+      occurredAt: '2026-08-15T11:00:00+08:00',
       reason: '承运方确认遗失',
     });
     const recovered = application.progressShipmentPackageLogisticsException({
@@ -2497,7 +2497,7 @@ describe('发货记录', () => {
       exceptionId: exception.id,
       expectedExceptionRevision: 3,
       stage: 'recovered',
-      occurredAt: '2026-08-14T12:00:00+08:00',
+      occurredAt: '2026-08-15T12:00:00+08:00',
       reason: '承运方在转运中心找回包裹',
     });
     const resolved = application.progressShipmentPackageLogisticsException({
@@ -2506,7 +2506,7 @@ describe('发货记录', () => {
       exceptionId: exception.id,
       expectedExceptionRevision: 4,
       stage: 'resolved',
-      occurredAt: '2026-08-14T13:00:00+08:00',
+      occurredAt: '2026-08-15T13:00:00+08:00',
       reason: '包裹已恢复正常派送',
     });
 
@@ -2724,7 +2724,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
@@ -6066,10 +6066,10 @@ describe('售后处理单', () => {
     expect(replacementPending).toMatchObject({
       status: 'waiting_replacement',
       returns: [],
-      refund: { status: 'cancelled', actualRecord: null },
+      refund: { status: 'pending', actualRecord: null },
       coordination: {
         handlingDirection: 'replacement',
-        currentTodo: '建立并跟进独立补发记录，原正向异常继续独立处理',
+        currentTodo: '安排第 2 轮补发',
         risk: '正向丢件影响 1 件商品',
         outboundException: { decision: 'replacement' },
       },
@@ -6077,15 +6077,24 @@ describe('售后处理单', () => {
         expect.objectContaining({ workflow: 'direct_replacement' }),
       ]),
     });
+    const refundCancelled = application.progressAftersalesCase({
+      kind: 'cancel_refund_request',
+      caseId: replacementPending.id,
+      expectedRevision: replacementPending.revision,
+      occurredAt: '2026-08-14T21:25:00+08:00',
+      reason: '买家确认只需补发，显式取消退款申请',
+    });
+    expect(refundCancelled.refund?.status).toBe('cancelled');
     expect(application.queryShipmentRecords()).toHaveLength(1);
-    const replacementRound = replacementPending.rounds.at(-1);
+    const replacementRound = refundCancelled.rounds.at(-1);
     if (!replacementRound || replacementRound.workflow !== 'direct_replacement') {
       throw new Error('测试前置缺少正向异常补发轮次');
     }
     const replacement = application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
-      caseId: replacementPending.id,
-      expectedRevision: replacementPending.revision,
+      caseId: refundCancelled.id,
+      roundId: replacementRound.id,
+      expectedRevision: refundCancelled.revision,
       occurredAt: '2026-08-14T21:30:00+08:00',
       reason: '按已确认丢失数量建立补发记录',
       packages: [{

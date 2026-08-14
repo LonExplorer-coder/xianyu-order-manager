@@ -208,12 +208,20 @@ export type AftersalesReturnRecord = {
 
 export type ProgressAftersalesCaseInput =
   | {
+    kind: 'cancel_refund_request';
+    caseId: string;
+    expectedRevision: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
     kind: 'decide_outbound_logistics_exception';
     caseId: string;
     expectedRevision: number;
     packageId: string;
     exceptionId: string;
     decision: AftersalesOutboundExceptionDecision;
+    requestedRefundCents?: number;
     occurredAt: string;
     reason: string;
   }
@@ -231,6 +239,7 @@ export type ProgressAftersalesCaseInput =
     kind: 'create_replacement_shipment';
     caseId: string;
     expectedRevision: number;
+    roundId: string;
     occurredAt: string;
     reason: string;
     packages: AftersalesReplacementPackageInput[];
@@ -239,6 +248,7 @@ export type ProgressAftersalesCaseInput =
     kind: 'start_next_round';
     caseId: string;
     expectedRevision: number;
+    sourceRoundId: string;
     sourceShipmentRecordId: string;
     workflow: AftersalesReplacementWorkflow;
     occurredAt: string;
@@ -258,6 +268,7 @@ export type ProgressAftersalesCaseInput =
     caseId: string;
     expectedRevision: number;
     handlingDirection: AftersalesHandlingDirection;
+    interceptionPackageId?: string;
     occurredAt: string;
     reason: string;
   }
@@ -417,6 +428,7 @@ export type CreateAftersalesCaseInput = {
   shipmentRecordId: string;
   workflow?: AftersalesWorkflow;
   handlingDirection?: AftersalesHandlingDirection;
+  interceptionPackageId?: string;
   occurredAt: string;
   reason: string;
   requestedRefundCents?: number;
@@ -513,6 +525,7 @@ export type AftersalesProcessingRound = {
   id: string;
   roundNumber: number;
   workflow: AftersalesReplacementWorkflow | 'legacy';
+  replacementRequired: boolean;
   sourceShipmentRecordId: string;
   items: AftersalesProcessingRoundItem[];
   returnRecordIds: string[];
@@ -577,6 +590,7 @@ export function normalizeCreateAftersalesCaseInput(
       'shipmentRecordId',
       'workflow',
       'handlingDirection',
+      'interceptionPackageId',
       'occurredAt',
       'reason',
       'requestedRefundCents',
@@ -605,6 +619,15 @@ export function normalizeCreateAftersalesCaseInput(
         handlingDirection: isAftersalesHandlingDirection(record.handlingDirection)
           ? record.handlingDirection
           : invalidHandlingDirection(),
+      }),
+    ...(record.interceptionPackageId === undefined
+      ? {}
+      : {
+        interceptionPackageId: boundedText(
+          record.interceptionPackageId,
+          200,
+          '拦截包裹标识无效',
+        ),
       }),
     occurredAt: dateTime(record.occurredAt, '售后发生时间无效'),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的问题原因'),
@@ -657,12 +680,25 @@ export function normalizeProgressAftersalesCaseInput(
     caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
     expectedRevision: revision(record.expectedRevision),
   };
+  if (record.kind === 'cancel_refund_request') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'occurredAt', 'reason'],
+      '取消退款申请参数',
+    );
+    return {
+      kind: 'cancel_refund_request',
+      ...common,
+      occurredAt: dateTime(record.occurredAt, '取消退款申请时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的取消退款原因'),
+    };
+  }
   if (record.kind === 'decide_outbound_logistics_exception') {
     rejectUnknownKeys(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'packageId', 'exceptionId',
-        'decision', 'occurredAt', 'reason',
+        'decision', 'requestedRefundCents', 'occurredAt', 'reason',
       ],
       '选择正向物流异常处理参数',
     );
@@ -675,6 +711,9 @@ export function normalizeProgressAftersalesCaseInput(
       packageId: boundedText(record.packageId, 200, '正向包裹标识无效'),
       exceptionId: boundedText(record.exceptionId, 200, '物流异常标识无效'),
       decision: record.decision,
+      ...(record.requestedRefundCents === undefined
+        ? {}
+        : { requestedRefundCents: money(record.requestedRefundCents, false) as number }),
       occurredAt: dateTime(record.occurredAt, '异常处理选择时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的异常处理选择原因'),
     };
@@ -704,7 +743,7 @@ export function normalizeProgressAftersalesCaseInput(
   if (record.kind === 'create_replacement_shipment') {
     rejectUnknownKeys(
       record,
-      ['kind', 'caseId', 'expectedRevision', 'occurredAt', 'reason', 'packages'],
+      ['kind', 'caseId', 'expectedRevision', 'roundId', 'occurredAt', 'reason', 'packages'],
       '建立补发记录参数',
     );
     const packages = arrayValue(record.packages, '请至少添加一个补发包裹');
@@ -714,6 +753,7 @@ export function normalizeProgressAftersalesCaseInput(
     return {
       kind: 'create_replacement_shipment',
       ...common,
+      roundId: boundedText(record.roundId, 200, '售后处理轮次标识无效'),
       occurredAt: dateTime(record.occurredAt, '补发时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的补发原因'),
       packages: packages.map((value) => {
@@ -750,7 +790,7 @@ export function normalizeProgressAftersalesCaseInput(
       record,
       [
         'kind', 'caseId', 'expectedRevision', 'sourceShipmentRecordId',
-        'workflow', 'occurredAt', 'reason', 'items',
+        'sourceRoundId', 'workflow', 'occurredAt', 'reason', 'items',
       ],
       '建立下一处理轮次参数',
     );
@@ -760,6 +800,7 @@ export function normalizeProgressAftersalesCaseInput(
     return {
       kind: 'start_next_round',
       ...common,
+      sourceRoundId: boundedText(record.sourceRoundId, 200, '来源处理轮次标识无效'),
       sourceShipmentRecordId: boundedText(
         record.sourceShipmentRecordId,
         200,
@@ -791,7 +832,10 @@ export function normalizeProgressAftersalesCaseInput(
   if (record.kind === 'change_handling_direction') {
     rejectUnknownKeys(
       record,
-      ['kind', 'caseId', 'expectedRevision', 'handlingDirection', 'occurredAt', 'reason'],
+      [
+        'kind', 'caseId', 'expectedRevision', 'handlingDirection',
+        'interceptionPackageId', 'occurredAt', 'reason',
+      ],
       '转换售后处理方向参数',
     );
     if (!isAftersalesHandlingDirection(record.handlingDirection)) {
@@ -801,6 +845,15 @@ export function normalizeProgressAftersalesCaseInput(
       kind: 'change_handling_direction',
       ...common,
       handlingDirection: record.handlingDirection,
+      ...(record.interceptionPackageId === undefined
+        ? {}
+        : {
+          interceptionPackageId: boundedText(
+            record.interceptionPackageId,
+            200,
+            '拦截包裹标识无效',
+          ),
+        }),
       occurredAt: dateTime(record.occurredAt, '处理方向转换时间无效'),
       reason: boundedText(record.reason, 500, '请填写 1 至 500 字的处理方向转换原因'),
     };

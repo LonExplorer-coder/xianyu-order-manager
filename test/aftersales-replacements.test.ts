@@ -110,6 +110,147 @@ afterEach(() => {
 });
 
 describe('换货、直接补发与多轮售后', () => {
+  it('未交寄补发可作废并保留历史后建立新的待补发轮次', async () => {
+    const { application } = await createApplication();
+    const original = confirmOriginalShipment(application);
+    const created = application.createAftersalesCase({
+      shipmentRecordId: original.record.id,
+      workflow: 'direct_replacement',
+      occurredAt: '2026-08-14T10:10:00+08:00',
+      reason: '测试未交寄补发作废',
+      items: [{
+        shipmentPackageItemId: original.record.packages[0].items[0].id,
+        quantity: 1,
+      }],
+    });
+    const firstAttempt = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: created.id,
+      roundId: created.rounds[0].id,
+      expectedRevision: created.revision,
+      occurredAt: '2026-08-14T10:20:00+08:00',
+      reason: '第一次补发运单填错',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-WRONG-REPLACEMENT',
+        items: [{ roundItemId: created.rounds[0].items[0].id, quantity: 1 }],
+      }],
+    });
+    const firstRecord = firstAttempt.rounds[0].replacementShipment;
+    if (!firstRecord) throw new Error('测试前置补发记录不存在');
+    application.cancelShipmentPackages({
+      recordId: firstRecord.id,
+      packageIds: [firstRecord.packages[0].id],
+      reason: '运单填错且未交寄，显式作废',
+    });
+    const afterCancellation = application.queryAftersalesCases({
+      shipmentRecordId: original.record.id,
+    })[0];
+    expect(afterCancellation.rounds[0]).toMatchObject({
+      replacementRequired: false,
+      replacementShipment: { status: 'voided' },
+    });
+    const retryRound = afterCancellation.rounds.find((round) => (
+      round.id !== created.rounds[0].id && round.replacementRequired
+    ));
+    expect(retryRound).toMatchObject({
+      roundNumber: 2,
+      workflow: 'direct_replacement',
+      replacementShipment: null,
+    });
+    if (!retryRound) throw new Error('作废后待重试轮次不存在');
+    const retried = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: afterCancellation.id,
+      roundId: retryRound.id,
+      expectedRevision: afterCancellation.revision,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '重新建立正确补发记录',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-CORRECT-REPLACEMENT',
+        items: retryRound.items.map((item) => ({
+          roundItemId: item.id,
+          quantity: item.quantity,
+        })),
+      }],
+    });
+    expect(retried.rounds.find(({ id }) => id === retryRound.id)?.replacementShipment)
+      .toMatchObject({ packages: [{ trackingNumber: 'SF-CORRECT-REPLACEMENT' }] });
+  });
+
+  it('同轮补发分成两个包裹逐次作废时为每个包裹保留精确重试义务', async () => {
+    const { application } = await createApplication();
+    const original = confirmOriginalShipment(application);
+    const created = application.createAftersalesCase({
+      shipmentRecordId: original.record.id,
+      workflow: 'direct_replacement',
+      occurredAt: '2026-08-14T10:10:00+08:00',
+      reason: '两件商品需要分包补发',
+      items: [{
+        shipmentPackageItemId: original.record.packages[0].items[0].id,
+        quantity: 2,
+      }],
+    });
+    const attempted = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: created.id,
+      roundId: created.rounds[0].id,
+      expectedRevision: created.revision,
+      occurredAt: '2026-08-14T10:20:00+08:00',
+      reason: '两个包裹分别登记',
+      packages: [
+        {
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-SPLIT-REPLACEMENT-01',
+          items: [{ roundItemId: created.rounds[0].items[0].id, quantity: 1 }],
+        },
+        {
+          shippingCarrier: '顺丰速运',
+          trackingNumber: 'SF-SPLIT-REPLACEMENT-02',
+          items: [{ roundItemId: created.rounds[0].items[0].id, quantity: 1 }],
+        },
+      ],
+    });
+    const replacement = attempted.rounds[0].replacementShipment;
+    if (!replacement) throw new Error('测试前置补发记录不存在');
+
+    application.cancelShipmentPackages({
+      recordId: replacement.id,
+      packageIds: [replacement.packages[0].id],
+      reason: '第一个包裹未交寄作废',
+    });
+    const afterFirstCancellation = application.queryAftersalesCases({
+      shipmentRecordId: original.record.id,
+    })[0];
+    expect(afterFirstCancellation.rounds.filter((round) => (
+      round.id !== created.rounds[0].id && round.replacementRequired
+    ))).toMatchObject([{
+      items: [{ quantity: 1 }],
+      replacementShipment: null,
+    }]);
+
+    application.cancelShipmentPackages({
+      recordId: replacement.id,
+      packageIds: [replacement.packages[1].id],
+      reason: '第二个包裹未交寄作废',
+    });
+    const afterBothCancellations = application.queryAftersalesCases({
+      shipmentRecordId: original.record.id,
+    })[0];
+    expect(afterBothCancellations.rounds[0]).toMatchObject({
+      replacementRequired: false,
+      replacementShipment: { status: 'voided' },
+    });
+    const retryRounds = afterBothCancellations.rounds.filter((round) => (
+      round.id !== created.rounds[0].id && round.replacementRequired
+    ));
+    expect(retryRounds).toHaveLength(2);
+    expect(retryRounds.map((round) => round.items[0].quantity)).toEqual([1, 1]);
+    expect(retryRounds.flatMap((round) => round.items)
+      .reduce((quantity, item) => quantity + item.quantity, 0)).toBe(2);
+  });
+
   it('换货收到并检查后建立独立补发记录，签收后可完成且不覆盖原发货', async () => {
     const { application } = await createApplication();
     const original = confirmOriginalShipment(application);
@@ -177,6 +318,7 @@ describe('换货、直接补发与多轮售后', () => {
     expect(() => application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
       caseId: inspected.id,
+      roundId: inspected.rounds[0].id,
       expectedRevision: inspected.revision,
       occurredAt: '2026-08-14T10:30:00+08:00',
       reason: '补发时间不能早于退货检查',
@@ -189,6 +331,7 @@ describe('换货、直接补发与多轮售后', () => {
     expect(() => application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
       caseId: inspected.id,
+      roundId: inspected.rounds[0].id,
       expectedRevision: inspected.revision,
       occurredAt: '2026-08-14T02:35:00.000Z',
       reason: '不同时区格式仍需遵守检查时间',
@@ -203,6 +346,7 @@ describe('换货、直接补发与多轮售后', () => {
     const replacement = application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
       caseId: inspected.id,
+      roundId: inspected.rounds[0].id,
       expectedRevision: inspected.revision,
       occurredAt: '2026-08-14T10:50:00+08:00',
       reason: '检查完成后发出换货商品',
@@ -300,6 +444,7 @@ describe('换货、直接补发与多轮售后', () => {
     const firstReplacement = application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
       caseId: created.id,
+      roundId: created.rounds[0].id,
       expectedRevision: created.revision,
       occurredAt: '2026-08-14T12:10:00+08:00',
       reason: '第一次直接补发',
@@ -315,6 +460,7 @@ describe('换货、直接补发与多轮售后', () => {
       kind: 'start_next_round',
       caseId: firstReplacement.id,
       expectedRevision: firstReplacement.revision,
+      sourceRoundId: firstReplacement.rounds[0].id,
       sourceShipmentRecordId: firstReplacementRecord?.id,
       workflow: 'direct_replacement',
       occurredAt: '2026-08-14T12:05:00+08:00',
@@ -325,6 +471,7 @@ describe('换货、直接补发与多轮售后', () => {
       kind: 'start_next_round',
       caseId: firstReplacement.id,
       expectedRevision: firstReplacement.revision,
+      sourceRoundId: firstReplacement.rounds[0].id,
       sourceShipmentRecordId: firstReplacementRecord?.id,
       workflow: 'exchange',
       occurredAt: '2026-08-14T12:15:00+08:00',
@@ -339,12 +486,6 @@ describe('换货、直接补发与多轮售后', () => {
       requestedRefundCents: 500,
       items: [{ shipmentPackageItemId: firstReplacementItem?.id, quantity: 1 }],
     })).toThrow('补发商品仍属于未完成的售后处理，请在原处理单新增轮次');
-    expect(() => application.cancelShipmentPackages({
-      recordId: firstReplacementRecord?.id,
-      packageIds: [firstReplacementRecord?.packages[0].id],
-      reason: '补发已形成售后事实，不能撤销',
-    })).toThrow('包裹已经产生售后处理证据，不能按未交寄撤销');
-
     const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
     const failureGate = new DatabaseSync(databasePath);
     try {
@@ -391,6 +532,7 @@ describe('换货、直接补发与多轮售后', () => {
       kind: 'start_next_round',
       caseId: firstReplacement.id,
       expectedRevision: afterDelivery?.revision,
+      sourceRoundId: firstReplacement.rounds[0].id,
       sourceShipmentRecordId: deliveredReplacement.id,
       workflow: 'exchange',
       occurredAt: '2026-08-14T12:17:30+08:00',
@@ -404,6 +546,7 @@ describe('换货、直接补发与多轮售后', () => {
       kind: 'start_next_round',
       caseId: firstReplacement.id,
       expectedRevision: afterDelivery?.revision,
+      sourceRoundId: firstReplacement.rounds[0].id,
       sourceShipmentRecordId: deliveredReplacement.id,
       workflow: 'exchange',
       occurredAt: '2026-08-14T12:20:00+08:00',
@@ -555,7 +698,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 35 });
+        .toEqual({ version: 36 });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);
@@ -584,6 +727,7 @@ describe('换货、直接补发与多轮售后', () => {
     const progressed = application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
       caseId: created.id,
+      roundId: created.rounds[0].id,
       expectedRevision: created.revision,
       occurredAt: '2026-08-14T14:10:00+08:00',
       reason: '建立约束验证补发',

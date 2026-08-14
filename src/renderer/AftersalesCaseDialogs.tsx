@@ -60,6 +60,7 @@ export function CreateAftersalesCaseDialog({
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [workflow, setWorkflow] = useState<AftersalesWorkflow>('general');
   const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection | ''>('');
+  const [interceptionPackageId, setInterceptionPackageId] = useState('');
   const [requestedRefundYuan, setRequestedRefundYuan] = useState('');
   const [reason, setReason] = useState('');
   const [quantities, setQuantities] = useState<Record<string, number>>(
@@ -85,7 +86,8 @@ export function CreateAftersalesCaseDialog({
       || requestedRefundCents !== null) &&
     (workflow !== 'return_refund'
       || (effectiveHandlingDirection !== ''
-        && availableDirections.includes(effectiveHandlingDirection))),
+        && availableDirections.includes(effectiveHandlingDirection)
+        && (effectiveHandlingDirection !== 'intercept' || Boolean(interceptionPackageId)))),
   );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -107,7 +109,12 @@ export function CreateAftersalesCaseDialog({
           : {
             requestedRefundCents: requestedRefundCents as number,
             ...(workflow === 'return_refund'
-              ? { handlingDirection: effectiveHandlingDirection as AftersalesHandlingDirection }
+              ? {
+                handlingDirection: effectiveHandlingDirection as AftersalesHandlingDirection,
+                ...(effectiveHandlingDirection === 'intercept'
+                  ? { interceptionPackageId }
+                  : {}),
+              }
               : {}),
           }),
         items: selectedItems,
@@ -237,6 +244,24 @@ export function CreateAftersalesCaseDialog({
               </select>
               <small>{physicalControlCopy(physicalControl)}</small>
             </label>
+            {effectiveHandlingDirection === 'intercept' && (
+              <label>
+                <span>本次拦截包裹</span>
+                <select
+                  aria-label="本次拦截包裹"
+                  value={interceptionPackageId}
+                  disabled={saving}
+                  onChange={(event) => setInterceptionPackageId(event.target.value)}
+                >
+                  <option value="">请选择要拦截的包裹</option>
+                  {sourcePackages.map((sourcePackage) => (
+                    <option key={sourcePackage.packageId} value={sourcePackage.packageId}>
+                      {sourcePackage.shippingCarrier} {sourcePackage.trackingNumber}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </fieldset>
         )}
         <DialogFooter saving={saving} canSubmit={canSubmit} error={error} onClose={onClose} action="create" />
@@ -356,25 +381,33 @@ export function ProgressAftersalesCaseDialog({
   aftersalesCase,
   kind,
   returnRecordId,
+  outboundExceptionId,
+  roundId,
   onProgress,
   onClose,
 }: {
   aftersalesCase: AftersalesCase;
   kind: ProgressAftersalesCaseInput['kind'];
   returnRecordId?: string;
+  outboundExceptionId?: string;
+  roundId?: string;
   onProgress: (input: ProgressAftersalesCaseInput) => Promise<void>;
   onClose: () => void;
 }) {
   const headingId = useId();
   const descriptionId = useId();
   const dialogRef = useDialogFocus();
-  const activeRound = aftersalesCase.rounds?.at(-1);
+  const activeRound = aftersalesCase.rounds.find(({ id }) => id === roundId)
+    ?? aftersalesCase.rounds?.at(-1);
   const returnRecord = aftersalesCase.returns.find(({ id }) => id === returnRecordId)
     ?? aftersalesCase.returns.find(({ id }) => activeRound?.returnRecordIds.includes(id))
     ?? aftersalesCase.returns.at(-1);
   const nextRoundSourceItems = activeRound?.replacementShipment?.packages
     .filter(({ status }) => status === 'active')
     .flatMap(({ items }) => items) ?? [];
+  const outboundException = aftersalesCase.coordination.outboundExceptionHistory.find(
+    ({ exceptionId }) => exceptionId === outboundExceptionId,
+  ) ?? aftersalesCase.coordination.outboundException;
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [reason, setReason] = useState('');
   const [amountYuan, setAmountYuan] = useState('');
@@ -414,7 +447,7 @@ export function ProgressAftersalesCaseDialog({
   >(aftersalesCase.coordination.returnException?.decision ?? 'wait_investigation');
   const [outboundExceptionDecision, setOutboundExceptionDecision] = useState<
     AftersalesOutboundExceptionDecision
-  >(aftersalesCase.coordination.outboundException?.decision ?? 'wait_investigation');
+  >(outboundException?.decision ?? 'wait_investigation');
   const activeExceptionType = kind === 'progress_return_logistics_exception'
     ? returnRecord?.currentException?.exceptionType
     : exceptionType;
@@ -431,6 +464,11 @@ export function ProgressAftersalesCaseDialog({
   ));
   const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection>(
     conversionDirections[0] ?? 'waiting',
+  );
+  const [interceptionPackageId, setInterceptionPackageId] = useState(
+    aftersalesCase.coordination.interception?.packageId
+      ?? aftersalesCase.coordination.sourcePackages[0]?.packageId
+      ?? '',
   );
   const [inspectionResult, setInspectionResult] = useState<ReturnInspectionResult>('resellable');
   const [inspectionResults, setInspectionResults] = useState<Record<string, ReturnInspectionResult>>(
@@ -454,19 +492,19 @@ export function ProgressAftersalesCaseDialog({
   const [differenceNote, setDifferenceNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const outboundExceptionPackage = aftersalesCase.coordination.sourcePackages.find(({ packageId }) => (
-    packageId === aftersalesCase.coordination.outboundException?.packageId
-  ));
   const interceptedReturnPackage = aftersalesCase.coordination.sourcePackages.find(({ packageId }) => (
-    packageId === aftersalesCase.coordination.outboundException?.packageId
-  )) ?? aftersalesCase.coordination.sourcePackages.find(({ logisticsStatus: status }) => (
-    status === 'returned'
+    packageId === aftersalesCase.coordination.interception?.packageId
   ));
   const amountCents = yuanToCents(amountYuan);
+  const outboundDecisionNeedsNewRefund = kind === 'decide_outbound_logistics_exception'
+    && (outboundExceptionDecision === 'refund_only'
+      || outboundExceptionDecision === 'refund_and_replacement')
+    && (aftersalesCase.refund === null || aftersalesCase.refund.status === 'cancelled');
   const needsAmount = kind === 'confirm_refund'
     || kind === 'open_carrier_claim'
     || kind === 'confirm_carrier_compensation'
-    || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved');
+    || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved')
+    || outboundDecisionNeedsNewRefund;
   const needsLogisticsIdentity = kind === 'register_return'
     || kind === 'correct_return_logistics'
     || kind === 'create_replacement_shipment';
@@ -495,9 +533,12 @@ export function ProgressAftersalesCaseDialog({
       && logisticsStatus === 'awaiting_carrier'
       && (carrierAcceptanceConfirmed || returnRecord?.carrierAcceptedAt != null))
     && (kind !== 'decide_outbound_logistics_exception'
-      || (aftersalesCase.coordination.outboundException && outboundExceptionPackage))
+      || Boolean(outboundException))
     && (kind !== 'inspect_intercepted_return'
-      || (interceptedReturnPackage && interceptedReturnPackage.items.length > 0)),
+      || (interceptedReturnPackage && interceptedReturnPackage.items.length > 0))
+    && (kind !== 'change_handling_direction'
+      || handlingDirection !== 'intercept'
+      || Boolean(interceptionPackageId)),
   );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -516,12 +557,22 @@ export function ProgressAftersalesCaseDialog({
       const targetId = returnRecord?.id as string;
       let input: ProgressAftersalesCaseInput;
       switch (kind) {
+        case 'cancel_refund_request':
+          input = {
+            kind, ...common,
+            occurredAt: normalizedOccurredAt as string,
+            reason,
+          };
+          break;
         case 'decide_outbound_logistics_exception':
           input = {
             kind, ...common,
-            packageId: outboundExceptionPackage?.packageId as string,
-            exceptionId: aftersalesCase.coordination.outboundException?.exceptionId as string,
+            packageId: outboundException?.packageId as string,
+            exceptionId: outboundException?.exceptionId as string,
             decision: outboundExceptionDecision,
+            ...(outboundDecisionNeedsNewRefund
+              ? { requestedRefundCents: amountCents as number }
+              : {}),
             occurredAt: normalizedOccurredAt as string,
             reason,
           };
@@ -542,6 +593,7 @@ export function ProgressAftersalesCaseDialog({
         case 'create_replacement_shipment':
           input = {
             kind, ...common,
+            roundId: activeRound?.id as string,
             occurredAt: normalizedOccurredAt as string,
             reason,
             packages: [{
@@ -557,6 +609,7 @@ export function ProgressAftersalesCaseDialog({
         case 'start_next_round':
           input = {
             kind, ...common,
+            sourceRoundId: activeRound?.id as string,
             sourceShipmentRecordId: activeRound?.replacementShipment?.id as string,
             workflow: nextRoundWorkflow,
             occurredAt: normalizedOccurredAt as string,
@@ -576,6 +629,7 @@ export function ProgressAftersalesCaseDialog({
         case 'change_handling_direction':
           input = {
             kind, ...common, handlingDirection,
+            ...(handlingDirection === 'intercept' ? { interceptionPackageId } : {}),
             occurredAt: normalizedOccurredAt as string, reason,
           };
           break;
@@ -750,6 +804,7 @@ export function ProgressAftersalesCaseDialog({
           </label>
         )}
         {kind === 'change_handling_direction' && (
+          <>
           <label>
             <span>新售后处理方向</span>
             <select
@@ -767,6 +822,24 @@ export function ProgressAftersalesCaseDialog({
               ))}
             </select>
           </label>
+          {handlingDirection === 'intercept' && (
+            <label>
+              <span>本次拦截包裹</span>
+              <select
+                aria-label="本次拦截包裹"
+                value={interceptionPackageId}
+                disabled={saving}
+                onChange={(event) => setInterceptionPackageId(event.target.value)}
+              >
+                {aftersalesCase.coordination.sourcePackages.map((sourcePackage) => (
+                  <option key={sourcePackage.packageId} value={sourcePackage.packageId}>
+                    {sourcePackage.shippingCarrier} {sourcePackage.trackingNumber}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          </>
         )}
         {(kind === 'register_return' || kind === 'correct_return_logistics'
           || kind === 'create_replacement_shipment') && (
@@ -940,19 +1013,33 @@ export function ProgressAftersalesCaseDialog({
                   event.target.value as AftersalesOutboundExceptionDecision,
                 )}
               >
-                <option value="wait_investigation">继续等待调查</option>
-                <option value="recover_or_redeliver">追回或重新派送</option>
-                <option value="refund_only">仅退款</option>
-                <option value="replacement">直接补发</option>
-                <option value="refund_and_replacement">退款并补发</option>
+                {outboundException?.availableDecisions.map((decision) => (
+                  <option key={decision} value={decision}>
+                    {outboundExceptionDecisionOptionLabel(decision)}
+                  </option>
+                ))}
               </select>
             </label>
-            {outboundExceptionPackage && (
+            {outboundException && (
               <p>
-                影响范围：{outboundExceptionPackage.items.map((item) => (
+                影响范围：{outboundException.affectedItems.map((item) => (
                   `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} × ${item.quantity}`
                 )).join('；')}
               </p>
+            )}
+            {outboundDecisionNeedsNewRefund && (
+              <label>
+                <span>本次申请退款金额（元）</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  aria-label="本次申请退款金额"
+                  value={amountYuan}
+                  disabled={saving}
+                  onChange={(event) => setAmountYuan(event.target.value)}
+                />
+              </label>
             )}
           </>
         )}
@@ -1394,6 +1481,13 @@ function normalizeActionDateTime(value: string): string {
 }
 
 function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
+  if (kind === 'cancel_refund_request') return {
+    title: '取消本次退款申请',
+    description: '退款与补发分开记录；只在已明确改为直接补发时显式取消退款。',
+    timeLabel: '取消时间',
+    reasonLabel: '取消原因',
+    confirmLabel: '确认取消退款',
+  };
   if (kind === 'decide_outbound_logistics_exception') return {
     title: '选择正向异常处理',
     description: '买家侧处理与承运调查、索赔分别推进；补发将建立新的处理轮次和发货记录。',
@@ -1534,6 +1628,16 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     reasonLabel: '取消原因',
     confirmLabel: '确认取消',
   };
+}
+
+function outboundExceptionDecisionOptionLabel(
+  decision: AftersalesOutboundExceptionDecision,
+): string {
+  if (decision === 'wait_investigation') return '继续等待调查';
+  if (decision === 'recover_or_redeliver') return '追回或重新派送';
+  if (decision === 'refund_only') return '仅退款';
+  if (decision === 'replacement') return '直接补发';
+  return '退款并补发';
 }
 
 const RETURN_LOGISTICS_STATUS_OPTIONS: ReadonlyArray<{
