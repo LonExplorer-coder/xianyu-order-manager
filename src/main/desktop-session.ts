@@ -407,7 +407,9 @@ export class DesktopSession {
     productId: string,
     input: UpdateStandardProductInput,
   ): StandardProduct {
-    return this.requireApplication().updateStandardProduct(productId, input);
+    const product = this.requireApplication().updateStandardProduct(productId, input);
+    this.refreshOrders();
+    return product;
   }
 
   public previewDraftProductStandardizations(

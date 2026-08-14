@@ -51,6 +51,67 @@ afterEach(() => {
 });
 
 describe('桌面启动状态', () => {
+  it('修改标准商品后立即通知已关联订单刷新展示', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-product-refresh-'));
+    const sourcePath = join(testRoot, '标准商品订单.png');
+    await writeFile(sourcePath, 'desktop-product-refresh');
+    const recognition: RecognitionResult = {
+      ...unusedRecognition,
+      orderNumber: 'XY-DESKTOP-PRODUCT-REFRESH',
+      buyerNickname: '商品刷新买家',
+      recipient: '商品刷新收件人',
+      phone: '13800000001',
+      phoneNormalized: '13800000001',
+      addressOriginal: '广东省深圳市南山区刷新路1号',
+      addressNormalized: '广东省深圳市南山区刷新路1号',
+      province: '广东省',
+      city: '深圳市',
+      district: '南山区',
+      amountCents: 800,
+      productTotalCents: 800,
+      items: [{
+        sourceTitle: '白模娃鞋',
+        sourceSpec: '05M',
+        unitPriceCents: 800,
+        quantity: 1,
+        quantityInferred: false,
+      }],
+    };
+    const session = new DesktopSession(
+      new Preferences(join(testRoot, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(testRoot, '订单数据'));
+    const product = session.createStandardProduct({
+      sku: 'SKU-DESKTOP-REFRESH',
+      name: '白模娃鞋',
+      specification: '05M',
+    });
+    await session.submitSourceScreenshots([sourcePath]);
+    await session.waitForCurrentRecognitionWork();
+    const draftId = session.listRecognitionBatches()[0].items[0].draftId;
+    if (!draftId) throw new Error('测试要求识别草稿');
+    const order = session.confirmDraft(session.getDraft(draftId)).order;
+    expect(order.items[0].standardProduct?.name).toBe('白模娃鞋');
+    const notifications: Array<ReturnType<DesktopSession['listOrders']>> = [];
+    session.onOrdersChanged((orders) => notifications.push(orders));
+
+    session.updateStandardProduct(product.id, {
+      sku: product.sku,
+      name: '统一白模娃鞋',
+      specification: product.specification,
+      expectedRevision: product.revision,
+    });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0][0].items[0].standardProduct).toMatchObject({
+      id: product.id,
+      name: '统一白模娃鞋',
+    });
+  });
+
   it('包裹物流状态同步订单后立即通知桌面订单列表刷新', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-desktop-shipment-sync-'));
     const sourcePath = join(testRoot, '待发货订单.png');
