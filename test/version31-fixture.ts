@@ -113,12 +113,29 @@ export function removeVersion35ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 export function removeVersion36ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion38ExtensionArtifacts(database);
   database.exec(`
     PRAGMA foreign_keys = OFF;
     DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_update;
     DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_delete;
     DROP TABLE IF EXISTS aftersales_refund_reopening_events;
     DELETE FROM schema_migrations WHERE version IN (36, 37);
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+export function removeVersion38ExtensionArtifacts(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TRIGGER IF EXISTS aftersales_case_workflow_template_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_case_workflow_template_events_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS aftersales_workflow_template_versions_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_workflow_template_versions_are_immutable_on_delete;
+    DROP INDEX IF EXISTS aftersales_case_workflow_template_events_by_case;
+    DROP TABLE IF EXISTS aftersales_case_workflow_template_events;
+    DROP TABLE IF EXISTS aftersales_workflow_template_versions;
+    DROP TABLE IF EXISTS aftersales_workflow_templates;
+    DELETE FROM schema_migrations WHERE version = 38;
     PRAGMA foreign_keys = ON;
   `);
 }

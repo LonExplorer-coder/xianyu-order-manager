@@ -118,7 +118,7 @@ describe('换货、直接补发与多轮售后', () => {
     const original = confirmOriginalShipment(application);
     const created = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-14T10:10:00+08:00',
       reason: '测试未交寄补发作废',
       items: [{
@@ -187,7 +187,7 @@ describe('换货、直接补发与多轮售后', () => {
     const original = confirmOriginalShipment(application);
     const created = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-14T10:10:00+08:00',
       reason: '两件商品需要分包补发',
       items: [{
@@ -260,7 +260,7 @@ describe('换货、直接补发与多轮售后', () => {
     const sourceItem = original.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
-      workflow: 'exchange',
+      workflowTemplateId: 'system-aftersales-exchange',
       occurredAt: '2026-08-14T10:10:00+08:00',
       reason: '买家收到一件破损商品，需要换货',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -415,7 +415,7 @@ describe('换货、直接补发与多轮售后', () => {
     const replacementItem = completed.rounds[0].replacementShipment?.packages[0].items[0];
     const independent = application.createAftersalesCase({
       shipmentRecordId: replacementRecord?.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-15T10:00:00+08:00',
       reason: '售后完成后补发商品出现新的独立问题',
       items: [{ shipmentPackageItemId: replacementItem?.id, quantity: 1 }],
@@ -433,7 +433,7 @@ describe('换货、直接补发与多轮售后', () => {
     const sourceItem = original.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-14T12:00:00+08:00',
       reason: '缺少配件，直接补发一件',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -483,7 +483,7 @@ describe('换货、直接补发与多轮售后', () => {
     })).toThrow('补发商品尚未签收，不能建立买家退回的换货轮次');
     expect(() => application.createAftersalesCase({
       shipmentRecordId: firstReplacementRecord?.id,
-      workflow: 'refund_only',
+      workflowTemplateId: 'system-aftersales-refund-only',
       occurredAt: '2026-08-14T12:16:00+08:00',
       reason: '活动父售后期间不能另建独立售后',
       requestedRefundCents: 500,
@@ -615,6 +615,7 @@ describe('换货、直接补发与多轮售后', () => {
     const original = confirmOriginalShipment(application);
     const existing = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-14T13:00:00+08:00',
       reason: 'v33 已存在的一般售后',
       items: [{ shipmentPackageItemId: original.record.packages[0].items[0].id, quantity: 1 }],
@@ -701,7 +702,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 37 });
+        .toEqual({ version: 38 });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);
@@ -719,7 +720,7 @@ describe('换货、直接补发与多轮售后', () => {
     const original = confirmOriginalShipment(application);
     const created = application.createAftersalesCase({
       shipmentRecordId: original.record.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-14T14:00:00+08:00',
       reason: '验证数据库身份约束',
       items: [{

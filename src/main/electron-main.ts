@@ -245,8 +245,32 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('aftersales-cases:query', (_event, input: unknown) => (
     desktopSession.queryAftersalesCases(input)
   ));
+  ipcMain.handle('aftersales-workflows:list', () => (
+    desktopSession.listAftersalesWorkflowTemplates()
+  ));
+  ipcMain.handle(
+    'aftersales-workflows:set-enabled',
+    (_event, templateId: string, enabled: boolean) => (
+      desktopSession.setAftersalesWorkflowTemplateEnabled(templateId, enabled)
+    ),
+  );
+  ipcMain.handle('aftersales-workflows:create', (_event, input: unknown) => (
+    desktopSession.createAftersalesWorkflowTemplate(input)
+  ));
+  ipcMain.handle('aftersales-workflows:copy', (_event, input: unknown) => (
+    desktopSession.copyAftersalesWorkflowTemplate(input)
+  ));
+  ipcMain.handle(
+    'aftersales-workflows:update',
+    (_event, templateId: string, input: unknown) => (
+      desktopSession.updateAftersalesWorkflowTemplate(templateId, input)
+    ),
+  );
   ipcMain.handle('aftersales-cases:create', (_event, input: unknown) => (
     desktopSession.createAftersalesCase(input)
+  ));
+  ipcMain.handle('aftersales-cases:change-workflow', (_event, input: unknown) => (
+    desktopSession.changeAftersalesCaseWorkflowTemplate(input)
   ));
   ipcMain.handle('aftersales-cases:update', (_event, input: unknown) => (
     desktopSession.updateAftersalesCase(input)

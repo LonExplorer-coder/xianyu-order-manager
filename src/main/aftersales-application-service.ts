@@ -4,6 +4,7 @@ import {
   isAftersalesReturnLogisticsStatus,
   isAftersalesStatus,
   isAftersalesWorkflow,
+  normalizeChangeAftersalesCaseWorkflowTemplateInput,
   normalizeAftersalesCaseQuery,
   normalizeCreateAftersalesCaseInput,
   normalizeProgressAftersalesCaseInput,
@@ -13,6 +14,8 @@ import {
   type AftersalesCaseItem,
   type AftersalesCaseItemInput,
   type AftersalesCaseSnapshot,
+  type AftersalesCaseWorkflowTemplate,
+  type AftersalesCaseWorkflowTemplateEvent,
   type AftersalesFulfillmentSummary,
   type AftersalesProcessingRound,
   type ProgressAftersalesCaseInput,
@@ -43,6 +46,7 @@ import {
   prepareLogisticsStatusChange,
 } from '../core/logistics-exceptions';
 import { LogisticsExceptionService } from './logistics-exception-service';
+import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { Workspace } from './workspace';
 import type { ShipmentRecord } from '../core/shipment-records';
 
@@ -56,6 +60,14 @@ export class AftersalesApplicationService {
 
   public create(input: unknown): AftersalesCase {
     const prepared = normalizeCreateAftersalesCaseInput(input);
+    const workflowTemplate = this.aftersalesWorkflowTemplateService().requireEnabledCurrent(
+      prepared.workflowTemplateId,
+    );
+    const workflow = workflowTemplate.workflow;
+    if (workflow !== 'refund_only' && workflow !== 'return_refund'
+      && prepared.requestedRefundCents !== undefined) {
+      throw new Error('当前售后流程不能登记申请退款金额');
+    }
     const activeParent = this.workspace.database.prepare(`
       SELECT cases.id
       FROM aftersales_replacement_shipments AS replacements
@@ -77,7 +89,7 @@ export class AftersalesApplicationService {
       interception: null,
     });
     const handlingDirection = initialHandlingDirection({
-      workflow: prepared.workflow,
+      workflow,
       requested: prepared.handlingDirection,
       physicalControl: initialCoordination.physicalControl,
       availableDirections: initialCoordination.availableDirections,
@@ -89,7 +101,7 @@ export class AftersalesApplicationService {
       )
       : null;
     const caseId = randomUUID();
-    const initialStatus = prepared.workflow === 'refund_only'
+    const initialStatus = workflow === 'refund_only'
       ? 'waiting_refund'
       : handlingDirection === null
         ? 'processing'
@@ -109,12 +121,26 @@ export class AftersalesApplicationService {
       `).run(
         caseId,
         prepared.shipmentRecordId,
-        prepared.workflow,
+        workflow,
         initialStatus,
         prepared.reason,
         handlingDirection,
         prepared.occurredAt,
         now,
+        now,
+      );
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_case_workflow_template_events (
+          id, case_id, kind, before_template_id, before_template_version,
+          after_template_id, after_template_version, reason, occurred_at, created_at
+        ) VALUES (?, ?, 'selected', NULL, NULL, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        caseId,
+        workflowTemplate.id,
+        workflowTemplate.version,
+        prepared.reason,
+        prepared.occurredAt,
         now,
       );
       const insertItem = this.workspace.database.prepare(`
@@ -136,8 +162,8 @@ export class AftersalesApplicationService {
         caseId,
         handlingDirection === 'replacement'
           ? 'direct_replacement'
-          : prepared.workflow === 'exchange' || prepared.workflow === 'direct_replacement'
-          ? prepared.workflow
+          : workflow === 'exchange' || workflow === 'direct_replacement'
+          ? workflow
           : 'legacy',
         prepared.shipmentRecordId,
         prepared.occurredAt,
@@ -184,7 +210,7 @@ export class AftersalesApplicationService {
           ) VALUES (?, ?, 'requested', ?, ?, ?)
         `).run(randomUUID(), caseId, prepared.occurredAt, prepared.reason, now);
       }
-      if (prepared.workflow === 'refund_only' || prepared.workflow === 'return_refund') {
+      if (workflow === 'refund_only' || workflow === 'return_refund') {
         const pendingItemId = randomUUID();
         const requestedAmountCents = prepared.requestedRefundCents;
         if (requestedAmountCents === undefined) throw new Error('申请退款金额无效');
@@ -233,6 +259,171 @@ export class AftersalesApplicationService {
       ORDER BY occurred_at DESC, created_at DESC, id DESC
     `).all(...values) as unknown as SqlRow[];
     return rows.map((row) => this.get(asString(row.id)));
+  }
+
+  public changeWorkflowTemplate(input: unknown): AftersalesCase {
+    const prepared = normalizeChangeAftersalesCaseWorkflowTemplateInput(input);
+    const current = this.get(prepared.caseId);
+    if (current.status === 'completed' || current.status === 'cancelled') {
+      throw new Error('已结束的售后处理单不能调整后续流程');
+    }
+    if (current.revision !== prepared.expectedRevision) {
+      throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
+    }
+    const target = this.aftersalesWorkflowTemplateService().requireEnabledCurrent(
+      prepared.workflowTemplateId,
+    );
+    if (current.workflowTemplate.templateId === target.id
+      && current.workflowTemplate.version === target.version) {
+      throw new Error('售后流程没有变化');
+    }
+    const latestTemplateEvent = current.workflowTemplate.timeline.at(-1);
+    if (!latestTemplateEvent) throw new Error('售后处理单缺少流程模板版本');
+    assertOccurredAtNotBefore(
+      prepared.occurredAt,
+      latestTemplateEvent.occurredAt,
+      '售后流程调整时间不能早于上一次流程选择',
+    );
+
+    const targetDirection = initialHandlingDirection({
+      workflow: target.workflow,
+      requested: prepared.handlingDirection
+        ?? (target.workflow === current.workflow
+          ? current.coordination.handlingDirection ?? undefined
+          : undefined),
+      physicalControl: current.coordination.physicalControl,
+      availableDirections: current.coordination.availableDirections,
+    });
+    if ((target.workflow === 'refund_only' || target.workflow === 'return_refund')
+      && current.refund === null && prepared.requestedRefundCents === undefined) {
+      throw new Error('请先填写本次申请退款金额');
+    }
+    if (target.workflow !== 'refund_only' && target.workflow !== 'return_refund'
+      && prepared.requestedRefundCents !== undefined) {
+      throw new Error('当前售后流程不能登记申请退款金额');
+    }
+    const newRefundCents = current.refund === null
+      && (target.workflow === 'refund_only' || target.workflow === 'return_refund')
+      ? prepared.requestedRefundCents ?? null
+      : null;
+    const nextStatus = target.workflow === 'refund_only'
+      ? current.refund?.status === 'confirmed' ? 'ready_to_complete' : 'waiting_refund'
+      : targetDirection === null
+        ? 'processing'
+        : statusForHandlingDirection(targetDirection);
+    const before: AftersalesCaseSnapshot = {
+      status: current.status,
+      reason: current.reason,
+      items: current.items.map(({ shipmentPackageItemId, quantity }) => ({
+        shipmentPackageItemId,
+        quantity,
+      })),
+    };
+    const after: AftersalesCaseSnapshot = { ...before, status: nextStatus };
+    const now = new Date().toISOString();
+    this.workspace.transaction(() => {
+      const updated = this.workspace.database.prepare(`
+        UPDATE aftersales_cases
+        SET workflow = ?, status = ?, handling_direction = ?,
+            revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(
+        target.workflow,
+        nextStatus,
+        targetDirection,
+        now,
+        current.id,
+        current.revision,
+      );
+      if (updated.changes !== 1) {
+        throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
+      }
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_case_workflow_template_events (
+          id, case_id, kind, before_template_id, before_template_version,
+          after_template_id, after_template_version, reason, occurred_at, created_at
+        ) VALUES (?, ?, 'changed', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        current.id,
+        current.workflowTemplate.templateId,
+        current.workflowTemplate.version,
+        target.id,
+        target.version,
+        prepared.reason,
+        prepared.occurredAt,
+        now,
+      );
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_case_events (
+          id, case_id, kind, base_revision, result_revision,
+          before_snapshot_json, after_snapshot_json, change_reason, created_at
+        ) VALUES (?, ?, 'updated', ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        current.id,
+        current.revision,
+        current.revision + 1,
+        JSON.stringify(before),
+        JSON.stringify(after),
+        prepared.reason,
+        now,
+      );
+      if (targetDirection !== null
+        && targetDirection !== current.coordination.handlingDirection) {
+        const beforeDirection = current.coordination.handlingDirection;
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_handling_direction_events (
+            id, case_id, kind, before_direction, after_direction,
+            occurred_at, reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          current.id,
+          beforeDirection === null ? 'selected' : 'changed',
+          beforeDirection,
+          targetDirection,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+      }
+      if (target.workflow !== current.workflow
+        && (target.workflow === 'exchange' || target.workflow === 'direct_replacement')
+        && !this.hasReusableSceneRound(current, target.workflow)) {
+        this.createReplacementRound(
+          current,
+          target.workflow,
+          current.shipmentRecordId,
+          current.items.map((item) => ({
+            shipmentPackageItemId: item.shipmentPackageItemId,
+            quantity: item.quantity,
+          })),
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+      }
+      if (newRefundCents !== null) {
+        const pendingItemId = randomUUID();
+        this.workspace.database.prepare(`
+          INSERT INTO pending_financial_items (
+            id, kind, aftersales_case_id, requested_amount_cents,
+            status, created_at, resolved_at
+          ) VALUES (?, 'aftersales_refund', ?, ?, 'pending', ?, NULL)
+        `).run(pendingItemId, current.id, newRefundCents, now);
+        this.workspace.database.prepare(`
+          INSERT INTO pending_financial_item_events (
+            id, pending_item_id, kind, requested_amount_cents,
+            actual_amount_cents, reason, occurred_at, created_at
+          ) VALUES (?, ?, 'created', ?, NULL, ?, ?, ?)
+        `).run(
+          randomUUID(), pendingItemId, newRefundCents,
+          prepared.reason, prepared.occurredAt, now,
+        );
+      }
+    });
+    return this.get(current.id);
   }
 
   public update(input: unknown): AftersalesCase {
@@ -1997,10 +2188,12 @@ export class AftersalesApplicationService {
     const hasUndecidedOutboundException = coordination.outboundExceptionHistory.some((exception) => (
       exception.stage === 'confirmed' && exception.decision === null
     ));
+    const workflowTemplate = this.getWorkflowTemplate(caseId);
     return {
       id: asString(row.id),
       shipmentRecordId: asString(row.shipment_record_id),
       workflow: asAftersalesWorkflow(row.workflow),
+      workflowTemplate,
       status: asAftersalesStatus(row.status),
       revision: asNumber(row.revision),
       reason: asString(row.reason),
@@ -2021,6 +2214,52 @@ export class AftersalesApplicationService {
       timeline,
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
+    };
+  }
+
+  private getWorkflowTemplate(caseId: string): AftersalesCaseWorkflowTemplate {
+    const rows = this.workspace.database.prepare(`
+      SELECT *
+      FROM aftersales_case_workflow_template_events
+      WHERE case_id = ?
+      ORDER BY sequence
+    `).all(caseId) as unknown as SqlRow[];
+    if (rows.length === 0) throw new Error('售后处理单缺少流程模板版本');
+    const timeline = rows.map((row): AftersalesCaseWorkflowTemplateEvent => {
+      const kind = asString(row.kind);
+      if (kind !== 'selected' && kind !== 'changed') {
+        throw new Error('数据库售后流程模板选择事件无效');
+      }
+      return {
+        kind,
+        before: row.before_template_id === null
+          ? null
+          : {
+            templateId: asString(row.before_template_id),
+            version: asNumber(row.before_template_version),
+          },
+        after: {
+          templateId: asString(row.after_template_id),
+          version: asNumber(row.after_template_version),
+        },
+        reason: asString(row.reason),
+        occurredAt: asString(row.occurred_at),
+        createdAt: asString(row.created_at),
+      };
+    });
+    const current = timeline.at(-1);
+    if (!current) throw new Error('售后处理单缺少流程模板版本');
+    const template = this.aftersalesWorkflowTemplateService().getVersion(
+      current.after.templateId,
+      current.after.version,
+    );
+    return {
+      templateId: template.id,
+      version: template.version,
+      name: template.name,
+      scenario: template.scenario,
+      steps: template.steps,
+      timeline,
     };
   }
 
@@ -2091,7 +2330,9 @@ export class AftersalesApplicationService {
         || (replacementShipment === null && (
           latestDecisionRequiresReplacement
           || (mappedDecisionRow === undefined
-            && (workflow === 'exchange' || handlingDirection === 'replacement'))
+            && (workflow === 'exchange'
+              ? handlingDirection === 'buyer_return'
+              : handlingDirection === 'replacement'))
         ))
       );
       return {
@@ -2961,6 +3202,10 @@ export class AftersalesApplicationService {
     return new LogisticsExceptionService(this.workspace);
   }
 
+  private aftersalesWorkflowTemplateService(): AftersalesWorkflowTemplateService {
+    return new AftersalesWorkflowTemplateService(this.workspace);
+  }
+
   private advanceCase(
     current: AftersalesCase,
     status: AftersalesCase['status'],
@@ -3216,15 +3461,35 @@ export class AftersalesApplicationService {
     reason: string,
     now: string,
   ): string {
+    return this.createReplacementRound(
+      current,
+      'direct_replacement',
+      sourceShipmentRecordId,
+      affectedItems,
+      occurredAt,
+      reason,
+      now,
+    );
+  }
+
+  private createReplacementRound(
+    current: AftersalesCase,
+    workflow: 'exchange' | 'direct_replacement',
+    sourceShipmentRecordId: string,
+    affectedItems: readonly AftersalesCaseItemInput[],
+    occurredAt: string,
+    reason: string,
+    now: string,
+  ): string {
     const nextRoundNumber = (current.rounds.at(-1)?.roundNumber ?? 0) + 1;
     const roundId = randomUUID();
     this.workspace.database.prepare(`
       INSERT INTO aftersales_processing_rounds (
         id, case_id, round_number, workflow, source_shipment_record_id,
         occurred_at, reason, created_at
-      ) VALUES (?, ?, ?, 'direct_replacement', ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      roundId, current.id, nextRoundNumber, sourceShipmentRecordId,
+      roundId, current.id, nextRoundNumber, workflow, sourceShipmentRecordId,
       occurredAt, reason, now,
     );
     const insertItem = this.workspace.database.prepare(`
@@ -3236,6 +3501,22 @@ export class AftersalesApplicationService {
       insertItem.run(randomUUID(), roundId, item.shipmentPackageItemId, item.quantity);
     }
     return roundId;
+  }
+
+  private hasReusableSceneRound(
+    current: AftersalesCase,
+    workflow: 'exchange' | 'direct_replacement',
+  ): boolean {
+    return current.rounds.some((round) => {
+      if (round.workflow !== workflow || round.replacementShipment !== null) return false;
+      const mappedException = this.workspace.database.prepare(`
+        SELECT 1
+        FROM aftersales_outbound_exception_replacement_rounds
+        WHERE round_id = ?
+        LIMIT 1
+      `).get(round.id);
+      return mappedException === undefined;
+    });
   }
 
   private cancelPendingRefund(

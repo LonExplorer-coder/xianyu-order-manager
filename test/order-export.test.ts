@@ -1113,6 +1113,7 @@ describe('默认脱敏的订单工作簿导出', () => {
     });
     application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T20:00:00+08:00',
       reason: '其中一件商品等待买家退回',
       items: [{

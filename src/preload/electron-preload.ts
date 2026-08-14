@@ -72,7 +72,23 @@ const api: DesktopApi = {
     ipcRenderer.invoke('shipment-records:progress-package-carrier-claim', input)
   ),
   queryAftersalesCases: (query) => ipcRenderer.invoke('aftersales-cases:query', query),
+  listAftersalesWorkflowTemplates: () => ipcRenderer.invoke('aftersales-workflows:list'),
+  setAftersalesWorkflowTemplateEnabled: (templateId, enabled) => (
+    ipcRenderer.invoke('aftersales-workflows:set-enabled', templateId, enabled)
+  ),
+  createAftersalesWorkflowTemplate: (input) => (
+    ipcRenderer.invoke('aftersales-workflows:create', input)
+  ),
+  copyAftersalesWorkflowTemplate: (input) => (
+    ipcRenderer.invoke('aftersales-workflows:copy', input)
+  ),
+  updateAftersalesWorkflowTemplate: (templateId, input) => (
+    ipcRenderer.invoke('aftersales-workflows:update', templateId, input)
+  ),
   createAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:create', input),
+  changeAftersalesCaseWorkflowTemplate: (input) => (
+    ipcRenderer.invoke('aftersales-cases:change-workflow', input)
+  ),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),
   progressAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:progress', input),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),

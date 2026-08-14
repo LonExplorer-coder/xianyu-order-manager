@@ -2554,6 +2554,7 @@ describe('发货记录', () => {
     const resolvedItem = resolved.record.packages[0].items[0];
     application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-15T14:00:00+08:00',
       reason: '物流异常已结束后新建普通售后问题',
       items: [{ shipmentPackageItemId: resolvedItem.id, quantity: 1 }],
@@ -2765,7 +2766,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 37 });
+        .toEqual({ version: 38 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
@@ -3351,7 +3352,7 @@ describe('退货异常跨流程协调', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T22:00:00+08:00',
       reason: '买家寄回一件商品后申请退款',
@@ -3590,7 +3591,7 @@ describe('退货异常跨流程协调', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-15T08:00:00+08:00',
       reason: '退货运输中先行退款',
@@ -3684,7 +3685,7 @@ describe('退货异常跨流程协调', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T23:00:00+08:00',
       reason: '买家寄回商品',
@@ -3797,7 +3798,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     expect(() => application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       occurredAt: '2026-08-13T20:59:00+08:00',
       reason: '即使买家已签收也不能默认退回',
       requestedRefundCents: 1_000,
@@ -3805,7 +3806,7 @@ describe('退货物流与承运索赔', () => {
     })).toThrow('请根据当前实物控制关系明确选择售后处理方向');
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T21:00:00+08:00',
       reason: '买家退回一件商品',
@@ -3926,7 +3927,7 @@ describe('退货物流与承运索赔', () => {
     confirmBuyerControl(application, shipment);
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T20:00:00+08:00',
       reason: '买家退回一件商品',
@@ -4105,7 +4106,7 @@ describe('退货物流与承运索赔', () => {
     const [firstItem, secondItem] = shipment.record.packages[0].items;
     const firstCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T22:00:00+08:00',
       reason: '第一张订单退货',
@@ -4114,7 +4115,7 @@ describe('退货物流与承运索赔', () => {
     });
     const secondCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T22:01:00+08:00',
       reason: '第二张订单与第一张订单合装退货',
@@ -4393,7 +4394,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T14:00:00+08:00',
       reason: '验证退货正常运输与异常分离',
@@ -4475,7 +4476,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T23:00:00+08:00',
       reason: '两件商品需要退回检查',
@@ -4635,7 +4636,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T08:00:00+08:00',
       reason: '买家准备寄回商品',
@@ -4752,7 +4753,7 @@ describe('退货物流与承运索赔', () => {
     const anotherSourceItem = shipment.record.packages[0].items[1];
     const combinedAfterLoss = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T09:11:00+08:00',
       reason: '另一件商品原本与丢失包裹合装',
@@ -4805,7 +4806,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T10:00:00+08:00',
       reason: '退货途中发生丢件',
@@ -5026,7 +5027,7 @@ describe('退货物流与承运索赔', () => {
     const rejectedSourceItem = shipment.record.packages[0].items[1];
     const rejectedCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T12:00:00+08:00',
       reason: '另一件退货发生运输异常',
@@ -5164,7 +5165,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T14:00:00+08:00',
       reason: '验证旧版退货索赔迁移',
@@ -5218,7 +5219,7 @@ describe('退货物流与承运索赔', () => {
       expectedRevision: shipment.record.packages[0].revision,
       shippingCarrier: '顺丰速运',
       trackingNumber: 'SF-V29-RETURN-CLAIM-CORRECTED',
-      occurredAt: '2026-08-14T14:50:00+08:00',
+      occurredAt: new Date(Date.parse(shipment.record.createdAt) + 60_000).toISOString(),
       reason: '模拟 v29 中已经存在的正向物流更正历史',
     });
     application.close();
@@ -5358,7 +5359,7 @@ describe('退货物流与承运索赔', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-12T10:00:00+08:00',
       reason: '旧版退货退款事实',
@@ -5561,6 +5562,7 @@ describe('售后处理单', () => {
     const [firstItem, secondItem] = shipment.record.packages[0].items;
     const general = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-14T08:00:00+08:00',
       reason: '旧版一般售后',
       items: [{ shipmentPackageItemId: firstItem.id, quantity: 1 }],
@@ -5575,7 +5577,7 @@ describe('售后处理单', () => {
     });
     const refundOnly = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'refund_only',
+      workflowTemplateId: 'system-aftersales-refund-only',
       occurredAt: '2026-08-14T08:10:00+08:00',
       reason: '旧版仅退款',
       requestedRefundCents: 500,
@@ -5583,7 +5585,7 @@ describe('售后处理单', () => {
     });
     const ambiguousReturn = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T08:20:00+08:00',
       reason: '旧版只有等待退回状态，没有退货实物',
@@ -5592,7 +5594,7 @@ describe('售后处理单', () => {
     });
     const concreteReturn = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-14T08:30:00+08:00',
       reason: '旧版已有买家退货实物',
@@ -5696,7 +5698,7 @@ describe('售后处理单', () => {
     const sourceItem = sourcePackage.items[0];
     const input = {
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund' as const,
+      workflowTemplateId: 'system-aftersales-return-refund',
       occurredAt: '2026-08-14T10:00:00+08:00',
       reason: '买家收货地址有误，希望截回商品',
       requestedRefundCents: 1_000,
@@ -5813,7 +5815,7 @@ describe('售后处理单', () => {
     const sourceItem = sourcePackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       occurredAt: '2026-08-14T19:00:00+08:00',
       reason: '买家要求改变收货安排',
@@ -5860,7 +5862,7 @@ describe('售后处理单', () => {
 
     const another = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       occurredAt: '2026-08-14T19:11:00+08:00',
       reason: '另一件商品申请拦截',
@@ -5912,7 +5914,7 @@ describe('售后处理单', () => {
 
     const completionPending = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       occurredAt: '2026-08-14T19:15:00+08:00',
       reason: '先申请拦截，后与买家协调仅退款',
@@ -6047,7 +6049,7 @@ describe('售后处理单', () => {
     const sourceItem = sourcePackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'only_refund',
       occurredAt: '2026-08-14T20:00:00+08:00',
       reason: '买家急需退款，商家同意先行处理',
@@ -6141,7 +6143,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'replacement',
       requestedRefundCents: 1_000,
       occurredAt: new Date(Date.parse(shipment.record.createdAt) + 60_000).toISOString(),
@@ -6226,7 +6228,7 @@ describe('售后处理单', () => {
     const sourceItem = sourcePackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       occurredAt: '2026-08-14T21:00:00+08:00',
       reason: '包裹长时间未更新，先继续等待调查',
@@ -6298,7 +6300,7 @@ describe('售后处理单', () => {
     const unaffectedItem = sourcePackage.items[1];
     const mixed = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       occurredAt: '2026-08-14T21:15:00+08:00',
       reason: '同一包裹中一件已丢失，另一件仍在运输',
@@ -6447,7 +6449,7 @@ describe('售后处理单', () => {
 
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       occurredAt: '2026-08-14T22:10:00+08:00',
       reason: '两个包裹实际流转不一致，先分别核实',
@@ -6516,6 +6518,7 @@ describe('售后处理单', () => {
     const caseOccurredAt = new Date(Date.parse(shipment.record.createdAt) + 60_000).toISOString();
     const createdCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: caseOccurredAt,
       reason: '已发出的一件商品存在破损',
       items: [{
@@ -6659,7 +6662,7 @@ describe('售后处理单', () => {
     ).toISOString();
     const aftersalesCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       requestedRefundCents: 1_500,
       occurredAt: eventAt(60),
@@ -6889,6 +6892,7 @@ describe('售后处理单', () => {
 
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T10:00:00+08:00',
       reason: '其中一件商品存在破损',
       items: [{
@@ -7077,7 +7081,7 @@ describe('售后处理单', () => {
     });
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       requestedRefundCents: 1_000,
       occurredAt: eventAt(120),
@@ -7249,6 +7253,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T11:00:00+08:00',
       reason: '先登记一件商品破损',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -7323,6 +7328,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const first = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T12:00:00+08:00',
       reason: '第一件商品售后处理中',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -7330,6 +7336,7 @@ describe('售后处理单', () => {
 
     expect(() => application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T12:10:00+08:00',
       reason: '错误登记超过剩余可处理数量',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
@@ -7345,6 +7352,7 @@ describe('售后处理单', () => {
     });
     expect(application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T12:20:00+08:00',
       reason: '完成后发生新的独立问题',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
@@ -7372,6 +7380,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T13:00:00+08:00',
       reason: '重启持久化测试',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -7424,6 +7433,7 @@ describe('售后处理单', () => {
     });
     application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T16:00:00+08:00',
       reason: '买家已提出商品售后',
       items: [{
@@ -7459,6 +7469,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T17:00:00+08:00',
       reason: '第一轮独立售后问题',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -7503,7 +7514,7 @@ describe('售后处理单', () => {
 
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'refund_only',
+      workflowTemplateId: 'system-aftersales-refund-only',
       occurredAt: '2026-08-13T20:00:00+08:00',
       reason: '其中一件商品申请部分退款',
       requestedRefundCents: 600,
@@ -7552,7 +7563,7 @@ describe('售后处理单', () => {
     });
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'refund_only',
+      workflowTemplateId: 'system-aftersales-refund-only',
       occurredAt: '2026-08-13T20:10:00+08:00',
       reason: '买家申请部分退款',
       requestedRefundCents: 600,
@@ -7642,7 +7653,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'refund_only',
+      workflowTemplateId: 'system-aftersales-refund-only',
       occurredAt: '2026-08-13T20:30:00+08:00',
       reason: '买家提出退款后又撤销',
       requestedRefundCents: 1_000,
@@ -7675,7 +7686,7 @@ describe('售后处理单', () => {
     });
     const returnRefund = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T20:35:00+08:00',
       reason: '买家寄回商品后取消退款申请',
@@ -7748,6 +7759,7 @@ describe('售后处理单', () => {
       .toBe('无需物流操作');
     const laterCase = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T20:40:00+08:00',
       reason: '取消后发生新的独立问题',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 2 }],
@@ -7795,7 +7807,7 @@ describe('售后处理单', () => {
     const sourceItem = shipment.record.packages[0].items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'buyer_return',
       occurredAt: '2026-08-13T21:00:00+08:00',
       reason: '一件商品破损，需要退回后退款',

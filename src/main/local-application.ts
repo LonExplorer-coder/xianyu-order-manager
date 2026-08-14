@@ -175,6 +175,12 @@ import {
   prepareLogisticsStatusChange,
 } from '../core/logistics-exceptions';
 import type { AftersalesCase } from '../core/aftersales-cases';
+import type {
+  AftersalesWorkflowTemplate,
+  CopyAftersalesWorkflowTemplateInput,
+  CreateAftersalesWorkflowTemplateInput,
+  UpdateAftersalesWorkflowTemplateInput,
+} from '../core/aftersales-workflow-templates';
 import {
   DEFAULT_ORDER_TABLE_COLUMNS,
   normalizeCreateTableTemplateInput,
@@ -196,6 +202,7 @@ import {
   systemOrderNumberSequence,
 } from '../core/system-order-number';
 import { AftersalesApplicationService } from './aftersales-application-service';
+import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { LogisticsExceptionService } from './logistics-exception-service';
@@ -1525,6 +1532,36 @@ export class LocalApplication {
       this.assertTableTemplateDependenciesMatch(template);
       return template;
     });
+  }
+
+  public listAftersalesWorkflowTemplates(): AftersalesWorkflowTemplate[] {
+    return this.aftersalesWorkflowTemplateService().list();
+  }
+
+  public setAftersalesWorkflowTemplateEnabled(
+    templateId: string,
+    enabled: boolean,
+  ): AftersalesWorkflowTemplate {
+    return this.aftersalesWorkflowTemplateService().setEnabled(templateId, enabled);
+  }
+
+  public createAftersalesWorkflowTemplate(
+    input: unknown,
+  ): AftersalesWorkflowTemplate {
+    return this.aftersalesWorkflowTemplateService().create(input);
+  }
+
+  public copyAftersalesWorkflowTemplate(
+    input: unknown,
+  ): AftersalesWorkflowTemplate {
+    return this.aftersalesWorkflowTemplateService().copy(input);
+  }
+
+  public updateAftersalesWorkflowTemplate(
+    templateId: string,
+    input: unknown,
+  ): AftersalesWorkflowTemplate {
+    return this.aftersalesWorkflowTemplateService().update(templateId, input);
   }
 
   public createTableTemplate(input: CreateTableTemplateInput): TableTemplate {
@@ -3774,6 +3811,10 @@ export class LocalApplication {
     return this.aftersalesService().create(input);
   }
 
+  public changeAftersalesCaseWorkflowTemplate(input: unknown): AftersalesCase {
+    return this.aftersalesService().changeWorkflowTemplate(input);
+  }
+
   public queryAftersalesCases(input?: unknown): AftersalesCase[] {
     return this.aftersalesService().query(input);
   }
@@ -5424,6 +5465,10 @@ export class LocalApplication {
       this.requireWorkspace(),
       (recordId) => this.getShipmentRecord(recordId),
     );
+  }
+
+  private aftersalesWorkflowTemplateService(): AftersalesWorkflowTemplateService {
+    return new AftersalesWorkflowTemplateService(this.requireWorkspace());
   }
 
   private logisticsExceptionService(): LogisticsExceptionService {

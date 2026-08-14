@@ -21,6 +21,10 @@ import {
   type AftersalesReturnExceptionDecision,
 } from './aftersales-coordination';
 import type { ShipmentRecord } from './shipment-records';
+import type {
+  AftersalesWorkflowScenario,
+  AftersalesWorkflowStep,
+} from './aftersales-workflow-templates';
 
 export type AftersalesStatus =
   | 'processing'
@@ -435,7 +439,7 @@ export type AftersalesReplacementPackageInput = {
 
 export type CreateAftersalesCaseInput = {
   shipmentRecordId: string;
-  workflow?: AftersalesWorkflow;
+  workflowTemplateId: string;
   handlingDirection?: AftersalesHandlingDirection;
   interceptionPackageId?: string;
   occurredAt: string;
@@ -444,11 +448,17 @@ export type CreateAftersalesCaseInput = {
   items: AftersalesCaseItemInput[];
 };
 
-export type NormalizedCreateAftersalesCaseInput = Omit<
-  CreateAftersalesCaseInput,
-  'workflow'
-> & {
-  workflow: AftersalesWorkflow;
+export type NormalizedCreateAftersalesCaseInput = CreateAftersalesCaseInput;
+
+export type ChangeAftersalesCaseWorkflowTemplateInput = {
+  caseId: string;
+  expectedRevision: number;
+  workflowTemplateId: string;
+  handlingDirection?: AftersalesHandlingDirection;
+  interceptionPackageId?: string;
+  requestedRefundCents?: number;
+  occurredAt: string;
+  reason: string;
 };
 
 export type UpdateAftersalesCaseInput = {
@@ -503,6 +513,7 @@ export type AftersalesCase = {
   id: string;
   shipmentRecordId: string;
   workflow: AftersalesWorkflow;
+  workflowTemplate: AftersalesCaseWorkflowTemplate;
   status: AftersalesStatus;
   revision: number;
   reason: string;
@@ -516,6 +527,24 @@ export type AftersalesCase = {
   timeline: AftersalesCaseEvent[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type AftersalesCaseWorkflowTemplateEvent = {
+  kind: 'selected' | 'changed';
+  before: { templateId: string; version: number } | null;
+  after: { templateId: string; version: number };
+  reason: string;
+  occurredAt: string;
+  createdAt: string;
+};
+
+export type AftersalesCaseWorkflowTemplate = {
+  templateId: string;
+  version: number;
+  name: string;
+  scenario: AftersalesWorkflowScenario;
+  steps: AftersalesWorkflowStep[];
+  timeline: AftersalesCaseWorkflowTemplateEvent[];
 };
 
 export type AftersalesProcessingRoundItem = {
@@ -597,7 +626,7 @@ export function normalizeCreateAftersalesCaseInput(
     record,
     [
       'shipmentRecordId',
-      'workflow',
+      'workflowTemplateId',
       'handlingDirection',
       'interceptionPackageId',
       'occurredAt',
@@ -607,21 +636,16 @@ export function normalizeCreateAftersalesCaseInput(
     ],
     '新建售后处理单参数',
   );
-  const workflow = record.workflow ?? 'general';
-  if (!isAftersalesWorkflow(workflow)) throw new Error('售后处理方式无效');
-  if (
-    workflow !== 'refund_only'
-    && workflow !== 'return_refund'
-    && record.requestedRefundCents !== undefined
-  ) {
-    throw new Error('当前售后处理方式不能登记申请退款金额');
-  }
-  const requestedRefundCents = workflow === 'refund_only' || workflow === 'return_refund'
-    ? money(record.requestedRefundCents, false)
-    : undefined;
+  const requestedRefundCents = record.requestedRefundCents === undefined
+    ? undefined
+    : money(record.requestedRefundCents, false);
   return {
     shipmentRecordId: boundedText(record.shipmentRecordId, 200, '发货记录标识无效'),
-    workflow,
+    workflowTemplateId: boundedText(
+      record.workflowTemplateId,
+      200,
+      '售后流程模板标识无效',
+    ),
     ...(record.handlingDirection === undefined
       ? {}
       : {
@@ -642,6 +666,60 @@ export function normalizeCreateAftersalesCaseInput(
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的问题原因'),
     ...(requestedRefundCents === undefined ? {} : { requestedRefundCents }),
     items: itemInputs(record.items),
+  };
+}
+
+export function normalizeChangeAftersalesCaseWorkflowTemplateInput(
+  input: unknown,
+): ChangeAftersalesCaseWorkflowTemplateInput {
+  const record = asRecord(input, '调整售后流程参数无效');
+  rejectUnknownKeys(
+    record,
+    [
+      'caseId',
+      'expectedRevision',
+      'workflowTemplateId',
+      'handlingDirection',
+      'interceptionPackageId',
+      'requestedRefundCents',
+      'occurredAt',
+      'reason',
+    ],
+    '调整售后流程参数',
+  );
+  if (!Number.isSafeInteger(record.expectedRevision) || Number(record.expectedRevision) < 1) {
+    throw new Error('售后处理单版本无效');
+  }
+  const requestedRefundCents = record.requestedRefundCents === undefined
+    ? undefined
+    : money(record.requestedRefundCents, false);
+  return {
+    caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
+    expectedRevision: Number(record.expectedRevision),
+    workflowTemplateId: boundedText(
+      record.workflowTemplateId,
+      200,
+      '售后流程模板标识无效',
+    ),
+    ...(record.handlingDirection === undefined
+      ? {}
+      : {
+        handlingDirection: isAftersalesHandlingDirection(record.handlingDirection)
+          ? record.handlingDirection
+          : invalidHandlingDirection(),
+      }),
+    ...(record.interceptionPackageId === undefined
+      ? {}
+      : {
+        interceptionPackageId: boundedText(
+          record.interceptionPackageId,
+          200,
+          '拦截包裹标识无效',
+        ),
+      }),
+    ...(requestedRefundCents === undefined ? {} : { requestedRefundCents }),
+    occurredAt: dateTime(record.occurredAt, '售后流程调整时间无效'),
+    reason: boundedText(record.reason, 500, '请填写 1 至 500 字的流程调整原因'),
   };
 }
 

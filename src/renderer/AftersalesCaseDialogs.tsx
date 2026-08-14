@@ -11,12 +11,12 @@ import type { DesktopApi } from '../core/desktop-api';
 import type {
   AftersalesCase,
   AftersalesStatus,
-  AftersalesWorkflow,
   AftersalesReturnDiscrepancy,
   AftersalesReturnLogisticsStatus,
   ProgressAftersalesCaseInput,
   ReturnInspectionResult,
 } from '../core/aftersales-cases';
+import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
   availableAftersalesDirections,
   physicalControlForSourcePackages,
@@ -58,7 +58,8 @@ export function CreateAftersalesCaseDialog({
   const dialogRef = useDialogFocus();
   const sourceItems = activeShipmentRecordItems(record);
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
-  const [workflow, setWorkflow] = useState<AftersalesWorkflow>('general');
+  const [workflowTemplates, setWorkflowTemplates] = useState<AftersalesWorkflowTemplate[]>([]);
+  const [workflowTemplateId, setWorkflowTemplateId] = useState('');
   const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection | ''>('');
   const [interceptionPackageId, setInterceptionPackageId] = useState('');
   const [requestedRefundYuan, setRequestedRefundYuan] = useState('');
@@ -68,6 +69,27 @@ export function CreateAftersalesCaseDialog({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api.listAftersalesWorkflowTemplates()
+      .then((templates) => {
+        if (!active) return;
+        const enabled = templates.filter(({ enabled }) => enabled);
+        setWorkflowTemplates(enabled);
+        setWorkflowTemplateId((current) => current
+          || enabled.find(({ scenario }) => scenario === 'other')?.id
+          || enabled[0]?.id
+          || '');
+      })
+      .catch((value: unknown) => {
+        if (active) setError(errorMessage(value));
+      });
+    return () => { active = false; };
+  }, [api]);
+  const selectedWorkflowTemplate = workflowTemplates.find(
+    ({ id }) => id === workflowTemplateId,
+  ) ?? null;
+  const workflow = selectedWorkflowTemplate?.workflow ?? 'general';
   const selectedItems = selectedItemInputs(sourceItems, quantities);
   const sourcePackages = sourcePackageEvidenceFromShipmentRecord(record, quantities);
   const physicalControl = sourcePackages.length > 0
@@ -81,6 +103,7 @@ export function CreateAftersalesCaseDialog({
   const canSubmit = Boolean(
     reason.trim() &&
     occurredAt &&
+    selectedWorkflowTemplate !== null &&
     selectedItems.length > 0 &&
     ((workflow !== 'refund_only' && workflow !== 'return_refund')
       || requestedRefundCents !== null) &&
@@ -99,9 +122,10 @@ export function CreateAftersalesCaseDialog({
       const localOccurredAt = occurredAt.length === 16 ? `${occurredAt}:00` : occurredAt;
       const normalizedOccurredAt = normalizeShanghaiDateTime(localOccurredAt.replace('T', ' '));
       if (!normalizedOccurredAt) throw new Error('请填写有效的售后发生时间');
+      if (!selectedWorkflowTemplate) throw new Error('请选择售后流程');
       onApplied(await api.createAftersalesCase({
         shipmentRecordId: record.id,
-        workflow,
+        workflowTemplateId: selectedWorkflowTemplate.id,
         occurredAt: normalizedOccurredAt,
         reason,
         ...(workflow !== 'refund_only' && workflow !== 'return_refund'
@@ -146,22 +170,26 @@ export function CreateAftersalesCaseDialog({
           <p id={descriptionId}>只选择本次问题涉及的商品和数量；不会改写原发货记录或物流状态。</p>
         </header>
         <label>
-          <span>售后处理方式</span>
+          <span>售后流程</span>
           <select
-            aria-label="售后处理方式"
-            value={workflow}
+            aria-label="售后流程"
+            value={workflowTemplateId}
             disabled={saving}
             onChange={(event) => {
-              setWorkflow(event.target.value as AftersalesWorkflow);
+              setWorkflowTemplateId(event.target.value);
               setHandlingDirection('');
             }}
           >
-            <option value="general">一般处理</option>
-            <option value="refund_only">仅退款</option>
-            <option value="return_refund">退货退款</option>
-            <option value="exchange">换货</option>
-            <option value="direct_replacement">直接补发</option>
+            {workflowTemplates.length === 0 && <option value="">正在读取可用流程…</option>}
+            {workflowTemplates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.name}{template.origin === 'custom' ? ' · 自定义' : ''}
+              </option>
+            ))}
           </select>
+          {selectedWorkflowTemplate && (
+            <small>版本 {selectedWorkflowTemplate.version} · {selectedWorkflowTemplate.steps.length} 个引导步骤</small>
+          )}
         </label>
         <label>
           <span>售后发生时间</span>
@@ -265,6 +293,177 @@ export function CreateAftersalesCaseDialog({
           </fieldset>
         )}
         <DialogFooter saving={saving} canSubmit={canSubmit} error={error} onClose={onClose} action="create" />
+      </form>
+    </div>,
+    document.body,
+  );
+}
+
+export function ChangeAftersalesWorkflowDialog({
+  api,
+  aftersalesCase,
+  onApplied,
+  onClose,
+}: {
+  api: DesktopApi;
+  aftersalesCase: AftersalesCase;
+  onApplied: (input: Parameters<DesktopApi['changeAftersalesCaseWorkflowTemplate']>[0]) => Promise<void>;
+  onClose: () => void;
+}) {
+  const dialogRef = useDialogFocus();
+  const [templates, setTemplates] = useState<AftersalesWorkflowTemplate[]>([]);
+  const [templateId, setTemplateId] = useState('');
+  const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection | ''>(
+    aftersalesCase.coordination.handlingDirection ?? '',
+  );
+  const [interceptionPackageId, setInterceptionPackageId] = useState('');
+  const [requestedRefundYuan, setRequestedRefundYuan] = useState('');
+  const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api.listAftersalesWorkflowTemplates()
+      .then((values) => {
+        if (!active) return;
+        const enabled = values.filter(({ enabled }) => enabled);
+        setTemplates(enabled);
+        setTemplateId(enabled.find((template) => (
+          template.id !== aftersalesCase.workflowTemplate.templateId
+          || template.version !== aftersalesCase.workflowTemplate.version
+        ))?.id ?? enabled[0]?.id ?? '');
+      })
+      .catch((value: unknown) => { if (active) setError(errorMessage(value)); });
+    return () => { active = false; };
+  }, [api, aftersalesCase.workflowTemplate.templateId, aftersalesCase.workflowTemplate.version]);
+  const selected = templates.find(({ id }) => id === templateId) ?? null;
+  const requestedRefundCents = yuanToCents(requestedRefundYuan);
+  const requiresRefund = selected?.workflow === 'refund_only'
+    || selected?.workflow === 'return_refund';
+  const requiresDirection = selected?.workflow === 'return_refund';
+  const canSubmit = Boolean(
+    selected
+    && reason.trim()
+    && occurredAt
+    && (!requiresRefund || aftersalesCase.refund !== null || requestedRefundCents !== null)
+    && (!requiresDirection || handlingDirection !== '')
+    && (handlingDirection !== 'intercept' || interceptionPackageId),
+  );
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit || !selected) return;
+    setSaving(true);
+    setError('');
+    try {
+      const localOccurredAt = occurredAt.length === 16 ? `${occurredAt}:00` : occurredAt;
+      const normalizedOccurredAt = normalizeShanghaiDateTime(localOccurredAt.replace('T', ' '));
+      if (!normalizedOccurredAt) throw new Error('请填写有效的流程调整时间');
+      await onApplied({
+        caseId: aftersalesCase.id,
+        expectedRevision: aftersalesCase.revision,
+        workflowTemplateId: selected.id,
+        occurredAt: normalizedOccurredAt,
+        reason,
+        ...(requiresDirection
+          ? {
+            handlingDirection: handlingDirection as AftersalesHandlingDirection,
+            ...(handlingDirection === 'intercept' ? { interceptionPackageId } : {}),
+          }
+          : {}),
+        ...(requiresRefund && aftersalesCase.refund === null
+          ? { requestedRefundCents: requestedRefundCents as number }
+          : {}),
+      });
+      onClose();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="调整后续售后流程"
+      tabIndex={-1}
+    >
+      <form className="shipment-package-action-dialog aftersales-case-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">保留已发生事实</span>
+          <h2>调整后续售后流程</h2>
+          <p>已有的退款、退货、补发和物流事实不会被删除，只调整接下来的引导步骤。</p>
+        </header>
+        <label>
+          <span>当前流程</span>
+          <input value={`${aftersalesCase.workflowTemplate.name} · 版本 ${aftersalesCase.workflowTemplate.version}`} readOnly />
+        </label>
+        <label>
+          <span>新的后续流程</span>
+          <select
+            aria-label="新的后续流程"
+            value={templateId}
+            disabled={saving}
+            onChange={(event) => {
+              setTemplateId(event.target.value);
+              const target = templates.find(({ id }) => id === event.target.value);
+              setHandlingDirection(target?.workflow === aftersalesCase.workflow
+                ? aftersalesCase.coordination.handlingDirection ?? ''
+                : '');
+            }}
+          >
+            {templates.map((template) => (
+              <option key={template.id} value={template.id}>{template.name} · 版本 {template.version}</option>
+            ))}
+          </select>
+        </label>
+        {requiresRefund && aftersalesCase.refund === null && (
+          <label>
+            <span>申请退款金额（元）</span>
+            <input type="number" min="0.01" step="0.01" value={requestedRefundYuan} onChange={(event) => setRequestedRefundYuan(event.target.value)} />
+          </label>
+        )}
+        {requiresDirection && (
+          <label>
+            <span>售后处理方向</span>
+            <select value={handlingDirection} disabled={saving} onChange={(event) => setHandlingDirection(event.target.value as AftersalesHandlingDirection | '')}>
+              <option value="">请明确选择处理方向</option>
+              {aftersalesCase.coordination.availableDirections.map((direction) => (
+                <option key={direction} value={direction}>{aftersalesHandlingDirectionLabel(direction)}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {requiresDirection && handlingDirection === 'intercept' && (
+          <label>
+            <span>本次拦截包裹</span>
+            <select value={interceptionPackageId} onChange={(event) => setInterceptionPackageId(event.target.value)}>
+              <option value="">请选择要拦截的包裹</option>
+              {aftersalesCase.coordination.sourcePackages.map((sourcePackage) => (
+                <option key={sourcePackage.packageId} value={sourcePackage.packageId}>
+                  {sourcePackage.shippingCarrier} {sourcePackage.trackingNumber}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          <span>流程调整时间</span>
+          <input type="datetime-local" step={1} value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} />
+        </label>
+        <ReasonField label="调整原因" value={reason} saving={saving} onChange={setReason} />
+        {error && <p role="alert">{error}</p>}
+        <footer>
+          <button type="button" disabled={saving} onClick={onClose}>取消</button>
+          <button className="button button--primary" type="submit" disabled={saving || !canSubmit}>
+            {saving ? '正在保存…' : '确认调整'}
+          </button>
+        </footer>
       </form>
     </div>,
     document.body,

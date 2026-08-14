@@ -113,7 +113,7 @@ describe('正向发货异常上层处理', () => {
     ).toISOString();
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: occurredAt(1),
@@ -221,7 +221,7 @@ describe('正向发货异常上层处理', () => {
     ).toISOString();
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: occurredAt(1),
@@ -305,7 +305,7 @@ describe('正向发货异常上层处理', () => {
     const unaffectedItem = shipmentPackage.items[1];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T10:00:00+08:00',
@@ -492,7 +492,7 @@ describe('正向发货异常上层处理', () => {
     const affectedItem = shipmentPackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T11:00:00+08:00',
@@ -603,7 +603,7 @@ describe('正向发货异常上层处理', () => {
     const affectedItem = shipmentPackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T11:00:00+08:00',
@@ -660,7 +660,7 @@ describe('正向发货异常上层处理', () => {
     const affectedItem = shipmentPackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T12:00:00+08:00',
@@ -834,7 +834,7 @@ describe('正向发货异常上层处理', () => {
     const sourceItem = sourcePackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'direct_replacement',
+      workflowTemplateId: 'system-aftersales-direct-replacement',
       occurredAt: '2026-08-14T13:00:00+08:00',
       reason: '首轮直接补发',
       items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
@@ -921,7 +921,7 @@ describe('正向发货异常上层处理', () => {
     const affectedItem = shipmentPackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T14:00:00+08:00',
@@ -976,7 +976,7 @@ describe('正向发货异常上层处理', () => {
     const [firstItem, secondItem] = shipmentPackage.items;
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 2_000,
       occurredAt: '2026-08-14T15:00:00+08:00',
@@ -1125,7 +1125,7 @@ describe('正向发货异常上层处理', () => {
     const affectedItem = shipmentPackage.items[0];
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T17:00:00+08:00',
@@ -1197,7 +1197,7 @@ describe('正向发货异常上层处理', () => {
     const [replacementItem, refundItem] = shipmentPackage.items;
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
       occurredAt: '2026-08-14T18:00:00+08:00',

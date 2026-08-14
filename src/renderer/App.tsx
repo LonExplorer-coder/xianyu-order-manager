@@ -90,6 +90,7 @@ import {
 } from '../core/shipment-records';
 import type {
   AftersalesCase,
+  ChangeAftersalesCaseWorkflowTemplateInput,
   ProgressAftersalesCaseInput,
 } from '../core/aftersales-cases';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
@@ -147,6 +148,7 @@ import {
 } from '../core/order-operations-projection';
 import { OrderExportDialog } from './OrderExportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
+import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
 import {
   LOGISTICS_EXCEPTION_TYPE_OPTIONS,
   logisticsExceptionStageLabel,
@@ -159,7 +161,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'aftersales_workflows' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -1176,6 +1178,8 @@ export function App({ api }: AppProps) {
         onChangeDataDirectory={changeDataDirectory}
       />
     );
+  } else if (activePage === 'aftersales_workflows') {
+    workspace = <AftersalesWorkflowTemplatesWorkspace api={api} />;
   } else if (activePage === 'templates') {
     workspace = (
       <TableTemplatesWorkspace
@@ -1389,6 +1393,15 @@ function AppFrame({
           >
             <Icon name="shipment" />
             <span className="nav-label">发货组</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'aftersales_workflows' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'aftersales_workflows' ? 'page' : undefined}
+            onClick={() => onNavigate('aftersales_workflows')}
+          >
+            <Icon name="template" />
+            <span className="nav-label">售后流程</span>
           </button>
           <button
             className={`nav-item${activePage === 'templates' ? ' is-active' : ''}`}
@@ -1696,6 +1709,16 @@ function ShipmentGroupsWorkspace({
     }
   }
 
+  async function changeAftersalesWorkflow(
+    input: ChangeAftersalesCaseWorkflowTemplateInput,
+  ) {
+    const updated = await api.changeAftersalesCaseWorkflowTemplate(input);
+    onAftersalesCasesChange([
+      updated,
+      ...aftersalesCases.filter(({ id }) => id !== updated.id),
+    ]);
+  }
+
   function toggleGroup(groupId: string) {
     setSelectedGroupIds((current) => (
       current.includes(groupId)
@@ -1934,6 +1957,7 @@ function ShipmentGroupsWorkspace({
 
       {activeView === 'partially_shipped' && (
         <ShipmentArchiveSection
+          api={api}
           label="部分发货组"
           emptyMessage="没有部分发货的发货组"
           archives={partiallyShippedArchives}
@@ -1963,11 +1987,13 @@ function ShipmentGroupsWorkspace({
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
           onProgressAftersales={progressAftersales}
+          onChangeAftersalesWorkflow={changeAftersalesWorkflow}
         />
       )}
 
       {activeView === 'fully_shipped' && (
         <ShipmentArchiveSection
+          api={api}
           label="已全部发货的发货组"
           emptyMessage="尚无已全部发货的发货组档案"
           archives={fullyShippedArchives}
@@ -1997,6 +2023,7 @@ function ShipmentGroupsWorkspace({
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
           onProgressAftersales={progressAftersales}
+          onChangeAftersalesWorkflow={changeAftersalesWorkflow}
         />
       )}
 
@@ -2383,6 +2410,7 @@ function ConfirmShipmentDialog({
 }
 
 function ShipmentArchiveSection({
+  api,
   label,
   emptyMessage,
   archives,
@@ -2398,7 +2426,9 @@ function ShipmentArchiveSection({
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
+  onChangeAftersalesWorkflow,
 }: {
+  api: DesktopApi;
   label: string;
   emptyMessage: string;
   archives: ShipmentGroupArchive[];
@@ -2438,6 +2468,9 @@ function ShipmentArchiveSection({
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
   onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
+  onChangeAftersalesWorkflow: (
+    input: ChangeAftersalesCaseWorkflowTemplateInput,
+  ) => Promise<void>;
 }) {
   const [logisticsFilter, setLogisticsFilter] = useState<'all' | ShipmentLogisticsStatus>('all');
   const visibleArchives = logisticsFilter === 'all'
@@ -2608,6 +2641,7 @@ function ShipmentArchiveSection({
                     </details>
                   )}
                   <ShipmentRecordsSection
+                    api={api}
                     embedded
                     records={archive.records}
                     aftersalesCases={aftersalesCases}
@@ -2620,6 +2654,7 @@ function ShipmentArchiveSection({
                     onCreateAftersales={onCreateAftersales}
                     onUpdateAftersales={onUpdateAftersales}
                     onProgressAftersales={onProgressAftersales}
+                    onChangeAftersalesWorkflow={onChangeAftersalesWorkflow}
                   />
                 </details>
               </article>
@@ -2632,6 +2667,7 @@ function ShipmentArchiveSection({
 }
 
 function ShipmentRecordsSection({
+  api,
   records,
   aftersalesCases,
   focus,
@@ -2643,8 +2679,10 @@ function ShipmentRecordsSection({
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
+  onChangeAftersalesWorkflow,
   embedded = false,
 }: {
+  api: DesktopApi;
   records: ShipmentRecord[];
   aftersalesCases: AftersalesCase[];
   focus?: ShipmentFocus | null;
@@ -2676,6 +2714,9 @@ function ShipmentRecordsSection({
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
   onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
+  onChangeAftersalesWorkflow: (
+    input: ChangeAftersalesCaseWorkflowTemplateInput,
+  ) => Promise<void>;
   embedded?: boolean;
 }) {
   const content = records.length === 0 ? (
@@ -2945,11 +2986,13 @@ function ShipmentRecordsSection({
             ))}
           </div>
           <AftersalesCasePanel
+            api={api}
             record={record}
             aftersalesCases={recordAftersalesCases}
             focusedCaseId={focus?.recordId === record.id ? focus.aftersalesCaseId : undefined}
             onUpdate={(aftersalesCase) => onUpdateAftersales(record, aftersalesCase)}
             onProgress={onProgressAftersales}
+            onChangeWorkflow={onChangeAftersalesWorkflow}
           />
         </article>
         );

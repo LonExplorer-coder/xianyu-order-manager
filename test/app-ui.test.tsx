@@ -37,6 +37,11 @@ import { summarizeRecognitionBatchItems } from '../src/core/recognition-batches'
 import type { ShipmentGroupProjection } from '../src/core/shipment-groups';
 import type { ShipmentGroupArchive, ShipmentRecord } from '../src/core/shipment-records';
 import type { AftersalesCase } from '../src/core/aftersales-cases';
+import {
+  SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES,
+  aftersalesWorkflowForScenario,
+  type AftersalesWorkflowTemplate,
+} from '../src/core/aftersales-workflow-templates';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { App } from '../src/renderer/App';
@@ -44,7 +49,18 @@ import { hasActiveParentAftersalesCase } from '../src/renderer/aftersales-presen
 
 afterEach(cleanup);
 
-const emptyAftersalesRounds: Pick<AftersalesCase, 'rounds' | 'fulfillment'> = {
+const emptyAftersalesRounds: Pick<
+  AftersalesCase,
+  'rounds' | 'fulfillment' | 'workflowTemplate'
+> = {
+  workflowTemplate: {
+    templateId: 'system-aftersales-other',
+    version: 1,
+    name: '其他处理',
+    scenario: 'other',
+    steps: [],
+    timeline: [],
+  },
   rounds: [],
   fulfillment: {
     cumulativeSentQuantity: 0,
@@ -53,6 +69,20 @@ const emptyAftersalesRounds: Pick<AftersalesCase, 'rounds' | 'fulfillment'> = {
     currentRoundNumber: 1,
   },
 };
+
+const testWorkflowTemplates: AftersalesWorkflowTemplate[] =
+  SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES.map((template) => ({
+    id: template.id,
+    origin: 'system',
+    systemKey: template.systemKey,
+    enabled: true,
+    version: 1,
+    ...template.definition,
+    workflow: aftersalesWorkflowForScenario(template.definition.scenario),
+    createdAt: '2026-08-14T00:00:00.000Z',
+    updatedAt: '2026-08-14T00:00:00.000Z',
+    versionCreatedAt: '2026-08-14T00:00:00.000Z',
+  }));
 
 const draft: OrderDraft = {
   id: 'draft-1',
@@ -465,7 +495,13 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     progressShipmentPackageLogisticsException: vi.fn(),
     progressShipmentPackageCarrierClaim: vi.fn(),
     queryAftersalesCases: vi.fn().mockResolvedValue([]),
+    listAftersalesWorkflowTemplates: vi.fn().mockResolvedValue(testWorkflowTemplates),
+    setAftersalesWorkflowTemplateEnabled: vi.fn(),
+    createAftersalesWorkflowTemplate: vi.fn(),
+    copyAftersalesWorkflowTemplate: vi.fn(),
+    updateAftersalesWorkflowTemplate: vi.fn(),
     createAftersalesCase: vi.fn(),
+    changeAftersalesCaseWorkflowTemplate: vi.fn(),
     updateAftersalesCase: vi.fn(),
     progressAftersalesCase: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
@@ -1702,6 +1738,7 @@ describe('订单管理工作台', () => {
       quantity: 1,
     };
     const aftersalesCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-replacement',
       shipmentRecordId: record.id,
       workflow: 'direct_replacement',
@@ -1822,6 +1859,7 @@ describe('订单管理工作台', () => {
       quantity: 1,
     };
     const aftersalesCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
       id: 'aftersales-ui-parent',
       shipmentRecordId: sourceRecord.id,
       workflow: 'direct_replacement',
@@ -1985,8 +2023,8 @@ describe('订单管理工作台', () => {
     });
     await user.type(within(dialog).getByRole('textbox', { name: '问题原因' }), '其中一件商品破损');
     await user.selectOptions(
-      within(dialog).getByRole('combobox', { name: '售后处理方式' }),
-      'refund_only',
+      within(dialog).getByRole('combobox', { name: '售后流程' }),
+      'system-aftersales-refund-only',
     );
     fireEvent.change(within(dialog).getByRole('spinbutton', { name: '申请退款金额' }), {
       target: { value: '6' },
@@ -2001,7 +2039,7 @@ describe('订单管理工作台', () => {
     await waitFor(() => {
       expect(createAftersalesCase).toHaveBeenCalledWith({
         shipmentRecordId: record.id,
-        workflow: 'refund_only',
+        workflowTemplateId: 'system-aftersales-refund-only',
         occurredAt: '2026-08-13T14:00:00+08:00',
         reason: '其中一件商品破损',
         requestedRefundCents: 600,
@@ -2173,7 +2211,10 @@ describe('订单管理工作台', () => {
     const history = await screen.findByRole('region', { name: '发货记录' });
     await user.click(within(history).getByRole('button', { name: '建立售后处理单' }));
     const createDialog = screen.getByRole('dialog', { name: '建立售后处理单' });
-    await user.selectOptions(within(createDialog).getByLabelText('售后处理方式'), 'return_refund');
+    await user.selectOptions(
+      within(createDialog).getByLabelText('售后流程'),
+      'system-aftersales-return-refund',
+    );
     fireEvent.change(within(createDialog).getByLabelText('售后发生时间'), {
       target: { value: '2026-08-13T15:00:00' },
     });
@@ -2193,7 +2234,7 @@ describe('订单管理工作台', () => {
     await user.click(createButton);
     await waitFor(() => expect(createAftersalesCase).toHaveBeenCalledWith({
       shipmentRecordId: record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       interceptionPackageId: sourcePackage.id,
       occurredAt: '2026-08-13T15:00:00+08:00',
@@ -2469,7 +2510,7 @@ describe('订单管理工作台', () => {
       const sourceItem = shipment.record.packages[0].items[0];
       const cancellationPending = application.createAftersalesCase({
         shipmentRecordId: shipment.record.id,
-        workflow: 'return_refund',
+        workflowTemplateId: 'system-aftersales-return-refund',
         handlingDirection: 'intercept',
         occurredAt: '2026-08-13T15:00:00+08:00',
         reason: '取消路径先申请拦截',
@@ -2492,7 +2533,7 @@ describe('订单管理工作台', () => {
       });
       const completionPending = application.createAftersalesCase({
         shipmentRecordId: shipment.record.id,
-        workflow: 'return_refund',
+        workflowTemplateId: 'system-aftersales-return-refund',
         handlingDirection: 'intercept',
         occurredAt: '2026-08-13T15:10:00+08:00',
         reason: '完成路径先申请拦截',
@@ -9700,6 +9741,182 @@ describe('订单管理工作台', () => {
       includeOrderItems: false,
       orderItemTemplateId: null,
       masking: 'masked',
+    }));
+  });
+
+  it('管理预置与自定义售后流程版本', async () => {
+    const user = userEvent.setup();
+    const refundOnly = testWorkflowTemplates.find(({ scenario }) => scenario === 'refund_only')!;
+    const setEnabled = vi.fn().mockResolvedValue({ ...refundOnly, enabled: false });
+    const createTemplate = vi.fn(async (input) => ({
+      id: 'custom-workflow-ui',
+      origin: 'custom' as const,
+      systemKey: null,
+      enabled: true,
+      version: 1,
+      ...input,
+      workflow: aftersalesWorkflowForScenario(input.scenario),
+      createdAt: '2026-08-14T00:00:00.000Z',
+      updatedAt: '2026-08-14T00:00:00.000Z',
+      versionCreatedAt: '2026-08-14T00:00:00.000Z',
+    }));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [],
+      }),
+      listAftersalesWorkflowTemplates: vi.fn().mockResolvedValue(testWorkflowTemplates),
+      setAftersalesWorkflowTemplateEnabled: setEnabled,
+      createAftersalesWorkflowTemplate: createTemplate,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '售后流程' }));
+    expect(await screen.findByRole('heading', { name: '售后流程' })).toBeInTheDocument();
+    const presetCard = screen.getByRole('heading', { name: '仅退款' }).closest('article');
+    if (!presetCard) throw new Error('未找到仅退款预置流程');
+    expect(within(presetCard).queryByRole('button', { name: '编辑新版本' }))
+      .not.toBeInTheDocument();
+    await user.click(within(presetCard).getByRole('button', { name: '停用' }));
+    await waitFor(() => expect(setEnabled).toHaveBeenCalledWith(refundOnly.id, false));
+
+    await user.click(screen.getByRole('button', { name: '新建自定义流程' }));
+    const dialog = screen.getByRole('dialog', { name: '编辑售后流程' });
+    await user.type(within(dialog).getByLabelText('流程名称'), '客服协商处理');
+    await user.click(within(dialog).getByRole('button', { name: '+添加步骤' }));
+    const steps = within(dialog).getAllByRole('group');
+    expect(steps).toHaveLength(2);
+    fireEvent.change(within(steps[1]).getByLabelText('步骤 2 名称'), {
+      target: { value: '记录协商结果' },
+    });
+    await user.selectOptions(within(steps[1]).getByLabelText('显示条件'), 'logistics_exception_present');
+    await user.click(within(steps[1]).getByLabelText('必需步骤'));
+    await user.click(within(dialog).getByRole('button', { name: '保存流程版本' }));
+
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      name: '客服协商处理',
+      scenario: 'other',
+      steps: expect.arrayContaining([expect.objectContaining({
+        name: '记录协商结果',
+        required: false,
+        condition: { fact: 'logistics_exception_present', equals: true },
+      })]),
+    })));
+  });
+
+  it('在售后处理单显示当前步骤并只调整后续流程', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const refundTemplate = testWorkflowTemplates.find(({ scenario }) => scenario === 'refund_only')!;
+    const returnTemplate = testWorkflowTemplates.find(({ scenario }) => scenario === 'return_refund')!;
+    const currentCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
+      id: 'aftersales-workflow-guide-ui',
+      shipmentRecordId: record.id,
+      workflow: 'refund_only',
+      workflowTemplate: {
+        templateId: refundTemplate.id,
+        version: refundTemplate.version,
+        name: refundTemplate.name,
+        scenario: refundTemplate.scenario,
+        steps: refundTemplate.steps,
+        timeline: [{
+          kind: 'selected', before: null,
+          after: { templateId: refundTemplate.id, version: 1 },
+          reason: '先与买家协商仅退款',
+          occurredAt: '2026-08-14T10:30:00+08:00',
+          createdAt: '2026-08-14T02:30:00.000Z',
+        }],
+      },
+      status: 'waiting_refund',
+      revision: 1,
+      reason: '先与买家协商仅退款',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      items: [{
+        id: 'aftersales-workflow-guide-item',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: {
+        pendingItemId: 'workflow-guide-refund',
+        requestedAmountCents: 500,
+        status: 'pending',
+        actualRecord: null,
+        createdAt: '2026-08-14T02:30:00.000Z',
+        latestEventAt: '2026-08-14T10:30:00+08:00',
+        timeline: [],
+      },
+      returns: [],
+      coordination: testAftersalesCoordination(null, {
+        physicalControl: 'buyer',
+        currentTodo: '核对并确认实际退款',
+        availableDirections: ['buyer_return', 'only_refund', 'replacement'],
+      }),
+      timeline: [],
+      createdAt: '2026-08-14T02:30:00.000Z',
+      updatedAt: '2026-08-14T02:30:00.000Z',
+    };
+    const changedCase: AftersalesCase = {
+      ...currentCase,
+      workflow: 'return_refund',
+      status: 'waiting_return',
+      revision: 2,
+      workflowTemplate: {
+        templateId: returnTemplate.id,
+        version: 1,
+        name: returnTemplate.name,
+        scenario: returnTemplate.scenario,
+        steps: returnTemplate.steps,
+        timeline: currentCase.workflowTemplate.timeline,
+      },
+    };
+    const changeWorkflow = vi.fn().mockResolvedValue(changedCase);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([currentCase]),
+      listAftersalesWorkflowTemplates: vi.fn().mockResolvedValue(testWorkflowTemplates),
+      changeAftersalesCaseWorkflowTemplate: changeWorkflow,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const caseRegion = await screen.findByRole('region', { name: `售后处理单 ${currentCase.id}` });
+    const guide = within(caseRegion).getByRole('region', { name: '售后流程引导' });
+    expect(guide).toHaveTextContent('仅退款');
+    expect(guide).toHaveTextContent('确认问题与退款申请');
+    expect(guide).toHaveTextContent('确认实际退款必需 · 当前建议');
+    await user.click(within(guide).getByRole('button', { name: '调整后续流程' }));
+    const dialog = screen.getByRole('dialog', { name: '调整后续售后流程' });
+    await user.selectOptions(within(dialog).getByLabelText('新的后续流程'), returnTemplate.id);
+    await user.selectOptions(within(dialog).getByLabelText('售后处理方向'), 'buyer_return');
+    fireEvent.change(within(dialog).getByLabelText('流程调整时间'), {
+      target: { value: '2026-08-14T10:40:00' },
+    });
+    await user.type(within(dialog).getByLabelText('调整原因'), '协商后改为买家寄回再退款');
+    await user.click(within(dialog).getByRole('button', { name: '确认调整' }));
+
+    await waitFor(() => expect(changeWorkflow).toHaveBeenCalledWith({
+      caseId: currentCase.id,
+      expectedRevision: 1,
+      workflowTemplateId: returnTemplate.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '协商后改为买家寄回再退款',
     }));
   });
 });

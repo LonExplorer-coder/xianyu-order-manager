@@ -13,6 +13,7 @@ import {
   shanghaiDateKey,
   systemOrderNumberForSequence,
 } from '../core/system-order-number';
+import { SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES } from '../core/aftersales-workflow-templates';
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
@@ -190,6 +191,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(35)) migrateToVersion35(database);
   if (!versions.has(36)) migrateToVersion36(database);
   if (!versions.has(37)) migrateToVersion37(database);
+  if (!versions.has(38)) migrateToVersion38(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -4948,6 +4950,151 @@ function migrateToVersion37(database: DatabaseSync): void {
     `);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (37, ?)')
       .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }
+    throw error;
+  }
+}
+
+function migrateToVersion38(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE aftersales_workflow_templates (
+        id TEXT PRIMARY KEY,
+        origin TEXT NOT NULL CHECK (origin IN ('system', 'custom')),
+        system_key TEXT UNIQUE CHECK (
+          (origin = 'system' AND system_key IN (
+            'refund_only', 'return_refund', 'exchange', 'direct_replacement',
+            'intercept_return', 'lost_handling', 'other'
+          ))
+          OR (origin = 'custom' AND system_key IS NULL)
+        ),
+        name_key TEXT NOT NULL UNIQUE,
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        current_version INTEGER NOT NULL CHECK (current_version >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (id, current_version)
+      ) STRICT;
+
+      CREATE TABLE aftersales_workflow_template_versions (
+        template_id TEXT NOT NULL
+          REFERENCES aftersales_workflow_templates(id) ON DELETE RESTRICT,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        definition_json TEXT NOT NULL CHECK (json_valid(definition_json)),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (template_id, version)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TRIGGER aftersales_workflow_template_versions_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_workflow_template_versions
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales workflow template versions are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_workflow_template_versions_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_workflow_template_versions
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales workflow template versions are immutable');
+      END;
+
+      CREATE TABLE aftersales_case_workflow_template_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+        before_template_id TEXT,
+        before_template_version INTEGER,
+        after_template_id TEXT NOT NULL,
+        after_template_version INTEGER NOT NULL CHECK (after_template_version >= 1),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (before_template_id, before_template_version)
+          REFERENCES aftersales_workflow_template_versions(template_id, version)
+          ON DELETE RESTRICT,
+        FOREIGN KEY (after_template_id, after_template_version)
+          REFERENCES aftersales_workflow_template_versions(template_id, version)
+          ON DELETE RESTRICT,
+        CHECK (
+          (kind = 'selected' AND before_template_id IS NULL AND before_template_version IS NULL)
+          OR (kind = 'changed' AND before_template_id IS NOT NULL
+            AND before_template_version IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX aftersales_case_workflow_template_events_by_case
+      ON aftersales_case_workflow_template_events (case_id, sequence);
+
+      CREATE TRIGGER aftersales_case_workflow_template_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_case_workflow_template_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case workflow template events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_case_workflow_template_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_case_workflow_template_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case workflow template events are immutable');
+      END;
+    `);
+    const createdAt = new Date().toISOString();
+    const insertTemplate = database.prepare(`
+      INSERT INTO aftersales_workflow_templates (
+        id, origin, system_key, name_key, enabled, current_version, created_at, updated_at
+      ) VALUES (?, 'system', ?, ?, 1, 1, ?, ?)
+    `);
+    const insertVersion = database.prepare(`
+      INSERT INTO aftersales_workflow_template_versions (
+        template_id, version, definition_json, created_at
+      ) VALUES (?, 1, ?, ?)
+    `);
+    for (const preset of SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES) {
+      insertTemplate.run(
+        preset.id,
+        preset.systemKey,
+        preset.definition.name.normalize('NFKC').toLocaleLowerCase('zh-CN'),
+        createdAt,
+        createdAt,
+      );
+      insertVersion.run(preset.id, JSON.stringify(preset.definition), createdAt);
+    }
+    database.prepare(`
+      INSERT INTO aftersales_case_workflow_template_events (
+        id, case_id, kind, before_template_id, before_template_version,
+        after_template_id, after_template_version, reason, occurred_at, created_at
+      )
+      SELECT
+        lower(hex(randomblob(16))),
+        cases.id,
+        'selected',
+        NULL,
+        NULL,
+        CASE cases.workflow
+          WHEN 'refund_only' THEN ?
+          WHEN 'return_refund' THEN ?
+          WHEN 'exchange' THEN ?
+          WHEN 'direct_replacement' THEN ?
+          ELSE ?
+        END,
+        1,
+        '旧售后处理单按原处理方式关联预置流程',
+        cases.occurred_at,
+        ?
+      FROM aftersales_cases AS cases
+    `).run(
+      SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES[0].id,
+      SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES[1].id,
+      SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES[2].id,
+      SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES[3].id,
+      SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES[6].id,
+      createdAt,
+    );
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (38, ?)')
+      .run(createdAt);
     database.exec('COMMIT;');
   } catch (error) {
     try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }

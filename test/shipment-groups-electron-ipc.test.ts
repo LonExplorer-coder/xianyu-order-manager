@@ -364,7 +364,7 @@ describe('发货组 Electron IPC', () => {
     const sourcePackage = shipment.record.packages[0];
     const created = await invoke('aftersales-cases:create', {
       shipmentRecordId: shipment.record.id,
-      workflow: 'return_refund',
+      workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
       occurredAt: '2026-08-15T09:00:00+08:00',
       reason: '包裹运输中申请拦截',

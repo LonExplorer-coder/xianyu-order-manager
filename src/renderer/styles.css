@@ -5570,6 +5570,259 @@ select:focus-visible {
   color: var(--danger);
 }
 
+.aftersales-workflows-workspace {
+  min-width: 0;
+  padding: 32px 40px 56px;
+}
+
+.aftersales-workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 18px;
+}
+
+.aftersales-workflow-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line-color, #deddd8);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 8px 26px rgb(20 28 38 / 5%);
+}
+
+.aftersales-workflow-card.is-disabled {
+  background: #f5f5f3;
+  color: #767d86;
+}
+
+.aftersales-workflow-card > header,
+.aftersales-workflow-card > footer,
+.aftersales-workflow-editor > header,
+.aftersales-workflow-editor > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.aftersales-workflow-card h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+}
+
+.aftersales-workflow-card header span,
+.aftersales-workflow-card p,
+.aftersales-workflow-card small {
+  color: #77808c;
+}
+
+.aftersales-workflow-card ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aftersales-workflow-card li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(20 28 38 / 4%);
+}
+
+.aftersales-workflow-card footer {
+  justify-content: flex-end;
+  margin-top: auto;
+}
+
+.aftersales-workflow-editor {
+  display: flex;
+  width: min(980px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
+  flex-direction: column;
+  gap: 20px;
+  padding: 26px;
+  overflow: auto;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgb(15 23 42 / 24%);
+}
+
+.aftersales-workflow-editor h2 {
+  margin: 5px 0 0;
+}
+
+.aftersales-workflow-editor__identity,
+.aftersales-workflow-editor__condition {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.aftersales-workflow-editor label {
+  display: grid;
+  gap: 7px;
+}
+
+.aftersales-workflow-editor input,
+.aftersales-workflow-editor select {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #d9d9d4;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.aftersales-workflow-editor__steps {
+  display: grid;
+  gap: 14px;
+}
+
+.aftersales-workflow-editor fieldset {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #dfded8;
+  border-radius: 12px;
+}
+
+.aftersales-workflow-editor__step-head {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, .8fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.aftersales-workflow-editor .compact-check,
+.aftersales-workflow-editor__fields label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aftersales-workflow-editor .compact-check input,
+.aftersales-workflow-editor__fields input {
+  width: auto;
+  padding: 0;
+}
+
+.aftersales-workflow-editor__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 12px;
+  border-radius: 9px;
+  background: #f7f7f5;
+}
+
+.aftersales-workflow-editor__step-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.aftersales-workflow-guide {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #deddd7;
+  border-radius: 12px;
+  background: #fbfbf8;
+}
+
+.aftersales-workflow-guide > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.aftersales-workflow-guide > header div {
+  display: grid;
+  gap: 2px;
+}
+
+.aftersales-workflow-guide > header span,
+.aftersales-workflow-guide small {
+  color: #77808c;
+}
+
+.aftersales-workflow-guide > ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aftersales-workflow-guide > ol > li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.aftersales-workflow-guide > ol > li > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e9ebed;
+  color: #4f5965;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.aftersales-workflow-guide > ol > li > div {
+  display: grid;
+  min-width: 0;
+}
+
+.aftersales-workflow-guide > ol > li.is-completed {
+  color: #61706b;
+  background: #f0f5f1;
+}
+
+.aftersales-workflow-guide > ol > li.is-completed > span {
+  background: #d7e8dc;
+  color: #23633b;
+}
+
+.aftersales-workflow-guide > ol > li.is-current {
+  outline: 2px solid #e6bd2f;
+  background: #fff9dd;
+}
+
+.aftersales-workflow-guide > ol > li.is-current > span {
+  background: #f4cc39;
+  color: #1e2937;
+}
+
+@media (max-width: 900px) {
+  .aftersales-workflows-workspace {
+    padding: 24px;
+  }
+
+  .aftersales-workflow-editor__identity,
+  .aftersales-workflow-editor__condition,
+  .aftersales-workflow-editor__step-head {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-loading,
 .settings-load-error {
   display: flex;

@@ -124,6 +124,7 @@ describe('桌面启动状态', () => {
     });
     const aftersalesCase = session.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
+      workflowTemplateId: 'system-aftersales-other',
       occurredAt: '2026-08-13T19:00:00+08:00',
       reason: '桌面会话售后投影测试',
       items: [{

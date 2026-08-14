@@ -79,6 +79,7 @@ import type {
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import type { AftersalesCase } from '../core/aftersales-cases';
+import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
   LocalApplication,
   type RecognitionBatchItemUpdate,
@@ -461,8 +462,40 @@ export class DesktopSession {
     return this.requireApplication().queryAftersalesCases(input);
   }
 
+  public listAftersalesWorkflowTemplates(): AftersalesWorkflowTemplate[] {
+    return this.requireApplication().listAftersalesWorkflowTemplates();
+  }
+
+  public setAftersalesWorkflowTemplateEnabled(
+    templateId: string,
+    enabled: boolean,
+  ): AftersalesWorkflowTemplate {
+    return this.requireApplication().setAftersalesWorkflowTemplateEnabled(templateId, enabled);
+  }
+
+  public createAftersalesWorkflowTemplate(input: unknown): AftersalesWorkflowTemplate {
+    return this.requireApplication().createAftersalesWorkflowTemplate(input);
+  }
+
+  public copyAftersalesWorkflowTemplate(input: unknown): AftersalesWorkflowTemplate {
+    return this.requireApplication().copyAftersalesWorkflowTemplate(input);
+  }
+
+  public updateAftersalesWorkflowTemplate(
+    templateId: string,
+    input: unknown,
+  ): AftersalesWorkflowTemplate {
+    return this.requireApplication().updateAftersalesWorkflowTemplate(templateId, input);
+  }
+
   public createAftersalesCase(input: unknown): AftersalesCase {
     const result = this.requireApplication().createAftersalesCase(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public changeAftersalesCaseWorkflowTemplate(input: unknown): AftersalesCase {
+    const result = this.requireApplication().changeAftersalesCaseWorkflowTemplate(input);
     this.refreshOrders();
     return result;
   }

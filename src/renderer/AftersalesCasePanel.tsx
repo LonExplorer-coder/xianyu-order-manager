@@ -3,8 +3,11 @@ import { useState } from 'react';
 import type {
   AftersalesCase,
   AftersalesCaseUpdatedEvent,
+  ChangeAftersalesCaseWorkflowTemplateInput,
   ProgressAftersalesCaseInput,
 } from '../core/aftersales-cases';
+import type { DesktopApi } from '../core/desktop-api';
+import { projectAftersalesWorkflowSteps } from '../core/aftersales-workflow-templates';
 import type { ShipmentRecord } from '../core/shipment-records';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
@@ -19,24 +22,31 @@ import {
   returnQuantityDifferenceSummary,
 } from './aftersales-presentation';
 import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
-import { ProgressAftersalesCaseDialog } from './AftersalesCaseDialogs';
+import {
+  ChangeAftersalesWorkflowDialog,
+  ProgressAftersalesCaseDialog,
+} from './AftersalesCaseDialogs';
 import {
   logisticsExceptionStageLabel,
   logisticsExceptionTypeLabel,
 } from './logistics-presentation';
 
 export function AftersalesCasePanel({
+  api,
   record,
   aftersalesCases,
   focusedCaseId,
   onUpdate,
   onProgress,
+  onChangeWorkflow,
 }: {
+  api: DesktopApi;
   record: ShipmentRecord;
   aftersalesCases: readonly AftersalesCase[];
   focusedCaseId?: string;
   onUpdate: (aftersalesCase: AftersalesCase) => void;
   onProgress: (input: ProgressAftersalesCaseInput) => Promise<void>;
+  onChangeWorkflow: (input: ChangeAftersalesCaseWorkflowTemplateInput) => Promise<void>;
 }) {
   const [progressTarget, setProgressTarget] = useState<{
     aftersalesCase: AftersalesCase;
@@ -45,11 +55,16 @@ export function AftersalesCasePanel({
     outboundExceptionId?: string;
     roundId?: string;
   } | null>(null);
+  const [workflowTarget, setWorkflowTarget] = useState<AftersalesCase | null>(null);
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
       {aftersalesCases.map((aftersalesCase) => {
         const operationsCoordination = aftersalesCaseOperationsCoordination(aftersalesCase);
+        const workflowSteps = projectAftersalesWorkflowSteps(
+          aftersalesCase.workflowTemplate,
+          aftersalesCase,
+        );
         return (
         <section
           id={`aftersales-case-${aftersalesCase.id}`}
@@ -66,6 +81,45 @@ export function AftersalesCasePanel({
             </strong>
             <span>{formatDateTime(aftersalesCase.occurredAt)}</span>
           </header>
+          <section className="aftersales-workflow-guide" aria-label="售后流程引导">
+            <header>
+              <div>
+                <strong>{aftersalesCase.workflowTemplate.name}</strong>
+                <span>版本 {aftersalesCase.workflowTemplate.version}</span>
+              </div>
+              {aftersalesCase.status !== 'completed' && aftersalesCase.status !== 'cancelled' && (
+                <button type="button" onClick={() => setWorkflowTarget(aftersalesCase)}>
+                  调整后续流程
+                </button>
+              )}
+            </header>
+            <ol>
+              {workflowSteps.map((step, index) => (
+                <li className={`is-${step.state}`} key={step.id}>
+                  <span aria-hidden="true">{step.state === 'completed' ? '✓' : index + 1}</span>
+                  <div>
+                    <strong>{step.name}</strong>
+                    <small>{step.required ? '必需' : '可选'}
+                      {step.state === 'current' ? ' · 当前建议' : ''}</small>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {aftersalesCase.workflowTemplate.timeline.length > 1 && (
+              <details>
+                <summary>流程调整历史</summary>
+                <ol>
+                  {aftersalesCase.workflowTemplate.timeline.map((event, index) => (
+                    <li key={`${event.kind}-${index}`}>
+                      <strong>{event.kind === 'selected' ? '选择流程' : '调整后续流程'}</strong>
+                      <span>{event.reason}</span>
+                      <small>{formatDateTime(event.occurredAt)}</small>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+          </section>
           <p>{aftersalesCase.reason}</p>
           <ul>
             {aftersalesCase.items.map((item) => (
@@ -803,6 +857,14 @@ export function AftersalesCasePanel({
           roundId={progressTarget.roundId}
           onProgress={onProgress}
           onClose={() => setProgressTarget(null)}
+        />
+      )}
+      {workflowTarget && (
+        <ChangeAftersalesWorkflowDialog
+          api={api}
+          aftersalesCase={workflowTarget}
+          onApplied={onChangeWorkflow}
+          onClose={() => setWorkflowTarget(null)}
         />
       )}
     </div>

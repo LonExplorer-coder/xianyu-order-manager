@@ -76,10 +76,17 @@ import type {
 import type {
   AftersalesCase,
   AftersalesCaseQuery,
+  ChangeAftersalesCaseWorkflowTemplateInput,
   CreateAftersalesCaseInput,
   ProgressAftersalesCaseInput,
   UpdateAftersalesCaseInput,
 } from './aftersales-cases';
+import type {
+  AftersalesWorkflowTemplate,
+  CopyAftersalesWorkflowTemplateInput,
+  CreateAftersalesWorkflowTemplateInput,
+  UpdateAftersalesWorkflowTemplateInput,
+} from './aftersales-workflow-templates';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -146,7 +153,25 @@ export interface DesktopApi {
     input: ProgressShipmentPackageCarrierClaimInput,
   ): Promise<ShipmentCarrierClaimProgressResult>;
   queryAftersalesCases(query?: AftersalesCaseQuery): Promise<AftersalesCase[]>;
+  listAftersalesWorkflowTemplates(): Promise<AftersalesWorkflowTemplate[]>;
+  setAftersalesWorkflowTemplateEnabled(
+    templateId: string,
+    enabled: boolean,
+  ): Promise<AftersalesWorkflowTemplate>;
+  createAftersalesWorkflowTemplate(
+    input: CreateAftersalesWorkflowTemplateInput,
+  ): Promise<AftersalesWorkflowTemplate>;
+  copyAftersalesWorkflowTemplate(
+    input: CopyAftersalesWorkflowTemplateInput,
+  ): Promise<AftersalesWorkflowTemplate>;
+  updateAftersalesWorkflowTemplate(
+    templateId: string,
+    input: UpdateAftersalesWorkflowTemplateInput,
+  ): Promise<AftersalesWorkflowTemplate>;
   createAftersalesCase(input: CreateAftersalesCaseInput): Promise<AftersalesCase>;
+  changeAftersalesCaseWorkflowTemplate(
+    input: ChangeAftersalesCaseWorkflowTemplateInput,
+  ): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
   progressAftersalesCase(input: ProgressAftersalesCaseInput): Promise<AftersalesCase>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
