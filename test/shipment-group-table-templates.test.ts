@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +12,7 @@ import type {
   Recognizer,
   RecognizerSource,
 } from '../src/core/contracts';
+import { normalizeShipmentGroupExportInput } from '../src/core/shipment-group-export';
 import { LocalApplication } from '../src/main/local-application';
 
 const openedApplications: LocalApplication[] = [];
@@ -350,8 +352,27 @@ describe('发货组字段与模板持久化', () => {
       .toThrow('发货组成员已变化');
   });
 
+  it('受控导出边界拒绝超过一万笔的嵌套成员快照', () => {
+    expect(() => normalizeShipmentGroupExportInput({
+      shipmentGroups: [
+        {
+          id: 'group-a',
+          expectedMemberOrderIds: Array.from({ length: 5_001 }, (_, index) => `a-${index}`),
+        },
+        {
+          id: 'group-b',
+          expectedMemberOrderIds: Array.from({ length: 5_000 }, (_, index) => `b-${index}`),
+        },
+      ],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: null,
+      masking: 'masked',
+    })).toThrow('一次最多导出 10000 笔发货组成员订单');
+  });
+
   it('同一买家的新发货轮次不继承已完成组的自定义值', async () => {
-    const { application, confirmNextOrder } = await openIncrementalApplication([
+    const { application, dataDirectory, confirmNextOrder } = await openIncrementalApplication([
       recognition('XY-GROUP-LIFECYCLE-0001'),
       recognition('XY-GROUP-LIFECYCLE-0002'),
     ]);
@@ -384,6 +405,17 @@ describe('发货组字段与模板持久化', () => {
         items: allItems,
       }],
     });
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      const row = database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM shipment_group_custom_field_values
+        WHERE shipment_group_id = ?
+      `).get(firstGroup.id) as { count: number };
+      expect(row.count).toBe(0);
+    } finally {
+      database.close();
+    }
 
     await confirmNextOrder();
     const secondGroup = application.queryShipmentGroups().groups[0];

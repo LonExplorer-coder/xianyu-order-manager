@@ -936,12 +936,15 @@ describe('订单管理工作台', () => {
     const zoneInput = within(fieldDialog).getByRole('textbox', { name: '拣货区域' });
     await user.clear(zoneInput);
     await user.type(zoneInput, '西区');
+    const queryCountBeforeSave = queryShipmentGroupWorkbench.mock.calls.length;
     await user.click(within(fieldDialog).getByRole('button', { name: '保存发货组字段' }));
     await waitFor(() => expect(saveShipmentGroupCustomFieldValues).toHaveBeenCalledWith({
       shipmentGroupId: group.id,
       expectedMemberOrderIds: [confirmedOrder.id],
       values: [{ definitionId: zoneField.id, value: '西区' }],
     }));
+    await waitFor(() => expect(queryShipmentGroupWorkbench.mock.calls.length)
+      .toBeGreaterThan(queryCountBeforeSave));
     expect(await screen.findByText('发货组字段已保存')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: '导出当前发货组' }));

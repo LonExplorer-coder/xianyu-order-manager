@@ -120,13 +120,17 @@ export function buildShipmentGroupWorkbench(
   const filtered = projection.groups.filter((group) => {
     if (normalizedText && !shipmentGroupSearchText(group).includes(normalizedText)) return false;
     if (!query.customFieldFilter) return true;
+    const definition = groupDefinitions.find(
+      ({ id }) => id === query.customFieldFilter?.definitionId,
+    );
+    if (!definition) return false;
     const value = valueByOwnerAndDefinition.get(shipmentGroupCustomFieldValueKey(
       group.id,
       query.customFieldFilter.definitionId,
     ));
     return value !== undefined
       && value !== null
-      && sameCustomFieldValue(value, query.customFieldFilter.value);
+      && matchesCustomFieldFilter(definition.type, value, query.customFieldFilter.value);
   });
   const sorted = [...filtered].sort((left, right) => {
     let compared = 0;
@@ -239,8 +243,21 @@ function customFieldComparableText(value: CustomFieldValue): string {
   return Array.isArray(value) ? value.join('\n') : String(value);
 }
 
-function sameCustomFieldValue(left: CustomFieldValue, right: CustomFieldValue): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function matchesCustomFieldFilter(
+  type: CustomFieldDefinition['type'],
+  stored: CustomFieldValue,
+  requested: CustomFieldValue,
+): boolean {
+  if (type === 'text' && typeof stored === 'string' && typeof requested === 'string') {
+    return stored.normalize('NFKC').toLocaleLowerCase('zh-CN').includes(
+      requested.normalize('NFKC').toLocaleLowerCase('zh-CN'),
+    );
+  }
+  if (type === 'multi_select' && Array.isArray(stored) && Array.isArray(requested)) {
+    const storedValues = new Set(stored);
+    return requested.every((value) => storedValues.has(value));
+  }
+  return JSON.stringify(stored) === JSON.stringify(requested);
 }
 
 function shipmentGroupCustomFieldValueKey(

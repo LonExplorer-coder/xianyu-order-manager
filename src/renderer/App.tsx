@@ -212,6 +212,7 @@ export function App({ api }: AppProps) {
   const [orderItemQueryLoading, setOrderItemQueryLoading] = useState(false);
   const [shipmentGroupProjection, setShipmentGroupProjection] =
     useState<ShipmentGroupWorkbenchResult | null>(null);
+  const [shipmentGroupQueryRefreshToken, setShipmentGroupQueryRefreshToken] = useState(0);
   const [shipmentGroupArchives, setShipmentGroupArchives] = useState<ShipmentGroupArchive[]>([]);
   const [aftersalesCases, setAftersalesCases] = useState<AftersalesCase[]>([]);
   const [shipmentFocus, setShipmentFocus] = useState<ShipmentFocus | null>(null);
@@ -529,6 +530,7 @@ export function App({ api }: AppProps) {
     readyDataDirectory,
     shipmentGroupProjectionDefinitionIds,
     shipmentGroupQuery,
+    shipmentGroupQueryRefreshToken,
   ]);
 
   useEffect(() => {
@@ -1306,6 +1308,7 @@ export function App({ api }: AppProps) {
         onCustomFieldValuesChange={(values) => setShipmentGroupProjection((current) => (
           current ? { ...current, customFieldValues: values } : current
         ))}
+        onRefreshWorkbench={() => setShipmentGroupQueryRefreshToken((token) => token + 1)}
         onArchivesChange={setShipmentGroupArchives}
         onAftersalesCasesChange={setAftersalesCases}
         onOpenOrder={(orderId) => void openOrder(orderId)}
@@ -1665,6 +1668,7 @@ function ShipmentGroupsWorkspace({
   error,
   onProjectionChange,
   onCustomFieldValuesChange,
+  onRefreshWorkbench,
   onArchivesChange,
   onAftersalesCasesChange,
   onOpenOrder,
@@ -1691,6 +1695,7 @@ function ShipmentGroupsWorkspace({
   error: string;
   onProjectionChange: (projection: ShipmentGroupProjection) => void;
   onCustomFieldValuesChange: (values: ShipmentGroupCustomFieldValue[]) => void;
+  onRefreshWorkbench: () => void;
   onArchivesChange: (archives: ShipmentGroupArchive[]) => void;
   onAftersalesCasesChange: (cases: AftersalesCase[]) => void;
   onOpenOrder: (orderId: string) => void;
@@ -2535,6 +2540,7 @@ function ShipmentGroupsWorkspace({
               ...savedValues,
             ];
             onCustomFieldValuesChange(nextValues);
+            onRefreshWorkbench();
             setCustomFieldTarget(null);
             setCustomFieldFeedback('发货组字段已保存');
           }}

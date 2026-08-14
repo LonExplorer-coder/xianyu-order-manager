@@ -20,6 +20,22 @@ const zoneDefinition: CustomFieldDefinition = {
   updatedAt: '2026-08-14T00:00:00.000Z',
 };
 
+const noteDefinition: CustomFieldDefinition = {
+  ...zoneDefinition,
+  id: 'field-note',
+  name: '打包备注',
+  type: 'text',
+  options: [],
+};
+
+const labelDefinition: CustomFieldDefinition = {
+  ...zoneDefinition,
+  id: 'field-labels',
+  name: '打包标签',
+  type: 'multi_select',
+  options: ['易碎', '加急', '礼品'],
+};
+
 function group(input: {
   id: string;
   recipient: string;
@@ -73,6 +89,44 @@ function group(input: {
 }
 
 describe('发货组工作台投影', () => {
+  it('文本字段按包含筛选，多选字段按包含全部所选项筛选', () => {
+    const target = group({
+      id: 'group-filter-target',
+      recipient: '刘环湘',
+      address: '广东省惠州市惠城区水口街道1号',
+      orderNumber: 'FILTER-001',
+      amountCents: 1_200,
+    });
+    const values: ShipmentGroupCustomFieldValue[] = [
+      { shipmentGroupId: target.id, definitionId: noteDefinition.id, value: '请使用加厚纸箱' },
+      {
+        shipmentGroupId: target.id,
+        definitionId: labelDefinition.id,
+        value: ['易碎', '加急'],
+      },
+    ];
+    const projection = { groups: [target], attentionOrders: [] };
+
+    expect(buildShipmentGroupWorkbench(
+      projection,
+      { customFieldFilter: { definitionId: noteDefinition.id, value: '加厚' } },
+      [noteDefinition, labelDefinition],
+      values,
+    ).groups).toHaveLength(1);
+    expect(buildShipmentGroupWorkbench(
+      projection,
+      { customFieldFilter: { definitionId: labelDefinition.id, value: ['易碎'] } },
+      [noteDefinition, labelDefinition],
+      values,
+    ).groups).toHaveLength(1);
+    expect(buildShipmentGroupWorkbench(
+      projection,
+      { customFieldFilter: { definitionId: labelDefinition.id, value: ['易碎', '礼品'] } },
+      [noteDefinition, labelDefinition],
+      values,
+    ).groups).toEqual([]);
+  });
+
   it('按成员订单与自定义字段筛选，并用发货组字段投影一行', () => {
     const east = group({
       id: 'group-east',

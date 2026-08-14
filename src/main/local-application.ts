@@ -3499,6 +3499,10 @@ export class LocalApplication {
           archiveFullyShipped ? now : null,
           now,
         );
+        workspace.database.prepare(`
+          DELETE FROM shipment_group_custom_field_values
+          WHERE shipment_group_id = ?
+        `).run(sourceGroupId);
       } else if (archiveFullyShipped) {
         workspace.database.prepare(`
           UPDATE shipment_group_archives
@@ -4437,7 +4441,9 @@ export class LocalApplication {
       createdAt: new Date().toISOString(),
     };
     this.insertShipmentGroupAdjustmentEvent(event);
-    return { event, projection: this.queryShipmentGroups() };
+    const nextProjection = this.queryShipmentGroups();
+    this.pruneShipmentGroupCustomFieldValues(nextProjection.groups.map(({ id }) => id));
+    return { event, projection: nextProjection };
   }
 
   public mergeShipmentGroups(input: unknown): ShipmentGroupAdjustmentResult {
@@ -4455,7 +4461,9 @@ export class LocalApplication {
       createdAt: new Date().toISOString(),
     };
     this.insertShipmentGroupAdjustmentEvent(event);
-    return { event, projection: this.queryShipmentGroups() };
+    const nextProjection = this.queryShipmentGroups();
+    this.pruneShipmentGroupCustomFieldValues(nextProjection.groups.map(({ id }) => id));
+    return { event, projection: nextProjection };
   }
 
   public listShipmentGroupAdjustmentEvents(): ShipmentGroupAdjustmentEvent[] {
@@ -4490,6 +4498,13 @@ export class LocalApplication {
         event.createdAt,
       );
     });
+  }
+
+  private pruneShipmentGroupCustomFieldValues(activeGroupIds: readonly string[]): void {
+    this.requireWorkspace().database.prepare(`
+      DELETE FROM shipment_group_custom_field_values
+      WHERE shipment_group_id NOT IN (SELECT value FROM json_each(?))
+    `).run(JSON.stringify(activeGroupIds));
   }
 
   public queryOrders(

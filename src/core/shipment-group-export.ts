@@ -43,6 +43,7 @@ export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroup
   if (input.shipmentGroups.length > 10_000) {
     throw new Error('一次最多导出 10000 个发货组');
   }
+  let totalMemberOrderCount = 0;
   const shipmentGroups = input.shipmentGroups.map((entry) => {
     const group = strictRecord(entry, '发货组导出范围', [
       'id',
@@ -52,8 +53,13 @@ export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroup
     const id = group.id.trim();
     if (!id || id.length > 200) throw new Error('发货组导出标识无效');
     if (!Array.isArray(group.expectedMemberOrderIds)
-      || group.expectedMemberOrderIds.length === 0) {
+      || group.expectedMemberOrderIds.length === 0
+      || group.expectedMemberOrderIds.length > 10_000) {
       throw new Error('发货组导出成员无效');
+    }
+    totalMemberOrderCount += group.expectedMemberOrderIds.length;
+    if (totalMemberOrderCount > 10_000) {
+      throw new Error('一次最多导出 10000 笔发货组成员订单');
     }
     const expectedMemberOrderIds = group.expectedMemberOrderIds.map((value) => {
       if (typeof value !== 'string') throw new Error('发货组导出成员无效');
