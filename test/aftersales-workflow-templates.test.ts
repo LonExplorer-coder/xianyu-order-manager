@@ -887,7 +887,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'

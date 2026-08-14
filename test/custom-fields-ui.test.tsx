@@ -155,6 +155,8 @@ const confirmedOrder: OriginalOrder = {
     quantity: 1,
     quantityInferred: false,
     subtotalCents: 800,
+    standardProduct: null,
+    standardizationSource: null,
   }],
 };
 

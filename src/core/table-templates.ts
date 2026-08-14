@@ -16,6 +16,10 @@ import type {
   ShipmentGroupWorkbenchQuery,
 } from './shipment-groups';
 import {
+  displayedProductSpecification,
+  displayedProductTitle,
+} from './product-standardization';
+import {
   QUANTITY_SOURCES,
   quantitySourceFromLegacy,
   quantitySourceLabel,
@@ -55,6 +59,9 @@ export type OrderItemBuiltinTableFieldId =
   | 'item_sequence'
   | 'product_title'
   | 'product_spec'
+  | 'sku'
+  | 'standard_product_name'
+  | 'standard_product_spec'
   | 'unit_price'
   | 'quantity'
   | 'quantity_source';
@@ -142,6 +149,9 @@ export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'item_sequence' }, displayName: '商品序号' },
   { field: { kind: 'builtin', key: 'product_title' }, displayName: '原始商品标题' },
   { field: { kind: 'builtin', key: 'product_spec' }, displayName: '原始款式／规格' },
+  { field: { kind: 'builtin', key: 'sku' }, displayName: 'SKU' },
+  { field: { kind: 'builtin', key: 'standard_product_name' }, displayName: '标准商品名' },
+  { field: { kind: 'builtin', key: 'standard_product_spec' }, displayName: '标准规格' },
   { field: { kind: 'builtin', key: 'unit_price' }, displayName: '商品单价' },
   { field: { kind: 'builtin', key: 'quantity' }, displayName: '数量' },
   { field: { kind: 'builtin', key: 'quantity_source' }, displayName: '数量来源' },
@@ -312,6 +322,9 @@ const ORDER_ITEM_BUILTIN_FIELDS = [
   fixedField('order_item', 'builtin', 'item_sequence', '商品序号', 'number'),
   fixedField('order_item', 'builtin', 'product_title', '原始商品标题', 'text'),
   fixedField('order_item', 'builtin', 'product_spec', '原始款式／规格', 'text'),
+  fixedField('order_item', 'builtin', 'sku', 'SKU', 'text'),
+  fixedField('order_item', 'builtin', 'standard_product_name', '标准商品名', 'text'),
+  fixedField('order_item', 'builtin', 'standard_product_spec', '标准规格', 'text'),
   fixedField('order_item', 'builtin', 'unit_price', '商品单价', 'money'),
   fixedField('order_item', 'builtin', 'quantity', '数量', 'number'),
   fixedField('order_item', 'builtin', 'quantity_source', '数量来源', 'text'),
@@ -675,7 +688,11 @@ export function projectOrderTableCell(
     case 'phone': return order.phone;
     case 'address': return order.addressOriginal;
     case 'product_summary': return order.items
-      .map((item) => `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} ×${item.quantity}`)
+      .map((item) => {
+        const title = displayedProductTitle(item);
+        const specification = displayedProductSpecification(item);
+        return `${title}${specification ? ` · ${specification}` : ''} ×${item.quantity}`;
+      })
       .join('；');
     case 'initial_source_recognition_status': return order.initialSourceRecognitionStatus;
     case 'platform_transaction_status': return order.platformTransactionStatus;
@@ -820,8 +837,8 @@ export function projectOrderTableProjectionRow(
     }
     const item = order.items[column.itemIndex];
     if (!item) return null;
-    if (column.value === 'product') return item.sourceTitle;
-    if (column.value === 'specification') return item.sourceSpec;
+    if (column.value === 'product') return displayedProductTitle(item);
+    if (column.value === 'specification') return displayedProductSpecification(item);
     return item.quantity;
   });
 }
@@ -847,6 +864,9 @@ export function projectOrderItemTableCell(
     case 'item_sequence': return item.position + 1;
     case 'product_title': return item.sourceTitle;
     case 'product_spec': return item.sourceSpec;
+    case 'sku': return item.standardProduct?.sku ?? '';
+    case 'standard_product_name': return item.standardProduct?.name ?? '';
+    case 'standard_product_spec': return item.standardProduct?.specification ?? '';
     case 'unit_price': return item.unitPriceCents;
     case 'quantity': return item.quantity;
     case 'quantity_source': return quantitySourceLabel(

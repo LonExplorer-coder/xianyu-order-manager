@@ -1,6 +1,37 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion40ExtensionArtifacts(database: DatabaseSync): void {
+  const productCount = database.prepare('SELECT COUNT(*) AS count FROM standard_products')
+    .get() as { count: number };
+  const mappingCount = database.prepare('SELECT COUNT(*) AS count FROM product_mappings')
+    .get() as { count: number };
+  const standardizedItemCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM order_items
+    WHERE standard_product_id IS NOT NULL OR standardization_source IS NOT NULL
+  `).get() as { count: number };
+  if (productCount.count > 0 || mappingCount.count > 0 || standardizedItemCount.count > 0) {
+    throw new Error('v40 测试降级前必须移除标准商品与映射数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS order_items_standardization_is_consistent_on_insert;
+    DROP TRIGGER IF EXISTS order_items_standardization_is_consistent_on_update;
+    DROP INDEX IF EXISTS order_items_by_standard_product;
+    ALTER TABLE order_items DROP COLUMN standardization_source;
+    ALTER TABLE order_items DROP COLUMN standard_product_id;
+    DROP INDEX IF EXISTS product_mappings_by_standard_product;
+    DROP TABLE product_mappings;
+    DROP TABLE standard_products;
+    DELETE FROM schema_migrations WHERE version = 40;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion39ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion40ExtensionArtifacts(database);
   const groupDefinitionCount = database.prepare(`
     SELECT COUNT(*) AS count
     FROM custom_field_definitions

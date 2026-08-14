@@ -32,6 +32,11 @@ import type {
 import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
+  normalizeProductStandardizationConfirmations,
+  normalizeStandardProductInput,
+  normalizeUpdateStandardProductInput,
+} from '../core/product-standardization';
+import {
   normalizeCreateTableTemplateInput,
   normalizeShipmentGroupWorkbenchQuery,
   normalizeUpdateTableTemplateInput,
@@ -171,10 +176,16 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
 
   ipcMain.handle(
     'workflow:confirm-draft',
-    (_event, draft: OrderDraft, customValues: unknown) => {
+    (
+      _event,
+      draft: OrderDraft,
+      customValues: unknown,
+      productStandardizations: unknown,
+    ) => {
       return desktopSession.confirmDraft(
         draft,
         parseDraftCustomFieldValues(customValues),
+        normalizeProductStandardizationConfirmations(productStandardizations),
       );
     },
   );
@@ -185,17 +196,36 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       draft: OrderDraft,
       expectedRevision: unknown,
       customValues: unknown,
+      productStandardizations: unknown,
     ) => (
       desktopSession.confirmOrderUpdate(
         draft,
         parseExpectedRevision(expectedRevision),
         parseDraftCustomFieldValues(customValues),
+        normalizeProductStandardizationConfirmations(productStandardizations),
       )
     ),
   );
   ipcMain.handle('workflow:cancel-draft', (_event, draftId: unknown) => {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
+  ipcMain.handle('products:list', () => desktopSession.listStandardProducts());
+  ipcMain.handle('products:create', (_event, input: unknown) => (
+    desktopSession.createStandardProduct(normalizeStandardProductInput(input))
+  ));
+  ipcMain.handle(
+    'products:update',
+    (_event, productId: unknown, input: unknown) => (
+      desktopSession.updateStandardProduct(
+        parseWorkflowId(productId, '标准商品'),
+        normalizeUpdateStandardProductInput(input),
+      )
+    ),
+  );
+  ipcMain.handle(
+    'products:preview-draft-standardizations',
+    (_event, draft: OrderDraft) => desktopSession.previewDraftProductStandardizations(draft),
+  );
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
   ipcMain.handle('orders:query', (_event, input: unknown, definitionIds: unknown) => (
     desktopSession.queryOrders(

@@ -334,6 +334,11 @@ describe('默认脱敏的订单工作簿导出', () => {
     await writeFile(destinationPath, Buffer.from('existing-workbook-contents'));
     const currentResultIds = application.queryOrders({ buyerText: '海棠' })
       .orders.map(({ id }) => id);
+    const standardProduct = application.createStandardProduct({
+      sku: 'CUP-SUMMER-RED',
+      name: '标准海棠杯',
+      specification: '红色 450ml 标准款',
+    });
     const database = new DatabaseSync(join(testRoot, '数据', 'xianyu-order-manager.sqlite3'));
     try {
       database.prepare(`
@@ -345,6 +350,11 @@ describe('默认脱敏的订单工作簿导出', () => {
         END
         WHERE order_id = ?
       `).run(currentResultIds[0]);
+      database.prepare(`
+        UPDATE order_items
+        SET standard_product_id = ?, standardization_source = 'manual'
+        WHERE order_id = ? AND position = 0
+      `).run(standardProduct.id, currentResultIds[0]);
     } finally {
       database.close();
     }
@@ -401,11 +411,11 @@ describe('默认脱敏的订单工作簿导出', () => {
     expect(defaultOrderHeaders).not.toContain('备注');
     expect(defaultOrderHeaders).not.toContain('支付宝交易号');
     expect(cellByHeader(orders, 2, '商品1')).toMatchObject({
-      value: '夏日海棠杯',
+      value: '标准海棠杯',
       type: ExcelJS.ValueType.String,
     });
     expect(cellByHeader(orders, 2, '款式或规格1')).toMatchObject({
-      value: '红色 450ml',
+      value: '红色 450ml 标准款',
       type: ExcelJS.ValueType.String,
     });
     expect(cellByHeader(orders, 2, '数量1')).toMatchObject({
@@ -421,11 +431,19 @@ describe('默认脱敏的订单工作簿导出', () => {
       '商品序号',
       '原始商品标题',
       '原始款式／规格',
+      'SKU',
+      '标准商品名',
+      '标准规格',
       '商品单价',
       '数量',
       '数量来源',
       '商品小计',
     ]);
+    expect(cellByHeader(items, 2, '原始商品标题').value).toBe('夏日海棠杯');
+    expect(cellByHeader(items, 2, '原始款式／规格').value).toBe('红色 450ml');
+    expect(cellByHeader(items, 2, 'SKU').value).toBe('CUP-SUMMER-RED');
+    expect(cellByHeader(items, 2, '标准商品名').value).toBe('标准海棠杯');
+    expect(cellByHeader(items, 2, '标准规格').value).toBe('红色 450ml 标准款');
 
     expect(cellByHeader(orders, 2, '买家')).toMatchObject({
       value: '海**家',

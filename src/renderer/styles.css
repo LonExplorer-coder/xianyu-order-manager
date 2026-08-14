@@ -4483,6 +4483,67 @@ select:focus-visible {
   gap: 14px;
 }
 
+.product-standardization-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dfe1dc;
+  border-radius: 8px;
+  background: #f7f8f5;
+}
+
+.product-standardization-editor__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.product-standardization-editor__heading strong,
+.product-standardization-editor__heading small {
+  display: block;
+}
+
+.product-standardization-editor__heading strong {
+  color: var(--navy-900);
+  font-size: 11px;
+}
+
+.product-standardization-editor__heading small {
+  margin-top: 4px;
+  color: var(--navy-500);
+  font-size: 9px;
+}
+
+.product-standardization-editor__heading > span {
+  padding: 4px 7px;
+  border: 1px solid #cbd9c9;
+  border-radius: 999px;
+  background: #f2f8ef;
+  color: #416146;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.product-standardization-editor__mapping {
+  margin: 0;
+  padding: 10px;
+  background: #fff;
+}
+
+.product-standardization-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.product-standardization-candidates > span {
+  color: var(--navy-500);
+  font-size: 9px;
+  font-weight: 700;
+}
+
 .item-title-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -6118,6 +6179,11 @@ select:focus-visible {
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.field-definition-card > .button {
+  min-height: 30px;
+  margin-top: 12px;
 }
 
 .fields-check-row {

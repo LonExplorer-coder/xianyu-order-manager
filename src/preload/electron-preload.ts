@@ -30,16 +30,35 @@ const api: DesktopApi = {
     };
   },
   cancelDraft: (draftId) => ipcRenderer.invoke('workflow:cancel-draft', draftId),
-  confirmDraft: (draft, customValues) => (
-    ipcRenderer.invoke('workflow:confirm-draft', draft, customValues)
+  confirmDraft: (draft, customValues, productStandardizations) => (
+    ipcRenderer.invoke(
+      'workflow:confirm-draft',
+      draft,
+      customValues,
+      productStandardizations,
+    )
   ),
-  confirmOrderUpdate: (draft, expectedRevision, customValues) => (
+  confirmOrderUpdate: (
+    draft,
+    expectedRevision,
+    customValues,
+    productStandardizations,
+  ) => (
     ipcRenderer.invoke(
       'workflow:confirm-order-update',
       draft,
       expectedRevision,
       customValues,
+      productStandardizations,
     )
+  ),
+  listStandardProducts: () => ipcRenderer.invoke('products:list'),
+  createStandardProduct: (input) => ipcRenderer.invoke('products:create', input),
+  updateStandardProduct: (productId, input) => (
+    ipcRenderer.invoke('products:update', productId, input)
+  ),
+  previewDraftProductStandardizations: (draft) => (
+    ipcRenderer.invoke('products:preview-draft-standardizations', draft)
   ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
   queryOrders: (query, customFieldDefinitionIds) => (

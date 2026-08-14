@@ -162,6 +162,8 @@ const confirmedOrder: OriginalOrder = {
     quantity: 2,
     quantityInferred: false,
     subtotalCents: 1_600,
+    standardProduct: null,
+    standardizationSource: null,
   }],
 };
 
@@ -486,6 +488,10 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       order: confirmedOrder,
       resolution: 'order_updated',
     }),
+    listStandardProducts: vi.fn().mockResolvedValue([]),
+    createStandardProduct: vi.fn(),
+    updateStandardProduct: vi.fn(),
+    previewDraftProductStandardizations: vi.fn().mockResolvedValue([]),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
@@ -4217,6 +4223,109 @@ describe('订单管理工作台', () => {
         recipient: '人工修正收件人',
         items: [expect.objectContaining({ quantity: 2, quantityInferred: false })],
       }),
+    );
+  });
+
+  it('在标准商品页创建并编辑内部 SKU、商品名和规格', async () => {
+    const user = userEvent.setup();
+    const created = {
+      id: 'product-ui-1',
+      sku: 'SKU-UI-001',
+      name: '娃鞋白模',
+      specification: '05M',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const createStandardProduct = vi.fn().mockResolvedValue(created);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listStandardProducts: vi.fn().mockResolvedValue([]),
+      createStandardProduct,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '标准商品' }));
+    expect(await screen.findByRole('heading', { name: '标准商品' })).toBeVisible();
+    await user.type(screen.getByRole('textbox', { name: /SKU/u }), created.sku);
+    await user.type(screen.getByRole('textbox', { name: /标准商品名/u }), created.name);
+    await user.type(screen.getByRole('textbox', { name: /标准规格/u }), created.specification);
+    await user.click(screen.getByRole('button', { name: '创建标准商品' }));
+
+    expect(createStandardProduct).toHaveBeenCalledWith({
+      sku: created.sku,
+      name: created.name,
+      specification: created.specification,
+    });
+    expect(await screen.findByText(created.sku)).toBeVisible();
+    expect(screen.getByText(created.name)).toBeVisible();
+  });
+
+  it('订单校对只展示模糊候选，人工选中并勾选后才提交商品映射', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-candidate',
+      sku: 'SKU-UI-CANDIDATE',
+      name: '脱敏测试标准商品',
+      specification: '白色标准款',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        candidates: [{
+          product,
+          reason: 'fuzzy',
+          score: 0.72,
+          mappingSuggested: false,
+        }],
+      }]),
+      confirmDraft,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    expect(await screen.findByRole('button', {
+      name: /SKU-UI-CANDIDATE.*相似候选/u,
+    })).toBeVisible();
+    expect(screen.getByRole('combobox', { name: '商品 1 标准商品' })).toHaveValue('__none__');
+
+    await user.click(screen.getByRole('button', {
+      name: /SKU-UI-CANDIDATE.*相似候选/u,
+    }));
+    await user.click(screen.getByRole('checkbox', { name: /记住这组订单原文/u }));
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: draft.id }),
+      undefined,
+      [{
+        draftItemId: draft.items[0].id,
+        standardProductId: product.id,
+        createMapping: true,
+      }],
     );
   });
 
@@ -9412,6 +9521,9 @@ describe('订单管理工作台', () => {
         '商品序号',
         '原始商品标题',
         '原始款式／规格',
+        'SKU',
+        '标准商品名',
+        '标准规格',
         '商品单价',
         '数量',
         '数量来源',

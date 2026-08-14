@@ -4,8 +4,10 @@ import { basename, dirname, extname, join } from 'node:path';
 
 import type {
   ConfirmedOrderSnapshot,
+  DraftItem,
   OrderDetails,
   OrderChangeEvent,
+  OrderFieldChange,
   OrderChangeValue,
   OrderEditReview,
   OrderDraft,
@@ -95,6 +97,18 @@ import {
   normalizedOrderIdentityPart,
 } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
+import {
+  fuzzyProductSimilarity,
+  normalizeProductText,
+  normalizeProductStandardizationConfirmations,
+  normalizeSkuKey,
+  normalizeStandardProductInput,
+  normalizeUpdateStandardProductInput,
+  type DraftItemProductStandardization,
+  type ProductStandardizationConfirmation,
+  type ProductStandardizationSource,
+  type StandardProduct,
+} from '../core/product-standardization';
 import {
   assessAutomaticImport,
   isOrderReviewIssueCode,
@@ -2219,6 +2233,7 @@ export class LocalApplication {
     draft: OrderDraft,
     customValues?: DraftCustomFieldValues,
     options: ConfirmDraftCustomFieldOptions = {},
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): OriginalOrder {
     const workspace = this.requireWorkspace();
     const persistedDraft = this.getDraft(draft.id);
@@ -2246,6 +2261,10 @@ export class LocalApplication {
     const preparedCustomValues = this.prepareDraftCustomFieldValues(draft, customValues, {
       enforceRequiredItemFields: options.enforceRequiredItemFields ?? true,
     });
+    const preparedProductStandardizations = this.prepareProductStandardizations(
+      draft.items,
+      productStandardizations,
+    );
     const orderId = randomUUID();
     const now = new Date().toISOString();
     const confirmedRecognition = toConfirmedOrderSnapshot(draft);
@@ -2314,14 +2333,17 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
-          unit_price_cents, quantity, quantity_source, subtotal_cents
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          unit_price_cents, quantity, quantity_source, subtotal_cents,
+          standard_product_id, standardization_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
         const quantitySource = requiredQuantitySource(item);
         const itemId = persistedItemIds.get(item.id);
         if (!itemId) throw new Error('订单草稿商品标识无效');
+        const standardization = preparedProductStandardizations.get(item.id);
+        if (!standardization) throw new Error('订单草稿商品标准化结果无效');
         insertItem.run(
           itemId,
           orderId,
@@ -2332,7 +2354,12 @@ export class LocalApplication {
           item.quantity,
           quantitySource,
           safeSubtotal(unitPriceCents, item.quantity),
+          standardization.standardProductId,
+          standardization.source,
         );
+        if (standardization.createMapping && standardization.standardProductId) {
+          this.upsertProductMapping(item, standardization.standardProductId, now);
+        }
       });
 
       const insertCustomValue = workspace.database.prepare(`
@@ -2423,6 +2450,7 @@ export class LocalApplication {
     draft: OrderDraft,
     expectedRevision: number,
     customValues?: DraftCustomFieldValues,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): OrderUpdateConfirmation {
     const workspace = this.requireWorkspace();
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
@@ -2474,7 +2502,7 @@ export class LocalApplication {
     }
     draft = withHigherPriorityCurrentQuantities(existing, draft);
     const hasShipmentHistory = this.orderFulfillmentProjection().hasShipmentHistory(orderId);
-    const changes = diffOrderCurrentValues(existing, draft).filter((change) => (
+    const contentChanges = diffOrderCurrentValues(existing, draft).filter((change) => (
       !hasShipmentHistory || change.path !== 'fulfillmentStatus'
     ));
     const fulfillmentStatus = hasShipmentHistory
@@ -2510,8 +2538,60 @@ export class LocalApplication {
     for (const existingItemId of persistedItemIds.values()) {
       unusedExistingItemIds.delete(existingItemId);
     }
+    const preparedProductStandardizations = this.prepareProductStandardizations(
+      draft.items,
+      productStandardizations,
+    );
+    const explicitStandardizationItemIds = new Set(
+      (productStandardizations ?? []).map(({ draftItemId }) => draftItemId),
+    );
+    const existingItemsById = new Map(existing.items.map((item) => [item.id, item]));
+    draft.items.forEach((item) => {
+      if (explicitStandardizationItemIds.has(item.id)) return;
+      const persistedItemId = persistedItemIds.get(item.id);
+      const existingItem = persistedItemId ? existingItemsById.get(persistedItemId) : undefined;
+      if (!existingItem) return;
+      preparedProductStandardizations.set(item.id, {
+        standardProductId: existingItem.standardProduct?.id ?? null,
+        source: existingItem.standardizationSource,
+        createMapping: false,
+      });
+    });
+    const standardizationChanges: OrderFieldChange[] = [];
+    draft.items.forEach((item, index) => {
+      const prepared = preparedProductStandardizations.get(item.id);
+      if (!prepared) throw new Error('订单草稿商品标准化结果无效');
+      const persistedItemId = persistedItemIds.get(item.id);
+      const existingItem = persistedItemId ? existingItemsById.get(persistedItemId) : undefined;
+      const beforeProductId = existingItem?.standardProduct?.id ?? null;
+      const beforeSource = existingItem?.standardizationSource ?? null;
+      if (beforeProductId !== prepared.standardProductId) {
+        const afterProduct = prepared.standardProductId
+          ? this.getStandardProduct(prepared.standardProductId)
+          : null;
+        standardizationChanges.push({
+          path: `items[${index}].standardProductSku`,
+          before: existingItem?.standardProduct?.sku ?? null,
+          after: afterProduct?.sku ?? null,
+        });
+      }
+      if (beforeSource !== prepared.source) {
+        standardizationChanges.push({
+          path: `items[${index}].standardizationSource`,
+          before: beforeSource,
+          after: prepared.source,
+        });
+      }
+    });
+    const changes = [...contentChanges, ...standardizationChanges];
     if (changes.length === 0) {
       workspace.transaction(() => {
+        for (const item of draft.items) {
+          const standardization = preparedProductStandardizations.get(item.id);
+          if (standardization?.createMapping && standardization.standardProductId) {
+            this.upsertProductMapping(item, standardization.standardProductId, now);
+          }
+        }
         this.deleteDraftCustomFieldValuesForOrderUpdate(
           orderId,
           persistedItemIds,
@@ -2634,8 +2714,9 @@ export class LocalApplication {
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
-          unit_price_cents, quantity, quantity_source, subtotal_cents
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          unit_price_cents, quantity, quantity_source, subtotal_cents,
+          standard_product_id, standardization_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateItem = workspace.database.prepare(`
         UPDATE order_items
@@ -2646,7 +2727,9 @@ export class LocalApplication {
           unit_price_cents = ?,
           quantity = ?,
           quantity_source = ?,
-          subtotal_cents = ?
+          subtotal_cents = ?,
+          standard_product_id = ?,
+          standardization_source = ?
         WHERE id = ? AND order_id = ?
       `);
       draft.items.forEach((item, position) => {
@@ -2654,6 +2737,8 @@ export class LocalApplication {
         const quantitySource = requiredQuantitySource(item);
         const itemId = persistedItemIds.get(item.id);
         if (!itemId) throw new Error('订单草稿商品标识无效');
+        const standardization = preparedProductStandardizations.get(item.id);
+        if (!standardization) throw new Error('订单草稿商品标准化结果无效');
         if (existingItemIds.has(itemId)) {
           updateItem.run(
             position,
@@ -2663,6 +2748,8 @@ export class LocalApplication {
             item.quantity,
             quantitySource,
             safeSubtotal(unitPriceCents, item.quantity),
+            standardization.standardProductId,
+            standardization.source,
             itemId,
             orderId,
           );
@@ -2677,6 +2764,8 @@ export class LocalApplication {
             item.quantity,
             quantitySource,
             safeSubtotal(unitPriceCents, item.quantity),
+            standardization.standardProductId,
+            standardization.source,
           );
           workspace.database.prepare(`
             INSERT INTO custom_field_values (
@@ -2690,6 +2779,9 @@ export class LocalApplication {
             WHERE definitions.granularity = 'order_item'
               AND definitions.default_value_json IS NOT NULL
           `).run(itemId, now, now);
+        }
+        if (standardization.createMapping && standardization.standardProductId) {
+          this.upsertProductMapping(item, standardization.standardProductId, now);
         }
       });
       if (unusedExistingItemIds.size > 0) {
@@ -3130,6 +3222,285 @@ export class LocalApplication {
 
   public listOrders(): OrderSummary[] {
     return this.queryOrders({}, []).orders;
+  }
+
+  public createStandardProduct(input: unknown): StandardProduct {
+    const workspace = this.requireWorkspace();
+    const normalized = normalizeStandardProductInput(input);
+    const skuKey = normalizeSkuKey(normalized.sku);
+    if (workspace.database.prepare(
+      'SELECT 1 AS found FROM standard_products WHERE sku_key = ?',
+    ).get(skuKey)) {
+      throw new Error('SKU 已存在');
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    workspace.database.prepare(`
+      INSERT INTO standard_products (
+        id, sku, sku_key, name, specification,
+        name_key, specification_key, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      id,
+      normalized.sku,
+      skuKey,
+      normalized.name,
+      normalized.specification,
+      normalizeProductText(normalized.name),
+      normalizeProductText(normalized.specification),
+      now,
+      now,
+    );
+    return this.getStandardProduct(id);
+  }
+
+  public listStandardProducts(): StandardProduct[] {
+    const workspace = this.requireWorkspace();
+    return (workspace.database.prepare(`
+      SELECT *
+      FROM standard_products
+      ORDER BY sku_key, id
+    `).all() as unknown as SqlRow[]).map(parseStandardProductRow);
+  }
+
+  public updateStandardProduct(productId: string, input: unknown): StandardProduct {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    const normalized = normalizeUpdateStandardProductInput(input);
+    const skuKey = normalizeSkuKey(normalized.sku);
+    const duplicate = workspace.database.prepare(`
+      SELECT 1 AS found
+      FROM standard_products
+      WHERE sku_key = ? AND id <> ?
+    `).get(skuKey, id);
+    if (duplicate) throw new Error('SKU 已存在');
+    const now = new Date().toISOString();
+    const result = workspace.database.prepare(`
+      UPDATE standard_products
+      SET
+        sku = ?,
+        sku_key = ?,
+        name = ?,
+        specification = ?,
+        name_key = ?,
+        specification_key = ?,
+        revision = revision + 1,
+        updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      normalized.sku,
+      skuKey,
+      normalized.name,
+      normalized.specification,
+      normalizeProductText(normalized.name),
+      normalizeProductText(normalized.specification),
+      now,
+      id,
+      normalized.expectedRevision,
+    );
+    if (result.changes !== 1) {
+      if (!workspace.database.prepare(
+        'SELECT 1 AS found FROM standard_products WHERE id = ?',
+      ).get(id)) throw new Error('未找到标准商品');
+      throw new Error('标准商品已在其他操作中更新，请刷新后重试');
+    }
+    return this.getStandardProduct(id);
+  }
+
+  private getStandardProduct(productId: string): StandardProduct {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT * FROM standard_products WHERE id = ?
+    `).get(productId) as SqlRow | undefined;
+    if (!row) throw new Error('未找到标准商品');
+    return parseStandardProductRow(row);
+  }
+
+  private exactStandardProductId(
+    item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
+  ): string | null {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT id
+      FROM standard_products
+      WHERE name_key = ? AND specification_key = ?
+      ORDER BY id
+      LIMIT 2
+    `).all(
+      normalizeProductText(item.sourceTitle),
+      normalizeProductText(item.sourceSpec),
+    ) as unknown as SqlRow[];
+    return rows.length === 1 ? asString(rows[0].id) : null;
+  }
+
+  private mappedStandardProductId(
+    item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
+  ): string | null {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT standard_product_id
+      FROM product_mappings
+      WHERE source_title_key = ? AND source_spec_key = ?
+    `).get(
+      normalizeProductText(item.sourceTitle),
+      normalizeProductText(item.sourceSpec),
+    ) as SqlRow | undefined;
+    return row ? asString(row.standard_product_id) : null;
+  }
+
+  public previewDraftProductStandardizations(
+    draft: OrderDraft,
+  ): DraftItemProductStandardization[] {
+    const persisted = this.getDraft(draft.id);
+    if (persisted.status !== 'awaiting_review') {
+      throw new Error('该订单草稿已经处理');
+    }
+    if (!Array.isArray(draft.items) || draft.items.length > 200) {
+      throw new Error('订单商品明细无效');
+    }
+    for (const item of draft.items) {
+      if (
+        typeof item.id !== 'string' || !item.id ||
+        typeof item.sourceTitle !== 'string' || item.sourceTitle.length > 300 ||
+        typeof item.sourceSpec !== 'string' || item.sourceSpec.length > 300
+      ) {
+        throw new Error('订单商品明细无效');
+      }
+    }
+    const products = this.listStandardProducts();
+    const workspace = this.requireWorkspace();
+    return draft.items.map((item) => {
+      const mappedId = this.mappedStandardProductId(item);
+      const exactId = mappedId ? null : this.exactStandardProductId(item);
+      const automaticProductId = mappedId ?? exactId;
+      const automaticProduct = automaticProductId
+        ? products.find(({ id }) => id === automaticProductId) ?? null
+        : null;
+      const previousManualRows = workspace.database.prepare(`
+        SELECT standard_product_id, COUNT(*) AS correction_count
+        FROM order_items
+        WHERE standardization_source = 'manual'
+          AND source_title = ? COLLATE NOCASE
+          AND source_spec = ? COLLATE NOCASE
+          AND standard_product_id IS NOT NULL
+        GROUP BY standard_product_id
+      `).all(item.sourceTitle, item.sourceSpec) as unknown as SqlRow[];
+      const correctionCountByProductId = new Map(previousManualRows.map((row) => [
+        asString(row.standard_product_id),
+        asNumber(row.correction_count),
+      ]));
+      const candidates = automaticProduct
+        ? []
+        : products
+          .map((product) => {
+            const correctionCount = correctionCountByProductId.get(product.id) ?? 0;
+            const score = correctionCount > 0
+              ? 1
+              : fuzzyProductSimilarity(item.sourceTitle, item.sourceSpec, product);
+            return {
+              product,
+              reason: correctionCount > 0
+                ? 'previous_manual_choice' as const
+                : 'fuzzy' as const,
+              score,
+              mappingSuggested: correctionCount > 0,
+            };
+          })
+          .filter(({ score }) => score >= 0.35)
+          .sort((left, right) => right.score - left.score || (
+            left.product.sku.localeCompare(right.product.sku, 'zh-CN')
+          ))
+          .slice(0, 5);
+      return {
+        draftItemId: item.id,
+        sourceTitle: item.sourceTitle,
+        sourceSpec: item.sourceSpec,
+        automaticProduct,
+        automaticSource: mappedId ? 'mapping' : exactId ? 'exact' : null,
+        candidates,
+      };
+    });
+  }
+
+  private prepareProductStandardizations(
+    items: readonly DraftItem[],
+    confirmations?: readonly ProductStandardizationConfirmation[],
+  ): Map<string, {
+    standardProductId: string | null;
+    source: ProductStandardizationSource | null;
+    createMapping: boolean;
+  }> {
+    const choices = normalizeProductStandardizationConfirmations(confirmations);
+    const itemById = new Map(items.map((item) => [item.id, item]));
+    const choiceByItemId = new Map<string, ProductStandardizationConfirmation>();
+    for (const choice of choices) {
+      if (!itemById.has(choice.draftItemId) || choiceByItemId.has(choice.draftItemId)) {
+        throw new Error('商品标准化确认目标无效');
+      }
+      if (choice.standardProductId !== null) this.getStandardProduct(choice.standardProductId);
+      choiceByItemId.set(choice.draftItemId, choice);
+    }
+    const entries: Array<[
+      string,
+      {
+        standardProductId: string | null;
+        source: ProductStandardizationSource | null;
+        createMapping: boolean;
+      },
+    ]> = items.map((item) => {
+      const choice = choiceByItemId.get(item.id);
+      if (choice) {
+        return [item.id, {
+          standardProductId: choice.standardProductId,
+          source: choice.standardProductId ? 'manual' : null,
+          createMapping: choice.createMapping,
+        }];
+      }
+      const mappedId = this.mappedStandardProductId(item);
+      if (mappedId) {
+        return [item.id, {
+          standardProductId: mappedId,
+          source: 'mapping',
+          createMapping: false,
+        }];
+      }
+      const exactId = this.exactStandardProductId(item);
+      return [item.id, {
+        standardProductId: exactId,
+        source: exactId ? 'exact' : null,
+        createMapping: false,
+      }];
+    });
+    return new Map(entries);
+  }
+
+  private upsertProductMapping(
+    item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
+    standardProductId: string,
+    now: string,
+  ): void {
+    const workspace = this.requireWorkspace();
+    workspace.database.prepare(`
+      INSERT INTO product_mappings (
+        id, source_title, source_spec, source_title_key, source_spec_key,
+        standard_product_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (source_title_key, source_spec_key) DO UPDATE SET
+        source_title = excluded.source_title,
+        source_spec = excluded.source_spec,
+        standard_product_id = excluded.standard_product_id,
+        updated_at = excluded.updated_at
+    `).run(
+      randomUUID(),
+      item.sourceTitle,
+      item.sourceSpec,
+      normalizeProductText(item.sourceTitle),
+      normalizeProductText(item.sourceSpec),
+      standardProductId,
+      now,
+      now,
+    );
   }
 
   private listShipmentCandidateOrders(): OriginalOrder[] {
@@ -4546,14 +4917,19 @@ export class LocalApplication {
         OR EXISTS (
           SELECT 1
           FROM order_items AS searched_items
+          LEFT JOIN standard_products AS searched_products
+            ON searched_products.id = searched_items.standard_product_id
           WHERE searched_items.order_id = orders.id
             AND (
               searched_items.source_title LIKE ? ESCAPE '\\'
               OR searched_items.source_spec LIKE ? ESCAPE '\\'
+              OR searched_products.sku LIKE ? ESCAPE '\\'
+              OR searched_products.name LIKE ? ESCAPE '\\'
+              OR searched_products.specification LIKE ? ESCAPE '\\'
             )
         )
       )`);
-      parameters.push(...Array<string>(12).fill(pattern));
+      parameters.push(...Array<string>(15).fill(pattern));
     }
     const buyerText = query.buyerText?.normalize('NFKC').trim();
     if (buyerText) {
@@ -4572,13 +4948,18 @@ export class LocalApplication {
       where.push(`EXISTS (
         SELECT 1
         FROM order_items AS filtered_items
+        LEFT JOIN standard_products AS filtered_products
+          ON filtered_products.id = filtered_items.standard_product_id
         WHERE filtered_items.order_id = orders.id
           AND (
             filtered_items.source_title LIKE ? ESCAPE '\\'
             OR filtered_items.source_spec LIKE ? ESCAPE '\\'
+            OR filtered_products.sku LIKE ? ESCAPE '\\'
+            OR filtered_products.name LIKE ? ESCAPE '\\'
+            OR filtered_products.specification LIKE ? ESCAPE '\\'
           )
       )`);
-      parameters.push(pattern, pattern);
+      parameters.push(pattern, pattern, pattern, pattern, pattern);
     }
     if (query.platform) {
       where.push('orders.platform = ?');
@@ -4722,13 +5103,37 @@ export class LocalApplication {
             SELECT json_group_array(json_object(
               'sourceTitle', ordered_items.source_title,
               'sourceSpec', ordered_items.source_spec,
-              'quantity', ordered_items.quantity
+              'quantity', ordered_items.quantity,
+              'standardProduct', CASE
+                WHEN ordered_items.standard_product_id IS NULL THEN NULL
+                ELSE json_object(
+                  'id', ordered_items.standard_product_id,
+                  'sku', ordered_items.standard_sku,
+                  'name', ordered_items.standard_name,
+                  'specification', ordered_items.standard_specification,
+                  'revision', ordered_items.standard_revision,
+                  'createdAt', ordered_items.standard_created_at,
+                  'updatedAt', ordered_items.standard_updated_at
+                )
+              END
             ))
             FROM (
-              SELECT source_title, source_spec, quantity
+              SELECT
+                order_items.source_title,
+                order_items.source_spec,
+                order_items.quantity,
+                order_items.standard_product_id,
+                standard_products.sku AS standard_sku,
+                standard_products.name AS standard_name,
+                standard_products.specification AS standard_specification,
+                standard_products.revision AS standard_revision,
+                standard_products.created_at AS standard_created_at,
+                standard_products.updated_at AS standard_updated_at
               FROM order_items
-              WHERE order_id = orders.id
-              ORDER BY position
+              LEFT JOIN standard_products
+                ON standard_products.id = order_items.standard_product_id
+              WHERE order_items.order_id = orders.id
+              ORDER BY order_items.position
             ) AS ordered_items
           ), '[]') AS items_json
         FROM original_orders AS orders
@@ -4973,9 +5378,16 @@ export class LocalApplication {
       SELECT
         items.*,
         orders.system_order_number,
-        orders.platform_order_number AS order_number
+        orders.platform_order_number AS order_number,
+        products.sku AS standard_sku,
+        products.name AS standard_name,
+        products.specification AS standard_specification,
+        products.revision AS standard_revision,
+        products.created_at AS standard_created_at,
+        products.updated_at AS standard_updated_at
       FROM order_items AS items
       JOIN original_orders AS orders ON orders.id = items.order_id
+      LEFT JOIN standard_products AS products ON products.id = items.standard_product_id
       WHERE ${where.join('\n        AND ')}
       ORDER BY ${sortExpression} ${sortDirection}, items.id
     `).all(...parameters, ...sortParameters) as unknown as SqlRow[];
@@ -4994,6 +5406,20 @@ export class LocalApplication {
         quantitySource,
         quantityInferred: quantityInferredFromSource(quantitySource),
         subtotalCents: asNumber(row.subtotal_cents),
+        standardProduct: row.standard_product_id === null
+          ? null
+          : {
+              id: asString(row.standard_product_id),
+              sku: asString(row.standard_sku),
+              name: asString(row.standard_name),
+              specification: asString(row.standard_specification),
+              revision: asNumber(row.standard_revision),
+              createdAt: asString(row.standard_created_at),
+              updatedAt: asString(row.standard_updated_at),
+            },
+        standardizationSource: row.standardization_source === null
+          ? null
+          : asProductStandardizationSource(row.standardization_source),
       };
     });
     if (normalizedScopedOrderIds) {
@@ -5064,7 +5490,20 @@ export class LocalApplication {
     if (!row) throw new Error('未找到原始订单');
 
     const itemRows = workspace.database
-      .prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY position')
+      .prepare(`
+        SELECT
+          items.*,
+          products.sku AS standard_sku,
+          products.name AS standard_name,
+          products.specification AS standard_specification,
+          products.revision AS standard_revision,
+          products.created_at AS standard_created_at,
+          products.updated_at AS standard_updated_at
+        FROM order_items AS items
+        LEFT JOIN standard_products AS products ON products.id = items.standard_product_id
+        WHERE items.order_id = ?
+        ORDER BY items.position
+      `)
       .all(orderId) as unknown as SqlRow[];
     const items: OrderItem[] = itemRows.map((item) => {
       const quantitySource = asQuantitySource(item.quantity_source);
@@ -5078,6 +5517,20 @@ export class LocalApplication {
         quantitySource,
         quantityInferred: quantityInferredFromSource(quantitySource),
         subtotalCents: asNumber(item.subtotal_cents),
+        standardProduct: item.standard_product_id === null
+          ? null
+          : {
+              id: asString(item.standard_product_id),
+              sku: asString(item.standard_sku),
+              name: asString(item.standard_name),
+              specification: asString(item.standard_specification),
+              revision: asNumber(item.standard_revision),
+              createdAt: asString(item.standard_created_at),
+              updatedAt: asString(item.standard_updated_at),
+            },
+        standardizationSource: item.standardization_source === null
+          ? null
+          : asProductStandardizationSource(item.standardization_source),
       };
     });
 
@@ -7116,6 +7569,25 @@ function customFieldTextCollation(type: CustomFieldDefinition['type']): string {
     : '';
 }
 
+function parseStandardProductRow(row: SqlRow): StandardProduct {
+  return {
+    id: asString(row.id),
+    sku: asString(row.sku),
+    name: asString(row.name),
+    specification: asString(row.specification),
+    revision: asNumber(row.revision),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function asProductStandardizationSource(
+  value: string | number | null | undefined,
+): ProductStandardizationSource {
+  if (value === 'exact' || value === 'mapping' || value === 'manual') return value;
+  throw new Error('数据库商品标准化来源无效');
+}
+
 function orderWorkbenchDateColumn(
   field: OrderWorkbenchDateField,
 ): 'orders.ordered_at_normalized' | 'orders.paid_at_normalized' | 'orders.created_at' {
@@ -7193,11 +7665,28 @@ function parseOrderSummaryItems(serialized: string): OrderSummary['items'] {
     typeof (item as Record<string, unknown>).sourceTitle === 'string' &&
     typeof (item as Record<string, unknown>).sourceSpec === 'string' &&
     Number.isSafeInteger((item as Record<string, unknown>).quantity) &&
-    ((item as Record<string, unknown>).quantity as number) > 0
+    ((item as Record<string, unknown>).quantity as number) > 0 &&
+    isStoredStandardProduct((item as Record<string, unknown>).standardProduct)
   ))) {
     throw new Error('数据库订单商品摘要格式错误');
   }
   return parsed as OrderSummary['items'];
+}
+
+function isStoredStandardProduct(value: unknown): boolean {
+  if (value === null) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.sku === 'string' &&
+    typeof record.name === 'string' &&
+    typeof record.specification === 'string' &&
+    Number.isSafeInteger(record.revision) &&
+    (record.revision as number) > 0 &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string'
+  );
 }
 
 function assertExpectedShipmentItems(

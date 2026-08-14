@@ -244,7 +244,20 @@ describe('表格模板核心契约', () => {
 
   it('按当前结果最大商品数完整展开动态列并对短订单留空', () => {
     const first = orderSummaryForProjection('order-1', 'XY-001', [
-      { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
+      {
+        sourceTitle: '海棠杯（闲鱼专拍）',
+        sourceSpec: '红色原文',
+        quantity: 2,
+        standardProduct: {
+          id: 'product-cup-red',
+          sku: 'CUP-RED',
+          name: '海棠杯',
+          specification: '红色',
+          revision: 1,
+          createdAt: '2026-07-30T01:00:00.000Z',
+          updatedAt: '2026-07-30T01:00:00.000Z',
+        },
+      },
       { sourceTitle: '海棠杯', sourceSpec: '蓝色', quantity: 1 },
     ]);
     const second = orderSummaryForProjection('order-2', 'XY-002', [
@@ -369,6 +382,21 @@ describe('表格模板核心契约', () => {
       {
         reference: { kind: 'builtin', key: 'product_spec' },
         defaultLabel: '原始款式／规格',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'sku' },
+        defaultLabel: 'SKU',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'standard_product_name' },
+        defaultLabel: '标准商品名',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'builtin', key: 'standard_product_spec' },
+        defaultLabel: '标准规格',
         valueType: 'text',
       },
       {
@@ -647,7 +675,7 @@ describe('表格模板核心契约', () => {
     )).toBeNull();
   });
 
-  it('把商品明细字段投影为可复用的原始单元格值', () => {
+  it('商品明细同时投影订单原文和标准商品字段', () => {
     const item: OrderItemWorkbenchItem & { orderNumber: string } = {
       id: 'item-1',
       orderId: 'order-1',
@@ -661,6 +689,16 @@ describe('表格模板核心契约', () => {
       quantitySource: 'ocr_explicit',
       quantityInferred: false,
       subtotalCents: 3_600,
+      standardProduct: {
+        id: 'product-item-1',
+        sku: 'CUP-RED',
+        name: '标准海棠杯',
+        specification: '红色标准款',
+        revision: 1,
+        createdAt: '2026-07-30T01:00:00.000Z',
+        updatedAt: '2026-07-30T01:00:00.000Z',
+      },
+      standardizationSource: 'manual',
     };
     const customValues: CustomFieldValueRecord[] = [{
       definitionId: itemField.id,
@@ -677,6 +715,16 @@ describe('表格模板核心契约', () => {
       .toBe(1);
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'unit_price' }))
       .toBe(1_800);
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'product_title' }))
+      .toBe('海棠杯');
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'product_spec' }))
+      .toBe('红色');
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'sku' }))
+      .toBe('CUP-RED');
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'standard_product_name' }))
+      .toBe('标准海棠杯');
+    expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'standard_product_spec' }))
+      .toBe('红色标准款');
     const quantitySourceLabels: Array<[QuantitySource, string]> = [
       ['manual', '人工修改'],
       ['ocr_explicit', 'OCR 识别'],

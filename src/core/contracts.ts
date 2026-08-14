@@ -6,6 +6,10 @@ import type {
 import type { QuantitySource } from './quantity-source';
 import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
 import type {
+  ProductStandardizationSource,
+  StandardProduct,
+} from './product-standardization';
+import type {
   OrderOperationsOverview,
   OrderOperationsProjection,
 } from './order-operations-projection';
@@ -264,6 +268,8 @@ export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
   position: number;
   unitPriceCents: number;
   subtotalCents: number;
+  standardProduct: StandardProduct | null;
+  standardizationSource: ProductStandardizationSource | null;
 };
 
 export type OriginalOrder = Omit<
@@ -323,7 +329,10 @@ export type OrderSummary = {
   orderedAtNormalized: string;
   paidAtNormalized: string;
   createdAt: string;
-  items: Array<Pick<OrderItem, 'sourceTitle' | 'sourceSpec' | 'quantity'>>;
+  items: Array<Pick<OrderItem, 'sourceTitle' | 'sourceSpec' | 'quantity'> & {
+    /** Present for persisted application projections; optional for lightweight consumers. */
+    standardProduct?: StandardProduct | null;
+  }>;
   operations: OrderOperationsOverview;
 };
 

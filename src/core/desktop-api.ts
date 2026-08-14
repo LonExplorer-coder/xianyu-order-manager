@@ -32,6 +32,13 @@ import type {
 } from './candidate-verification-settings';
 import type { CandidateAdjudicationAuditView } from './candidate-adjudication-audit';
 import type {
+  CreateStandardProductInput,
+  DraftItemProductStandardization,
+  ProductStandardizationConfirmation,
+  StandardProduct,
+  UpdateStandardProductInput,
+} from './product-standardization';
+import type {
   OrderIntakeSettingsView,
   SaveOrderIntakeSettingsInput,
 } from './order-intake';
@@ -125,12 +132,23 @@ export interface DesktopApi {
   confirmDraft(
     draft: OrderDraft,
     customValues?: DraftCustomFieldValues,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): Promise<OrderDraftConfirmation>;
   confirmOrderUpdate(
     draft: OrderDraft,
     expectedRevision: number,
     customValues?: DraftCustomFieldValues,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): Promise<OrderUpdateConfirmation>;
+  listStandardProducts(): Promise<StandardProduct[]>;
+  createStandardProduct(input: CreateStandardProductInput): Promise<StandardProduct>;
+  updateStandardProduct(
+    productId: string,
+    input: UpdateStandardProductInput,
+  ): Promise<StandardProduct>;
+  previewDraftProductStandardizations(
+    draft: OrderDraft,
+  ): Promise<DraftItemProductStandardization[]>;
   listOrders(): Promise<OrderSummary[]>;
   queryOrders(
     query: OrderWorkbenchQuery,

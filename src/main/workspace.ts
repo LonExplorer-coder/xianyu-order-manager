@@ -193,6 +193,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(37)) migrateToVersion37(database);
   if (!versions.has(38)) migrateToVersion38(database);
   if (!versions.has(39)) migrateToVersion39(database);
+  if (!versions.has(40)) migrateToVersion40(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5396,6 +5397,74 @@ function migrateToVersion39(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion40(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE standard_products (
+        id TEXT PRIMARY KEY,
+        sku TEXT NOT NULL CHECK (length(trim(sku)) BETWEEN 1 AND 100),
+        sku_key TEXT NOT NULL UNIQUE CHECK (length(trim(sku_key)) BETWEEN 1 AND 100),
+        name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 300),
+        specification TEXT NOT NULL CHECK (length(trim(specification)) BETWEEN 1 AND 300),
+        name_key TEXT NOT NULL CHECK (length(trim(name_key)) BETWEEN 1 AND 300),
+        specification_key TEXT NOT NULL CHECK (length(trim(specification_key)) BETWEEN 1 AND 300),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE product_mappings (
+        id TEXT PRIMARY KEY,
+        source_title TEXT NOT NULL CHECK (length(trim(source_title)) BETWEEN 1 AND 300),
+        source_spec TEXT NOT NULL CHECK (length(source_spec) <= 300),
+        source_title_key TEXT NOT NULL CHECK (length(trim(source_title_key)) BETWEEN 1 AND 300),
+        source_spec_key TEXT NOT NULL CHECK (length(source_spec_key) <= 300),
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (source_title_key, source_spec_key)
+      ) STRICT;
+
+      CREATE INDEX product_mappings_by_standard_product
+      ON product_mappings (standard_product_id, source_title_key, source_spec_key);
+
+      ALTER TABLE order_items
+      ADD COLUMN standard_product_id TEXT
+        REFERENCES standard_products(id) ON DELETE RESTRICT;
+
+      ALTER TABLE order_items
+      ADD COLUMN standardization_source TEXT
+        CHECK (standardization_source IN ('exact', 'mapping', 'manual'));
+
+      CREATE INDEX order_items_by_standard_product
+      ON order_items (standard_product_id, order_id, position);
+
+      CREATE TRIGGER order_items_standardization_is_consistent_on_insert
+      BEFORE INSERT ON order_items
+      WHEN (NEW.standard_product_id IS NULL) <> (NEW.standardization_source IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standardization is inconsistent');
+      END;
+
+      CREATE TRIGGER order_items_standardization_is_consistent_on_update
+      BEFORE UPDATE OF standard_product_id, standardization_source ON order_items
+      WHEN (NEW.standard_product_id IS NULL) <> (NEW.standardization_source IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standardization is inconsistent');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (40, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
   }
 }
 

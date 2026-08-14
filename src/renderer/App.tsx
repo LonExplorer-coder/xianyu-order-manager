@@ -161,6 +161,12 @@ import { ShipmentGroupExportDialog } from './ShipmentGroupExportDialog';
 import { ShipmentGroupCustomFieldsDialog } from './ShipmentGroupCustomFieldsDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
+import { StandardProductsWorkspace } from './StandardProductsWorkspace';
+import type {
+  DraftItemProductStandardization,
+  ProductStandardizationConfirmation,
+  StandardProduct,
+} from '../core/product-standardization';
 import {
   LOGISTICS_EXCEPTION_TYPE_OPTIONS,
   logisticsExceptionStageLabel,
@@ -173,7 +179,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'aftersales_workflows' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -911,7 +917,10 @@ export function App({ api }: AppProps) {
     }
   }
 
-  async function confirmOrder(event?: FormEvent<HTMLFormElement>) {
+  async function confirmOrder(
+    event?: FormEvent<HTMLFormElement>,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
+  ) {
     event?.preventDefault();
     if (!draft || bootstrap?.kind !== 'ready') return;
     setBusyAction('confirm');
@@ -920,18 +929,31 @@ export function App({ api }: AppProps) {
     try {
       let resolution: RecognitionBatchView['items'][number]['resolution'] = 'new_order';
       if (isOrderUpdate) {
-        const outcome = customFieldDefinitions.length > 0
+        const outcome = productStandardizations?.length
           ? await api.confirmOrderUpdate(
             draft,
             draftReview.expectedRevision,
-            draftCustomFieldValues,
+            customFieldDefinitions.length > 0 ? draftCustomFieldValues : undefined,
+            productStandardizations,
           )
-          : await api.confirmOrderUpdate(draft, draftReview.expectedRevision);
+          : customFieldDefinitions.length > 0
+            ? await api.confirmOrderUpdate(
+              draft,
+              draftReview.expectedRevision,
+              draftCustomFieldValues,
+            )
+            : await api.confirmOrderUpdate(draft, draftReview.expectedRevision);
         resolution = outcome.resolution;
       } else {
-        const outcome = customFieldDefinitions.length > 0
-          ? await api.confirmDraft(draft, draftCustomFieldValues)
-          : await api.confirmDraft(draft);
+        const outcome = productStandardizations?.length
+          ? await api.confirmDraft(
+            draft,
+            customFieldDefinitions.length > 0 ? draftCustomFieldValues : undefined,
+            productStandardizations,
+          )
+          : customFieldDefinitions.length > 0
+            ? await api.confirmDraft(draft, draftCustomFieldValues)
+            : await api.confirmDraft(draft);
         resolution = outcome.resolution;
       }
       const requestedAtVersion = orderSnapshotVersion.current;
@@ -1253,6 +1275,8 @@ export function App({ api }: AppProps) {
     );
   } else if (activePage === 'aftersales_workflows') {
     workspace = <AftersalesWorkflowTemplatesWorkspace api={api} />;
+  } else if (activePage === 'products') {
+    workspace = <StandardProductsWorkspace api={api} />;
   } else if (activePage === 'templates') {
     workspace = (
       <TableTemplatesWorkspace
@@ -1347,7 +1371,9 @@ export function App({ api }: AppProps) {
         onCustomFieldValuesChange={setDraftCustomFieldValues}
         onCustomFieldTouched={(key) => draftCustomFieldTouchedKeys.current.add(key)}
         onCancel={() => void cancelReview()}
-        onConfirm={(event) => void confirmOrder(event)}
+        onConfirm={(event, productStandardizations) => (
+          void confirmOrder(event, productStandardizations)
+        )}
       />
     );
   } else if ((activePage === 'orders' || activePage === 'shipments') && orderDetails) {
@@ -1510,6 +1536,15 @@ function AppFrame({
           >
             <Icon name="template" />
             <span className="nav-label">售后流程</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'products' ? ' is-active' : ''}`}
+            type="button"
+            aria-current={activePage === 'products' ? 'page' : undefined}
+            onClick={() => onNavigate('products')}
+          >
+            <Icon name="fields" />
+            <span className="nav-label">标准商品</span>
           </button>
           <button
             className={`nav-item${activePage === 'templates' ? ' is-active' : ''}`}
@@ -7456,7 +7491,10 @@ type ReviewWorkspaceProps = {
   onCustomFieldValuesChange: (values: DraftCustomFieldValues) => void;
   onCustomFieldTouched: (key: string) => void;
   onCancel: () => void;
-  onConfirm: (event: FormEvent<HTMLFormElement>) => void;
+  onConfirm: (
+    event: FormEvent<HTMLFormElement>,
+    productStandardizations: readonly ProductStandardizationConfirmation[],
+  ) => void;
 };
 
 function ReviewWorkspace({
@@ -7477,6 +7515,14 @@ function ReviewWorkspace({
 }: ReviewWorkspaceProps) {
   const [moneyErrors, setMoneyErrors] = useState<Record<string, string>>({});
   const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
+  const [standardProducts, setStandardProducts] = useState<StandardProduct[]>([]);
+  const [standardizationPreview, setStandardizationPreview] =
+    useState<DraftItemProductStandardization[]>([]);
+  const [standardizationChoices, setStandardizationChoices] = useState<Record<
+    string,
+    { standardProductId: string | null; createMapping: boolean }
+  >>({});
+  const [standardizationError, setStandardizationError] = useState('');
   const candidateAudit = useCandidateAdjudicationAudit(api, draft.id);
   const isOrderUpdate = review.kind === 'order_update';
   const updateChanges = isOrderUpdate
@@ -7528,6 +7574,38 @@ function ReviewWorkspace({
     customFieldInputsValid &&
     requiredOrderCustomFieldsComplete &&
     requiredItemCustomFieldsComplete;
+  const productSourceKey = JSON.stringify(draft.items.map((item) => [
+    item.id,
+    item.sourceTitle,
+    item.sourceSpec,
+  ]));
+  const currentProductByDraftItemId = useMemo(() => {
+    if (review.kind !== 'order_update') return new Map<string, StandardProduct>();
+    const persistedIds = matchOrderItemIds(review.currentOrder.items, draft.items);
+    const existingById = new Map(review.currentOrder.items.map((item) => [item.id, item]));
+    return new Map(draft.items.flatMap((item) => {
+      const persistedId = persistedIds.get(item.id);
+      const product = persistedId ? existingById.get(persistedId)?.standardProduct : null;
+      return product ? [[item.id, product] as const] : [];
+    }));
+  }, [draft.items, review]);
+
+  useEffect(() => {
+    let active = true;
+    setStandardizationChoices({});
+    setStandardizationError('');
+    void Promise.all([
+      api.listStandardProducts(),
+      api.previewDraftProductStandardizations(draft),
+    ]).then(([products, preview]) => {
+      if (!active) return;
+      setStandardProducts(products);
+      setStandardizationPreview(preview);
+    }).catch((error: unknown) => {
+      if (active) setStandardizationError(errorMessage(error));
+    });
+    return () => { active = false; };
+  }, [api, draft.id, productSourceKey]);
 
   function patchDraft(patch: Partial<OrderDraft>) {
     onDraftChange({ ...draft, ...patch });
@@ -7638,6 +7716,14 @@ function ReviewWorkspace({
     });
   }
 
+  function submitReview(event: FormEvent<HTMLFormElement>) {
+    const confirmations = Object.entries(standardizationChoices).map(([
+      draftItemId,
+      choice,
+    ]) => ({ draftItemId, ...choice }));
+    onConfirm(event, confirmations);
+  }
+
   return (
     <section className="review-workspace review-enter">
       <header className="workspace-header workspace-header--review">
@@ -7690,7 +7776,7 @@ function ReviewWorkspace({
           </div>
         </figure>
 
-        <form id="review-form" className="review-form" onSubmit={onConfirm}>
+        <form id="review-form" className="review-form" onSubmit={submitReview}>
           <fieldset
             className="review-form__controls"
             disabled={confirming || cancelling}
@@ -8019,6 +8105,24 @@ function ReviewWorkspace({
                     <div className="inferred-note">
                       数量来源：{draftItemQuantitySourceLabel(item)}
                     </div>
+                    <ProductStandardizationEditor
+                      item={item}
+                      itemIndex={index}
+                      products={standardProducts}
+                      preview={standardizationPreview.find(({ draftItemId }) => (
+                        draftItemId === item.id
+                      ))}
+                      currentProduct={currentProductByDraftItemId.get(item.id) ?? null}
+                      choice={standardizationChoices[item.id]}
+                      onChoiceChange={(choice) => setStandardizationChoices((current) => {
+                        if (choice === undefined) {
+                          const next = { ...current };
+                          delete next[item.id];
+                          return next;
+                        }
+                        return { ...current, [item.id]: choice };
+                      })}
+                    />
                     {itemCustomFields.length > 0 && (
                       <div className="item-custom-fields">
                         <span className="item-custom-fields__title">商品自定义字段</span>
@@ -8060,6 +8164,11 @@ function ReviewWorkspace({
                 请填写每件商品的全部必填自定义字段后再确认入库。
               </p>
             )}
+            {standardizationError && (
+              <p className="custom-field-required-note" role="alert">
+                标准商品候选读取失败：{standardizationError}。仍可保留订单原始商品信息入库。
+              </p>
+            )}
             <button className="add-item-button" type="button" onClick={addItem}>
               <span aria-hidden="true">+</span>添加商品
             </button>
@@ -8067,6 +8176,114 @@ function ReviewWorkspace({
           </fieldset>
         </form>
       </div>
+    </section>
+  );
+}
+
+function ProductStandardizationEditor({
+  item,
+  itemIndex,
+  products,
+  preview,
+  currentProduct,
+  choice,
+  onChoiceChange,
+}: {
+  item: DraftItem;
+  itemIndex: number;
+  products: readonly StandardProduct[];
+  preview?: DraftItemProductStandardization;
+  currentProduct: StandardProduct | null;
+  choice?: { standardProductId: string | null; createMapping: boolean };
+  onChoiceChange: (
+    choice: { standardProductId: string | null; createMapping: boolean } | undefined,
+  ) => void;
+}) {
+  const automaticProduct = currentProduct ?? preview?.automaticProduct ?? null;
+  const selectValue = choice
+    ? choice.standardProductId ?? '__none__'
+    : automaticProduct
+      ? '__automatic__'
+      : '__none__';
+  const automaticLabel = currentProduct
+    ? `保持当前关联：${currentProduct.sku} · ${currentProduct.name}`
+    : preview?.automaticSource === 'mapping'
+      ? `按已有映射关联：${automaticProduct?.sku} · ${automaticProduct?.name}`
+      : `按标题和规格精确关联：${automaticProduct?.sku} · ${automaticProduct?.name}`;
+
+  return (
+    <section className="product-standardization-editor" aria-label={`商品 ${itemIndex + 1} 标准化`}>
+      <div className="product-standardization-editor__heading">
+        <div>
+          <strong>标准商品关联</strong>
+          <small>截图原文始终保留；模糊候选不会自动合并。</small>
+        </div>
+        {automaticProduct && !choice && <span>已自动匹配</span>}
+      </div>
+      <label className="field">
+        <span className="field-label">标准商品</span>
+        <select
+          aria-label={`商品 ${itemIndex + 1} 标准商品`}
+          value={selectValue}
+          onChange={(event) => {
+            if (event.target.value === '__automatic__') {
+              onChoiceChange(undefined);
+            } else if (event.target.value === '__none__') {
+              onChoiceChange(automaticProduct
+                ? { standardProductId: null, createMapping: false }
+                : undefined);
+            } else {
+              onChoiceChange({
+                standardProductId: event.target.value,
+                createMapping: false,
+              });
+            }
+          }}
+        >
+          {automaticProduct && <option value="__automatic__">{automaticLabel}</option>}
+          <option value="__none__">暂不关联</option>
+          {products.map((product) => (
+            <option value={product.id} key={product.id}>
+              {product.sku} · {product.name} · {product.specification}
+            </option>
+          ))}
+        </select>
+      </label>
+      {choice?.standardProductId && (
+        <label className="fields-check-row product-standardization-editor__mapping">
+          <input
+            type="checkbox"
+            checked={choice.createMapping}
+            onChange={(event) => onChoiceChange({
+              ...choice,
+              createMapping: event.target.checked,
+            })}
+          />
+          <span>
+            <strong>记住这组订单原文</strong>
+            <small>以后遇到“{item.sourceTitle} / {item.sourceSpec || '无规格'}”时自动关联。</small>
+          </span>
+        </label>
+      )}
+      {!automaticProduct && preview && preview.candidates.length > 0 && (
+        <div className="product-standardization-candidates">
+          <span>可能的标准商品</span>
+          {preview.candidates.map((candidate) => (
+            <button
+              className="button button--quiet"
+              type="button"
+              key={candidate.product.id}
+              onClick={() => onChoiceChange({
+                standardProductId: candidate.product.id,
+                createMapping: candidate.mappingSuggested,
+              })}
+            >
+              {candidate.product.sku} · {candidate.product.name}
+              {candidate.reason === 'previous_manual_choice' ? '（曾人工关联）' : '（相似候选）'}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -8161,6 +8378,8 @@ function orderChangeFieldLabel(path: string): string {
     unitPriceCents: '单价',
     quantity: '数量',
     quantitySource: '数量来源',
+    standardProductSku: '标准商品（SKU）',
+    standardizationSource: '标准化来源',
   } as Record<string, string>)[field] : '整项';
   return `商品 ${position} · ${label ?? field}`;
 }
@@ -8174,6 +8393,14 @@ function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
   if (typeof value === 'string') {
     if (path.endsWith('.quantitySource') && isQuantitySource(value)) {
       return quantitySourceLabel(value);
+    }
+    if (path.endsWith('.standardizationSource')) {
+      const standardizationLabels: Record<string, string> = {
+        exact: '标题与规格精确一致',
+        mapping: '已有商品映射',
+        manual: '本次人工确认',
+      };
+      return standardizationLabels[value] ?? value;
     }
     if (path === 'platformTransactionStatus') {
       return platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus']);

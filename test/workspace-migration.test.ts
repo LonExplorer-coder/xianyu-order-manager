@@ -1,10 +1,10 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 
-import type { Recognizer } from '../src/core/contracts';
+import type { RecognitionResult, Recognizer } from '../src/core/contracts';
 import { createOrderTableProjectionPlan } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
@@ -15,9 +15,174 @@ import {
   removeVersion35ExtensionArtifacts,
   removeVersion38ExtensionArtifacts,
   removeVersion39ExtensionArtifacts,
+  removeVersion40ExtensionArtifacts,
 } from './version31-fixture';
 
+function productMigrationRecognition(): RecognitionResult {
+  return {
+    platform: 'xianyu',
+    sellerAccount: '迁移测试账号',
+    orderNumber: 'XY-V39-PRODUCT',
+    alipayTransactionNumber: 'ALI-V39-PRODUCT',
+    buyerNickname: '迁***户',
+    recipient: '迁移收件人',
+    phone: '13900000040',
+    phoneNormalized: '13900000040',
+    addressOriginal: '广东省深圳市南山区迁移路40号',
+    addressNormalized: '广东省深圳市南山区迁移路40号',
+    province: '广东省',
+    city: '深圳市',
+    district: '南山区',
+    orderedAtOriginal: '2026-08-14 10:00:00',
+    orderedAtNormalized: '2026-08-14T10:00:00+08:00',
+    paidAtOriginal: '2026-08-14 10:00:08',
+    paidAtNormalized: '2026-08-14T10:00:08+08:00',
+    productTotalCents: 1000,
+    shippingFeeCents: 0,
+    amountCents: 1000,
+    platformTransactionStatus: 'paid',
+    fulfillmentStatus: 'pending_shipment',
+    items: [{
+      sourceTitle: '迁移标准商品',
+      sourceSpec: '标准规格',
+      unitPriceCents: 1000,
+      quantity: 1,
+      quantityInferred: false,
+    }],
+  };
+}
+
 describe('数据库升级', () => {
+  it('将真实 v39 工作区升级为标准商品与映射并在重启后保持关联', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v39-product-standardization-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      removeVersion40ExtensionArtifacts(legacy);
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 39 });
+      expect((legacy.prepare('PRAGMA table_info(order_items)').all() as Array<{ name: string }>)
+        .map(({ name }) => name)).not.toContain('standard_product_id');
+    } finally {
+      legacy.close();
+    }
+
+    const sourcePath = join(dataDirectory, '标准商品迁移订单.png');
+    const application = new LocalApplication({
+      recognize: async () => ({
+        result: productMigrationRecognition(),
+        evidences: [{
+          provider: 'controlled',
+          model: 'controlled',
+          requestId: 'v39-product-standardization',
+          schemaVersion: 1,
+          rawResponse: '{}',
+        }],
+      }),
+    });
+    application.openDataDirectory(dataDirectory);
+    const product = application.createStandardProduct({
+      sku: 'SKU-V39-MIGRATED',
+      name: '迁移标准商品',
+      specification: '标准规格',
+    });
+    await writeFile(sourcePath, Buffer.from('v39-product-standardization'));
+    const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+    const order = application.confirmDraft(draft);
+    application.close();
+
+    const reopened = new LocalApplication({
+      recognize: async () => { throw new Error('重启读取不应调用 OCR'); },
+    });
+    reopened.openDataDirectory(dataDirectory);
+    try {
+      expect(reopened.listStandardProducts()).toEqual([
+        expect.objectContaining({ id: product.id, sku: 'SKU-V39-MIGRATED' }),
+      ]);
+      expect(reopened.getOrder(order.id).order.items[0]).toMatchObject({
+        sourceTitle: '迁移标准商品',
+        sourceSpec: '标准规格',
+        standardProduct: { id: product.id, sku: 'SKU-V39-MIGRATED' },
+        standardizationSource: 'exact',
+      });
+    } finally {
+      reopened.close();
+    }
+
+    const verified = Workspace.open(dataDirectory);
+    try {
+      expect(verified.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 40 });
+      expect(() => verified.database.prepare(`
+        UPDATE order_items
+        SET standardization_source = NULL
+        WHERE id = ?
+      `).run(order.items[0].id)).toThrow(/standardization is inconsistent/);
+      expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      verified.close();
+    }
+  });
+
+  it('标准商品迁移失败时回滚全部结构，修复后可重新升级', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v40-product-rollback-'));
+    Workspace.open(dataDirectory).close();
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      removeVersion40ExtensionArtifacts(legacy);
+      legacy.exec(`
+        CREATE TRIGGER fail_product_standardization_migration
+        BEFORE INSERT ON schema_migrations
+        WHEN NEW.version = 40
+        BEGIN
+          SELECT RAISE(ABORT, 'injected product standardization migration failure');
+        END;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    expect(() => Workspace.open(dataDirectory)).toThrow(
+      /injected product standardization migration failure/u,
+    );
+    const rolledBack = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      expect(rolledBack.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 39 });
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE name IN ('standard_products', 'product_mappings')
+      `).all()).toEqual([]);
+      expect((rolledBack.prepare('PRAGMA table_info(order_items)').all() as Array<{
+        name: string;
+      }>).map(({ name }) => name)).not.toContain('standard_product_id');
+      rolledBack.exec('DROP TRIGGER fail_product_standardization_migration;');
+    } finally {
+      rolledBack.close();
+    }
+
+    const repaired = Workspace.open(dataDirectory);
+    try {
+      expect(repaired.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 40 });
+      expect(repaired.database.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE name IN ('standard_products', 'product_mappings')
+        ORDER BY name
+      `).all()).toEqual([
+        { name: 'product_mappings' },
+        { name: 'standard_products' },
+      ]);
+    } finally {
+      repaired.close();
+    }
+  });
+
   it('将真实 v38 字段与模板升级为支持发货组粒度并保持幂等', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v38-shipment-group-fields-'));
     const current = Workspace.open(dataDirectory);
@@ -83,7 +248,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 39 });
+      ).get()).toEqual({ version: 40 });
       expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       verified.close();
@@ -179,7 +344,7 @@ describe('数据库升级', () => {
       });
       expect(migrated.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 39 });
+      ).get()).toEqual({ version: 40 });
       expect(() => migrated.database.prepare(`
         INSERT INTO pending_financial_item_events (
           id, pending_item_id, kind, requested_amount_cents,
@@ -224,7 +389,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(migrated.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN (
@@ -265,7 +430,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(migrated.database.prepare(`
         SELECT name
         FROM sqlite_schema
@@ -319,7 +484,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -518,6 +683,7 @@ describe('数据库升级', () => {
       { version: 37 },
       { version: 38 },
       { version: 39 },
+      { version: 40 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -983,6 +1149,7 @@ describe('数据库升级', () => {
       { version: 37 },
       { version: 38 },
       { version: 39 },
+      { version: 40 },
     ]);
     expect(
       (
@@ -1247,6 +1414,7 @@ describe('数据库升级', () => {
         { version: 37 },
         { version: 38 },
         { version: 39 },
+        { version: 40 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1413,8 +1581,13 @@ describe('数据库升级', () => {
     const filteredOrders = application.queryOrders({ productText: '旧商品第二款' }).orders;
     expect(filteredOrders[0]?.items)
       .toEqual([
-        { sourceTitle: '旧商品', sourceSpec: '旧规格', quantity: 1 },
-        { sourceTitle: '旧商品第二款', sourceSpec: '蓝色', quantity: 2 },
+        {
+          sourceTitle: '旧商品', sourceSpec: '旧规格', quantity: 1, standardProduct: null,
+        },
+        {
+          sourceTitle: '旧商品第二款', sourceSpec: '蓝色', quantity: 2,
+          standardProduct: null,
+        },
       ]);
     const conflictingTemplate = migrated.find(({ id }) => (
       id === 'template-conflicting-summary-v10'
@@ -1445,7 +1618,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1559,7 +1732,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1579,7 +1752,7 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
@@ -1593,6 +1766,7 @@ describe('数据库升级', () => {
         { version: 37 },
         { version: 38 },
         { version: 39 },
+        { version: 40 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1626,7 +1800,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{

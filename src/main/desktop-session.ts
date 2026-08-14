@@ -33,6 +33,13 @@ import {
   type SaveOrderIntakeSettingsInput,
 } from '../core/order-intake';
 import { hasEquivalentOrderContent } from '../core/order-comparison';
+import type {
+  CreateStandardProductInput,
+  DraftItemProductStandardization,
+  ProductStandardizationConfirmation,
+  StandardProduct,
+  UpdateStandardProductInput,
+} from '../core/product-standardization';
 import { createHash, randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
@@ -358,9 +365,10 @@ export class DesktopSession {
   public confirmDraft(
     draft: OrderDraft,
     customValues?: DraftCustomFieldValues,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): OrderDraftConfirmation {
     const application = this.requireApplication();
-    const order = application.confirmDraft(draft, customValues);
+    const order = application.confirmDraft(draft, customValues, {}, productStandardizations);
     this.refreshOrders();
     this.setItemStatusByDraftId(draft.id, 'imported', 'new_order');
     return { order, resolution: 'new_order' };
@@ -370,11 +378,13 @@ export class DesktopSession {
     draft: OrderDraft,
     expectedRevision: number,
     customValues?: DraftCustomFieldValues,
+    productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): OrderUpdateConfirmation {
     const outcome = this.requireApplication().confirmOrderUpdate(
       draft,
       expectedRevision,
       customValues,
+      productStandardizations,
     );
     this.refreshOrders();
     this.setItemStatusByDraftId(
@@ -383,6 +393,27 @@ export class DesktopSession {
       outcome.resolution,
     );
     return outcome;
+  }
+
+  public listStandardProducts(): StandardProduct[] {
+    return this.requireApplication().listStandardProducts();
+  }
+
+  public createStandardProduct(input: CreateStandardProductInput): StandardProduct {
+    return this.requireApplication().createStandardProduct(input);
+  }
+
+  public updateStandardProduct(
+    productId: string,
+    input: UpdateStandardProductInput,
+  ): StandardProduct {
+    return this.requireApplication().updateStandardProduct(productId, input);
+  }
+
+  public previewDraftProductStandardizations(
+    draft: OrderDraft,
+  ): DraftItemProductStandardization[] {
+    return this.requireApplication().previewDraftProductStandardizations(draft);
   }
 
   public listOrders(): OrderSummary[] {

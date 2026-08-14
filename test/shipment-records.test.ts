@@ -2766,7 +2766,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 39 });
+        .toEqual({ version: 40 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
