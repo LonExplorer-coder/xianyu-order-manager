@@ -316,10 +316,10 @@ export const SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES: ReadonlyArray<{
         step('choose-resolution', 'choose_resolution', '选择买家侧处理', true, [
           'handling_direction', 'resolution_reason',
         ], condition('logistics_exception_present')),
-        step('confirm-refund', 'confirm_refund', '按选择确认退款', false, [
+        step('confirm-refund', 'confirm_refund', '按选择确认退款', true, [
           'requested_refund_amount', 'occurred_at', 'resolution_reason',
         ], condition('refund_requested')),
-        step('prepare-replacement', 'prepare_replacement', '按选择建立补发', false, [
+        step('prepare-replacement', 'prepare_replacement', '按选择建立补发', true, [
           'replacement_packages', 'occurred_at', 'reason',
         ], condition('replacement_required')),
         step('complete', 'complete', '完成售后', true, ['resolution_reason']),
@@ -439,10 +439,17 @@ export function projectAftersalesWorkflowSteps(
     || facts[stepValue.condition.fact] === stepValue.condition.equals
   ));
   const completed = visible.map((stepValue) => (
-    stepCompleted(stepValue.kind, aftersalesCase, currentRound, currentReturns)
+    stepCompleted(
+      stepValue.kind,
+      template.scenario,
+      aftersalesCase,
+      currentRound,
+      currentReturns,
+    )
     && stepValue.fields.every((field) => workflowFieldSatisfied(
       field,
       stepValue.kind,
+      template.scenario,
       aftersalesCase,
       currentRound,
       currentReturns,
@@ -464,12 +471,19 @@ export function projectAftersalesWorkflowSteps(
 
 function stepCompleted(
   kind: AftersalesWorkflowStepKind,
+  scenario: AftersalesWorkflowScenario,
   value: AftersalesCase,
   currentRound: AftersalesCase['rounds'][number] | null,
   currentReturns: AftersalesCase['returns'],
 ): boolean {
   if (kind === 'identify_issue') return true;
-  if (kind === 'choose_resolution') return value.coordination.handlingDirection !== null;
+  if (kind === 'choose_resolution') {
+    return scenario === 'lost_handling'
+      ? value.coordination.outboundExceptionHistory.some(({ stage, decision }) => (
+        stage === 'confirmed' && decision !== null
+      ))
+      : value.coordination.handlingDirection !== null;
+  }
   if (kind === 'request_interception') return value.coordination.interception !== null;
   if (kind === 'register_return') return currentReturns.length > 0;
   if (kind === 'receive_return') {
@@ -481,9 +495,12 @@ function stepCompleted(
     return currentRound?.replacementShipment !== null && currentRound !== null;
   }
   if (kind === 'confirm_replacement_delivery') {
-    return currentRound?.replacementShipment?.packages.some(({ status, logisticsStatus }) => (
-        status === 'active' && logisticsStatus === 'delivered'
-      )) ?? false;
+    const activePackages = currentRound?.replacementShipment?.packages.filter(({ status }) => (
+      status === 'active'
+    )) ?? [];
+    return activePackages.length > 0 && activePackages.every(({ logisticsStatus }) => (
+      logisticsStatus === 'delivered'
+    ));
   }
   if (kind === 'resolve_logistics_exception') {
     const exceptions = [
@@ -491,7 +508,7 @@ function stepCompleted(
       ...value.coordination.returnExceptionHistory,
     ];
     return exceptions.length > 0 && exceptions.every(({ stage }) => (
-      stage === 'recovered' || stage === 'resolved'
+      stage === 'confirmed' || stage === 'recovered' || stage === 'resolved'
     ));
   }
   if (kind === 'record_resolution') {
@@ -531,6 +548,7 @@ function replacementRoundDelivered(round: AftersalesCase['rounds'][number]): boo
 function workflowFieldSatisfied(
   field: AftersalesWorkflowField,
   stepKind: AftersalesWorkflowStepKind,
+  scenario: AftersalesWorkflowScenario,
   value: AftersalesCase,
   currentRound: AftersalesCase['rounds'][number] | null,
   currentReturns: AftersalesCase['returns'],
@@ -539,7 +557,13 @@ function workflowFieldSatisfied(
   if (field === 'reason') return value.reason.trim().length > 0;
   if (field === 'items') return value.items.length > 0;
   if (field === 'requested_refund_amount') return value.refund !== null;
-  if (field === 'handling_direction') return value.coordination.handlingDirection !== null;
+  if (field === 'handling_direction') {
+    return scenario === 'lost_handling'
+      ? value.coordination.outboundExceptionHistory.some(({ stage, decision }) => (
+        stage === 'confirmed' && decision !== null
+      ))
+      : value.coordination.handlingDirection !== null;
+  }
   if (field === 'interception_package') {
     return Boolean(value.coordination.interception?.packageId);
   }
@@ -583,6 +607,11 @@ function workflowFieldSatisfied(
   }
   if (field === 'resolution_reason') {
     if (stepKind === 'choose_resolution') {
+      if (scenario === 'lost_handling') {
+        return value.coordination.outboundExceptionHistory.some(({ timeline }) => (
+          timeline.length > 0
+        ));
+      }
       return value.coordination.handlingDirectionTimeline.length > 0;
     }
     if (stepKind === 'request_interception') {

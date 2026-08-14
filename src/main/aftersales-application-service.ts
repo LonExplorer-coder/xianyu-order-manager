@@ -545,7 +545,17 @@ export class AftersalesApplicationService {
       && current.workflowTemplate.timeline.at(-1)?.kind === 'changed'
       && current.workflowTemplate.scenario !== 'refund_only'
       && current.workflowTemplate.scenario !== 'return_refund';
+    const lostHandlingProgress = current.workflowTemplate.scenario === 'lost_handling'
+      && (
+        prepared.kind === 'decide_outbound_logistics_exception'
+        || prepared.kind === 'confirm_refund'
+        || prepared.kind === 'cancel_refund_request'
+        || prepared.kind === 'create_replacement_shipment'
+        || prepared.kind === 'start_next_round'
+        || prepared.kind === 'complete'
+      );
     if (current.workflow === 'general'
+      && !lostHandlingProgress
       && !(carriesRefundFromEarlierTemplate && (
         prepared.kind === 'confirm_refund'
         || prepared.kind === 'cancel_refund_request'

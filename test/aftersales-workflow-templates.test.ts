@@ -644,6 +644,127 @@ describe('售后流程模板', () => {
       })]);
   });
 
+  it('丢件处理预置可真实选择买家侧处理并更新指引', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication(false);
+    const lostHandling = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'lost_handling',
+    );
+    if (!lostHandling) throw new Error('缺少丢件处理预置流程');
+    const shipmentPackage = application.queryShipmentGroupArchives()[0]
+      .records.find(({ id }) => id === shipmentRecordId)?.packages[0];
+    if (!shipmentPackage) throw new Error('测试前置包裹不存在');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: lostHandling.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '包裹长时间无物流轨迹',
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const accepted = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipmentRecordId,
+      packageId: shipmentPackage.id,
+      expectedRevision: shipmentPackage.revision,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '已核对承运方揽收证据',
+    });
+    const withLoss = application.recordShipmentPackageLogisticsException({
+      recordId: shipmentRecordId,
+      packageId: shipmentPackage.id,
+      expectedRevision: accepted.record.packages[0].revision,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackageItemId, quantity: 1 }],
+      },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '承运方确认一件商品丢失',
+    });
+    const current = application.queryAftersalesCases({ shipmentRecordId })
+      .find(({ id }) => id === created.id);
+    const exceptionId = withLoss.record.packages[0].currentException?.id;
+    if (!current || !exceptionId) throw new Error('丢件售后投影不存在');
+
+    const decided = application.progressAftersalesCase({
+      kind: 'decide_outbound_logistics_exception',
+      caseId: current.id,
+      expectedRevision: current.revision,
+      packageId: shipmentPackage.id,
+      exceptionId,
+      decision: 'refund_only',
+      requestedRefundCents: 500,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      reason: '与买家协商后选择仅退款',
+    });
+    const steps = projectAftersalesWorkflowSteps(decided.workflowTemplate, decided);
+
+    expect(decided).toMatchObject({
+      workflow: 'general',
+      refund: { requestedAmountCents: 500, status: 'pending' },
+      coordination: {
+        outboundException: { decision: 'refund_only', stage: 'confirmed' },
+      },
+    });
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'resolve_logistics_exception', state: 'completed' }),
+      expect.objectContaining({ kind: 'choose_resolution', state: 'completed' }),
+      expect.objectContaining({ kind: 'confirm_refund', state: 'current' }),
+    ]));
+  });
+
+  it('多包裹补发只签收一个时不会误标全部签收完成', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const directReplacement = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'direct_replacement',
+    );
+    if (!directReplacement) throw new Error('缺少直接补发预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: directReplacement.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '两件商品分两个包裹补发',
+      items: [{ shipmentPackageItemId, quantity: 2 }],
+    });
+    const round = created.rounds.find(({ replacementRequired }) => replacementRequired);
+    if (!round) throw new Error('待补发轮次不存在');
+    const replacement = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      roundId: round.id,
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '建立两个补发包裹',
+      packages: [1, 2].map((index) => ({
+        shippingCarrier: '顺丰速运',
+        trackingNumber: `SF-WORKFLOW-MULTI-${index}`,
+        items: [{ roundItemId: round.items[0].id, quantity: 1 }],
+      })),
+    });
+    const replacementRecord = replacement.rounds.find(({ id }) => id === round.id)
+      ?.replacementShipment;
+    if (!replacementRecord) throw new Error('补发记录不存在');
+    application.updateShipmentPackageLogisticsStatus({
+      recordId: replacementRecord.id,
+      packageId: replacementRecord.packages[0].id,
+      expectedRevision: replacementRecord.packages[0].revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '仅第一个补发包裹签收',
+    });
+    const current = application.queryAftersalesCases({ shipmentRecordId })
+      .find(({ id }) => id === created.id);
+    if (!current) throw new Error('补发售后投影不存在');
+
+    expect(projectAftersalesWorkflowSteps(current.workflowTemplate, current)
+      .find(({ kind }) => kind === 'confirm_replacement_delivery')?.state)
+      .toBe('current');
+  });
+
   it('运输中切换到拦截退回时真实建立指定包裹的拦截事项', async () => {
     const { application, shipmentRecordId, shipmentPackageItemId } =
       await openShippedApplication(false);
@@ -695,7 +816,10 @@ describe('售后流程模板', () => {
     const refundOnly = application.listAftersalesWorkflowTemplates().find(
       ({ scenario }) => scenario === 'refund_only',
     );
-    if (!refundOnly) throw new Error('缺少仅退款预置流程');
+    const returnRefund = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'return_refund',
+    );
+    if (!refundOnly || !returnRefund) throw new Error('缺少退款预置流程');
     const existing = application.createAftersalesCase({
       shipmentRecordId,
       workflowTemplateId: refundOnly.id,
@@ -704,12 +828,39 @@ describe('售后流程模板', () => {
       requestedRefundCents: 500,
       items: [{ shipmentPackageItemId, quantity: 1 }],
     });
+    const directionCase = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:31:00+08:00',
+      reason: 'v37 方向事件保真测试',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const changedDirectionCase = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: directionCase.id,
+      expectedRevision: directionCase.revision,
+      handlingDirection: 'only_refund',
+      occurredAt: '2026-08-14T10:32:00+08:00',
+      reason: '协商后从买家寄回改为仅退款',
+    });
+    expect(changedDirectionCase.coordination.handlingDirectionTimeline.map(({ kind }) => kind))
+      .toEqual(['selected', 'changed']);
     application.close();
     applications.splice(applications.indexOf(application), 1);
 
     const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
+    let directionRowsBefore: unknown[] = [];
     try {
+      directionRowsBefore = legacy.prepare(`
+        SELECT sequence, id, case_id, kind, before_direction, after_direction,
+          occurred_at, reason, created_at
+        FROM aftersales_handling_direction_events
+        WHERE case_id = ?
+        ORDER BY sequence
+      `).all(directionCase.id);
       removeVersion38ExtensionArtifacts(legacy);
       expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
         .toEqual({ version: 37 });
@@ -730,6 +881,9 @@ describe('售后流程模板', () => {
         timeline: [{ kind: 'selected' }],
       },
     });
+    expect(migrated.queryAftersalesCases({ shipmentRecordId })
+      .find(({ id }) => id === directionCase.id)?.coordination.handlingDirectionTimeline)
+      .toEqual(changedDirectionCase.coordination.handlingDirectionTimeline);
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
@@ -741,6 +895,13 @@ describe('售后流程模板', () => {
       expect(() => verified.prepare(`
         DELETE FROM aftersales_case_workflow_template_events
       `).run()).toThrow(/immutable/u);
+      expect(verified.prepare(`
+        SELECT sequence, id, case_id, kind, before_direction, after_direction,
+          occurred_at, reason, created_at
+        FROM aftersales_handling_direction_events
+        WHERE case_id = ?
+        ORDER BY sequence
+      `).all(directionCase.id)).toEqual(directionRowsBefore);
     } finally {
       verified.close();
     }
@@ -754,5 +915,110 @@ describe('售后流程模板', () => {
       .find(({ id }) => id === existing.id)?.workflowTemplate).toEqual(
       restored?.workflowTemplate,
     );
+  });
+
+  it('v38 替表后迁移失败会整体回滚 v37 方向数据与不可变约束', async () => {
+    const { application, dataDirectory, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const returnRefund = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'return_refund',
+    );
+    if (!returnRefund) throw new Error('缺少退货退款预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '迁移失败回滚测试',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const changed = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      handlingDirection: 'only_refund',
+      occurredAt: '2026-08-14T10:31:00+08:00',
+      reason: '迁移前保留方向转换事实',
+    });
+    application.close();
+    applications.splice(applications.indexOf(application), 1);
+
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    let expectedDirectionRows: unknown[] = [];
+    try {
+      expectedDirectionRows = legacy.prepare(`
+        SELECT sequence, id, case_id, kind, before_direction, after_direction,
+          occurred_at, reason, created_at
+        FROM aftersales_handling_direction_events
+        WHERE case_id = ?
+        ORDER BY sequence
+      `).all(created.id);
+      removeVersion38ExtensionArtifacts(legacy);
+      legacy.exec(`
+        CREATE TABLE aftersales_workflow_templates (
+          id TEXT PRIMARY KEY
+        ) STRICT;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const failedMigration = new LocalApplication(unusedRecognizer);
+    expect(() => failedMigration.openDataDirectory(dataDirectory)).toThrow();
+    failedMigration.close();
+
+    const rolledBack = new DatabaseSync(databasePath);
+    try {
+      expect(rolledBack.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 37 });
+      expect(rolledBack.prepare(`
+        SELECT sequence, id, case_id, kind, before_direction, after_direction,
+          occurred_at, reason, created_at
+        FROM aftersales_handling_direction_events
+        WHERE case_id = ?
+        ORDER BY sequence
+      `).all(created.id)).toEqual(expectedDirectionRows);
+      expect(rolledBack.prepare(`
+        SELECT name, type FROM sqlite_schema
+        WHERE name IN (
+          'aftersales_direction_events_by_case',
+          'aftersales_direction_events_are_immutable_on_update',
+          'aftersales_direction_events_are_immutable_on_delete'
+        ) ORDER BY name
+      `).all()).toEqual([
+        { name: 'aftersales_direction_events_are_immutable_on_delete', type: 'trigger' },
+        { name: 'aftersales_direction_events_are_immutable_on_update', type: 'trigger' },
+        { name: 'aftersales_direction_events_by_case', type: 'index' },
+      ]);
+      expect((rolledBack.prepare(`
+        PRAGMA table_info(aftersales_handling_direction_events)
+      `).all() as Array<{ name: string; notnull: number }>)
+        .find(({ name }) => name === 'after_direction')?.notnull).toBe(1);
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE name = 'aftersales_handling_direction_events_v38'
+      `).get()).toBeUndefined();
+      expect(() => rolledBack.prepare(`
+        UPDATE aftersales_handling_direction_events
+        SET reason = '不允许篡改'
+        WHERE case_id = ?
+      `).run(created.id)).toThrow(/immutable/u);
+      rolledBack.exec('DROP TABLE aftersales_workflow_templates;');
+    } finally {
+      rolledBack.close();
+    }
+
+    const recovered = new LocalApplication(unusedRecognizer);
+    applications.push(recovered);
+    recovered.openDataDirectory(dataDirectory);
+    expect(recovered.queryAftersalesCases({ shipmentRecordId })
+      .find(({ id }) => id === created.id)).toMatchObject({
+      coordination: {
+        handlingDirection: 'only_refund',
+        handlingDirectionTimeline: changed.coordination.handlingDirectionTimeline,
+      },
+    });
   });
 });
