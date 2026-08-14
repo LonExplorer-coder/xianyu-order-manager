@@ -8,6 +8,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -76,6 +77,33 @@ describe('便携版数据目录冒烟', () => {
       configDirectory: join(root, '系统启动配置'),
       dataDirectory: join(root, '用户选择的订单数据'),
     })).rejects.toThrow('便携版重启后未能自动打开原订单数据目录');
+  });
+
+  it('读回阶段拒绝物流关键值损坏，避免把不完整历史误报为通过', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-portable-corrupted-history-smoke-'));
+    testRoots.push(root);
+    const configDirectory = join(root, '系统启动配置');
+    const dataDirectory = join(root, '用户选择的订单数据');
+    await runPortableReleaseDataSmoke({
+      phase: 'write',
+      configDirectory,
+      dataDirectory,
+    });
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      database.prepare(`
+        UPDATE shipment_packages
+        SET shipping_carrier = '损坏承运方', tracking_number = 'CORRUPTED'
+      `).run();
+    } finally {
+      database.close();
+    }
+
+    await expect(runPortableReleaseDataSmoke({
+      phase: 'read',
+      configDirectory,
+      dataDirectory,
+    })).rejects.toThrow('便携版重启后物流时间线不完整');
   });
 
   it('已有同名文件时拒绝覆盖或删除，避免误用冒烟入口破坏文件', async () => {

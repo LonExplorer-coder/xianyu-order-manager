@@ -35,7 +35,7 @@ pnpm vitest run \
   test/aftersales-workflow-templates.test.ts \
   test/portable-release-smoke.test.ts
 
-5 files passed, 109 tests passed
+5 files passed, 110 tests passed
 ```
 
 ## 剩余操作
