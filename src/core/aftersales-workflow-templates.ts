@@ -547,13 +547,19 @@ function workflowFieldSatisfied(
     return currentReturns.some(({ shippingCarrier }) => shippingCarrier.trim().length > 0)
       || Boolean(currentRound?.replacementShipment?.packages.some(({ shippingCarrier }) => (
         shippingCarrier.trim().length > 0
-      )));
+      )))
+      || value.coordination.sourcePackages.some(({ shippingCarrier }) => (
+        shippingCarrier.trim().length > 0
+      ));
   }
   if (field === 'tracking_number') {
     return currentReturns.some(({ trackingNumber }) => trackingNumber.trim().length > 0)
       || Boolean(currentRound?.replacementShipment?.packages.some(({ trackingNumber }) => (
         trackingNumber.trim().length > 0
-      )));
+      )))
+      || value.coordination.sourcePackages.some(({ trackingNumber }) => (
+        trackingNumber.trim().length > 0
+      ));
   }
   if (field === 'received_quantity') {
     return currentReturns.some(({ items }) => items.some(({ receivedQuantity }) => (

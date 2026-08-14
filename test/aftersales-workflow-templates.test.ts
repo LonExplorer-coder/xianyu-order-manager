@@ -617,14 +617,14 @@ describe('售后流程模板', () => {
     const { application, shipmentRecordId, shipmentPackageItemId } =
       await openShippedApplication();
     const custom = application.createAftersalesWorkflowTemplate({
-      name: '须核对退货运单的协商流程',
+      name: '须核对检查结果的协商流程',
       scenario: 'other',
       steps: [{
-        id: 'identify-with-tracking',
+        id: 'identify-with-inspection',
         kind: 'identify_issue',
-        name: '核对商品与退货运单',
+        name: '核对商品与检查结果',
         required: true,
-        fields: ['items', 'reason', 'tracking_number'],
+        fields: ['items', 'reason', 'inspection_result'],
         condition: null,
       }],
     });
@@ -632,7 +632,7 @@ describe('售后流程模板', () => {
       shipmentRecordId,
       workflowTemplateId: custom.id,
       occurredAt: '2026-08-14T10:30:00+08:00',
-      reason: '尚未登记退货运单',
+      reason: '尚未完成退货检查',
       items: [{ shipmentPackageItemId, quantity: 1 }],
     });
 
@@ -640,7 +640,7 @@ describe('售后流程模板', () => {
       .toEqual([expect.objectContaining({
         kind: 'identify_issue',
         state: 'current',
-        fields: ['items', 'reason', 'tracking_number'],
+        fields: ['items', 'reason', 'inspection_result'],
       })]);
   });
 
