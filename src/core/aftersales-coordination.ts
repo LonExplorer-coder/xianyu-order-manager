@@ -126,9 +126,9 @@ export type AftersalesReturnExceptionCoordination =
   };
 
 export type AftersalesHandlingDirectionEvent = {
-  kind: 'selected' | 'changed';
+  kind: 'selected' | 'changed' | 'cleared';
   before: AftersalesHandlingDirection | null;
-  after: AftersalesHandlingDirection;
+  after: AftersalesHandlingDirection | null;
   occurredAt: string;
   reason: string;
   createdAt: string;

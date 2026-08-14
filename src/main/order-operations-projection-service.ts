@@ -886,7 +886,8 @@ export class OrderOperationsProjectionService {
         events.id,
         'direction_' || events.kind AS event_kind,
         COALESCE(events.before_direction || ' → ', '')
-          || events.after_direction || ' · ' || events.reason AS detail,
+          || COALESCE(events.after_direction, '无指定处理方向')
+          || ' · ' || events.reason AS detail,
         events.occurred_at,
         cases.shipment_record_id,
         cases.id AS case_id,
@@ -1312,6 +1313,7 @@ export class OrderOperationsProjectionService {
 function aftersalesHistoryTitle(eventKind: string): string {
   if (eventKind === 'case_created') return '建立售后处理单';
   if (eventKind === 'case_updated') return '更新售后处理';
+  if (eventKind === 'direction_cleared') return '结束售后处理方向';
   if (eventKind.startsWith('direction_')) return '选择售后处理方向';
   if (eventKind === 'interception_requested') return '申请拦截正向包裹';
   if (eventKind === 'interception_succeeded') return '确认拦截成功';

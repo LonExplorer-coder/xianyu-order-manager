@@ -64,6 +64,10 @@ export class AftersalesApplicationService {
       prepared.workflowTemplateId,
     );
     const workflow = workflowTemplate.workflow;
+    if (workflowTemplate.scenario === 'intercept_return'
+      && prepared.handlingDirection !== 'intercept') {
+      throw new Error('拦截退回流程必须明确选择申请拦截');
+    }
     if (workflow !== 'refund_only' && workflow !== 'return_refund'
       && prepared.requestedRefundCents !== undefined) {
       throw new Error('当前售后流程不能登记申请退款金额');
@@ -294,6 +298,21 @@ export class AftersalesApplicationService {
       physicalControl: current.coordination.physicalControl,
       availableDirections: current.coordination.availableDirections,
     });
+    if (target.scenario === 'intercept_return' && targetDirection !== 'intercept') {
+      throw new Error('拦截退回流程必须明确选择申请拦截');
+    }
+    const shouldRequestInterception = targetDirection === 'intercept'
+      && current.coordination.handlingDirection !== 'intercept';
+    if (shouldRequestInterception
+      && current.coordination.interception?.status === 'requested') {
+      throw new Error('已有待确认的拦截请求，请先登记结果');
+    }
+    const targetInterceptionPackageId = shouldRequestInterception
+      ? resolveInterceptionPackageId(
+        prepared.interceptionPackageId,
+        current.coordination.sourcePackages.map(({ packageId }) => packageId),
+      )
+      : null;
     if ((target.workflow === 'refund_only' || target.workflow === 'return_refund')
       && current.refund === null && prepared.requestedRefundCents === undefined) {
       throw new Error('请先填写本次申请退款金额');
@@ -369,8 +388,7 @@ export class AftersalesApplicationService {
         prepared.reason,
         now,
       );
-      if (targetDirection !== null
-        && targetDirection !== current.coordination.handlingDirection) {
+      if (targetDirection !== current.coordination.handlingDirection) {
         const beforeDirection = current.coordination.handlingDirection;
         this.workspace.database.prepare(`
           INSERT INTO aftersales_handling_direction_events (
@@ -380,9 +398,20 @@ export class AftersalesApplicationService {
         `).run(
           randomUUID(),
           current.id,
-          beforeDirection === null ? 'selected' : 'changed',
+          targetDirection === null
+            ? 'cleared'
+            : beforeDirection === null ? 'selected' : 'changed',
           beforeDirection,
           targetDirection,
+          prepared.occurredAt,
+          prepared.reason,
+          now,
+        );
+      }
+      if (shouldRequestInterception && targetInterceptionPackageId) {
+        this.requestInterception(
+          current,
+          targetInterceptionPackageId,
           prepared.occurredAt,
           prepared.reason,
           now,
@@ -512,7 +541,16 @@ export class AftersalesApplicationService {
   public progress(input: unknown): AftersalesCase {
     const prepared = normalizeProgressAftersalesCaseInput(input);
     const current = this.get(prepared.caseId);
-    if (current.workflow === 'general') {
+    const carriesRefundFromEarlierTemplate = current.refund !== null
+      && current.workflowTemplate.timeline.at(-1)?.kind === 'changed'
+      && current.workflowTemplate.scenario !== 'refund_only'
+      && current.workflowTemplate.scenario !== 'return_refund';
+    if (current.workflow === 'general'
+      && !(carriesRefundFromEarlierTemplate && (
+        prepared.kind === 'confirm_refund'
+        || prepared.kind === 'cancel_refund_request'
+        || prepared.kind === 'complete'
+      ))) {
       throw new Error('一般售后请使用状态更新功能');
     }
     if (current.revision !== prepared.expectedRevision) {
@@ -542,10 +580,11 @@ export class AftersalesApplicationService {
       const confirmedDecisions = current.coordination.outboundExceptionHistory
         .filter((exception) => exception.stage === 'confirmed')
         .map(({ decision }) => decision);
-      if (!confirmedDecisions.includes('replacement')
+      if (!carriesRefundFromEarlierTemplate
+        && (!confirmedDecisions.includes('replacement')
         || confirmedDecisions.some((decision) => (
           decision === 'refund_only' || decision === 'refund_and_replacement'
-        ))) {
+        )))) {
         throw new Error('只有明确选择直接补发时才能取消本次退款申请');
       }
       const latestDecisionAt = current.coordination.outboundExceptionHistory
@@ -560,14 +599,13 @@ export class AftersalesApplicationService {
       );
       this.workspace.transaction(() => {
         this.cancelPendingRefund(current, prepared.reason, prepared.occurredAt, now);
-        this.advanceCase(
-          current,
-          this.allRequiredReplacementRoundsDelivered(current)
-            ? 'ready_to_complete'
-            : 'waiting_replacement',
-          prepared.reason,
-          now,
-        );
+        const replacementPending = current.rounds.some(({ replacementRequired }) => (
+          replacementRequired
+        )) && !this.allRequiredReplacementRoundsDelivered(current);
+        this.advanceCase(current, replacementPending
+          ? 'waiting_replacement'
+          : current.workflow === 'general' ? 'processing' : 'ready_to_complete',
+        prepared.reason, now);
       });
       return this.get(current.id);
     }
@@ -1673,6 +1711,8 @@ export class AftersalesApplicationService {
             || exception.decision === 'refund_and_replacement'),
       );
       const outboundRefundSupported = outboundRefundExceptions.length > 0;
+      const carriedRefundSupported = carriesRefundFromEarlierTemplate
+        && refund?.status === 'pending';
       const returnDecisionSupported = explicitOnlyRefund || (
         current.returns.length > 0
         && !(current.coordination.returnException?.exceptionType === 'lost'
@@ -1696,6 +1736,7 @@ export class AftersalesApplicationService {
       }
       const refundStatusReady = current.status === 'waiting_refund'
         || (current.status === 'waiting_replacement' && outboundRefundSupported)
+        || carriedRefundSupported
         || (current.workflow === 'return_refund'
           && (current.status === 'waiting_return' || current.status === 'waiting_inspection')
           && returnDecisionSupported);
@@ -1706,6 +1747,7 @@ export class AftersalesApplicationService {
         .flatMap(({ timeline }) => timeline.at(-1)?.occurredAt ?? [])
         .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
       const earliestRefundAt = latestOutboundRefundAt
+        ?? (carriedRefundSupported ? refund?.latestEventAt : undefined)
         ?? (explicitOnlyRefund
         ? current.occurredAt
         : current.workflow === 'return_refund'
@@ -2661,14 +2703,18 @@ export class AftersalesApplicationService {
     `).all(caseId) as unknown as SqlRow[];
     return rows.map((row) => {
       const kind = asString(row.kind);
-      if (kind !== 'selected' && kind !== 'changed') {
+      if (kind !== 'selected' && kind !== 'changed' && kind !== 'cleared') {
+        throw new Error('数据库售后处理方向事件错误');
+      }
+      const after = asNullableHandlingDirection(row.after_direction);
+      if ((kind === 'cleared' && after !== null)
+        || (kind !== 'cleared' && after === null)) {
         throw new Error('数据库售后处理方向事件错误');
       }
       return {
         kind,
         before: asNullableHandlingDirection(row.before_direction),
-        after: asNullableHandlingDirection(row.after_direction)
-          ?? invalidStoredHandlingDirection(),
+        after,
         occurredAt: asString(row.occurred_at),
         reason: asString(row.reason),
         createdAt: asString(row.created_at),
@@ -3309,29 +3355,44 @@ export class AftersalesApplicationService {
       input.now,
     );
     if (input.afterDirection === 'intercept') {
-      if (!input.interceptionPackageId) throw new Error('请明确选择本次拦截的包裹');
-      const existingBinding = this.workspace.database.prepare(`
-        SELECT shipment_package_id
-        FROM aftersales_interception_packages
-        WHERE case_id = ?
-      `).get(input.current.id) as SqlRow | undefined;
-      if (existingBinding
-        && asString(existingBinding.shipment_package_id) !== input.interceptionPackageId) {
-        throw new Error('已存在其他包裹的拦截事项，请另建售后处理单');
-      }
-      if (!existingBinding) {
-        this.workspace.database.prepare(`
-          INSERT INTO aftersales_interception_packages (
-            case_id, shipment_package_id, created_at
-          ) VALUES (?, ?, ?)
-        `).run(input.current.id, input.interceptionPackageId, input.now);
-      }
-      this.workspace.database.prepare(`
-        INSERT INTO aftersales_interception_events (
-          id, case_id, kind, occurred_at, reason, created_at
-        ) VALUES (?, ?, 'requested', ?, ?, ?)
-      `).run(randomUUID(), input.current.id, input.occurredAt, input.reason, input.now);
+      this.requestInterception(
+        input.current,
+        input.interceptionPackageId,
+        input.occurredAt,
+        input.reason,
+        input.now,
+      );
     }
+  }
+
+  private requestInterception(
+    current: AftersalesCase,
+    packageId: string | null | undefined,
+    occurredAt: string,
+    reason: string,
+    now: string,
+  ): void {
+    if (!packageId) throw new Error('请明确选择本次拦截的包裹');
+    const existingBinding = this.workspace.database.prepare(`
+      SELECT shipment_package_id
+      FROM aftersales_interception_packages
+      WHERE case_id = ?
+    `).get(current.id) as SqlRow | undefined;
+    if (existingBinding && asString(existingBinding.shipment_package_id) !== packageId) {
+      throw new Error('已存在其他包裹的拦截事项，请另建售后处理单');
+    }
+    if (!existingBinding) {
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_interception_packages (
+          case_id, shipment_package_id, created_at
+        ) VALUES (?, ?, ?)
+      `).run(current.id, packageId, now);
+    }
+    this.workspace.database.prepare(`
+      INSERT INTO aftersales_interception_events (
+        id, case_id, kind, occurred_at, reason, created_at
+      ) VALUES (?, ?, 'requested', ?, ?, ?)
+    `).run(randomUUID(), current.id, occurredAt, reason, now);
   }
 
   private outboundExceptionAffectedItems(
@@ -3778,10 +3839,6 @@ function asNullableHandlingDirection(
 ): AftersalesHandlingDirection | null {
   if (value === null || value === undefined) return null;
   if (isAftersalesHandlingDirection(value)) return value;
-  throw new Error('数据库售后处理方向错误');
-}
-
-function invalidStoredHandlingDirection(): never {
   throw new Error('数据库售后处理方向错误');
 }
 

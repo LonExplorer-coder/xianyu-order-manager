@@ -138,6 +138,25 @@ export const AFTERSALES_WORKFLOW_CONDITION_FACTS = [
   'logistics_exception_present',
 ] as const satisfies readonly AftersalesWorkflowConditionFact[];
 
+export function aftersalesWorkflowFieldLabel(value: AftersalesWorkflowField): string {
+  return ({
+    occurred_at: '发生时间',
+    reason: '原因',
+    items: '商品与数量',
+    requested_refund_amount: '申请退款金额',
+    handling_direction: '处理方向',
+    interception_package: '拦截包裹',
+    shipping_carrier: '承运方',
+    tracking_number: '运单号',
+    received_quantity: '收到数量',
+    inspection_result: '检查结果',
+    inspection_note: '检查说明',
+    replacement_packages: '补发包裹',
+    logistics_exception: '物流异常',
+    resolution_reason: '处理说明',
+  })[value];
+}
+
 export const SYSTEM_AFTERSALES_WORKFLOW_TEMPLATE_IDS = {
   refundOnly: 'system-aftersales-refund-only',
   returnRefund: 'system-aftersales-return-refund',
@@ -398,15 +417,17 @@ export function isAftersalesWorkflowScenario(
 }
 
 export function projectAftersalesWorkflowSteps(
-  template: Pick<AftersalesWorkflowTemplate, 'steps'>,
+  template: Pick<AftersalesWorkflowTemplate, 'scenario' | 'steps'>,
   aftersalesCase: AftersalesCase,
 ): AftersalesWorkflowStepProjection[] {
+  const currentRound = currentWorkflowRound(template.scenario, aftersalesCase);
+  const currentReturns = currentRound
+    ? aftersalesCase.returns.filter(({ id }) => currentRound.returnRecordIds.includes(id))
+    : [];
   const facts: Record<AftersalesWorkflowConditionFact, boolean> = {
     refund_requested: aftersalesCase.refund !== null,
-    return_registered: aftersalesCase.returns.length > 0,
-    replacement_required: aftersalesCase.rounds.some(({ replacementRequired }) => (
-      replacementRequired
-    )),
+    return_registered: currentReturns.length > 0,
+    replacement_required: currentRound?.replacementRequired ?? false,
     interception_requested: aftersalesCase.coordination.interception !== null,
     logistics_exception_present: [
       ...aftersalesCase.coordination.outboundExceptionHistory,
@@ -417,7 +438,16 @@ export function projectAftersalesWorkflowSteps(
     stepValue.condition === null
     || facts[stepValue.condition.fact] === stepValue.condition.equals
   ));
-  const completed = visible.map((stepValue) => stepCompleted(stepValue.kind, aftersalesCase));
+  const completed = visible.map((stepValue) => (
+    stepCompleted(stepValue.kind, aftersalesCase, currentRound, currentReturns)
+    && stepValue.fields.every((field) => workflowFieldSatisfied(
+      field,
+      stepValue.kind,
+      aftersalesCase,
+      currentRound,
+      currentReturns,
+    ))
+  ));
   const currentIndex = completed.findIndex((value, index) => (
     !value && visible[index]?.required
   ));
@@ -432,25 +462,28 @@ export function projectAftersalesWorkflowSteps(
   }));
 }
 
-function stepCompleted(kind: AftersalesWorkflowStepKind, value: AftersalesCase): boolean {
+function stepCompleted(
+  kind: AftersalesWorkflowStepKind,
+  value: AftersalesCase,
+  currentRound: AftersalesCase['rounds'][number] | null,
+  currentReturns: AftersalesCase['returns'],
+): boolean {
   if (kind === 'identify_issue') return true;
   if (kind === 'choose_resolution') return value.coordination.handlingDirection !== null;
   if (kind === 'request_interception') return value.coordination.interception !== null;
-  if (kind === 'register_return') return value.returns.length > 0;
+  if (kind === 'register_return') return currentReturns.length > 0;
   if (kind === 'receive_return') {
-    return value.returns.some(({ status }) => status === 'received' || status === 'inspected');
+    return currentReturns.some(({ status }) => status === 'received' || status === 'inspected');
   }
-  if (kind === 'inspect_return') return value.returns.some(({ status }) => status === 'inspected');
+  if (kind === 'inspect_return') return currentReturns.some(({ status }) => status === 'inspected');
   if (kind === 'confirm_refund') return value.refund?.status === 'confirmed';
   if (kind === 'prepare_replacement') {
-    return value.rounds.some(({ replacementShipment }) => replacementShipment !== null);
+    return currentRound?.replacementShipment !== null && currentRound !== null;
   }
   if (kind === 'confirm_replacement_delivery') {
-    return value.rounds.some(({ replacementShipment }) => (
-      replacementShipment?.packages.some(({ status, logisticsStatus }) => (
+    return currentRound?.replacementShipment?.packages.some(({ status, logisticsStatus }) => (
         status === 'active' && logisticsStatus === 'delivered'
-      ))
-    ));
+      )) ?? false;
   }
   if (kind === 'resolve_logistics_exception') {
     const exceptions = [
@@ -467,6 +500,105 @@ function stepCompleted(kind: AftersalesWorkflowStepKind, value: AftersalesCase):
       || value.status === 'cancelled';
   }
   return value.status === 'completed' || value.status === 'cancelled';
+}
+
+function currentWorkflowRound(
+  scenario: AftersalesWorkflowScenario,
+  value: AftersalesCase,
+): AftersalesCase['rounds'][number] | null {
+  const workflow = scenario === 'exchange'
+    ? 'exchange'
+    : scenario === 'direct_replacement' ? 'direct_replacement' : null;
+  const candidates = workflow
+    ? value.rounds.filter((round) => round.workflow === workflow)
+    : value.rounds;
+  return candidates.find((round) => (
+    round.replacementRequired && !replacementRoundDelivered(round)
+  )) ?? [...candidates].reverse().find(({ replacementRequired }) => (
+    replacementRequired
+  )) ?? candidates.at(-1) ?? null;
+}
+
+function replacementRoundDelivered(round: AftersalesCase['rounds'][number]): boolean {
+  const activePackages = round.replacementShipment?.packages.filter(({ status }) => (
+    status === 'active'
+  )) ?? [];
+  return activePackages.length > 0 && activePackages.every(({ logisticsStatus }) => (
+    logisticsStatus === 'delivered'
+  ));
+}
+
+function workflowFieldSatisfied(
+  field: AftersalesWorkflowField,
+  stepKind: AftersalesWorkflowStepKind,
+  value: AftersalesCase,
+  currentRound: AftersalesCase['rounds'][number] | null,
+  currentReturns: AftersalesCase['returns'],
+): boolean {
+  if (field === 'occurred_at') return value.occurredAt.length > 0;
+  if (field === 'reason') return value.reason.trim().length > 0;
+  if (field === 'items') return value.items.length > 0;
+  if (field === 'requested_refund_amount') return value.refund !== null;
+  if (field === 'handling_direction') return value.coordination.handlingDirection !== null;
+  if (field === 'interception_package') {
+    return Boolean(value.coordination.interception?.packageId);
+  }
+  if (field === 'shipping_carrier') {
+    return currentReturns.some(({ shippingCarrier }) => shippingCarrier.trim().length > 0)
+      || Boolean(currentRound?.replacementShipment?.packages.some(({ shippingCarrier }) => (
+        shippingCarrier.trim().length > 0
+      )));
+  }
+  if (field === 'tracking_number') {
+    return currentReturns.some(({ trackingNumber }) => trackingNumber.trim().length > 0)
+      || Boolean(currentRound?.replacementShipment?.packages.some(({ trackingNumber }) => (
+        trackingNumber.trim().length > 0
+      )));
+  }
+  if (field === 'received_quantity') {
+    return currentReturns.some(({ items }) => items.some(({ receivedQuantity }) => (
+      receivedQuantity > 0
+    )));
+  }
+  if (field === 'inspection_result') {
+    return currentReturns.some(({ items }) => items.some(({ inspectionResult }) => (
+      inspectionResult !== null
+    )));
+  }
+  if (field === 'inspection_note') {
+    return currentReturns.some(({ items }) => items.some(({ inspectionNote }) => (
+      inspectionNote !== null && inspectionNote.trim().length > 0
+    )));
+  }
+  if (field === 'replacement_packages') return currentRound?.replacementShipment !== null;
+  if (field === 'logistics_exception') {
+    return value.coordination.outboundExceptionHistory.length > 0
+      || value.coordination.returnExceptionHistory.length > 0;
+  }
+  if (field === 'resolution_reason') {
+    if (stepKind === 'choose_resolution') {
+      return value.coordination.handlingDirectionTimeline.length > 0;
+    }
+    if (stepKind === 'request_interception') {
+      return Boolean(value.coordination.interception?.timeline.length);
+    }
+    if (stepKind === 'confirm_refund') {
+      return value.refund?.timeline.some(({ kind }) => kind === 'confirmed') ?? false;
+    }
+    if (stepKind === 'resolve_logistics_exception') {
+      return [
+        ...value.coordination.outboundExceptionHistory,
+        ...value.coordination.returnExceptionHistory,
+      ].some(({ timeline }) => timeline.length > 0);
+    }
+    if (stepKind === 'record_resolution') {
+      return value.timeline.some(({ kind }) => kind === 'updated');
+    }
+    return value.status === 'ready_to_complete'
+      || value.status === 'completed'
+      || value.status === 'cancelled';
+  }
+  return false;
 }
 
 function step(

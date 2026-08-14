@@ -5,8 +5,8 @@ import {
   AFTERSALES_WORKFLOW_CONDITION_FACTS,
   AFTERSALES_WORKFLOW_FIELDS,
   AFTERSALES_WORKFLOW_STEP_KINDS,
+  aftersalesWorkflowFieldLabel,
   type AftersalesWorkflowConditionFact,
-  type AftersalesWorkflowField,
   type AftersalesWorkflowScenario,
   type AftersalesWorkflowStep,
   type AftersalesWorkflowStepKind,
@@ -297,7 +297,7 @@ function WorkflowEditor({
                           : step.fields.filter((candidate) => candidate !== field),
                       })}
                     />
-                    {fieldLabel(field)}
+                    {aftersalesWorkflowFieldLabel(field)}
                   </label>
                 ))}
               </div>
@@ -414,17 +414,6 @@ function stepKindLabel(value: AftersalesWorkflowStepKind): string {
     confirm_replacement_delivery: '确认补发签收',
     resolve_logistics_exception: '处理物流异常',
     record_resolution: '记录处理结果', complete: '完成售后',
-  })[value];
-}
-
-function fieldLabel(value: AftersalesWorkflowField): string {
-  return ({
-    occurred_at: '发生时间', reason: '原因', items: '商品与数量',
-    requested_refund_amount: '申请退款金额', handling_direction: '处理方向',
-    interception_package: '拦截包裹', shipping_carrier: '承运方', tracking_number: '运单号',
-    received_quantity: '收到数量', inspection_result: '检查结果',
-    inspection_note: '检查说明', replacement_packages: '补发包裹',
-    logistics_exception: '物流异常', resolution_reason: '处理说明',
   })[value];
 }
 

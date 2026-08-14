@@ -98,6 +98,9 @@ export function CreateAftersalesCaseDialog({
   const availableDirections = physicalControl
     ? availableAftersalesDirections(physicalControl)
     : [];
+  const templateDirections = selectedWorkflowTemplate?.scenario === 'intercept_return'
+    ? availableDirections.filter((direction) => direction === 'intercept')
+    : availableDirections;
   const effectiveHandlingDirection = handlingDirection;
   const requestedRefundCents = yuanToCents(requestedRefundYuan);
   const canSubmit = Boolean(
@@ -109,7 +112,7 @@ export function CreateAftersalesCaseDialog({
       || requestedRefundCents !== null) &&
     (workflow !== 'return_refund'
       || (effectiveHandlingDirection !== ''
-        && availableDirections.includes(effectiveHandlingDirection)
+        && templateDirections.includes(effectiveHandlingDirection)
         && (effectiveHandlingDirection !== 'intercept' || Boolean(interceptionPackageId)))),
   );
 
@@ -264,7 +267,7 @@ export function CreateAftersalesCaseDialog({
                 )}
               >
                 <option value="">请明确选择处理方向</option>
-                {availableDirections.map((direction) => (
+                {templateDirections.map((direction) => (
                   <option key={direction} value={direction}>
                     {aftersalesHandlingDirectionLabel(direction)}
                   </option>
@@ -342,12 +345,19 @@ export function ChangeAftersalesWorkflowDialog({
   const requiresRefund = selected?.workflow === 'refund_only'
     || selected?.workflow === 'return_refund';
   const requiresDirection = selected?.workflow === 'return_refund';
+  const templateDirections = selected?.scenario === 'intercept_return'
+    ? aftersalesCase.coordination.availableDirections.filter((direction) => (
+      direction === 'intercept'
+    ))
+    : aftersalesCase.coordination.availableDirections;
   const canSubmit = Boolean(
     selected
     && reason.trim()
     && occurredAt
     && (!requiresRefund || aftersalesCase.refund !== null || requestedRefundCents !== null)
-    && (!requiresDirection || handlingDirection !== '')
+    && (!requiresDirection || templateDirections.includes(
+      handlingDirection as AftersalesHandlingDirection,
+    ))
     && (handlingDirection !== 'intercept' || interceptionPackageId),
   );
 
@@ -433,7 +443,7 @@ export function ChangeAftersalesWorkflowDialog({
             <span>售后处理方向</span>
             <select value={handlingDirection} disabled={saving} onChange={(event) => setHandlingDirection(event.target.value as AftersalesHandlingDirection | '')}>
               <option value="">请明确选择处理方向</option>
-              {aftersalesCase.coordination.availableDirections.map((direction) => (
+              {templateDirections.map((direction) => (
                 <option key={direction} value={direction}>{aftersalesHandlingDirectionLabel(direction)}</option>
               ))}
             </select>

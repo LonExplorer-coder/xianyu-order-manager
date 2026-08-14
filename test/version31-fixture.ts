@@ -135,6 +135,51 @@ export function removeVersion38ExtensionArtifacts(database: DatabaseSync): void 
     DROP TABLE IF EXISTS aftersales_case_workflow_template_events;
     DROP TABLE IF EXISTS aftersales_workflow_template_versions;
     DROP TABLE IF EXISTS aftersales_workflow_templates;
+
+    DROP TRIGGER IF EXISTS aftersales_direction_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_direction_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS aftersales_direction_events_by_case;
+    CREATE TABLE aftersales_handling_direction_events_v37 (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed')),
+      before_direction TEXT CHECK (
+        before_direction IS NULL OR before_direction IN (
+          'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+        )
+      ),
+      after_direction TEXT NOT NULL CHECK (after_direction IN (
+        'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+      )),
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL,
+      CHECK (
+        (kind = 'selected' AND before_direction IS NULL)
+        OR (kind = 'changed' AND before_direction IS NOT NULL
+          AND before_direction <> after_direction)
+      )
+    ) STRICT;
+    INSERT INTO aftersales_handling_direction_events_v37 (
+      sequence, id, case_id, kind, before_direction, after_direction,
+      occurred_at, reason, created_at
+    )
+    SELECT sequence, id, case_id, kind, before_direction, after_direction,
+      occurred_at, reason, created_at
+    FROM aftersales_handling_direction_events
+    WHERE kind <> 'cleared';
+    DROP TABLE aftersales_handling_direction_events;
+    ALTER TABLE aftersales_handling_direction_events_v37
+      RENAME TO aftersales_handling_direction_events;
+    CREATE INDEX aftersales_direction_events_by_case
+      ON aftersales_handling_direction_events (case_id, sequence);
+    CREATE TRIGGER aftersales_direction_events_are_immutable_on_update
+    BEFORE UPDATE ON aftersales_handling_direction_events
+    BEGIN SELECT RAISE(ABORT, 'aftersales handling direction events are immutable'); END;
+    CREATE TRIGGER aftersales_direction_events_are_immutable_on_delete
+    BEFORE DELETE ON aftersales_handling_direction_events
+    BEGIN SELECT RAISE(ABORT, 'aftersales handling direction events are immutable'); END;
     DELETE FROM schema_migrations WHERE version = 38;
     PRAGMA foreign_keys = ON;
   `);

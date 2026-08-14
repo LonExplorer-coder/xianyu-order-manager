@@ -9900,6 +9900,7 @@ describe('订单管理工作台', () => {
     expect(guide).toHaveTextContent('仅退款');
     expect(guide).toHaveTextContent('确认问题与退款申请');
     expect(guide).toHaveTextContent('确认实际退款必需 · 当前建议');
+    expect(guide).toHaveTextContent('需核对：发生时间、申请退款金额、处理说明');
     await user.click(within(guide).getByRole('button', { name: '调整后续流程' }));
     const dialog = screen.getByRole('dialog', { name: '调整后续售后流程' });
     await user.selectOptions(within(dialog).getByLabelText('新的后续流程'), returnTemplate.id);

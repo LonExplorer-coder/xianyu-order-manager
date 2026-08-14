@@ -7,7 +7,10 @@ import type {
   ProgressAftersalesCaseInput,
 } from '../core/aftersales-cases';
 import type { DesktopApi } from '../core/desktop-api';
-import { projectAftersalesWorkflowSteps } from '../core/aftersales-workflow-templates';
+import {
+  aftersalesWorkflowFieldLabel,
+  projectAftersalesWorkflowSteps,
+} from '../core/aftersales-workflow-templates';
 import type { ShipmentRecord } from '../core/shipment-records';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
@@ -101,6 +104,9 @@ export function AftersalesCasePanel({
                     <strong>{step.name}</strong>
                     <small>{step.required ? '必需' : '可选'}
                       {step.state === 'current' ? ' · 当前建议' : ''}</small>
+                    {step.state === 'current' && step.fields.length > 0 && (
+                      <small>需核对：{step.fields.map(aftersalesWorkflowFieldLabel).join('、')}</small>
+                    )}
                   </div>
                 </li>
               ))}
@@ -712,6 +718,19 @@ export function AftersalesCasePanel({
                   )}
                 </button>
               )}
+              {isCarriedPendingRefund(aftersalesCase)
+                && primaryProgressAction(aftersalesCase) !== 'cancel_refund_request' && (
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => setProgressTarget({
+                    aftersalesCase,
+                    kind: 'cancel_refund_request',
+                  })}
+                >
+                  {progressActionLabel('cancel_refund_request')}
+                </button>
+              )}
               {aftersalesCase.refund?.status === 'pending'
                 && aftersalesCase.coordination.outboundExceptionHistory.some((exception) => (
                   exception.stage === 'confirmed'
@@ -786,10 +805,12 @@ export function AftersalesCasePanel({
               <ol>
                 {aftersalesCase.coordination.handlingDirectionTimeline.map((event, index) => (
                   <li key={`direction-${index}-${event.occurredAt}`}>
-                    <strong>{event.kind === 'selected' ? '选择处理方向' : '转换处理方向'}</strong>
+                    <strong>{event.kind === 'selected'
+                      ? '选择处理方向'
+                      : event.kind === 'cleared' ? '结束处理方向' : '转换处理方向'}</strong>
                     <span>
                       {event.before ? `${aftersalesHandlingDirectionLabel(event.before)} → ` : ''}
-                      {aftersalesHandlingDirectionLabel(event.after)} · {event.reason}
+                      {event.after ? aftersalesHandlingDirectionLabel(event.after) : '无指定处理方向'} · {event.reason}
                     </span>
                     <small>{formatDateTime(event.occurredAt)}</small>
                   </li>
@@ -899,6 +920,7 @@ function primaryProgressAction(
   const supportsOutboundRefund = confirmedOutboundDecisions.some((decision) => (
     decision === 'refund_only' || decision === 'refund_and_replacement'
   ));
+  if (isCarriedPendingRefund(aftersalesCase)) return 'confirm_refund';
   if (aftersalesCase.refund?.status === 'pending'
     && confirmedOutboundDecisions.includes('replacement')
     && !supportsOutboundRefund) {
@@ -969,6 +991,13 @@ function primaryProgressAction(
     return 'confirm_refund';
   }
   return null;
+}
+
+function isCarriedPendingRefund(aftersalesCase: AftersalesCase): boolean {
+  return aftersalesCase.refund?.status === 'pending'
+    && aftersalesCase.workflowTemplate.timeline.at(-1)?.kind === 'changed'
+    && aftersalesCase.workflowTemplate.scenario !== 'refund_only'
+    && aftersalesCase.workflowTemplate.scenario !== 'return_refund';
 }
 
 function returnFactProgressAction(

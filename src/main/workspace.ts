@@ -4961,6 +4961,62 @@ function migrateToVersion38(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE;');
   try {
     database.exec(`
+      DROP TRIGGER aftersales_direction_events_are_immutable_on_update;
+      DROP TRIGGER aftersales_direction_events_are_immutable_on_delete;
+
+      CREATE TABLE aftersales_handling_direction_events_v38 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('selected', 'changed', 'cleared')),
+        before_direction TEXT CHECK (
+          before_direction IS NULL OR before_direction IN (
+            'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+          )
+        ),
+        after_direction TEXT CHECK (
+          after_direction IS NULL OR after_direction IN (
+            'waiting', 'intercept', 'refuse', 'only_refund', 'replacement', 'buyer_return'
+          )
+        ),
+        occurred_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (kind = 'selected' AND before_direction IS NULL AND after_direction IS NOT NULL)
+          OR (kind = 'changed' AND before_direction IS NOT NULL
+            AND after_direction IS NOT NULL AND before_direction <> after_direction)
+          OR (kind = 'cleared' AND before_direction IS NOT NULL AND after_direction IS NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO aftersales_handling_direction_events_v38 (
+        sequence, id, case_id, kind, before_direction, after_direction,
+        occurred_at, reason, created_at
+      )
+      SELECT sequence, id, case_id, kind, before_direction, after_direction,
+        occurred_at, reason, created_at
+      FROM aftersales_handling_direction_events;
+
+      DROP TABLE aftersales_handling_direction_events;
+      ALTER TABLE aftersales_handling_direction_events_v38
+        RENAME TO aftersales_handling_direction_events;
+
+      CREATE INDEX aftersales_direction_events_by_case
+      ON aftersales_handling_direction_events (case_id, sequence);
+
+      CREATE TRIGGER aftersales_direction_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_handling_direction_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales handling direction events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_direction_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_handling_direction_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales handling direction events are immutable');
+      END;
+
       CREATE TABLE aftersales_workflow_templates (
         id TEXT PRIMARY KEY,
         origin TEXT NOT NULL CHECK (origin IN ('system', 'custom')),
