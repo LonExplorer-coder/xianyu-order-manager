@@ -350,4 +350,41 @@ describe('标准商品与商品映射', () => {
       ]),
     );
   });
+
+  it('原关联为空的旧订单再次校对时使用当前精确匹配', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-product-update-exact-'));
+    const firstPath = join(root, '首次.png');
+    const updatePath = join(root, '再次.png');
+    await writeFile(firstPath, Buffer.from('product-update-exact-first'));
+    await writeFile(updatePath, Buffer.from('product-update-exact-second'));
+    const application = new LocalApplication(new ControlledRecognizer(recognition('XY-PRODUCT-EXACT-UPDATE')));
+    openedApplications.push(application);
+    application.openDataDirectory(join(root, '数据'));
+    const [firstDraft] = (await application.submitRecognitionBatch([firstPath])).drafts;
+    const original = application.confirmDraft(firstDraft);
+    expect(original.items[0].standardProduct).toBeNull();
+    const product = application.createStandardProduct({
+      sku: 'SKU-EXACT-UPDATE',
+      name: '古风娃鞋白模',
+      specification: '05M',
+    });
+    const [updateDraft] = (await application.submitRecognitionBatch([updatePath])).drafts;
+    expect(() => application.confirmDraft(updateDraft)).toThrowError(/已转为订单更新/);
+    const review = application.getDraftReview(updateDraft.id);
+    if (review.kind !== 'order_update') throw new Error('预期订单更新校对');
+
+    const updated = application.confirmOrderUpdate({
+      ...review.draft,
+      recipient: '测试收件人更新',
+    }, review.expectedRevision);
+
+    expect(updated.order).toMatchObject({
+      id: original.id,
+      recipient: '测试收件人更新',
+      items: [expect.objectContaining({
+        standardProduct: expect.objectContaining({ id: product.id }),
+        standardizationSource: 'exact',
+      })],
+    });
+  });
 });

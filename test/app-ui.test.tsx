@@ -4329,6 +4329,65 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('曾人工关联候选也不会默认建立未来映射', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-previous-manual',
+      sku: 'SKU-UI-PREVIOUS',
+      name: '脱敏测试标准商品',
+      specification: '白色标准款',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        candidates: [{
+          product,
+          reason: 'previous_manual_choice',
+          score: 1,
+          mappingSuggested: true,
+        }],
+      }]),
+      confirmDraft,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', {
+      name: /SKU-UI-PREVIOUS.*曾人工关联/u,
+    }));
+    expect(screen.getByRole('checkbox', { name: /记住这组订单原文/u })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+
+    expect(confirmDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: draft.id }),
+      undefined,
+      [{
+        draftItemId: draft.items[0].id,
+        standardProductId: product.id,
+        createMapping: false,
+      }],
+    );
+  });
+
   it('人工确认新订单时要求每件商品补齐必填自定义字段', async () => {
     const user = userEvent.setup();
     const requiredItemField: CustomFieldDefinition = {

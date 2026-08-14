@@ -8275,7 +8275,7 @@ function ProductStandardizationEditor({
               key={candidate.product.id}
               onClick={() => onChoiceChange({
                 standardProductId: candidate.product.id,
-                createMapping: candidate.mappingSuggested,
+                createMapping: false,
               })}
             >
               {candidate.product.sku} · {candidate.product.name}

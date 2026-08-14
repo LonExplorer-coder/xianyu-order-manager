@@ -2550,9 +2550,9 @@ export class LocalApplication {
       if (explicitStandardizationItemIds.has(item.id)) return;
       const persistedItemId = persistedItemIds.get(item.id);
       const existingItem = persistedItemId ? existingItemsById.get(persistedItemId) : undefined;
-      if (!existingItem) return;
+      if (!existingItem?.standardProduct) return;
       preparedProductStandardizations.set(item.id, {
-        standardProductId: existingItem.standardProduct?.id ?? null,
+        standardProductId: existingItem.standardProduct.id,
         source: existingItem.standardizationSource,
         createMapping: false,
       });
