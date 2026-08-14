@@ -771,6 +771,9 @@ describe('订单管理工作台', () => {
     expect(attentionTable).toHaveTextContent('XY-SHIPMENT-UI-ATTENTION');
     expect(attentionTable).toHaveTextContent('缺少手机号');
     expect(screen.getByRole('button', { name: '重新组合' })).toBeDisabled();
+    await user.type(screen.getByRole('searchbox', { name: '搜索发货组' }), '脱敏');
+    await waitFor(() => expect(queryShipmentGroups.mock.calls.length).toBeGreaterThan(1));
+    const queryCountBeforeSplit = queryShipmentGroups.mock.calls.length;
     await user.click(screen.getByRole('button', { name: '拆分发货组 XY-SHIPMENT-UI-0001、XY-SHIPMENT-UI-0002' }));
     const dialog = screen.getByRole('dialog', { name: '拆分发货组' });
     await user.click(within(dialog).getByRole('checkbox', { name: 'XY-SHIPMENT-UI-0001' }));
@@ -782,6 +785,8 @@ describe('订单管理工作台', () => {
       splitOrderIds: ['order-1'],
       reason: '单独包装',
     });
+    await waitFor(() => expect(queryShipmentGroups.mock.calls.length)
+      .toBeGreaterThan(queryCountBeforeSplit));
     expect(screen.queryByRole('button', { name: /标记已发货|导出发货组/u }))
       .not.toBeInTheDocument();
   });

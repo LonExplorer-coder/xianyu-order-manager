@@ -4440,9 +4440,7 @@ export class LocalApplication {
       selectedRecipientOrderId: null,
       createdAt: new Date().toISOString(),
     };
-    this.insertShipmentGroupAdjustmentEvent(event);
-    const nextProjection = this.queryShipmentGroups();
-    this.pruneShipmentGroupCustomFieldValues(nextProjection.groups.map(({ id }) => id));
+    const nextProjection = this.insertShipmentGroupAdjustmentEvent(event);
     return { event, projection: nextProjection };
   }
 
@@ -4460,9 +4458,7 @@ export class LocalApplication {
       selectedRecipientOrderId: prepared.selectedRecipientOrderId,
       createdAt: new Date().toISOString(),
     };
-    this.insertShipmentGroupAdjustmentEvent(event);
-    const nextProjection = this.queryShipmentGroups();
-    this.pruneShipmentGroupCustomFieldValues(nextProjection.groups.map(({ id }) => id));
+    const nextProjection = this.insertShipmentGroupAdjustmentEvent(event);
     return { event, projection: nextProjection };
   }
 
@@ -4476,9 +4472,11 @@ export class LocalApplication {
     return rows.map(parseShipmentGroupAdjustmentEvent);
   }
 
-  private insertShipmentGroupAdjustmentEvent(event: ShipmentGroupAdjustmentEvent): void {
+  private insertShipmentGroupAdjustmentEvent(
+    event: ShipmentGroupAdjustmentEvent,
+  ): ShipmentGroupProjection {
     const workspace = this.requireWorkspace();
-    workspace.transaction(() => {
+    return workspace.transaction(() => {
       workspace.database.prepare(`
         INSERT INTO shipment_group_adjustment_events (
           id, operation, reason,
@@ -4497,6 +4495,9 @@ export class LocalApplication {
         event.selectedRecipientOrderId,
         event.createdAt,
       );
+      const projection = this.queryShipmentGroups();
+      this.pruneShipmentGroupCustomFieldValues(projection.groups.map(({ id }) => id));
+      return projection;
     });
   }
 

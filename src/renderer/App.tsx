@@ -1298,13 +1298,23 @@ export function App({ api }: AppProps) {
         loading={shipmentGroupLoading}
         openingOrder={busyAction === 'detail'}
         error={shipmentGroupError}
-        onProjectionChange={(projection) => setShipmentGroupProjection((current) => ({
-          ...projection,
-          customFieldValues: current?.customFieldValues.filter((value) => (
-            projection.groups.some(({ id }) => id === value.shipmentGroupId)
-          )) ?? [],
-          allGroupCount: projection.groups.length,
-        }))}
+        onProjectionChange={(projection) => {
+          setShipmentGroupProjection((current) => ({
+            ...projection,
+            customFieldValues: current?.customFieldValues.filter((value) => (
+              projection.groups.some(({ id }) => id === value.shipmentGroupId)
+            )) ?? [],
+            allGroupCount: projection.groups.length,
+          }));
+          if (
+            shipmentGroupQuery.text
+            || shipmentGroupQuery.sortField
+            || shipmentGroupQuery.customFieldFilter
+            || shipmentGroupQuery.customFieldSort
+          ) {
+            setShipmentGroupQueryRefreshToken((token) => token + 1);
+          }
+        }}
         onCustomFieldValuesChange={(values) => setShipmentGroupProjection((current) => (
           current ? { ...current, customFieldValues: values } : current
         ))}

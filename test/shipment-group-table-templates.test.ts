@@ -423,6 +423,52 @@ describe('发货组字段与模板持久化', () => {
     expect(application.queryShipmentGroupWorkbench({}, [zone.id]).customFieldValues).toEqual([]);
   });
 
+  it('拆分组与失效组字段清理在同一事务失败时全部回滚', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const field = application.createCustomFieldDefinition({
+      name: '分拣备注',
+      granularity: 'shipment_group',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    application.saveShipmentGroupCustomFieldValues({
+      shipmentGroupId: group.id,
+      expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      values: [{ definitionId: field.id, value: '保持事务一致' }],
+    });
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    database.exec(`
+      CREATE TRIGGER test_reject_shipment_group_value_cleanup
+      BEFORE DELETE ON shipment_group_custom_field_values
+      BEGIN
+        SELECT RAISE(ABORT, 'injected shipment group cleanup failure');
+      END;
+    `);
+    try {
+      expect(() => application.splitShipmentGroup({
+        groupId: group.id,
+        expectedMemberOrderIds: group.orders.map(({ id }) => id),
+        splitOrderIds: [group.orders[0].id],
+        reason: '测试原子回滚',
+      })).toThrow('injected shipment group cleanup failure');
+    } finally {
+      database.exec('DROP TRIGGER test_reject_shipment_group_value_cleanup');
+      database.close();
+    }
+
+    expect(application.listShipmentGroupAdjustmentEvents()).toEqual([]);
+    expect(application.queryShipmentGroups().groups).toEqual([group]);
+    expect(application.queryShipmentGroupWorkbench({}, [field.id]).customFieldValues)
+      .toEqual([expect.objectContaining({
+        shipmentGroupId: group.id,
+        definitionId: field.id,
+        value: '保持事务一致',
+      })]);
+  });
+
   it('跨地址手工组的脱敏地址使用最终收货信息所在地区', async () => {
     const { application } = await openApplicationWithResults([
       recognition('XY-GROUP-ADDRESS-0001'),
