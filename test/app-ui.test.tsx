@@ -5155,7 +5155,7 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(within(table).getAllByText('已退款')).toHaveLength(2));
   });
 
-  it('订单详情只维护平台交易状态，历史订单级物流保持只读', async () => {
+  it('订单详情只维护平台交易状态，不展示已停用的订单级物流', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
     const updatedOrder: OriginalOrder = {
@@ -5198,8 +5198,7 @@ describe('订单管理工作台', () => {
       patch: { platformTransactionStatus: 'cancelled' },
     });
     expect(screen.getByText('已取消 · 待发货')).toBeVisible();
-    expect(screen.getByRole('region', { name: '历史订单级物流' }))
-      .toHaveTextContent('只读参考，不作为当前发货依据');
+    expect(screen.queryByRole('region', { name: '历史订单级物流' })).toBeNull();
   });
 
   it('没有关联发货记录时可从订单详情直接进入发货组处理事实', async () => {
@@ -5568,8 +5567,7 @@ describe('订单管理工作台', () => {
       name: `查看订单 ${confirmedOrder.orderNumber}`,
     }));
 
-    const historicalLogistics = await screen.findByRole('region', { name: '历史订单级物流' });
-    expect(historicalLogistics).toHaveTextContent('只读参考，不作为当前发货依据');
+    expect(screen.queryByRole('region', { name: '历史订单级物流' })).toBeNull();
     const coordination = screen.getByRole('region', { name: '订单当前处理' });
     expect(coordination).toHaveTextContent('处理退货物流异常');
     expect(coordination).toHaveTextContent('另有 1 项');

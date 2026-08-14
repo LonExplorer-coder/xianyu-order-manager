@@ -8903,17 +8903,6 @@ function DetailWorkspace({
             )}
           </section>
 
-          <section className="detail-section" aria-label="历史订单级物流">
-            <div className="detail-section-title">
-              <h2>历史订单级物流</h2>
-              <span>只读参考，不作为当前发货依据</span>
-            </div>
-            <dl className="detail-grid">
-              <DetailTerm label="快递公司" value={displayValue(order.shippingCarrier)} />
-              <DetailTerm label="运单号" value={displayValue(order.trackingNumber)} />
-            </dl>
-          </section>
-
           <section className="detail-section" aria-label="关联发货与包裹物流">
             <div className="detail-section-title">
               <h2>关联发货与包裹物流</h2>
