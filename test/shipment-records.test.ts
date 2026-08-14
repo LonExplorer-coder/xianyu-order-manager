@@ -5968,12 +5968,15 @@ describe('售后处理单', () => {
       coordination: { interception: { status: 'failed' } },
     });
 
+    const deliveredAt = new Date(
+      Date.parse(sourcePackage.timeline.at(-1)?.occurredAt ?? shipment.record.createdAt) + 1_000,
+    ).toISOString();
     application.updateShipmentPackageLogisticsStatus({
       recordId: shipment.record.id,
       packageId: sourcePackage.id,
       expectedRevision: sourcePackage.revision,
       logisticsStatus: 'delivered',
-      occurredAt: '2026-08-14T19:20:00+08:00',
+      occurredAt: deliveredAt,
       reason: '买家确认原包裹已签收',
     });
     expect(application.queryAftersalesCases({ shipmentRecordId: shipment.record.id })
@@ -5986,12 +5989,16 @@ describe('售后处理单', () => {
         },
       });
 
+    const convertedAt = new Date(Math.max(
+      Date.parse(deliveredAt) + 1_000,
+      Date.parse('2026-08-14T19:30:00+08:00'),
+    )).toISOString();
     const converted = application.progressAftersalesCase({
       kind: 'change_handling_direction',
       caseId: failed.id,
       expectedRevision: failed.revision,
       handlingDirection: 'buyer_return',
-      occurredAt: '2026-08-14T19:30:00+08:00',
+      occurredAt: convertedAt,
       reason: '拦截失败且买家已签收，改为买家寄回',
     });
     expect(converted).toMatchObject({
@@ -6019,7 +6026,7 @@ describe('售后处理单', () => {
             kind: 'changed',
             before: 'waiting',
             after: 'buyer_return',
-            occurredAt: '2026-08-14T19:30:00+08:00',
+            occurredAt: convertedAt,
             reason: '拦截失败且买家已签收,改为买家寄回',
           }),
         ],
