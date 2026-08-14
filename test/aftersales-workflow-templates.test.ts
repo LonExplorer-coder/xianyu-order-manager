@@ -763,7 +763,7 @@ describe('售后流程模板', () => {
     expect(projectAftersalesWorkflowSteps(current.workflowTemplate, current)
       .find(({ kind }) => kind === 'confirm_replacement_delivery')?.state)
       .toBe('current');
-  }, 30_000);
+  });
 
   it('运输中切换到拦截退回时真实建立指定包裹的拦截事项', async () => {
     const { application, shipmentRecordId, shipmentPackageItemId } =
@@ -915,7 +915,7 @@ describe('售后流程模板', () => {
       .find(({ id }) => id === existing.id)?.workflowTemplate).toEqual(
       restored?.workflowTemplate,
     );
-  }, 30_000);
+  });
 
   it('v38 替表后迁移失败会整体回滚 v37 方向数据与不可变约束', async () => {
     const { application, dataDirectory, shipmentRecordId, shipmentPackageItemId } =
