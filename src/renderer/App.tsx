@@ -7518,6 +7518,8 @@ function ReviewWorkspace({
   const [standardProducts, setStandardProducts] = useState<StandardProduct[]>([]);
   const [standardizationPreview, setStandardizationPreview] =
     useState<DraftItemProductStandardization[]>([]);
+  const [standardizationRequestContext, setStandardizationRequestContext] = useState('');
+  const [standardizationRequestPending, setStandardizationRequestPending] = useState(true);
   const [standardizationChoices, setStandardizationChoices] = useState<Record<
     string,
     { standardProductId: string | null; createMapping: boolean }
@@ -7579,6 +7581,16 @@ function ReviewWorkspace({
     item.sourceTitle,
     item.sourceSpec,
   ]));
+  const productStandardizationContext = `${draft.id}:${productSourceKey}`;
+  const standardizationLoading =
+    standardizationRequestContext !== productStandardizationContext ||
+    standardizationRequestPending;
+  const currentStandardizationPreview = standardizationRequestContext === productStandardizationContext
+    ? standardizationPreview
+    : [];
+  const currentStandardizationChoices = standardizationRequestContext === productStandardizationContext
+    ? standardizationChoices
+    : {};
   const currentProductByDraftItemId = useMemo(() => {
     if (review.kind !== 'order_update') return new Map<string, StandardProduct>();
     const persistedIds = matchOrderItemIds(review.currentOrder.items, draft.items);
@@ -7592,6 +7604,9 @@ function ReviewWorkspace({
 
   useEffect(() => {
     let active = true;
+    setStandardizationRequestContext(productStandardizationContext);
+    setStandardizationRequestPending(true);
+    setStandardizationPreview([]);
     setStandardizationChoices({});
     setStandardizationError('');
     void Promise.all([
@@ -7603,9 +7618,11 @@ function ReviewWorkspace({
       setStandardizationPreview(preview);
     }).catch((error: unknown) => {
       if (active) setStandardizationError(errorMessage(error));
+    }).finally(() => {
+      if (active) setStandardizationRequestPending(false);
     });
     return () => { active = false; };
-  }, [api, draft.id, productSourceKey]);
+  }, [api, productStandardizationContext]);
 
   function patchDraft(patch: Partial<OrderDraft>) {
     onDraftChange({ ...draft, ...patch });
@@ -7717,7 +7734,11 @@ function ReviewWorkspace({
   }
 
   function submitReview(event: FormEvent<HTMLFormElement>) {
-    const confirmations = Object.entries(standardizationChoices).map(([
+    if (standardizationLoading) {
+      event.preventDefault();
+      return;
+    }
+    const confirmations = Object.entries(currentStandardizationChoices).map(([
       draftItemId,
       choice,
     ]) => ({ draftItemId, ...choice }));
@@ -7753,7 +7774,7 @@ function ReviewWorkspace({
             className="button button--primary"
             type="submit"
             form="review-form"
-            disabled={cancelling || confirming || !isComplete}
+            disabled={cancelling || confirming || standardizationLoading || !isComplete}
           >
             <Icon name="check" />
             {confirming
@@ -8109,11 +8130,12 @@ function ReviewWorkspace({
                       item={item}
                       itemIndex={index}
                       products={standardProducts}
-                      preview={standardizationPreview.find(({ draftItemId }) => (
+                      preview={currentStandardizationPreview.find(({ draftItemId }) => (
                         draftItemId === item.id
                       ))}
                       currentProduct={currentProductByDraftItemId.get(item.id) ?? null}
-                      choice={standardizationChoices[item.id]}
+                      choice={currentStandardizationChoices[item.id]}
+                      loading={standardizationLoading}
                       onChoiceChange={(choice) => setStandardizationChoices((current) => {
                         if (choice === undefined) {
                           const next = { ...current };
@@ -8187,6 +8209,7 @@ function ProductStandardizationEditor({
   preview,
   currentProduct,
   choice,
+  loading,
   onChoiceChange,
 }: {
   item: DraftItem;
@@ -8195,6 +8218,7 @@ function ProductStandardizationEditor({
   preview?: DraftItemProductStandardization;
   currentProduct: StandardProduct | null;
   choice?: { standardProductId: string | null; createMapping: boolean };
+  loading: boolean;
   onChoiceChange: (
     choice: { standardProductId: string | null; createMapping: boolean } | undefined,
   ) => void;
@@ -8218,12 +8242,15 @@ function ProductStandardizationEditor({
           <strong>标准商品关联</strong>
           <small>截图原文始终保留；模糊候选不会自动合并。</small>
         </div>
-        {automaticProduct && !choice && <span>已自动匹配</span>}
+        {loading
+          ? <span role="status">正在匹配…</span>
+          : automaticProduct && !choice && <span>已自动匹配</span>}
       </div>
       <label className="field">
         <span className="field-label">标准商品</span>
         <select
           aria-label={`商品 ${itemIndex + 1} 标准商品`}
+          disabled={loading}
           value={selectValue}
           onChange={(event) => {
             if (event.target.value === '__automatic__') {
@@ -8253,6 +8280,7 @@ function ProductStandardizationEditor({
         <label className="fields-check-row product-standardization-editor__mapping">
           <input
             type="checkbox"
+            disabled={loading}
             checked={choice.createMapping}
             onChange={(event) => onChoiceChange({
               ...choice,
@@ -8272,6 +8300,7 @@ function ProductStandardizationEditor({
             <button
               className="button button--quiet"
               type="button"
+              disabled={loading}
               key={candidate.product.id}
               onClick={() => onChoiceChange({
                 standardProductId: candidate.product.id,

@@ -121,6 +121,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
                   <button
                     className="button button--quiet"
                     type="button"
+                    disabled={saving}
                     aria-label={`编辑标准商品 ${product.sku}`}
                     onClick={() => beginEdit(product)}
                   >
@@ -144,6 +145,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
             <span className="field-label">SKU<i aria-hidden="true">*</i></span>
             <input
               required
+              disabled={saving}
               value={form.sku}
               onChange={(event) => setForm((current) => ({ ...current, sku: event.target.value }))}
             />
@@ -152,6 +154,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
             <span className="field-label">标准商品名<i aria-hidden="true">*</i></span>
             <input
               required
+              disabled={saving}
               value={form.name}
               onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
             />
@@ -160,6 +163,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
             <span className="field-label">标准规格<i aria-hidden="true">*</i></span>
             <input
               required
+              disabled={saving}
               value={form.specification}
               onChange={(event) => setForm((current) => ({
                 ...current,
@@ -178,7 +182,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
           )}
           <div className="form-actions">
             {editing && (
-              <button className="button button--quiet" type="button" onClick={resetForm}>
+              <button className="button button--quiet" type="button" disabled={saving} onClick={resetForm}>
                 取消编辑
               </button>
             )}

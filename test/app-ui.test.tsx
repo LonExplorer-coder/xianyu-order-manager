@@ -4265,6 +4265,59 @@ describe('订单管理工作台', () => {
     expect(screen.getByText(created.name)).toBeVisible();
   });
 
+  it('标准商品保存期间锁定当前表单和其他编辑入口', async () => {
+    const user = userEvent.setup();
+    const first = {
+      id: 'product-ui-lock-1',
+      sku: 'SKU-LOCK-001',
+      name: '待修改商品',
+      specification: '规格一',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const second = {
+      ...first,
+      id: 'product-ui-lock-2',
+      sku: 'SKU-LOCK-002',
+      name: '其他商品',
+    };
+    let resolveUpdate!: (product: typeof first) => void;
+    const pendingUpdate = new Promise<typeof first>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const updateStandardProduct = vi.fn(() => pendingUpdate);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listStandardProducts: vi.fn().mockResolvedValue([first, second]),
+      updateStandardProduct,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '标准商品' }));
+    await user.click(await screen.findByRole('button', { name: `编辑标准商品 ${first.sku}` }));
+    const nameInput = screen.getByRole('textbox', { name: /标准商品名/u });
+    await user.clear(nameInput);
+    await user.type(nameInput, '已修改商品');
+    await user.click(screen.getByRole('button', { name: '保存修改' }));
+
+    expect(nameInput).toBeDisabled();
+    expect(screen.getByRole('button', { name: `编辑标准商品 ${second.sku}` })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '取消编辑' })).toBeDisabled();
+
+    await act(async () => resolveUpdate({
+      ...first,
+      name: '已修改商品',
+      revision: 2,
+      updatedAt: '2026-08-14T10:01:00.000Z',
+    }));
+    expect(await screen.findByText('已修改商品')).toBeVisible();
+  });
+
   it('订单校对只展示模糊候选，人工选中并勾选后才提交商品映射', async () => {
     const user = userEvent.setup();
     const product = {
@@ -4386,6 +4439,71 @@ describe('订单管理工作台', () => {
         createMapping: false,
       }],
     );
+  });
+
+  it('商品原文改动后清除旧候选并等待当前匹配完成', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-stale-preview',
+      sku: 'SKU-UI-STALE',
+      name: '旧原文候选商品',
+      specification: '旧规格',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    type Preview = Awaited<ReturnType<DesktopApi['previewDraftProductStandardizations']>>;
+    let resolveCurrentPreview!: (preview: Preview) => void;
+    const currentPreview = new Promise<Preview>((resolve) => {
+      resolveCurrentPreview = resolve;
+    });
+    const previewDraftProductStandardizations = vi.fn()
+      .mockResolvedValueOnce([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        candidates: [{
+          product,
+          reason: 'fuzzy',
+          score: 0.75,
+          mappingSuggested: false,
+        }],
+      }])
+      .mockImplementationOnce(() => currentPreview);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    expect(await screen.findByRole('button', { name: /SKU-UI-STALE.*相似候选/u })).toBeVisible();
+    fireEvent.change(screen.getByRole('textbox', { name: '商品标题' }), {
+      target: { value: '全新商品原文' },
+    });
+
+    await waitFor(() => expect(previewDraftProductStandardizations).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: /SKU-UI-STALE.*相似候选/u })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+
+    await act(async () => resolveCurrentPreview([{
+      draftItemId: draft.items[0].id,
+      sourceTitle: '全新商品原文',
+      sourceSpec: draft.items[0].sourceSpec,
+      automaticProduct: null,
+      automaticSource: null,
+      candidates: [],
+    }]));
+    await waitFor(() => expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled());
   });
 
   it('人工确认新订单时要求每件商品补齐必填自定义字段', async () => {
