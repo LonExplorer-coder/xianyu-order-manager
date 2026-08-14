@@ -23,6 +23,10 @@ export type PortableReleaseSmokeResult = {
   dataDirectory: string;
   orderNumber: typeof PORTABLE_SMOKE_ORDER_NUMBER;
   orderCount: number;
+  shipmentRecordCount: number;
+  shipmentTimelineEventCount: number;
+  aftersalesCaseCount: number;
+  aftersalesTimelineEventCount: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -45,6 +49,7 @@ export async function runPortableReleaseDataSmoke(
     if (input.phase === 'write') {
       await importPortableSmokeOrder(session, configDirectory, dataDirectory);
       await session.waitForCurrentRecognitionWork();
+      createPortableSmokeOperationsHistory(session);
     } else {
       const restored = session.restore();
       if (restored.kind !== 'ready' || resolve(restored.dataDirectory) !== dataDirectory) {
@@ -75,15 +80,105 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后无法读取来源截图');
     }
 
+    const shipmentRecords = session.queryShipmentGroupArchives()
+      .flatMap((archive) => archive.records);
+    if (shipmentRecords.length !== 1) {
+      throw new Error('便携版重启后发货记录不完整');
+    }
+    const shipmentPackage = shipmentRecords[0]?.packages[0];
+    if (
+      !shipmentPackage ||
+      shipmentPackage.logisticsStatus !== 'in_transit' ||
+      shipmentPackage.timeline.length !== 1 ||
+      shipmentPackage.timeline[0]?.kind !== 'status_changed'
+    ) {
+      throw new Error('便携版重启后物流时间线不完整');
+    }
+
+    const aftersalesCases = session.queryAftersalesCases({
+      shipmentRecordId: shipmentRecords[0]?.id,
+    });
+    const aftersalesCase = aftersalesCases[0];
+    if (
+      aftersalesCases.length !== 1 ||
+      !aftersalesCase ||
+      aftersalesCase.status !== 'ready_to_complete' ||
+      aftersalesCase.refund?.status !== 'confirmed' ||
+      aftersalesCase.refund.actualRecord?.amountCents !== 300 ||
+      aftersalesCase.timeline.length !== 2
+    ) {
+      throw new Error('便携版重启后售后与退款历史不完整');
+    }
+
     return {
       phase: input.phase,
       dataDirectory,
       orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
       orderCount: orders.length,
+      shipmentRecordCount: shipmentRecords.length,
+      shipmentTimelineEventCount: shipmentPackage.timeline.length,
+      aftersalesCaseCount: aftersalesCases.length,
+      aftersalesTimelineEventCount: aftersalesCase.timeline.length,
     };
   } finally {
     session.close();
   }
+}
+
+function createPortableSmokeOperationsHistory(session: DesktopSession): void {
+  const group = session.queryShipmentGroups().groups[0];
+  if (!group) throw new Error('便携版冒烟没有生成待发货组');
+  const items = group.orders.flatMap((order) => order.items.map((item) => ({
+    orderId: order.id,
+    orderItemId: item.id,
+    quantity: item.quantity,
+  })));
+  const shipment = session.confirmShipment({
+    groupId: group.id,
+    expectedRemainingItems: items,
+    packages: [{
+      shippingCarrier: '便携验收快递',
+      trackingNumber: 'PORTABLE-SMOKE-TRACKING-001',
+      items,
+    }],
+  });
+  const shipmentPackage = shipment.record.packages[0];
+  if (!shipmentPackage) throw new Error('便携版冒烟没有生成发货包裹');
+  const logisticsOccurredAt = addSeconds(shipment.record.createdAt, 1);
+  const logistics = session.updateShipmentPackageLogisticsStatus({
+    recordId: shipment.record.id,
+    packageId: shipmentPackage.id,
+    expectedRevision: shipmentPackage.revision,
+    logisticsStatus: 'in_transit',
+    carrierAcceptanceConfirmed: true,
+    occurredAt: logisticsOccurredAt,
+    reason: '便携版验收确认承运方已揽收',
+  });
+  const sourceItem = logistics.record.packages[0]?.items[0];
+  if (!sourceItem) throw new Error('便携版冒烟发货商品不完整');
+  const aftersalesOccurredAt = addSeconds(logisticsOccurredAt, 1);
+  const aftersalesCase = session.createAftersalesCase({
+    shipmentRecordId: shipment.record.id,
+    workflowTemplateId: 'system-aftersales-refund-only',
+    occurredAt: aftersalesOccurredAt,
+    reason: '便携版验收登记部分退款',
+    requestedRefundCents: 400,
+    items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+  });
+  session.progressAftersalesCase({
+    kind: 'confirm_refund',
+    caseId: aftersalesCase.id,
+    expectedRevision: aftersalesCase.revision,
+    actualRefundCents: 300,
+    occurredAt: addSeconds(aftersalesOccurredAt, 1),
+    note: '便携版验收确认实际退款',
+  });
+}
+
+function addSeconds(value: string, seconds: number): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error('便携版冒烟业务时间无效');
+  return new Date(timestamp + seconds * 1_000).toISOString();
 }
 
 async function importPortableSmokeOrder(

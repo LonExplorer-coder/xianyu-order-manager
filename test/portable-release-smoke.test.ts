@@ -39,6 +39,10 @@ describe('便携版数据目录冒烟', () => {
       dataDirectory,
       orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
       orderCount: 1,
+      shipmentRecordCount: 1,
+      shipmentTimelineEventCount: 1,
+      aftersalesCaseCount: 1,
+      aftersalesTimelineEventCount: 2,
     });
 
     await access(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
@@ -56,6 +60,10 @@ describe('便携版数据目录冒烟', () => {
       dataDirectory,
       orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
       orderCount: 1,
+      shipmentRecordCount: 1,
+      shipmentTimelineEventCount: 1,
+      aftersalesCaseCount: 1,
+      aftersalesTimelineEventCount: 2,
     });
   });
 
