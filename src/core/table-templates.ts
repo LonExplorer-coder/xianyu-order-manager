@@ -263,6 +263,16 @@ const CUSTOM_FIELD_VALUE_INDEX_CACHE = new WeakMap<
   CustomFieldValueIndex
 >();
 
+type ShipmentGroupCustomFieldValueIndex = ReadonlyMap<
+  string,
+  ReadonlyMap<string, ShipmentGroupCustomFieldValue>
+>;
+
+const SHIPMENT_GROUP_CUSTOM_FIELD_VALUE_INDEX_CACHE = new WeakMap<
+  readonly ShipmentGroupCustomFieldValue[],
+  ShipmentGroupCustomFieldValueIndex
+>();
+
 type FixedTableField = AvailableTableField & {
   granularity: TableTemplateGranularity;
 };
@@ -684,10 +694,10 @@ export function projectShipmentGroupTableCell(
   customFieldValues: readonly ShipmentGroupCustomFieldValue[] = [],
 ): TableCellValue {
   if (reference.kind === 'custom') {
-    return customFieldValues.find((entry) => (
-      entry.shipmentGroupId === group.id
-      && entry.definitionId === reference.definitionId
-    ))?.value ?? null;
+    const index = SHIPMENT_GROUP_CUSTOM_FIELD_VALUE_INDEX_CACHE.get(customFieldValues)
+      ?? createShipmentGroupCustomFieldValueIndex(customFieldValues);
+    SHIPMENT_GROUP_CUSTOM_FIELD_VALUE_INDEX_CACHE.set(customFieldValues, index);
+    return index.get(group.id)?.get(reference.definitionId)?.value ?? null;
   }
   if (reference.kind === 'computed') {
     if (reference.key === 'shipment_group_order_count') return group.orderCount;
@@ -707,6 +717,23 @@ export function projectShipmentGroupTableCell(
     )).join('；');
     default: return null;
   }
+}
+
+function createShipmentGroupCustomFieldValueIndex(
+  values: readonly ShipmentGroupCustomFieldValue[],
+): ShipmentGroupCustomFieldValueIndex {
+  const index = new Map<string, Map<string, ShipmentGroupCustomFieldValue>>();
+  for (const value of values) {
+    let valuesByDefinition = index.get(value.shipmentGroupId);
+    if (!valuesByDefinition) {
+      valuesByDefinition = new Map<string, ShipmentGroupCustomFieldValue>();
+      index.set(value.shipmentGroupId, valuesByDefinition);
+    }
+    if (!valuesByDefinition.has(value.definitionId)) {
+      valuesByDefinition.set(value.definitionId, value);
+    }
+  }
+  return index;
 }
 
 export function createOrderTableProjectionPlan(

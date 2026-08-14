@@ -45,11 +45,14 @@ export function ShipmentGroupExportDialog({
   const [previewError, setPreviewError] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const shipmentGroupIds = useMemo(() => groups.map(({ id }) => id), [groups]);
+  const shipmentGroups = useMemo(() => groups.map((group) => ({
+    id: group.id,
+    expectedMemberOrderIds: group.orders.map(({ id }) => id),
+  })), [groups]);
 
   function exportInput(): ShipmentGroupExportInput {
     return {
-      shipmentGroupIds,
+      shipmentGroups,
       orderTemplateId: orderTemplateId || null,
       orderItemTemplateId: orderItemTemplateId || null,
       shipmentGroupTemplateId: shipmentGroupTemplateId || null,
@@ -77,7 +80,7 @@ export function ShipmentGroupExportDialog({
     onPreview,
     orderItemTemplateId,
     orderTemplateId,
-    shipmentGroupIds,
+    shipmentGroups,
     shipmentGroupTemplateId,
   ]);
 

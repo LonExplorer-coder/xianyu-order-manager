@@ -911,6 +911,25 @@ describe('订单管理工作台', () => {
     const table = await screen.findByRole('table', { name: '开放发货组' });
     expect(within(table).getByRole('columnheader', { name: '拣货区' })).toBeVisible();
     expect(within(table).getByText('东区')).toBeVisible();
+    const groupQuery = screen.getByRole('region', { name: '发货组查询' });
+    expect(within(groupQuery).getByRole('combobox', { name: '发货组内置排序' }))
+      .toHaveValue('total_quantity:desc');
+    await user.type(within(groupQuery).getByRole('searchbox', { name: '搜索发货组' }), '白模');
+    await waitFor(() => expect(queryShipmentGroupWorkbench).toHaveBeenLastCalledWith({
+      ...groupTemplate.query,
+      text: '白模',
+    }, [zoneField.id]));
+    await user.selectOptions(
+      within(groupQuery).getByRole('combobox', { name: '发货组自定义字段排序' }),
+      `${zoneField.id}:asc`,
+    );
+    await waitFor(() => expect(queryShipmentGroupWorkbench).toHaveBeenLastCalledWith({
+      text: '白模',
+      sortField: undefined,
+      sortDirection: undefined,
+      customFieldSort: { definitionId: zoneField.id, direction: 'asc' },
+    }, [zoneField.id]));
+    expect(screen.getByText('筛选或排序已修改')).toBeVisible();
 
     await user.click(within(table).getByRole('button', { name: '编辑组字段' }));
     const fieldDialog = screen.getByRole('dialog', { name: '编辑发货组字段' });
@@ -923,7 +942,7 @@ describe('订单管理工作台', () => {
       expectedMemberOrderIds: [confirmedOrder.id],
       values: [{ definitionId: zoneField.id, value: '西区' }],
     }));
-    expect(await screen.findByRole('status')).toHaveTextContent('发货组字段已保存');
+    expect(await screen.findByText('发货组字段已保存')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: '导出当前发货组' }));
     const exportDialog = screen.getByRole('dialog', { name: '导出三表 Excel' });
@@ -947,15 +966,18 @@ describe('订单管理工作台', () => {
     );
     await user.click(within(exportDialog).getByRole('button', { name: '保存三表 Excel' }));
     await waitFor(() => expect(exportShipmentGroups).toHaveBeenCalledWith({
-      shipmentGroupIds: [group.id],
+      shipmentGroups: [{
+        id: group.id,
+        expectedMemberOrderIds: [confirmedOrder.id],
+      }],
       orderTemplateId: orderTemplate.id,
       orderItemTemplateId: itemTemplate.id,
       shipmentGroupTemplateId: groupTemplate.id,
       masking: 'masked',
     }));
-    expect(await screen.findByRole('status')).toHaveTextContent(
+    expect(await screen.findByText(
       '已导出 1 个发货组、1 笔订单：闲鱼发货组-20260814.xlsx',
-    );
+    )).toBeVisible();
   });
 
   it('按待发货、部分发货和已全部发货组织发货组档案及其发货记录', async () => {

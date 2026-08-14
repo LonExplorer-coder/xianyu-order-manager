@@ -1769,13 +1769,22 @@ export class LocalApplication {
     }
 
     const groupById = new Map(this.queryShipmentGroups().groups.map((group) => [group.id, group]));
-    const groups = normalizedInput.shipmentGroupIds.map((groupId) => groupById.get(groupId));
+    const groups = normalizedInput.shipmentGroups.map(({ id }) => groupById.get(id));
     if (groups.some((group) => group === undefined)) {
       throw new Error('部分发货组已变化，请刷新后重新导出');
     }
     const selectedGroups = groups.filter((group): group is NonNullable<typeof group> => (
       group !== undefined
     ));
+    for (const expected of normalizedInput.shipmentGroups) {
+      const group = groupById.get(expected.id);
+      if (!group || !sameTextSet(
+        group.orders.map(({ id }) => id),
+        expected.expectedMemberOrderIds,
+      )) {
+        throw new Error('部分发货组成员已变化，请刷新后重新导出');
+      }
+    }
     const ambiguousGroup = selectedGroups.find((group) => (
       group.recipientConflict && group.selectedRecipientOrderId === null
     ));
@@ -1837,6 +1846,12 @@ export class LocalApplication {
     const projectedGroups = previewRowLimit === undefined
       ? selectedGroups
       : selectedGroups.slice(0, previewRowLimit);
+    const addressRegionOrderIds = [...new Set([
+      ...projectedOrderIds,
+      ...projectedGroups.map((group) => (
+        group.selectedRecipientOrderId ?? group.orders[0]?.id ?? ''
+      )).filter(Boolean),
+    ])];
     const orderResult = this.queryOrders(
       { lifecycleStatus: 'all' },
       orderCustomDefinitionIds,
@@ -1873,7 +1888,7 @@ export class LocalApplication {
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       orderCustomFieldValues: orderResult.customFieldValues,
       orderItemCustomFieldValues: orderItemResult.customFieldValues,
-      addressRegions: this.orderExportAddressRegions(projectedOrderIds),
+      addressRegions: this.orderExportAddressRegions(addressRegionOrderIds),
       orderMaximumItemCount: scopeStats.maximumItemCount,
       shipmentGroups: projectedGroups,
       shipmentGroupColumns,
@@ -3199,9 +3214,17 @@ export class LocalApplication {
         selectedRecipientOrder,
       }];
     });
-    return buildShipmentGroupProjection(orders, (matchKey) => (
+    return buildShipmentGroupProjection(orders, (matchKey, groupOrders) => (
       `shipment-group-${createHash('sha256')
-        .update(shipmentMatchKeyIdentity(matchKey))
+        .update(JSON.stringify([
+          shipmentMatchKeyIdentity(matchKey),
+          groupOrders.reduce((earliest, order) => (
+            order.createdAt < earliest.createdAt
+            || (order.createdAt === earliest.createdAt && order.id < earliest.id)
+              ? order
+              : earliest
+          )).id,
+        ]))
         .digest('hex')
         .slice(0, 24)}`
     ), manualGroups);
@@ -7231,6 +7254,12 @@ function parseStoredTextArray(serialized: string, message: string): string[] {
     throw new Error(message);
   }
   return parsed;
+}
+
+function sameTextSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return rightSet.size === right.length && left.every((value) => rightSet.has(value));
 }
 
 function asOptionalStoredMoney(

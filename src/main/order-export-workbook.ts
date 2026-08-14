@@ -171,8 +171,8 @@ export function createOrderExportWorkbookPlan(
           column.field,
           source.shipmentGroupCustomFieldValues ?? [],
         );
-        const firstOrderId = group.orders[0]?.id ?? '';
-        const region = source.addressRegions.get(firstOrderId) ?? {
+        const recipientOrderId = group.selectedRecipientOrderId ?? group.orders[0]?.id ?? '';
+        const region = source.addressRegions.get(recipientOrderId) ?? {
           province: '',
           city: '',
           district: '',

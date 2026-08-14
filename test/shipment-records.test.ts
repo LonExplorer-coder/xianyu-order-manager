@@ -614,7 +614,7 @@ describe('发货记录', () => {
       }],
     });
 
-    expect(laterGroup.id).toBe(firstGroup.id);
+    expect(laterGroup.id).not.toBe(firstGroup.id);
     expect(later.record.archiveId).not.toBe(first.record.archiveId);
     expect(application.queryShipmentGroupArchives()).toEqual([
       expect.objectContaining({
@@ -1861,7 +1861,7 @@ describe('发货记录', () => {
         items: laterItems,
       }],
     });
-    expect(first.record.sourceGroupId).toBe(later.record.sourceGroupId);
+    expect(first.record.sourceGroupId).not.toBe(later.record.sourceGroupId);
     application.close();
 
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));

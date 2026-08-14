@@ -1,7 +1,10 @@
 import type { OrderExportPreviewSheet } from './order-export';
 
 export type ShipmentGroupExportInput = {
-  shipmentGroupIds: string[];
+  shipmentGroups: Array<{
+    id: string;
+    expectedMemberOrderIds: string[];
+  }>;
   orderTemplateId: string | null;
   orderItemTemplateId: string | null;
   shipmentGroupTemplateId: string | null;
@@ -28,32 +31,49 @@ export type ShipmentGroupExportResult =
 
 export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroupExportInput {
   const input = strictRecord(value, '合并发货表导出请求', [
-    'shipmentGroupIds',
+    'shipmentGroups',
     'orderTemplateId',
     'orderItemTemplateId',
     'shipmentGroupTemplateId',
     'masking',
   ]);
-  if (!Array.isArray(input.shipmentGroupIds) || input.shipmentGroupIds.length === 0) {
+  if (!Array.isArray(input.shipmentGroups) || input.shipmentGroups.length === 0) {
     throw new Error('请至少选择一个发货组导出');
   }
-  if (input.shipmentGroupIds.length > 10_000) {
+  if (input.shipmentGroups.length > 10_000) {
     throw new Error('一次最多导出 10000 个发货组');
   }
-  const shipmentGroupIds = input.shipmentGroupIds.map((entry) => {
-    if (typeof entry !== 'string') throw new Error('发货组导出标识无效');
-    const id = entry.trim();
+  const shipmentGroups = input.shipmentGroups.map((entry) => {
+    const group = strictRecord(entry, '发货组导出范围', [
+      'id',
+      'expectedMemberOrderIds',
+    ]);
+    if (typeof group.id !== 'string') throw new Error('发货组导出标识无效');
+    const id = group.id.trim();
     if (!id || id.length > 200) throw new Error('发货组导出标识无效');
-    return id;
+    if (!Array.isArray(group.expectedMemberOrderIds)
+      || group.expectedMemberOrderIds.length === 0) {
+      throw new Error('发货组导出成员无效');
+    }
+    const expectedMemberOrderIds = group.expectedMemberOrderIds.map((value) => {
+      if (typeof value !== 'string') throw new Error('发货组导出成员无效');
+      const orderId = value.trim();
+      if (!orderId || orderId.length > 200) throw new Error('发货组导出成员无效');
+      return orderId;
+    });
+    if (new Set(expectedMemberOrderIds).size !== expectedMemberOrderIds.length) {
+      throw new Error('发货组导出成员不能重复');
+    }
+    return { id, expectedMemberOrderIds };
   });
-  if (new Set(shipmentGroupIds).size !== shipmentGroupIds.length) {
+  if (new Set(shipmentGroups.map(({ id }) => id)).size !== shipmentGroups.length) {
     throw new Error('发货组导出记录不能重复');
   }
   if (input.masking !== 'masked' && input.masking !== 'original') {
     throw new Error('合并发货表导出脱敏方式无效');
   }
   return {
-    shipmentGroupIds,
+    shipmentGroups,
     orderTemplateId: optionalTemplateId(input.orderTemplateId, '订单总表模板'),
     orderItemTemplateId: optionalTemplateId(input.orderItemTemplateId, '订单商品明细表模板'),
     shipmentGroupTemplateId: optionalTemplateId(

@@ -151,7 +151,10 @@ describe('发货组 Electron IPC', () => {
       values: [{ definitionId: definition.id, value: '东区' }],
     };
     const exportInput = {
-      shipmentGroupIds: ['group-1'],
+      shipmentGroups: [{
+        id: 'group-1',
+        expectedMemberOrderIds: ['order-1', 'order-2'],
+      }],
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,

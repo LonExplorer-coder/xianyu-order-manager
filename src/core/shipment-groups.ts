@@ -255,7 +255,10 @@ export type ShipmentMatchKey = Readonly<{
   addressNormalized: string;
 }>;
 
-export type ShipmentGroupIdFactory = (matchKey: ShipmentMatchKey) => string;
+export type ShipmentGroupIdFactory = (
+  matchKey: ShipmentMatchKey,
+  orders: readonly OriginalOrder[],
+) => string;
 
 export type ManualShipmentGroupDefinition = {
   id: string;
@@ -362,7 +365,7 @@ export function buildShipmentGroupProjection(
       }),
       ...[...grouped.values()].map(({ matchKey, orders }) => openShipmentGroup(
         orders,
-        idFor(matchKey),
+        idFor(matchKey, orders),
         'automatic',
         null,
       )),

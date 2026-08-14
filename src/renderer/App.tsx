@@ -806,6 +806,13 @@ export function App({ api }: AppProps) {
     }
   }
 
+  function changeShipmentGroupQuery(query: ShipmentGroupWorkbenchQuery) {
+    setShipmentGroupQuery(query);
+    if (activeTableTemplate?.granularity === 'shipment_group') {
+      setActiveTableTemplateDirty(true);
+    }
+  }
+
   async function saveActiveTableTemplateView() {
     if (!activeTableTemplate) return;
     setOperationError('');
@@ -1281,6 +1288,8 @@ export function App({ api }: AppProps) {
         activeTableTemplate={activeTableTemplate?.granularity === 'shipment_group'
           ? activeTableTemplate
           : null}
+        activeTableTemplateDirty={activeTableTemplateDirty}
+        query={shipmentGroupQuery}
         archives={shipmentGroupArchives}
         aftersalesCases={aftersalesCases}
         focus={shipmentFocus}
@@ -1303,6 +1312,8 @@ export function App({ api }: AppProps) {
         onApplyTableTemplate={(template) => void applyTableTemplate(template)}
         onClearTableTemplate={() => void clearTableTemplate('shipment_group')}
         onManageTableTemplates={() => setActivePage('templates')}
+        onQueryChange={changeShipmentGroupQuery}
+        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
         onPreviewExport={(input) => api.previewShipmentGroupExport(input)}
         onExport={(input) => api.exportShipmentGroups(input)}
       />
@@ -1644,6 +1655,8 @@ function ShipmentGroupsWorkspace({
   customFieldDefinitions,
   tableTemplates,
   activeTableTemplate,
+  activeTableTemplateDirty,
+  query,
   archives,
   aftersalesCases,
   focus,
@@ -1658,6 +1671,8 @@ function ShipmentGroupsWorkspace({
   onApplyTableTemplate,
   onClearTableTemplate,
   onManageTableTemplates,
+  onQueryChange,
+  onSaveActiveTableTemplate,
   onPreviewExport,
   onExport,
 }: {
@@ -1666,6 +1681,8 @@ function ShipmentGroupsWorkspace({
   customFieldDefinitions: CustomFieldDefinition[];
   tableTemplates: TableTemplate[];
   activeTableTemplate: Extract<TableTemplate, { granularity: 'shipment_group' }> | null;
+  activeTableTemplateDirty: boolean;
+  query: ShipmentGroupWorkbenchQuery;
   archives: ShipmentGroupArchive[];
   aftersalesCases: AftersalesCase[];
   focus: ShipmentFocus | null;
@@ -1682,6 +1699,8 @@ function ShipmentGroupsWorkspace({
   ) => void;
   onClearTableTemplate: () => void;
   onManageTableTemplates: () => void;
+  onQueryChange: (query: ShipmentGroupWorkbenchQuery) => void;
+  onSaveActiveTableTemplate: () => void;
   onPreviewExport: (
     input: ShipmentGroupExportInput,
   ) => Promise<ShipmentGroupExportPreviewResult>;
@@ -1734,6 +1753,9 @@ function ShipmentGroupsWorkspace({
   } | null>(null);
   const [exportTarget, setExportTarget] = useState<OpenShipmentGroup[] | null>(null);
   const [customFieldTarget, setCustomFieldTarget] = useState<OpenShipmentGroup | null>(null);
+  const [selectedCustomFilterId, setSelectedCustomFilterId] = useState(
+    query.customFieldFilter?.definitionId ?? '',
+  );
   const [customFieldFeedback, setCustomFieldFeedback] = useState('');
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
@@ -1758,6 +1780,15 @@ function ShipmentGroupsWorkspace({
   const shipmentGroupCustomDefinitions = customFieldDefinitions.filter(
     ({ granularity }) => granularity === 'shipment_group',
   );
+  const selectedCustomFilter = shipmentGroupCustomDefinitions.find(
+    ({ id }) => id === selectedCustomFilterId,
+  );
+  const hasActiveQuery = Boolean(
+    query.text || query.sortField || query.customFieldFilter || query.customFieldSort,
+  );
+  const patchQuery = (patch: Partial<ShipmentGroupWorkbenchQuery>) => {
+    onQueryChange({ ...query, ...patch });
+  };
 
   function shipmentGroupCell(group: OpenShipmentGroup, column: TableTemplateColumn): string {
     const value = projectShipmentGroupTableCell(
@@ -1774,6 +1805,10 @@ function ShipmentGroupsWorkspace({
     if (Array.isArray(value)) return value.join('、');
     return String(value);
   }
+
+  useEffect(() => {
+    setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
+  }, [query.customFieldFilter?.definitionId]);
 
   useEffect(() => {
     const currentGroupIds = new Set(pendingGroups.map(({ id }) => id));
@@ -1954,6 +1989,20 @@ function ShipmentGroupsWorkspace({
                 <option key={template.id} value={template.id}>{template.name}</option>
               ))}
             </select>
+            {activeTableTemplate && (
+              <span className={`template-state${activeTableTemplateDirty ? ' is-dirty' : ''}`}>
+                {activeTableTemplateDirty ? '筛选或排序已修改' : '已应用保存配置'}
+              </span>
+            )}
+            {activeTableTemplate && activeTableTemplateDirty && (
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={onSaveActiveTableTemplate}
+              >
+                保存当前筛选排序
+              </button>
+            )}
             <button className="button button--quiet" type="button" onClick={onManageTableTemplates}>
               管理模板
             </button>
@@ -1976,6 +2025,147 @@ function ShipmentGroupsWorkspace({
               {selectedGroups.length > 0 ? '导出已选发货组' : '导出当前发货组'}
             </button>
           </div>
+          <section className="order-query shipment-group-query" aria-label="发货组查询">
+            <label className="order-query__search">
+              <span>搜索发货组</span>
+              <input
+                type="search"
+                placeholder="订单号、收件信息或商品"
+                value={query.text ?? ''}
+                onChange={(event) => patchQuery({ text: event.target.value || undefined })}
+              />
+            </label>
+            <span className="order-query__result" role="status" aria-live="polite">
+              {loading
+                ? '正在查询…'
+                : `显示 ${pendingGroups.length} / ${projection?.allGroupCount ?? pendingGroups.length} 组`}
+            </span>
+            {hasActiveQuery && (
+              <button
+                className="button button--quiet order-query__clear"
+                type="button"
+                onClick={() => {
+                  setSelectedCustomFilterId('');
+                  onQueryChange({});
+                }}
+              >
+                清除筛选
+              </button>
+            )}
+            <div className="order-query__filters">
+              <label>
+                <span>内置排序</span>
+                <select
+                  aria-label="发货组内置排序"
+                  value={query.customFieldSort
+                    ? ''
+                    : query.sortField
+                      ? `${query.sortField}:${query.sortDirection ?? 'asc'}`
+                      : ''}
+                  onChange={(event) => {
+                    if (!event.target.value) {
+                      patchQuery({
+                        sortField: undefined,
+                        sortDirection: undefined,
+                        customFieldSort: undefined,
+                      });
+                      return;
+                    }
+                    const separator = event.target.value.lastIndexOf(':');
+                    patchQuery({
+                      sortField: event.target.value.slice(0, separator) as NonNullable<
+                        ShipmentGroupWorkbenchQuery['sortField']
+                      >,
+                      sortDirection: event.target.value.slice(separator + 1) as 'asc' | 'desc',
+                      customFieldSort: undefined,
+                    });
+                  }}
+                >
+                  <option value="">默认排序</option>
+                  {query.customFieldSort && (
+                    <option value="" disabled>当前由自定义字段排序</option>
+                  )}
+                  <option value="recipient:asc">最终收件人：升序</option>
+                  <option value="recipient:desc">最终收件人：降序</option>
+                  <option value="address:asc">最终收货地址：升序</option>
+                  <option value="address:desc">最终收货地址：降序</option>
+                  <option value="order_count:asc">合并订单数：少到多</option>
+                  <option value="order_count:desc">合并订单数：多到少</option>
+                  <option value="total_quantity:asc">商品总数量：少到多</option>
+                  <option value="total_quantity:desc">商品总数量：多到少</option>
+                  <option value="total_amount:asc">合并总额：低到高</option>
+                  <option value="total_amount:desc">合并总额：高到低</option>
+                </select>
+              </label>
+              <label>
+                <span>自定义字段筛选</span>
+                <select
+                  aria-label="发货组自定义字段筛选"
+                  value={selectedCustomFilterId}
+                  onChange={(event) => {
+                    setSelectedCustomFilterId(event.target.value);
+                    patchQuery({ customFieldFilter: undefined });
+                  }}
+                >
+                  <option value="">不筛选</option>
+                  {shipmentGroupCustomDefinitions.map((definition) => (
+                    <option value={definition.id} key={definition.id}>{definition.name}</option>
+                  ))}
+                </select>
+              </label>
+              {selectedCustomFilter && (
+                <CustomFieldInput
+                  definition={selectedCustomFilter}
+                  value={query.customFieldFilter?.definitionId === selectedCustomFilter.id
+                    ? query.customFieldFilter.value
+                    : null}
+                  label={selectedCustomFilter.type === 'multi_select'
+                    ? '发货组自定义字段值（包含全部所选项）'
+                    : '发货组自定义字段值'}
+                  showRequired={false}
+                  onChange={(value) => patchQuery({
+                    customFieldFilter: value === null
+                      ? undefined
+                      : { definitionId: selectedCustomFilter.id, value },
+                  })}
+                />
+              )}
+              <label>
+                <span>自定义字段排序</span>
+                <select
+                  aria-label="发货组自定义字段排序"
+                  value={query.customFieldSort
+                    ? `${query.customFieldSort.definitionId}:${query.customFieldSort.direction}`
+                    : ''}
+                  onChange={(event) => {
+                    if (!event.target.value) {
+                      patchQuery({ customFieldSort: undefined });
+                      return;
+                    }
+                    const separator = event.target.value.lastIndexOf(':');
+                    patchQuery({
+                      customFieldSort: {
+                        definitionId: event.target.value.slice(0, separator),
+                        direction: event.target.value.slice(separator + 1) as 'asc' | 'desc',
+                      },
+                      sortField: undefined,
+                      sortDirection: undefined,
+                    });
+                  }}
+                >
+                  <option value="">默认排序</option>
+                  {shipmentGroupCustomDefinitions.flatMap((definition) => ([
+                    <option value={`${definition.id}:asc`} key={`${definition.id}:asc`}>
+                      {definition.name}：升序
+                    </option>,
+                    <option value={`${definition.id}:desc`} key={`${definition.id}:desc`}>
+                      {definition.name}：降序
+                    </option>,
+                  ]))}
+                </select>
+              </label>
+            </div>
+          </section>
           <div className="table-frame shipment-groups-table-frame">
             <table aria-label="开放发货组">
               <thead>

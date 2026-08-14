@@ -86,6 +86,19 @@ async function openApplicationWithResults(results: RecognitionResult[]): Promise
   application: LocalApplication;
   dataDirectory: string;
 }> {
+  const incremental = await openIncrementalApplication(results);
+  for (const _result of results) await incremental.confirmNextOrder();
+  return {
+    application: incremental.application,
+    dataDirectory: incremental.dataDirectory,
+  };
+}
+
+async function openIncrementalApplication(results: RecognitionResult[]): Promise<{
+  application: LocalApplication;
+  dataDirectory: string;
+  confirmNextOrder: () => Promise<void>;
+}> {
   const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-group-template-'));
   const dataDirectory = join(root, '数据');
   const uploadDirectory = join(root, '上传');
@@ -93,13 +106,20 @@ async function openApplicationWithResults(results: RecognitionResult[]): Promise
   const application = new LocalApplication(new SequenceRecognizer([...results]));
   openedApplications.push(application);
   application.openDataDirectory(dataDirectory);
-  for (const [index] of results.entries()) {
-    const sourcePath = join(uploadDirectory, `订单-${index + 1}.png`);
-    await writeFile(sourcePath, Buffer.from(`shipment-group-template-${index + 1}`));
-    const batch = await application.submitRecognitionBatch([sourcePath]);
-    application.confirmDraft(batch.drafts[0]);
-  }
-  return { application, dataDirectory };
+  let nextIndex = 0;
+  return {
+    application,
+    dataDirectory,
+    confirmNextOrder: async () => {
+      const index = nextIndex;
+      if (index >= results.length) throw new Error('测试订单已用尽');
+      nextIndex += 1;
+      const sourcePath = join(uploadDirectory, `订单-${index + 1}.png`);
+      await writeFile(sourcePath, Buffer.from(`shipment-group-template-${index + 1}`));
+      const batch = await application.submitRecognitionBatch([sourcePath]);
+      application.confirmDraft(batch.drafts[0]);
+    },
+  };
 }
 
 afterEach(() => {
@@ -227,7 +247,10 @@ describe('发货组字段与模板持久化', () => {
       query: {},
     });
     const input = {
-      shipmentGroupIds: [group.id],
+      shipmentGroups: [{
+        id: group.id,
+        expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      }],
       orderTemplateId: orderTemplate.id,
       orderItemTemplateId: itemTemplate.id,
       shipmentGroupTemplateId: groupTemplate.id,
@@ -286,11 +309,130 @@ describe('发货组字段与模板持久化', () => {
 
     expect(group).toMatchObject({ recipientConflict: true, selectedRecipientOrderId: null });
     expect(() => application.previewShipmentGroupExport({
-      shipmentGroupIds: [group.id],
+      shipmentGroups: [{
+        id: group.id,
+        expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      }],
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
       masking: 'masked',
     })).toThrow('请先确认最终收件人再导出');
+  });
+
+  it('预览后发货组增加成员时拒绝静默扩大导出范围', async () => {
+    const { application, confirmNextOrder } = await openIncrementalApplication([
+      recognition('XY-EXPORT-SCOPE-0001'),
+      recognition('XY-EXPORT-SCOPE-0002'),
+      recognition('XY-EXPORT-SCOPE-0003'),
+    ]);
+    await confirmNextOrder();
+    await confirmNextOrder();
+    const group = application.queryShipmentGroups().groups[0];
+    const input = {
+      shipmentGroups: [{
+        id: group.id,
+        expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      }],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: null,
+      masking: 'masked' as const,
+    };
+
+    expect(application.previewShipmentGroupExport(input).orderCount).toBe(2);
+    await confirmNextOrder();
+    expect(application.queryShipmentGroups().groups[0]).toMatchObject({
+      id: group.id,
+      orderCount: 3,
+    });
+    expect(() => application.previewShipmentGroupExport(input))
+      .toThrow('发货组成员已变化');
+  });
+
+  it('同一买家的新发货轮次不继承已完成组的自定义值', async () => {
+    const { application, confirmNextOrder } = await openIncrementalApplication([
+      recognition('XY-GROUP-LIFECYCLE-0001'),
+      recognition('XY-GROUP-LIFECYCLE-0002'),
+    ]);
+    await confirmNextOrder();
+    const firstGroup = application.queryShipmentGroups().groups[0];
+    const zone = application.createCustomFieldDefinition({
+      name: '拣货区域',
+      granularity: 'shipment_group',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+    });
+    application.saveShipmentGroupCustomFieldValues({
+      shipmentGroupId: firstGroup.id,
+      expectedMemberOrderIds: firstGroup.orders.map(({ id }) => id),
+      values: [{ definitionId: zone.id, value: '东区' }],
+    });
+    const allItems = firstGroup.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    application.confirmShipment({
+      groupId: firstGroup.id,
+      expectedRemainingItems: allItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-GROUP-LIFECYCLE-1',
+        items: allItems,
+      }],
+    });
+
+    await confirmNextOrder();
+    const secondGroup = application.queryShipmentGroups().groups[0];
+    expect(secondGroup.id).not.toBe(firstGroup.id);
+    expect(application.queryShipmentGroupWorkbench({}, [zone.id]).customFieldValues).toEqual([]);
+  });
+
+  it('跨地址手工组的脱敏地址使用最终收货信息所在地区', async () => {
+    const { application } = await openApplicationWithResults([
+      recognition('XY-GROUP-ADDRESS-0001'),
+      recognition('XY-GROUP-ADDRESS-0002', {
+        recipient: '周宁',
+        phone: '13900000002',
+        phoneNormalized: '13900000002',
+        addressOriginal: '广东省深圳市福田区新风路2号',
+        addressNormalized: '广东省深圳市福田区新风路2号',
+        province: '广东省',
+        city: '深圳市',
+        district: '福田区',
+      }),
+    ]);
+    const before = application.queryShipmentGroups();
+    const selectedOrder = before.groups.find(({ addressOriginal }) => (
+      addressOriginal.includes('福田区')
+    ))?.orders[0];
+    if (!selectedOrder) throw new Error('测试最终收货信息不存在');
+    const merged = application.mergeShipmentGroups({
+      groupIds: before.groups.map(({ id }) => id),
+      expectedMemberOrderIds: before.groups.flatMap((group) => group.orders.map(({ id }) => id)),
+      selectedRecipientOrderId: selectedOrder.id,
+      reason: '合并打包',
+    }).projection.groups[0];
+    const template = application.createTableTemplate({
+      name: '最终收货地址',
+      granularity: 'shipment_group',
+      columns: [{ field: { kind: 'builtin', key: 'address' }, displayName: '最终收货地址' }],
+      query: {},
+    });
+
+    const preview = application.previewShipmentGroupExport({
+      shipmentGroups: [{
+        id: merged.id,
+        expectedMemberOrderIds: merged.orders.map(({ id }) => id),
+      }],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: template.id,
+      masking: 'masked',
+    });
+    expect(preview.sheets[2].rows).toEqual([['广东省深圳市福田区***']]);
   });
 });
