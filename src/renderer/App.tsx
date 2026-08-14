@@ -77,8 +77,16 @@ import {
 import {
   shipmentGroupsRequireFinalRecipient,
   type OpenShipmentGroup,
+  type ShipmentGroupCustomFieldValue,
+  type ShipmentGroupWorkbenchQuery,
   type ShipmentGroupProjection,
+  type ShipmentGroupWorkbenchResult,
 } from '../core/shipment-groups';
+import type {
+  ShipmentGroupExportInput,
+  ShipmentGroupExportPreviewResult,
+  ShipmentGroupExportResult,
+} from '../core/shipment-group-export';
 import {
   SHIPMENT_LOGISTICS_STATUSES,
   type ConfirmShipmentPackageInput,
@@ -107,9 +115,11 @@ import {
   createOrderTableProjectionPlan,
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
   DEFAULT_ORDER_TABLE_COLUMNS,
+  DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS,
   fieldReferenceKey,
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
+  projectShipmentGroupTableCell,
   tableTemplateCustomFieldDefinitionIds,
   type AvailableTableField,
   type CreateTableTemplateInput,
@@ -147,6 +157,8 @@ import {
   type OrderOperationsShipmentRecord,
 } from '../core/order-operations-projection';
 import { OrderExportDialog } from './OrderExportDialog';
+import { ShipmentGroupExportDialog } from './ShipmentGroupExportDialog';
+import { ShipmentGroupCustomFieldsDialog } from './ShipmentGroupCustomFieldsDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
 import {
@@ -195,10 +207,11 @@ export function App({ api }: AppProps) {
   const [orderQueryLoading, setOrderQueryLoading] = useState(false);
   const [ordersWorkspaceView, setOrdersWorkspaceView] = useState<OrdersWorkspaceView>('orders');
   const [orderItemQuery, setOrderItemQuery] = useState<OrderItemWorkbenchQuery>({});
+  const [shipmentGroupQuery, setShipmentGroupQuery] = useState<ShipmentGroupWorkbenchQuery>({});
   const [orderItemWorkbench, setOrderItemWorkbench] = useState<OrderItemWorkbenchResult | null>(null);
   const [orderItemQueryLoading, setOrderItemQueryLoading] = useState(false);
   const [shipmentGroupProjection, setShipmentGroupProjection] =
-    useState<ShipmentGroupProjection | null>(null);
+    useState<ShipmentGroupWorkbenchResult | null>(null);
   const [shipmentGroupArchives, setShipmentGroupArchives] = useState<ShipmentGroupArchive[]>([]);
   const [aftersalesCases, setAftersalesCases] = useState<AftersalesCase[]>([]);
   const [shipmentFocus, setShipmentFocus] = useState<ShipmentFocus | null>(null);
@@ -244,6 +257,11 @@ export function App({ api }: AppProps) {
       ? tableTemplateCustomFieldDefinitionIds(activeTableTemplate.columns)
       : []
   ), [activeTableTemplate]);
+  const shipmentGroupProjectionDefinitionIds = useMemo(() => (
+    customFieldDefinitions
+      .filter(({ granularity }) => granularity === 'shipment_group')
+      .map(({ id }) => id)
+  ), [customFieldDefinitions]);
 
   useEffect(() => {
     let active = true;
@@ -283,6 +301,7 @@ export function App({ api }: AppProps) {
     preloadedOrderItemTemplateQuery.current = null;
     setOrdersWorkspaceView('orders');
     setOrderItemQuery({});
+    setShipmentGroupQuery({});
     setOrderItemWorkbench(null);
     setShipmentGroupProjection(null);
     setShipmentGroupArchives([]);
@@ -477,7 +496,10 @@ export function App({ api }: AppProps) {
     setShipmentGroupLoading(true);
     setShipmentGroupError('');
     void Promise.all([
-      api.queryShipmentGroups(),
+      api.queryShipmentGroupWorkbench(
+        shipmentGroupQuery,
+        shipmentGroupProjectionDefinitionIds,
+      ),
       api.queryShipmentGroupArchives(),
       api.queryAftersalesCases(),
     ])
@@ -500,7 +522,14 @@ export function App({ api }: AppProps) {
     return () => {
       active = false;
     };
-  }, [activePage, api, orderQueryRefreshToken, readyDataDirectory]);
+  }, [
+    activePage,
+    api,
+    orderQueryRefreshToken,
+    readyDataDirectory,
+    shipmentGroupProjectionDefinitionIds,
+    shipmentGroupQuery,
+  ]);
 
   useEffect(() => {
     if (!readyDataDirectory || ordersWorkspaceView !== 'order_items') return undefined;
@@ -580,7 +609,11 @@ export function App({ api }: AppProps) {
         template.id === updated.id ? updated : template
       )));
       if (activeTableTemplateId === updated.id) {
-        const currentQuery = updated.granularity === 'order' ? orderQuery : orderItemQuery;
+        const currentQuery = updated.granularity === 'order'
+          ? orderQuery
+          : updated.granularity === 'order_item'
+            ? orderItemQuery
+            : shipmentGroupQuery;
         setActiveTableTemplateDirty(!sameJsonValue(currentQuery, updated.query));
       }
     } catch (error) {
@@ -605,6 +638,10 @@ export function App({ api }: AppProps) {
         query: OrderItemWorkbenchQuery;
         result: OrderItemWorkbenchResult;
       } | null = null;
+      let shipmentGroupReset: {
+        query: ShipmentGroupWorkbenchQuery;
+        result: ShipmentGroupWorkbenchResult;
+      } | null = null;
       if (deletingActiveTemplate) {
         tableTemplateApplyVersion.current += 1;
         if (template.granularity === 'order') {
@@ -617,9 +654,15 @@ export function App({ api }: AppProps) {
               orderTemplatesCustomFieldDefinitionIds(remainingTemplates),
             ),
           };
-        } else {
+        } else if (template.granularity === 'order_item') {
           const query: OrderItemWorkbenchQuery = {};
           itemReset = { query, result: await api.queryOrderItems(query, []) };
+        } else {
+          const query: ShipmentGroupWorkbenchQuery = {};
+          shipmentGroupReset = {
+            query,
+            result: await api.queryShipmentGroupWorkbench(query, []),
+          };
         }
       }
       await api.deleteTableTemplate(templateId);
@@ -635,6 +678,10 @@ export function App({ api }: AppProps) {
           setOrderItemQuery(itemReset.query);
           setOrderItemWorkbench(itemReset.result);
           setOrdersWorkspaceView('order_items');
+        } else if (shipmentGroupReset) {
+          setShipmentGroupQuery(shipmentGroupReset.query);
+          setShipmentGroupProjection(shipmentGroupReset.result);
+          setActivePage('shipments');
         }
         setActiveTableTemplateId('');
         setActiveTableTemplateDirty(false);
@@ -664,7 +711,7 @@ export function App({ api }: AppProps) {
         setOrderQuery(query);
         setOrderWorkbench(result);
         setOrdersWorkspaceView('orders');
-      } else {
+      } else if (template.granularity === 'order_item') {
         const query = structuredClone(template.query);
         const result = await api.queryOrderItems(
           query,
@@ -675,10 +722,20 @@ export function App({ api }: AppProps) {
         setOrderItemQuery(query);
         setOrderItemWorkbench(result);
         setOrdersWorkspaceView('order_items');
+      } else {
+        const query = structuredClone(template.query);
+        const result = await api.queryShipmentGroupWorkbench(
+          query,
+          shipmentGroupProjectionDefinitionIds,
+        );
+        if (requestVersion !== tableTemplateApplyVersion.current) return;
+        setShipmentGroupQuery(query);
+        setShipmentGroupProjection(result);
+        setActivePage('shipments');
       }
       setActiveTableTemplateId(template.id);
       setActiveTableTemplateDirty(false);
-      setActivePage('orders');
+      if (template.granularity !== 'shipment_group') setActivePage('orders');
       setOperationError('');
     } catch (error) {
       if (requestVersion === tableTemplateApplyVersion.current) {
@@ -707,7 +764,7 @@ export function App({ api }: AppProps) {
         setOrderQuery(query);
         setOrderWorkbench(result);
         setOrdersWorkspaceView('orders');
-      } else {
+      } else if (granularity === 'order_item') {
         const query: OrderItemWorkbenchQuery = {};
         const result = await api.queryOrderItems(query, []);
         if (requestVersion !== tableTemplateApplyVersion.current) return;
@@ -715,10 +772,13 @@ export function App({ api }: AppProps) {
         setOrderItemQuery(query);
         setOrderItemWorkbench(result);
         setOrdersWorkspaceView('order_items');
+      } else {
+        setShipmentGroupQuery({});
+        setActivePage('shipments');
       }
       setActiveTableTemplateId('');
       setActiveTableTemplateDirty(false);
-      setActivePage('orders');
+      if (granularity !== 'shipment_group') setActivePage('orders');
     } catch (error) {
       if (requestVersion === tableTemplateApplyVersion.current) {
         const message = errorMessage(error);
@@ -753,7 +813,11 @@ export function App({ api }: AppProps) {
       await updateTableTemplate(activeTableTemplate.id, {
         name: activeTableTemplate.name,
         columns: activeTableTemplate.columns,
-        query: activeTableTemplate.granularity === 'order' ? orderQuery : orderItemQuery,
+        query: activeTableTemplate.granularity === 'order'
+          ? orderQuery
+          : activeTableTemplate.granularity === 'order_item'
+            ? orderItemQuery
+            : shipmentGroupQuery,
       });
     } catch (error) {
       setOperationError(errorMessage(error));
@@ -1187,6 +1251,7 @@ export function App({ api }: AppProps) {
         customFieldDefinitions={customFieldDefinitions}
         orderQuery={orderQuery}
         orderItemQuery={orderItemQuery}
+        shipmentGroupQuery={shipmentGroupQuery}
         loading={tableTemplatesLoading}
         error={tableTemplatesError}
         saving={busyAction === 'templates'}
@@ -1211,16 +1276,35 @@ export function App({ api }: AppProps) {
       <ShipmentGroupsWorkspace
         api={api}
         projection={shipmentGroupProjection}
+        customFieldDefinitions={customFieldDefinitions}
+        tableTemplates={tableTemplates}
+        activeTableTemplate={activeTableTemplate?.granularity === 'shipment_group'
+          ? activeTableTemplate
+          : null}
         archives={shipmentGroupArchives}
         aftersalesCases={aftersalesCases}
         focus={shipmentFocus}
         loading={shipmentGroupLoading}
         openingOrder={busyAction === 'detail'}
         error={shipmentGroupError}
-        onProjectionChange={setShipmentGroupProjection}
+        onProjectionChange={(projection) => setShipmentGroupProjection((current) => ({
+          ...projection,
+          customFieldValues: current?.customFieldValues.filter((value) => (
+            projection.groups.some(({ id }) => id === value.shipmentGroupId)
+          )) ?? [],
+          allGroupCount: projection.groups.length,
+        }))}
+        onCustomFieldValuesChange={(values) => setShipmentGroupProjection((current) => (
+          current ? { ...current, customFieldValues: values } : current
+        ))}
         onArchivesChange={setShipmentGroupArchives}
         onAftersalesCasesChange={setAftersalesCases}
         onOpenOrder={(orderId) => void openOrder(orderId)}
+        onApplyTableTemplate={(template) => void applyTableTemplate(template)}
+        onClearTableTemplate={() => void clearTableTemplate('shipment_group')}
+        onManageTableTemplates={() => setActivePage('templates')}
+        onPreviewExport={(input) => api.previewShipmentGroupExport(input)}
+        onExport={(input) => api.exportShipmentGroups(input)}
       />
     );
   } else if (draft) {
@@ -1557,6 +1641,9 @@ function SystemScreen(props: SystemScreenProps) {
 function ShipmentGroupsWorkspace({
   api,
   projection,
+  customFieldDefinitions,
+  tableTemplates,
+  activeTableTemplate,
   archives,
   aftersalesCases,
   focus,
@@ -1564,12 +1651,21 @@ function ShipmentGroupsWorkspace({
   openingOrder,
   error,
   onProjectionChange,
+  onCustomFieldValuesChange,
   onArchivesChange,
   onAftersalesCasesChange,
   onOpenOrder,
+  onApplyTableTemplate,
+  onClearTableTemplate,
+  onManageTableTemplates,
+  onPreviewExport,
+  onExport,
 }: {
   api: DesktopApi;
-  projection: ShipmentGroupProjection | null;
+  projection: ShipmentGroupWorkbenchResult | null;
+  customFieldDefinitions: CustomFieldDefinition[];
+  tableTemplates: TableTemplate[];
+  activeTableTemplate: Extract<TableTemplate, { granularity: 'shipment_group' }> | null;
   archives: ShipmentGroupArchive[];
   aftersalesCases: AftersalesCase[];
   focus: ShipmentFocus | null;
@@ -1577,9 +1673,19 @@ function ShipmentGroupsWorkspace({
   openingOrder: boolean;
   error: string;
   onProjectionChange: (projection: ShipmentGroupProjection) => void;
+  onCustomFieldValuesChange: (values: ShipmentGroupCustomFieldValue[]) => void;
   onArchivesChange: (archives: ShipmentGroupArchive[]) => void;
   onAftersalesCasesChange: (cases: AftersalesCase[]) => void;
   onOpenOrder: (orderId: string) => void;
+  onApplyTableTemplate: (
+    template: Extract<TableTemplate, { granularity: 'shipment_group' }>,
+  ) => void;
+  onClearTableTemplate: () => void;
+  onManageTableTemplates: () => void;
+  onPreviewExport: (
+    input: ShipmentGroupExportInput,
+  ) => Promise<ShipmentGroupExportPreviewResult>;
+  onExport: (input: ShipmentGroupExportInput) => Promise<ShipmentGroupExportResult>;
 }) {
   const [activeView, setActiveView] = useState<
     'pending' | 'partially_shipped' | 'fully_shipped'
@@ -1626,6 +1732,9 @@ function ShipmentGroupsWorkspace({
     record: ShipmentRecord;
     aftersalesCase: AftersalesCase;
   } | null>(null);
+  const [exportTarget, setExportTarget] = useState<OpenShipmentGroup[] | null>(null);
+  const [customFieldTarget, setCustomFieldTarget] = useState<OpenShipmentGroup | null>(null);
+  const [customFieldFeedback, setCustomFieldFeedback] = useState('');
   const groups = projection?.groups ?? [];
   const attentionOrders = projection?.attentionOrders ?? [];
   const partiallyShippedArchives = archives.filter(
@@ -1635,6 +1744,36 @@ function ShipmentGroupsWorkspace({
   const pendingGroups = groups;
   const selectedGroupIdSet = new Set(selectedGroupIds);
   const selectedGroups = pendingGroups.filter(({ id }) => selectedGroupIdSet.has(id));
+  const shipmentGroupTemplates = tableTemplates.filter(
+    (template): template is Extract<TableTemplate, { granularity: 'shipment_group' }> => (
+      template.granularity === 'shipment_group'
+    ),
+  );
+  const shipmentGroupColumns = activeTableTemplate?.columns
+    ?? DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS;
+  const shipmentGroupFieldCatalog = availableTableFields(
+    'shipment_group',
+    customFieldDefinitions,
+  );
+  const shipmentGroupCustomDefinitions = customFieldDefinitions.filter(
+    ({ granularity }) => granularity === 'shipment_group',
+  );
+
+  function shipmentGroupCell(group: OpenShipmentGroup, column: TableTemplateColumn): string {
+    const value = projectShipmentGroupTableCell(
+      group,
+      column.field,
+      projection?.customFieldValues ?? [],
+    );
+    const valueType = shipmentGroupFieldCatalog.find(({ reference }) => (
+      fieldReferenceKey(reference) === fieldReferenceKey(column.field)
+    ))?.valueType;
+    if (value === null) return '—';
+    if (valueType === 'money' && typeof value === 'number') return formatMoney(value);
+    if (typeof value === 'boolean') return value ? '是' : '否';
+    if (Array.isArray(value)) return value.join('、');
+    return String(value);
+  }
 
   useEffect(() => {
     const currentGroupIds = new Set(pendingGroups.map(({ id }) => id));
@@ -1741,6 +1880,7 @@ function ShipmentGroupsWorkspace({
       </header>
 
       <InlineError message={error} />
+      {customFieldFeedback && <p className="orders-feedback" role="status">{customFieldFeedback}</p>}
 
       <section className="orders-overview" aria-label="发货组概况">
         <span><small>待发货组</small><strong>{pendingGroups.length}</strong></span>
@@ -1800,6 +1940,23 @@ function ShipmentGroupsWorkspace({
           </div>
           <div className="shipment-groups-actions" aria-label="发货组调整操作">
             <span>已选 {selectedGroups.length} 组</span>
+            <select
+              aria-label="发货组表格模板"
+              value={activeTableTemplate?.id ?? ''}
+              onChange={(event) => {
+                const template = shipmentGroupTemplates.find(({ id }) => id === event.target.value);
+                if (template) onApplyTableTemplate(template);
+                else onClearTableTemplate();
+              }}
+            >
+              <option value="">默认发货组字段</option>
+              {shipmentGroupTemplates.map((template) => (
+                <option key={template.id} value={template.id}>{template.name}</option>
+              ))}
+            </select>
+            <button className="button button--quiet" type="button" onClick={onManageTableTemplates}>
+              管理模板
+            </button>
             <button
               className="button button--quiet"
               type="button"
@@ -1808,18 +1965,27 @@ function ShipmentGroupsWorkspace({
             >
               重新组合
             </button>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={pendingGroups.length === 0}
+              onClick={() => setExportTarget(
+                selectedGroups.length > 0 ? selectedGroups : pendingGroups,
+              )}
+            >
+              {selectedGroups.length > 0 ? '导出已选发货组' : '导出当前发货组'}
+            </button>
           </div>
           <div className="table-frame shipment-groups-table-frame">
             <table aria-label="开放发货组">
               <thead>
                 <tr>
                   <th aria-label="选择" />
-                  <th>收件信息</th>
-                  <th>成员订单</th>
-                  <th>商品汇总</th>
-                  <th>订单数</th>
-                  <th>商品数量</th>
-                  <th>成交金额</th>
+                  {shipmentGroupColumns.map((column, index) => (
+                    <th key={`${fieldReferenceKey(column.field)}:${index}`}>
+                      {column.displayName}
+                    </th>
+                  ))}
                   <th>操作</th>
                 </tr>
               </thead>
@@ -1834,50 +2000,63 @@ function ShipmentGroupsWorkspace({
                         onChange={() => toggleGroup(group.id)}
                       />
                     </td>
-                    <td>
-                      <span className="order-cell-stack order-cell-stack--recipient">
-                        <strong>{group.recipient || '—'}</strong>
-                        {group.formation === 'manual' && <small>手工调整</small>}
-                        {group.recipientConflict && (
-                          <small>
-                            成员收件人不一致：{group.recipients.join(' / ')}
-                          </small>
-                        )}
-                        <small>{group.phone}</small>
-                        <small>{group.addressOriginal}</small>
-                      </span>
-                    </td>
-                    <td>
-                      <span className="shipment-group-orders">
-                        {group.orders.map((order) => (
-                          <button
-                            className="order-link"
-                            type="button"
-                            key={order.id}
-                            aria-label={`查看原始订单 ${order.orderNumber}`}
-                            onClick={() => onOpenOrder(order.id)}
-                            disabled={openingOrder}
-                          >
-                            {order.orderNumber}
-                          </button>
-                        ))}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="order-product-summary">
-                        {group.items.map((item) => (
-                          <span key={`${item.sourceTitle}\u0000${item.sourceSpec}`}>
-                            <strong>{item.sourceTitle}</strong>
-                            <small>{item.sourceSpec ? `${item.sourceSpec} × ${item.quantity}` : `× ${item.quantity}`}</small>
-                          </span>
-                        ))}
-                      </span>
-                    </td>
-                    <td>{group.orderCount}</td>
-                    <td>{group.totalQuantity}</td>
-                    <td className="money-cell"><strong>{formatMoney(group.totalAmountCents)}</strong></td>
+                    {shipmentGroupColumns.map((column, index) => (
+                      <td key={`${fieldReferenceKey(column.field)}:${index}`}>
+                        {column.field.kind === 'builtin'
+                          && column.field.key === 'member_order_numbers' ? (
+                            <span className="shipment-group-orders">
+                              {group.orders.map((order) => (
+                                <button
+                                  className="order-link"
+                                  type="button"
+                                  key={order.id}
+                                  aria-label={`查看原始订单 ${order.orderNumber}`}
+                                  onClick={() => onOpenOrder(order.id)}
+                                  disabled={openingOrder}
+                                >
+                                  {order.orderNumber}
+                                </button>
+                              ))}
+                            </span>
+                          ) : column.field.kind === 'builtin'
+                            && column.field.key === 'product_summary' ? (
+                              <span className="order-product-summary">
+                                {group.items.map((item) => (
+                                  <span key={`${item.sourceTitle}\u0000${item.sourceSpec}`}>
+                                    <strong>{item.sourceTitle}</strong>
+                                    <small>
+                                      {item.sourceSpec
+                                        ? `${item.sourceSpec} × ${item.quantity}`
+                                        : `× ${item.quantity}`}
+                                    </small>
+                                  </span>
+                                ))}
+                              </span>
+                            ) : column.field.kind === 'builtin'
+                              && column.field.key === 'recipient' ? (
+                                <span className="order-cell-stack order-cell-stack--recipient">
+                                  <strong>{group.recipient || '—'}</strong>
+                                  {group.recipientConflict && (
+                                    <small>成员收件人不一致：{group.recipients.join(' / ')}</small>
+                                  )}
+                                </span>
+                              ) : shipmentGroupCell(group, column)}
+                      </td>
+                    ))}
                     <td>
                       <span className="shipment-group-row-actions">
+                        {shipmentGroupCustomDefinitions.length > 0 && (
+                          <button
+                            className="button button--quiet"
+                            type="button"
+                            onClick={() => {
+                              setCustomFieldFeedback('');
+                              setCustomFieldTarget(group);
+                            }}
+                          >
+                            编辑组字段
+                          </button>
+                        )}
                         <button
                           className="button button--primary"
                           type="button"
@@ -2147,6 +2326,46 @@ function ShipmentGroupsWorkspace({
             setAdjustmentTarget(null);
           }}
           onClose={() => setAdjustmentTarget(null)}
+        />
+      )}
+
+      {customFieldTarget && (
+        <ShipmentGroupCustomFieldsDialog
+          group={customFieldTarget}
+          definitions={shipmentGroupCustomDefinitions}
+          values={projection?.customFieldValues ?? []}
+          onSave={(input) => api.saveShipmentGroupCustomFieldValues(input)}
+          onApplied={(savedValues) => {
+            const savedDefinitionIds = new Set(savedValues.map(({ definitionId }) => definitionId));
+            const nextValues = [
+              ...(projection?.customFieldValues.filter((value) => !(
+                value.shipmentGroupId === customFieldTarget.id
+                && savedDefinitionIds.has(value.definitionId)
+              )) ?? []),
+              ...savedValues,
+            ];
+            onCustomFieldValuesChange(nextValues);
+            setCustomFieldTarget(null);
+            setCustomFieldFeedback('发货组字段已保存');
+          }}
+          onClose={() => setCustomFieldTarget(null)}
+        />
+      )}
+
+      {exportTarget && (
+        <ShipmentGroupExportDialog
+          groups={exportTarget}
+          templates={tableTemplates}
+          initialShipmentGroupTemplateId={activeTableTemplate?.id ?? null}
+          onPreview={onPreviewExport}
+          onExport={onExport}
+          onSaved={(result) => {
+            setCustomFieldFeedback(
+              `已导出 ${result.shipmentGroupCount} 个发货组、${result.orderCount} 笔订单：${result.fileName}`,
+            );
+            setExportTarget(null);
+          }}
+          onClose={() => setExportTarget(null)}
         />
       )}
     </section>

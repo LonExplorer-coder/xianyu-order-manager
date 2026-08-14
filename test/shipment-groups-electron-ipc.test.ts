@@ -107,6 +107,77 @@ describe('发货组 Electron IPC', () => {
     expect(mergeShipmentGroups).toHaveBeenCalledWith(mergeInput);
   });
 
+  it('通过受控通道查询组字段并预览三表导出', async () => {
+    const definition = {
+      id: 'field-group-zone',
+      name: '拣货区域',
+      granularity: 'shipment_group',
+      type: 'text',
+      required: false,
+      defaultValue: null,
+      options: [],
+      createdAt: '2026-08-14T09:00:00.000Z',
+      updatedAt: '2026-08-14T09:00:00.000Z',
+    };
+    const queryShipmentGroupWorkbench = vi.fn().mockReturnValue({
+      groups: [],
+      attentionOrders: [],
+      customFieldValues: [],
+      allGroupCount: 0,
+    });
+    const saveShipmentGroupCustomFieldValues = vi.fn().mockReturnValue([]);
+    const previewShipmentGroupExport = vi.fn().mockReturnValue({
+      shipmentGroupCount: 1,
+      orderCount: 2,
+      orderItemCount: 3,
+      sheets: [
+        { name: '订单总表' },
+        { name: '订单商品明细表' },
+        { name: '合并发货表' },
+      ],
+    });
+    registerIpcHandlers({
+      listCustomFieldDefinitions: vi.fn().mockReturnValue([definition]),
+      queryShipmentGroupWorkbench,
+      saveShipmentGroupCustomFieldValues,
+      previewShipmentGroupExport,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+    const query = { sortField: 'total_quantity', sortDirection: 'desc' };
+    const saveInput = {
+      shipmentGroupId: 'group-1',
+      expectedMemberOrderIds: ['order-1', 'order-2'],
+      values: [{ definitionId: definition.id, value: '东区' }],
+    };
+    const exportInput = {
+      shipmentGroupIds: ['group-1'],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: null,
+      masking: 'masked',
+    };
+
+    await expect(invoke(
+      'shipment-groups:query-workbench',
+      query,
+      [definition.id],
+    )).resolves.toMatchObject({ allGroupCount: 0 });
+    await expect(invoke('shipment-groups:save-custom-field-values', saveInput))
+      .resolves.toEqual([]);
+    await expect(invoke('shipment-groups:preview-export', exportInput))
+      .resolves.toMatchObject({
+        sheets: [
+          { name: '订单总表' },
+          { name: '订单商品明细表' },
+          { name: '合并发货表' },
+        ],
+      });
+    expect(queryShipmentGroupWorkbench).toHaveBeenCalledWith(query, [definition.id]);
+    expect(saveShipmentGroupCustomFieldValues).toHaveBeenCalledWith(saveInput);
+    expect(previewShipmentGroupExport).toHaveBeenCalledWith(exportInput);
+  });
+
   it('通过受控通道查询发货组档案并确认实际发货', async () => {
     const queryShipmentGroupArchives = vi.fn().mockReturnValue([{
       id: 'shipment-group-archive-1',

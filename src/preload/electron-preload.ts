@@ -49,6 +49,16 @@ const api: DesktopApi = {
     ipcRenderer.invoke('order-items:query', query, customFieldDefinitionIds)
   ),
   queryShipmentGroups: () => ipcRenderer.invoke('shipment-groups:query'),
+  queryShipmentGroupWorkbench: (query, customFieldDefinitionIds) => (
+    ipcRenderer.invoke(
+      'shipment-groups:query-workbench',
+      query,
+      customFieldDefinitionIds,
+    )
+  ),
+  saveShipmentGroupCustomFieldValues: (input) => (
+    ipcRenderer.invoke('shipment-groups:save-custom-field-values', input)
+  ),
   splitShipmentGroup: (input) => ipcRenderer.invoke('shipment-groups:split', input),
   mergeShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:merge', input),
   queryShipmentGroupArchives: () => ipcRenderer.invoke('shipment-group-archives:query'),
@@ -93,6 +103,10 @@ const api: DesktopApi = {
   progressAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:progress', input),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
+  exportShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:export', input),
+  previewShipmentGroupExport: (input) => (
+    ipcRenderer.invoke('shipment-groups:preview-export', input)
+  ),
   onOrdersChanged: (listener) => {
     const ipcListener = (
       _event: Electron.IpcRendererEvent,

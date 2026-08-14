@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { CustomFieldDefinition } from '../core/custom-fields';
 import type { OrderItemWorkbenchQuery, OrderWorkbenchQuery } from '../core/order-workbench';
+import type { ShipmentGroupWorkbenchQuery } from '../core/shipment-groups';
 import {
   availableTableFields,
   DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
@@ -21,6 +22,7 @@ export type TableTemplatesWorkspaceProps = {
   customFieldDefinitions: CustomFieldDefinition[];
   orderQuery: OrderWorkbenchQuery;
   orderItemQuery: OrderItemWorkbenchQuery;
+  shipmentGroupQuery: ShipmentGroupWorkbenchQuery;
   loading: boolean;
   error: string;
   saving: boolean;
@@ -34,7 +36,7 @@ type TemplateDraft = {
   name: string;
   granularity: TableTemplateGranularity;
   columns: TableTemplateLayoutItem[];
-  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery;
+  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery;
 };
 
 const DEFAULT_FIELD_KEYS: Record<TableTemplateGranularity, string[]> = {
@@ -56,6 +58,16 @@ const DEFAULT_FIELD_KEYS: Record<TableTemplateGranularity, string[]> = {
     'builtin:quantity',
     'builtin:quantity_source',
     'computed:item_subtotal',
+  ],
+  shipment_group: [
+    'builtin:recipient',
+    'builtin:phone',
+    'builtin:address',
+    'builtin:member_order_numbers',
+    'builtin:product_summary',
+    'computed:shipment_group_order_count',
+    'computed:shipment_group_total_quantity',
+    'computed:shipment_group_total_amount',
   ],
 };
 
@@ -130,7 +142,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   }, [pendingDelete?.id]);
 
   function changeGranularity(granularity: TableTemplateGranularity) {
-    const query = granularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    const query = currentQueryFor(granularity, props);
     setLibraryGranularity(granularity);
     setDraft((current) => ({
       ...newDraft(granularity, props.customFieldDefinitions, query),
@@ -140,7 +152,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   }
 
   function openTemplateLibrary(granularity: TableTemplateGranularity) {
-    const query = granularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    const query = currentQueryFor(granularity, props);
     setLibraryGranularity(granularity);
     setEditingTemplateId(null);
     setDraft(newDraft(granularity, props.customFieldDefinitions, query));
@@ -149,7 +161,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
 
   function startNewTemplate() {
     setEditingTemplateId(null);
-    const query = libraryGranularity === 'order' ? props.orderQuery : props.orderItemQuery;
+    const query = currentQueryFor(libraryGranularity, props);
     setDraft(newDraft(libraryGranularity, props.customFieldDefinitions, query));
     setFeedback('');
   }
@@ -177,9 +189,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
   }
 
   function captureCurrentQuery() {
-    const currentQuery = draft.granularity === 'order'
-      ? props.orderQuery
-      : props.orderItemQuery;
+    const currentQuery = currentQueryFor(draft.granularity, props);
     setDraft((current) => ({ ...current, query: cloneQuery(currentQuery) }));
     setFeedback('已用当前筛选和排序更新模板草稿。');
   }
@@ -195,11 +205,16 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             columns: cloneLayoutItems(draft.columns),
             query: cloneQuery(draft.query as OrderWorkbenchQuery),
           }
-        : {
+        : draft.granularity === 'order_item' ? {
             name: draft.name,
             granularity: 'order_item',
             columns: cloneLayoutItems(draft.columns) as TableTemplateColumn[],
             query: cloneQuery(draft.query as OrderItemWorkbenchQuery),
+          } : {
+            name: draft.name,
+            granularity: 'shipment_group',
+            columns: cloneLayoutItems(draft.columns) as TableTemplateColumn[],
+            query: cloneQuery(draft.query as ShipmentGroupWorkbenchQuery),
           };
       if (editingTemplateId) {
         const update: UpdateTableTemplateInput = {
@@ -327,6 +342,15 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
         >
           订单商品明细表模板
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={libraryGranularity === 'shipment_group'}
+          className={libraryGranularity === 'shipment_group' ? 'is-active' : ''}
+          onClick={() => openTemplateLibrary('shipment_group')}
+        >
+          合并发货表模板
+        </button>
       </div>
 
       <div className="table-template-layout">
@@ -453,6 +477,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             >
               <option value="order">订单总表模板</option>
               <option value="order_item">订单商品明细表模板</option>
+              <option value="shipment_group">合并发货表模板</option>
             </select>
           </label>
 
@@ -701,7 +726,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
 function newDraft(
   granularity: TableTemplateGranularity,
   definitions: readonly CustomFieldDefinition[],
-  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery,
+  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery,
 ): TemplateDraft {
   const fields = availableTableFields(granularity, definitions);
   let columns: TableTemplateLayoutItem[] = DEFAULT_FIELD_KEYS[granularity].flatMap(
@@ -732,17 +757,33 @@ function cloneDynamicProductGroup(): typeof DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP 
   };
 }
 
-function cloneQuery<T extends OrderWorkbenchQuery | OrderItemWorkbenchQuery>(query: T): T {
+function cloneQuery<T extends
+  OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery
+>(query: T): T {
   return structuredClone(query);
 }
 
-function querySummary(query: OrderWorkbenchQuery | OrderItemWorkbenchQuery): string {
+function querySummary(
+  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery,
+): string {
   const count = Object.values(query).filter((value) => value !== undefined && value !== '').length;
   return count === 0 ? '无筛选，使用默认排序' : `${count} 项筛选或排序条件`;
 }
 
 function granularityLabel(granularity: TableTemplateGranularity): string {
-  return granularity === 'order' ? '订单' : '订单商品明细';
+  if (granularity === 'order') return '订单';
+  return granularity === 'order_item' ? '订单商品明细' : '合并发货组';
+}
+
+function currentQueryFor(
+  granularity: TableTemplateGranularity,
+  props: Pick<
+    TableTemplatesWorkspaceProps,
+    'orderQuery' | 'orderItemQuery' | 'shipmentGroupQuery'
+  >,
+): OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery {
+  if (granularity === 'order') return props.orderQuery;
+  return granularity === 'order_item' ? props.orderItemQuery : props.shipmentGroupQuery;
 }
 
 function fieldKindLabel(kind: TableTemplateColumn['field']['kind']): string {

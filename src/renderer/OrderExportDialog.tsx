@@ -52,7 +52,7 @@ export function OrderExportDialog({
   const [includeOrderItems, setIncludeOrderItems] = useState(false);
   const [orderItemTemplateId, setOrderItemTemplateId] = useState('');
   const [activePreviewSheet, setActivePreviewSheet] = useState<
-    '订单总表' | '订单商品明细表'
+    '订单总表' | '订单商品明细表' | '合并发货表'
   >('订单总表');
   const [maskingEnabled, setMaskingEnabled] = useState(true);
   const [preview, setPreview] = useState<OrderExportPreviewResult | null>(null);

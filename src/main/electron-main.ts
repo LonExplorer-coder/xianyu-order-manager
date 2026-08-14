@@ -11,6 +11,7 @@ import type {
   CustomFieldValue,
   DraftCustomFieldValues,
   SaveCustomFieldValuesInput,
+  SaveShipmentGroupCustomFieldValuesInput,
 } from '../core/custom-fields';
 import type {
   OcrConnectionTestInput,
@@ -23,6 +24,7 @@ import type {
 } from '../core/candidate-verification-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
 import { normalizeOrderExportInput } from '../core/order-export';
+import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
 import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
@@ -31,6 +33,7 @@ import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeCreateTableTemplateInput,
+  normalizeShipmentGroupWorkbenchQuery,
   normalizeUpdateTableTemplateInput,
   type TableTemplateGranularity,
 } from '../core/table-templates';
@@ -207,6 +210,18 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     )
   ));
   ipcMain.handle('shipment-groups:query', () => desktopSession.queryShipmentGroups());
+  ipcMain.handle(
+    'shipment-groups:query-workbench',
+    (_event, query: unknown, customFieldDefinitionIds: unknown) => (
+      desktopSession.queryShipmentGroupWorkbench(
+        normalizeShipmentGroupWorkbenchQuery(
+          query,
+          desktopSession.listCustomFieldDefinitions(),
+        ),
+        parseProjectedCustomFieldDefinitionIds(customFieldDefinitionIds),
+      )
+    ),
+  );
   ipcMain.handle('shipment-groups:split', (_event, input: unknown) => (
     desktopSession.splitShipmentGroup(input)
   ));
@@ -301,6 +316,29 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('orders:preview-export', (_event, input: unknown) => (
     desktopSession.previewOrderExport(normalizeOrderExportInput(input))
   ));
+  ipcMain.handle('shipment-groups:export', async (event, input: unknown) => {
+    const normalized = normalizeShipmentGroupExportInput(input);
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showSaveDialog(window, {
+      title: '导出合并发货 Excel',
+      buttonLabel: '保存 Excel',
+      defaultPath: defaultShipmentGroupExportFileName(new Date()),
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      properties: ['showOverwriteConfirmation', 'createDirectory'],
+    });
+    if (selection.canceled || !selection.filePath) return { kind: 'cancelled' as const };
+    const filePath = xlsxFilePath(selection.filePath);
+    const outcome = await desktopSession.exportShipmentGroupsToWorkbook(normalized, filePath);
+    return {
+      kind: 'saved' as const,
+      fileName: basename(filePath),
+      filePath,
+      ...outcome,
+    };
+  });
+  ipcMain.handle('shipment-groups:preview-export', (_event, input: unknown) => (
+    desktopSession.previewShipmentGroupExport(normalizeShipmentGroupExportInput(input))
+  ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
   ipcMain.handle('orders:update', (_event, input: unknown) => desktopSession.updateOrder(input));
   ipcMain.handle('orders:update-platform-transaction-status', (_event, input: unknown) => (
@@ -316,6 +354,11 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ));
   ipcMain.handle('custom-fields:save-values', (_event, input: unknown) => (
     desktopSession.saveCustomFieldValues(parseSaveCustomFieldValuesInput(input))
+  ));
+  ipcMain.handle('shipment-groups:save-custom-field-values', (_event, input: unknown) => (
+    desktopSession.saveShipmentGroupCustomFieldValues(
+      parseSaveShipmentGroupCustomFieldValuesInput(input),
+    )
   ));
   ipcMain.handle('table-templates:list', (_event, granularity: unknown) => (
     desktopSession.listTableTemplates(parseOptionalTableTemplateGranularity(granularity))
@@ -628,6 +671,11 @@ const SAVE_CUSTOM_FIELD_VALUES_KEYS = new Set([
   'orderValues',
   'itemValues',
 ]);
+const SAVE_SHIPMENT_GROUP_CUSTOM_FIELD_VALUES_KEYS = new Set([
+  'shipmentGroupId',
+  'expectedMemberOrderIds',
+  'values',
+]);
 const CUSTOM_FIELD_ORDER_VALUE_KEYS = new Set(['definitionId', 'value']);
 const CUSTOM_FIELD_ITEM_VALUE_KEYS = new Set([
   'definitionId',
@@ -650,6 +698,32 @@ function parseSaveCustomFieldValuesInput(input: unknown): SaveCustomFieldValuesI
     orderId: parseWorkflowId(input.orderId, '订单'),
     orderValues: parseOrderCustomFieldValues(input.orderValues),
     itemValues: parsePersistedItemCustomFieldValues(input.itemValues),
+  };
+}
+
+function parseSaveShipmentGroupCustomFieldValuesInput(
+  input: unknown,
+): SaveShipmentGroupCustomFieldValuesInput {
+  if (!isRecord(input)) throw new Error('发货组自定义字段值格式无效');
+  rejectUnknownKeys(
+    input,
+    SAVE_SHIPMENT_GROUP_CUSTOM_FIELD_VALUES_KEYS,
+    '发货组自定义字段值',
+  );
+  requireOwnKeys(
+    input,
+    SAVE_SHIPMENT_GROUP_CUSTOM_FIELD_VALUES_KEYS,
+    '发货组自定义字段值',
+  );
+  const expectedMemberOrderIds = boundedArray(
+    input.expectedMemberOrderIds,
+    10_000,
+    '发货组成员快照',
+  ).map((orderId) => parseWorkflowId(orderId, '发货组成员订单'));
+  return {
+    shipmentGroupId: parseWorkflowId(input.shipmentGroupId, '发货组'),
+    expectedMemberOrderIds,
+    values: parseOrderCustomFieldValues(input.values),
   };
 }
 
@@ -878,6 +952,11 @@ function requireWindow(): BrowserWindow {
 function defaultOrderExportFileName(now: Date): string {
   const part = (value: number): string => String(value).padStart(2, '0');
   return `闲鱼订单-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
+}
+
+function defaultShipmentGroupExportFileName(now: Date): string {
+  const part = (value: number): string => String(value).padStart(2, '0');
+  return `合并发货-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
 }
 
 function xlsxFilePath(value: string): string {

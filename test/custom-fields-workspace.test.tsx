@@ -100,6 +100,6 @@ describe('自定义字段创建器', () => {
   it('明确说明默认值会用于既有及后续订单或商品', () => {
     renderWorkspace();
 
-    expect(screen.getByText(/既有及后续订单或商品/u)).toBeVisible();
+    expect(screen.getByText(/既有及后续对应数据/u)).toBeVisible();
   });
 });

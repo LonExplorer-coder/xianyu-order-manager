@@ -439,6 +439,12 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
   const {
     selectSourceScreenshot = vi.fn().mockResolvedValue(null),
     queryOrders = vi.fn().mockResolvedValue(workbenchResult([])),
+    queryShipmentGroups = vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+    queryShipmentGroupWorkbench = vi.fn(async () => ({
+      ...await queryShipmentGroups(),
+      customFieldValues: [],
+      allGroupCount: 0,
+    })),
     ...desktopApiOverrides
   } = overrides;
   const selectOneSourceScreenshot = selectSourceScreenshot
@@ -483,7 +489,9 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
-    queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+    queryShipmentGroups,
+    queryShipmentGroupWorkbench,
+    saveShipmentGroupCustomFieldValues: vi.fn().mockResolvedValue([]),
     splitShipmentGroup: vi.fn(),
     mergeShipmentGroups: vi.fn(),
     queryShipmentGroupArchives: vi.fn().mockResolvedValue([]),
@@ -508,6 +516,13 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     previewOrderExport: vi.fn().mockResolvedValue({
       orderCount: 0,
       orderItemCount: null,
+      sheets: [],
+    }),
+    exportShipmentGroups: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
+    previewShipmentGroupExport: vi.fn().mockResolvedValue({
+      shipmentGroupCount: 0,
+      orderCount: 0,
+      orderItemCount: 0,
       sheets: [],
     }),
     onOrdersChanged: vi.fn(() => () => undefined),
@@ -769,6 +784,178 @@ describe('订单管理工作台', () => {
     });
     expect(screen.queryByRole('button', { name: /标记已发货|导出发货组/u }))
       .not.toBeInTheDocument();
+  });
+
+  it('用发货组模板编辑组字段并预览后导出三张工作表', async () => {
+    const user = userEvent.setup();
+    const projection = singleShipmentGroupProjection();
+    const group = projection.groups[0];
+    const createdAt = '2026-08-14T09:00:00.000Z';
+    const zoneField: CustomFieldDefinition = {
+      id: 'field-shipment-group-zone',
+      name: '拣货区域',
+      granularity: 'shipment_group',
+      type: 'text',
+      required: true,
+      defaultValue: null,
+      options: [],
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const orderTemplate: TableTemplate = {
+      id: 'template-shipment-export-orders',
+      name: '发货订单总表',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' }],
+      query: {},
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const itemTemplate: TableTemplate = {
+      id: 'template-shipment-export-items',
+      name: '发货商品明细',
+      granularity: 'order_item',
+      columns: [{ field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' }],
+      query: {},
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const groupTemplate: TableTemplate = {
+      id: 'template-shipment-export-groups',
+      name: '东区合并发货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '成员订单' },
+        { field: { kind: 'custom', definitionId: zoneField.id }, displayName: '拣货区' },
+      ],
+      query: { sortField: 'total_quantity', sortDirection: 'desc' },
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const queryShipmentGroupWorkbench = vi.fn().mockResolvedValue({
+      ...projection,
+      customFieldValues: [{
+        shipmentGroupId: group.id,
+        definitionId: zoneField.id,
+        value: '东区',
+      }],
+      allGroupCount: 1,
+    });
+    const saveShipmentGroupCustomFieldValues = vi.fn().mockResolvedValue([{
+      shipmentGroupId: group.id,
+      definitionId: zoneField.id,
+      value: '西区',
+    }]);
+    const previewShipmentGroupExport = vi.fn().mockResolvedValue({
+      shipmentGroupCount: 1,
+      orderCount: 1,
+      orderItemCount: 1,
+      sheets: [
+        {
+          name: '订单总表',
+          columns: [{ header: '平台单号', valueType: 'text' }],
+          rows: [[confirmedOrder.orderNumber]],
+          totalRowCount: 1,
+        },
+        {
+          name: '订单商品明细表',
+          columns: [{ header: '商品', valueType: 'text' }],
+          rows: [[confirmedOrder.items[0].sourceTitle]],
+          totalRowCount: 1,
+        },
+        {
+          name: '合并发货表',
+          columns: [
+            { header: '成员订单', valueType: 'text' },
+            { header: '拣货区', valueType: 'text' },
+          ],
+          rows: [[confirmedOrder.orderNumber, '西区']],
+          totalRowCount: 1,
+        },
+      ],
+    });
+    const exportShipmentGroups = vi.fn().mockResolvedValue({
+      kind: 'saved',
+      fileName: '闲鱼发货组-20260814.xlsx',
+      filePath: 'D:\\导出\\闲鱼发货组-20260814.xlsx',
+      shipmentGroupCount: 1,
+      orderCount: 1,
+      orderItemCount: 1,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroupWorkbench,
+      listCustomFieldDefinitions: vi.fn().mockResolvedValue([zoneField]),
+      listTableTemplates: vi.fn().mockResolvedValue([
+        orderTemplate,
+        itemTemplate,
+        groupTemplate,
+      ]),
+      saveShipmentGroupCustomFieldValues,
+      previewShipmentGroupExport,
+      exportShipmentGroups,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    await user.selectOptions(
+      await screen.findByRole('combobox', { name: '发货组表格模板' }),
+      groupTemplate.id,
+    );
+    const table = await screen.findByRole('table', { name: '开放发货组' });
+    expect(within(table).getByRole('columnheader', { name: '拣货区' })).toBeVisible();
+    expect(within(table).getByText('东区')).toBeVisible();
+
+    await user.click(within(table).getByRole('button', { name: '编辑组字段' }));
+    const fieldDialog = screen.getByRole('dialog', { name: '编辑发货组字段' });
+    const zoneInput = within(fieldDialog).getByRole('textbox', { name: '拣货区域' });
+    await user.clear(zoneInput);
+    await user.type(zoneInput, '西区');
+    await user.click(within(fieldDialog).getByRole('button', { name: '保存发货组字段' }));
+    await waitFor(() => expect(saveShipmentGroupCustomFieldValues).toHaveBeenCalledWith({
+      shipmentGroupId: group.id,
+      expectedMemberOrderIds: [confirmedOrder.id],
+      values: [{ definitionId: zoneField.id, value: '西区' }],
+    }));
+    expect(await screen.findByRole('status')).toHaveTextContent('发货组字段已保存');
+
+    await user.click(screen.getByRole('button', { name: '导出当前发货组' }));
+    const exportDialog = screen.getByRole('dialog', { name: '导出三表 Excel' });
+    expect(within(exportDialog).getByRole('tab', { name: '订单总表预览' })).toBeVisible();
+    expect(within(exportDialog).getByRole('tab', { name: '订单商品明细表预览' })).toBeVisible();
+    const groupPreviewTab = within(exportDialog).getByRole('tab', { name: '合并发货表预览' });
+    await user.click(groupPreviewTab);
+    expect(within(
+      await within(exportDialog).findByRole('table', { name: '合并发货表导出预览' }),
+    ).getAllByRole('columnheader').map(({ textContent }) => textContent)).toEqual([
+      '成员订单',
+      '拣货区',
+    ]);
+    await user.selectOptions(
+      within(exportDialog).getByRole('combobox', { name: '订单总表模板' }),
+      orderTemplate.id,
+    );
+    await user.selectOptions(
+      within(exportDialog).getByRole('combobox', { name: '订单商品明细表模板' }),
+      itemTemplate.id,
+    );
+    await user.click(within(exportDialog).getByRole('button', { name: '保存三表 Excel' }));
+    await waitFor(() => expect(exportShipmentGroups).toHaveBeenCalledWith({
+      shipmentGroupIds: [group.id],
+      orderTemplateId: orderTemplate.id,
+      orderItemTemplateId: itemTemplate.id,
+      shipmentGroupTemplateId: groupTemplate.id,
+      masking: 'masked',
+    }));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '已导出 1 个发货组、1 笔订单：闲鱼发货组-20260814.xlsx',
+    );
   });
 
   it('按待发货、部分发货和已全部发货组织发货组档案及其发货记录', async () => {

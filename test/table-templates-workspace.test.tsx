@@ -79,6 +79,7 @@ function renderWorkspace(overrides: Partial<Parameters<typeof TableTemplatesWork
       customFieldDefinitions={customFieldDefinitions}
       orderQuery={orderQuery}
       orderItemQuery={{}}
+      shipmentGroupQuery={{}}
       loading={false}
       error=""
       saving={false}

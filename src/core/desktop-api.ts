@@ -16,6 +16,7 @@ import type {
   CustomFieldValueRecord,
   DraftCustomFieldValues,
   SaveCustomFieldValuesInput,
+  SaveShipmentGroupCustomFieldValuesInput,
 } from './custom-fields';
 import type {
   OcrConnectionTestInput,
@@ -45,7 +46,17 @@ import type {
   OrderExportPreviewResult,
   OrderExportResult,
 } from './order-export';
-import type { ShipmentGroupProjection } from './shipment-groups';
+import type {
+  ShipmentGroupCustomFieldValue,
+  ShipmentGroupProjection,
+  ShipmentGroupWorkbenchQuery,
+  ShipmentGroupWorkbenchResult,
+} from './shipment-groups';
+import type {
+  ShipmentGroupExportInput,
+  ShipmentGroupExportPreviewResult,
+  ShipmentGroupExportResult,
+} from './shipment-group-export';
 import type {
   MergeShipmentGroupsInput,
   ShipmentGroupAdjustmentResult,
@@ -130,6 +141,13 @@ export interface DesktopApi {
     customFieldDefinitionIds?: readonly string[],
   ): Promise<OrderItemWorkbenchResult>;
   queryShipmentGroups(): Promise<ShipmentGroupProjection>;
+  queryShipmentGroupWorkbench(
+    query: ShipmentGroupWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): Promise<ShipmentGroupWorkbenchResult>;
+  saveShipmentGroupCustomFieldValues(
+    input: SaveShipmentGroupCustomFieldValuesInput,
+  ): Promise<ShipmentGroupCustomFieldValue[]>;
   splitShipmentGroup(input: SplitShipmentGroupInput): Promise<ShipmentGroupAdjustmentResult>;
   mergeShipmentGroups(input: MergeShipmentGroupsInput): Promise<ShipmentGroupAdjustmentResult>;
   queryShipmentGroupArchives(): Promise<ShipmentGroupArchive[]>;
@@ -176,6 +194,10 @@ export interface DesktopApi {
   progressAftersalesCase(input: ProgressAftersalesCaseInput): Promise<AftersalesCase>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
+  exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;
+  previewShipmentGroupExport(
+    input: ShipmentGroupExportInput,
+  ): Promise<ShipmentGroupExportPreviewResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
   updateOrder(input: OrderEditInput): Promise<OrderDetails>;

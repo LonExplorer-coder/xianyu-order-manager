@@ -1,5 +1,164 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion39ExtensionArtifacts(database: DatabaseSync): void {
+  const groupDefinitionCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM custom_field_definitions
+    WHERE granularity = 'shipment_group'
+  `).get() as { count: number };
+  const groupTemplateCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM table_templates
+    WHERE granularity = 'shipment_group'
+  `).get() as { count: number };
+  if (groupDefinitionCount.count > 0 || groupTemplateCount.count > 0) {
+    throw new Error('v39 测试降级前必须移除发货组字段与模板数据');
+  }
+
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS shipment_group_custom_field_values_match_definition_on_insert;
+    DROP TRIGGER IF EXISTS shipment_group_custom_field_values_match_definition_on_update;
+    DROP INDEX IF EXISTS shipment_group_custom_field_values_by_group;
+    DROP TABLE IF EXISTS shipment_group_custom_field_values;
+
+    DROP TRIGGER IF EXISTS custom_field_definitions_keep_template_granularity_on_update;
+    DROP TRIGGER IF EXISTS table_templates_prevent_granularity_change_with_dependencies;
+    DROP TRIGGER IF EXISTS table_template_dependencies_match_granularity_on_insert;
+    DROP TRIGGER IF EXISTS table_template_dependencies_match_granularity_on_update;
+    DROP TRIGGER IF EXISTS custom_field_values_owner_matches_definition_on_insert;
+    DROP TRIGGER IF EXISTS custom_field_values_owner_matches_definition_on_update;
+
+    CREATE TABLE custom_field_definitions_v38_fixture (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      granularity TEXT NOT NULL CHECK (granularity IN ('order', 'order_item')),
+      value_type TEXT NOT NULL CHECK (value_type IN (
+        'text', 'number', 'money', 'datetime',
+        'single_select', 'multi_select', 'checkbox'
+      )),
+      required INTEGER NOT NULL CHECK (required IN (0, 1)),
+      default_value_json TEXT CHECK (
+        default_value_json IS NULL OR json_valid(default_value_json)
+      ),
+      options_json TEXT NOT NULL CHECK (
+        json_valid(options_json) AND json_type(options_json) = 'array'
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (granularity, name)
+    ) STRICT;
+    INSERT INTO custom_field_definitions_v38_fixture
+    SELECT * FROM custom_field_definitions;
+
+    CREATE TABLE table_templates_v38_fixture (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      name_key TEXT NOT NULL,
+      granularity TEXT NOT NULL CHECK (granularity IN ('order', 'order_item')),
+      configuration_version INTEGER NOT NULL DEFAULT 2
+        CHECK (configuration_version = 2),
+      configuration_json TEXT NOT NULL CHECK (
+        json_valid(configuration_json) AND json_type(configuration_json) = 'object'
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (granularity, name_key)
+    ) STRICT;
+    INSERT INTO table_templates_v38_fixture
+    SELECT * FROM table_templates;
+
+    DROP TABLE table_templates;
+    ALTER TABLE table_templates_v38_fixture RENAME TO table_templates;
+    DROP TABLE custom_field_definitions;
+    ALTER TABLE custom_field_definitions_v38_fixture RENAME TO custom_field_definitions;
+
+    CREATE TRIGGER custom_field_values_owner_matches_definition_on_insert
+    BEFORE INSERT ON custom_field_values
+    WHEN EXISTS (
+      SELECT 1 FROM custom_field_definitions AS definitions
+      WHERE definitions.id = NEW.definition_id
+        AND NOT (
+          (definitions.granularity = 'order'
+            AND NEW.order_id IS NOT NULL AND NEW.order_item_id IS NULL)
+          OR
+          (definitions.granularity = 'order_item'
+            AND NEW.order_id IS NULL AND NEW.order_item_id IS NOT NULL)
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'custom field granularity does not match value owner');
+    END;
+    CREATE TRIGGER custom_field_values_owner_matches_definition_on_update
+    BEFORE UPDATE ON custom_field_values
+    WHEN EXISTS (
+      SELECT 1 FROM custom_field_definitions AS definitions
+      WHERE definitions.id = NEW.definition_id
+        AND NOT (
+          (definitions.granularity = 'order'
+            AND NEW.order_id IS NOT NULL AND NEW.order_item_id IS NULL)
+          OR
+          (definitions.granularity = 'order_item'
+            AND NEW.order_id IS NULL AND NEW.order_item_id IS NOT NULL)
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'custom field granularity does not match value owner');
+    END;
+    CREATE TRIGGER table_template_dependencies_match_granularity_on_insert
+    BEFORE INSERT ON table_template_custom_field_dependencies
+    WHEN EXISTS (
+      SELECT 1 FROM table_templates AS templates
+      JOIN custom_field_definitions AS definitions
+        ON definitions.id = NEW.definition_id
+      WHERE templates.id = NEW.template_id
+        AND templates.granularity <> definitions.granularity
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'table template and custom field granularities do not match');
+    END;
+    CREATE TRIGGER table_template_dependencies_match_granularity_on_update
+    BEFORE UPDATE ON table_template_custom_field_dependencies
+    WHEN EXISTS (
+      SELECT 1 FROM table_templates AS templates
+      JOIN custom_field_definitions AS definitions
+        ON definitions.id = NEW.definition_id
+      WHERE templates.id = NEW.template_id
+        AND templates.granularity <> definitions.granularity
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'table template and custom field granularities do not match');
+    END;
+    CREATE TRIGGER table_templates_prevent_granularity_change_with_dependencies
+    BEFORE UPDATE OF granularity ON table_templates
+    WHEN OLD.granularity <> NEW.granularity
+      AND EXISTS (
+        SELECT 1 FROM table_template_custom_field_dependencies AS dependencies
+        WHERE dependencies.template_id = OLD.id
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'cannot change table template granularity with custom field dependencies');
+    END;
+    CREATE TRIGGER custom_field_definitions_keep_template_granularity_on_update
+    BEFORE UPDATE OF granularity ON custom_field_definitions
+    WHEN OLD.granularity <> NEW.granularity
+      AND EXISTS (
+        SELECT 1 FROM table_template_custom_field_dependencies AS dependencies
+        JOIN table_templates AS templates ON templates.id = dependencies.template_id
+        WHERE dependencies.definition_id = OLD.id
+          AND templates.granularity <> NEW.granularity
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'table template and custom field granularities do not match');
+    END;
+
+    DELETE FROM schema_migrations WHERE version = 39;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion31ExtensionArtifacts(database: DatabaseSync): void {
   removeVersion32ExtensionArtifacts(database);
   database.exec(`
@@ -125,6 +284,7 @@ export function removeVersion36ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 export function removeVersion38ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion39ExtensionArtifacts(database);
   database.exec(`
     PRAGMA foreign_keys = OFF;
     DROP TRIGGER IF EXISTS aftersales_case_workflow_template_events_are_immutable_on_update;

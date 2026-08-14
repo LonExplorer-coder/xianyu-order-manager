@@ -26,7 +26,7 @@ export type OrderExportWriteResult = {
 };
 
 export type OrderExportPreviewSheet = {
-  name: '订单总表' | '订单商品明细表';
+  name: '订单总表' | '订单商品明细表' | '合并发货表';
   columns: Array<{ header: string; valueType: CustomFieldType }>;
   rows: string[][];
   totalRowCount: number;

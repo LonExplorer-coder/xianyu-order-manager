@@ -111,7 +111,7 @@ export function CustomFieldsWorkspace({
         <div>
           <span className="section-kicker">业务字段配置</span>
           <h1>字段库</h1>
-          <p>为订单或商品添加业务字段，字段值与平台订单事实分开保存。</p>
+          <p>为订单、商品或当前发货组添加业务字段，字段值与平台订单事实分开保存。</p>
         </div>
       </header>
 
@@ -196,6 +196,7 @@ export function CustomFieldsWorkspace({
               >
                 <option value="order">订单</option>
                 <option value="order_item">商品</option>
+                <option value="shipment_group">发货组</option>
               </select>
             </label>
             <label className="field">
@@ -232,7 +233,7 @@ export function CustomFieldsWorkspace({
               checked={required}
               onChange={(event) => setRequired(event.target.checked)}
             />
-            <span><strong>必填字段</strong><small>订单级必填且没有默认值时，自动入库会转为人工确认。</small></span>
+            <span><strong>必填字段</strong><small>订单级必填且没有默认值时，自动入库会转为人工确认；发货组级必填值在导出前校验。</small></span>
           </label>
 
           <label className="fields-check-row">
@@ -246,7 +247,7 @@ export function CustomFieldsWorkspace({
                 setDefaultValueValid(true);
               }}
             />
-            <span><strong>设置默认值</strong><small>创建后会应用到既有及后续订单或商品，可继续修改。</small></span>
+            <span><strong>设置默认值</strong><small>创建后会应用到既有及后续对应数据，可继续修改。</small></span>
           </label>
 
           {hasDefault && (
@@ -299,7 +300,9 @@ export function customFieldTypeLabel(type: CustomFieldType): string {
 }
 
 export function granularityLabel(granularity: CustomFieldGranularity): string {
-  return granularity === 'order' ? '订单' : '商品';
+  if (granularity === 'order') return '订单';
+  if (granularity === 'order_item') return '商品';
+  return '发货组';
 }
 
 function defaultFieldLabel(type: CustomFieldType): string {

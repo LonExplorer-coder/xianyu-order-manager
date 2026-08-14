@@ -66,6 +66,7 @@ import type {
   CustomFieldValueRecord,
   DraftCustomFieldValues,
   SaveCustomFieldValuesInput,
+  SaveShipmentGroupCustomFieldValuesInput,
 } from '../core/custom-fields';
 import {
   isCustomFieldGranularity,
@@ -140,10 +141,13 @@ import {
   type ShipmentGroupAdjustmentResult,
 } from '../core/shipment-group-adjustments';
 import {
+  buildShipmentGroupWorkbench,
   buildFixedMemberShipmentGroup,
   buildShipmentGroupProjection,
   shipmentMatchKeyIdentity,
+  type ShipmentGroupCustomFieldValue,
   type ShipmentGroupProjection,
+  type ShipmentGroupWorkbenchResult,
 } from '../core/shipment-groups';
 import {
   isShipmentLogisticsStatus,
@@ -183,13 +187,21 @@ import type {
 } from '../core/aftersales-workflow-templates';
 import {
   DEFAULT_ORDER_TABLE_COLUMNS,
+  DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS,
   normalizeCreateTableTemplateInput,
   normalizeStoredTableTemplateInput,
+  normalizeShipmentGroupWorkbenchQuery,
   normalizeUpdateTableTemplateInput,
   isDynamicProductTableGroup,
   tableTemplateCustomFieldDefinitionIds,
   tableTemplateNameKey,
 } from '../core/table-templates';
+import {
+  normalizeShipmentGroupExportInput,
+  type ShipmentGroupExportInput,
+  type ShipmentGroupExportPreviewResult,
+  type ShipmentGroupExportWriteResult,
+} from '../core/shipment-group-export';
 import {
   createOrderExportWorkbookPlan,
   createOrderExportPreviewSheets,
@@ -1473,7 +1485,7 @@ export class LocalApplication {
         definition.updatedAt,
       );
 
-      if (definition.defaultValue === null) return;
+      if (definition.defaultValue === null || definition.granularity === 'shipment_group') return;
       const targets = definition.granularity === 'order'
         ? workspace.database.prepare('SELECT id FROM original_orders ORDER BY created_at, id').all()
         : workspace.database.prepare('SELECT id FROM order_items ORDER BY order_id, position, id').all();
@@ -1516,7 +1528,8 @@ export class LocalApplication {
     if (
       granularity !== undefined &&
       granularity !== 'order' &&
-      granularity !== 'order_item'
+      granularity !== 'order_item' &&
+      granularity !== 'shipment_group'
     ) {
       throw new Error('表格模板数据粒度无效');
     }
@@ -1691,6 +1704,186 @@ export class LocalApplication {
             : { '订单商品明细表': prepared.orderItemCount }
         ),
       }),
+    };
+  }
+
+  public async exportShipmentGroupsToWorkbook(
+    input: ShipmentGroupExportInput,
+    destinationPath: string,
+  ): Promise<ShipmentGroupExportWriteResult> {
+    if (typeof destinationPath !== 'string' || !destinationPath.trim()) {
+      throw new Error('合并发货表导出文件路径无效');
+    }
+    const prepared = this.prepareShipmentGroupExport(input);
+    await writeOrderExportWorkbook(destinationPath, prepared.plan);
+    return {
+      shipmentGroupCount: prepared.shipmentGroupCount,
+      orderCount: prepared.orderCount,
+      orderItemCount: prepared.orderItemCount,
+    };
+  }
+
+  public previewShipmentGroupExport(
+    input: ShipmentGroupExportInput,
+  ): ShipmentGroupExportPreviewResult {
+    const prepared = this.prepareShipmentGroupExport(input, 5);
+    return {
+      shipmentGroupCount: prepared.shipmentGroupCount,
+      orderCount: prepared.orderCount,
+      orderItemCount: prepared.orderItemCount,
+      sheets: createOrderExportPreviewSheets(prepared.plan, 5, {
+        '订单总表': prepared.orderCount,
+        '订单商品明细表': prepared.orderItemCount,
+        '合并发货表': prepared.shipmentGroupCount,
+      }),
+    };
+  }
+
+  private prepareShipmentGroupExport(
+    input: ShipmentGroupExportInput,
+    previewRowLimit?: number,
+  ): {
+    plan: OrderExportWorkbookPlan;
+    shipmentGroupCount: number;
+    orderCount: number;
+    orderItemCount: number;
+  } {
+    const normalizedInput = normalizeShipmentGroupExportInput(input);
+    const orderTemplate = normalizedInput.orderTemplateId === null
+      ? null
+      : this.getTableTemplate(normalizedInput.orderTemplateId);
+    const orderItemTemplate = normalizedInput.orderItemTemplateId === null
+      ? null
+      : this.getTableTemplate(normalizedInput.orderItemTemplateId);
+    const shipmentGroupTemplate = normalizedInput.shipmentGroupTemplateId === null
+      ? null
+      : this.getTableTemplate(normalizedInput.shipmentGroupTemplateId);
+    if (orderTemplate && orderTemplate.granularity !== 'order') {
+      throw new Error('订单总表必须使用订单粒度模板');
+    }
+    if (orderItemTemplate && orderItemTemplate.granularity !== 'order_item') {
+      throw new Error('订单商品明细表必须使用订单商品明细粒度模板');
+    }
+    if (shipmentGroupTemplate && shipmentGroupTemplate.granularity !== 'shipment_group') {
+      throw new Error('合并发货表必须使用发货组粒度模板');
+    }
+
+    const groupById = new Map(this.queryShipmentGroups().groups.map((group) => [group.id, group]));
+    const groups = normalizedInput.shipmentGroupIds.map((groupId) => groupById.get(groupId));
+    if (groups.some((group) => group === undefined)) {
+      throw new Error('部分发货组已变化，请刷新后重新导出');
+    }
+    const selectedGroups = groups.filter((group): group is NonNullable<typeof group> => (
+      group !== undefined
+    ));
+    const ambiguousGroup = selectedGroups.find((group) => (
+      group.recipientConflict && group.selectedRecipientOrderId === null
+    ));
+    if (ambiguousGroup) {
+      throw new Error('发货组的收件人不一致，请先确认最终收件人再导出');
+    }
+
+    const shipmentGroupDefinitions = this.listCustomFieldDefinitions().filter(
+      ({ granularity }) => granularity === 'shipment_group',
+    );
+    const requiredShipmentGroupDefinitions = shipmentGroupDefinitions.filter(
+      ({ required }) => required,
+    );
+    if (requiredShipmentGroupDefinitions.length > 0) {
+      const requiredValues = this.listShipmentGroupCustomFieldValues(
+        selectedGroups.map(({ id }) => id),
+        requiredShipmentGroupDefinitions.map(({ id }) => id),
+        requiredShipmentGroupDefinitions,
+      );
+      const valuesByTarget = new Map(requiredValues.map((entry) => [
+        `${entry.shipmentGroupId}\u0000${entry.definitionId}`,
+        entry.value,
+      ]));
+      for (const group of selectedGroups) {
+        for (const definition of requiredShipmentGroupDefinitions) {
+          const key = `${group.id}\u0000${definition.id}`;
+          const value = valuesByTarget.has(key)
+            ? valuesByTarget.get(key)
+            : definition.defaultValue;
+          if (isMissingCustomFieldValue(value)) {
+            throw new Error(
+              `发货组缺少必填字段“${definition.name}”，请补全后再导出`,
+            );
+          }
+        }
+      }
+    }
+
+    const orderIds = [...new Set(selectedGroups.flatMap((group) => (
+      group.orders.map(({ id }) => id)
+    )))];
+    const scopeStats = this.orderExportScopeStats(orderIds);
+    if (scopeStats.orderCount !== orderIds.length) {
+      throw new Error('部分订单已变化，请刷新发货组后重新导出');
+    }
+
+    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS;
+    const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
+    const shipmentGroupColumns = shipmentGroupTemplate?.columns
+      ?? DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS;
+    const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
+    const orderItemCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderItemColumns);
+    const shipmentGroupCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(
+      shipmentGroupColumns,
+    );
+    const projectedOrderIds = previewRowLimit === undefined
+      ? orderIds
+      : orderIds.slice(0, previewRowLimit);
+    const projectedGroups = previewRowLimit === undefined
+      ? selectedGroups
+      : selectedGroups.slice(0, previewRowLimit);
+    const orderResult = this.queryOrders(
+      { lifecycleStatus: 'all' },
+      orderCustomDefinitionIds,
+      projectedOrderIds,
+    );
+    const queriedItems = this.queryOrderItems(
+      {},
+      orderItemCustomDefinitionIds,
+      projectedOrderIds,
+      true,
+    );
+    const orderItemResult = previewRowLimit === undefined
+      ? queriedItems
+      : {
+          items: queriedItems.items.slice(0, previewRowLimit),
+          customFieldValues: queriedItems.customFieldValues.filter((value) => (
+            value.orderItemId !== null
+            && queriedItems.items.slice(0, previewRowLimit)
+              .some((item) => item.id === value.orderItemId)
+          )),
+        };
+    const groupCustomFieldValues = this.listShipmentGroupCustomFieldValues(
+      projectedGroups.map(({ id }) => id),
+      shipmentGroupCustomDefinitionIds,
+      shipmentGroupDefinitions,
+    );
+    const plan = createOrderExportWorkbookPlan({
+      masking: normalizedInput.masking,
+      includeOrderItems: true,
+      orders: orderResult.orders,
+      orderItems: orderItemResult.items,
+      orderColumns,
+      orderItemColumns,
+      customFieldDefinitions: this.listCustomFieldDefinitions(),
+      orderCustomFieldValues: orderResult.customFieldValues,
+      orderItemCustomFieldValues: orderItemResult.customFieldValues,
+      addressRegions: this.orderExportAddressRegions(projectedOrderIds),
+      orderMaximumItemCount: scopeStats.maximumItemCount,
+      shipmentGroups: projectedGroups,
+      shipmentGroupColumns,
+      shipmentGroupCustomFieldValues: groupCustomFieldValues,
+    });
+    return {
+      plan,
+      shipmentGroupCount: selectedGroups.length,
+      orderCount: orderIds.length,
+      orderItemCount: scopeStats.orderItemCount,
     };
   }
 
@@ -3012,6 +3205,137 @@ export class LocalApplication {
         .digest('hex')
         .slice(0, 24)}`
     ), manualGroups);
+  }
+
+  public queryShipmentGroupWorkbench(
+    query: unknown = {},
+    customFieldDefinitionIds: readonly string[] = [],
+  ): ShipmentGroupWorkbenchResult {
+    const definitions = this.listCustomFieldDefinitions();
+    const groupDefinitions = definitions.filter(
+      ({ granularity }) => granularity === 'shipment_group',
+    );
+    const normalizedQuery = normalizeShipmentGroupWorkbenchQuery(query, definitions);
+    const requestedDefinitionIds = new Set(customFieldDefinitionIds.map((definitionId) => {
+      const definition = groupDefinitions.find(({ id }) => id === definitionId);
+      if (!definition) throw new Error('发货组自定义字段无效');
+      return definition.id;
+    }));
+    if (normalizedQuery.customFieldFilter) {
+      requestedDefinitionIds.add(normalizedQuery.customFieldFilter.definitionId);
+    }
+    if (normalizedQuery.customFieldSort) {
+      requestedDefinitionIds.add(normalizedQuery.customFieldSort.definitionId);
+    }
+
+    const projection = this.queryShipmentGroups();
+    const values = this.listShipmentGroupCustomFieldValues(
+      projection.groups.map(({ id }) => id),
+      [...requestedDefinitionIds],
+      groupDefinitions,
+    );
+    return buildShipmentGroupWorkbench(
+      projection,
+      normalizedQuery,
+      groupDefinitions.filter(({ id }) => requestedDefinitionIds.has(id)),
+      values,
+    );
+  }
+
+  public saveShipmentGroupCustomFieldValues(
+    input: SaveShipmentGroupCustomFieldValuesInput,
+  ): ShipmentGroupCustomFieldValue[] {
+    const workspace = this.requireWorkspace();
+    if (!input || typeof input !== 'object') {
+      throw new Error('发货组自定义字段保存内容无效');
+    }
+    const shipmentGroupId = normalizeShipmentGroupIdentifier(input.shipmentGroupId);
+    if (!Array.isArray(input.expectedMemberOrderIds) || input.expectedMemberOrderIds.length === 0) {
+      throw new Error('发货组成员快照无效');
+    }
+    const expectedMemberOrderIds = input.expectedMemberOrderIds.map(
+      (orderId) => normalizeShipmentGroupIdentifier(orderId),
+    );
+    if (new Set(expectedMemberOrderIds).size !== expectedMemberOrderIds.length) {
+      throw new Error('发货组成员快照不能重复');
+    }
+    if (!Array.isArray(input.values)) {
+      throw new Error('发货组自定义字段保存内容无效');
+    }
+
+    const group = this.queryShipmentGroups().groups.find(({ id }) => id === shipmentGroupId);
+    const currentMemberIds = group?.orders.map(({ id }) => id).sort() ?? [];
+    if (
+      !group ||
+      currentMemberIds.join('\n') !== [...expectedMemberOrderIds].sort().join('\n')
+    ) {
+      throw new Error('发货组已变化，请刷新后重试');
+    }
+
+    const definitions = this.listCustomFieldDefinitions().filter(
+      ({ granularity }) => granularity === 'shipment_group',
+    );
+    const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+    const pending = input.values.map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        throw new Error('发货组自定义字段保存内容无效');
+      }
+      const definitionId = normalizeShipmentGroupIdentifier(entry.definitionId);
+      const definition = definitionsById.get(definitionId);
+      if (!definition) throw new Error('发货组自定义字段无效');
+      return {
+        definition,
+        value: entry.value === null
+          ? null
+          : normalizeCustomFieldValue(definition.type, entry.value, definition.options),
+      };
+    });
+    if (new Set(pending.map(({ definition }) => definition.id)).size !== pending.length) {
+      throw new Error('同一发货组自定义字段不能重复赋值');
+    }
+
+    workspace.transaction(() => {
+      const now = new Date().toISOString();
+      for (const entry of pending) {
+        workspace.database.prepare(`
+          INSERT INTO shipment_group_custom_field_values (
+            id, definition_id, shipment_group_id, value_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (definition_id, shipment_group_id) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        `).run(
+          randomUUID(),
+          entry.definition.id,
+          shipmentGroupId,
+          JSON.stringify(entry.value),
+          now,
+          now,
+        );
+      }
+
+      const stored = this.listShipmentGroupCustomFieldValues(
+        [shipmentGroupId],
+        definitions.map(({ id }) => id),
+        definitions,
+      );
+      const storedByDefinition = new Map(stored.map((entry) => [entry.definitionId, entry.value]));
+      for (const definition of definitions) {
+        if (!definition.required) continue;
+        const value = storedByDefinition.has(definition.id)
+          ? storedByDefinition.get(definition.id)
+          : definition.defaultValue;
+        if (isMissingCustomFieldValue(value)) {
+          throw new Error(`必填自定义字段“${definition.name}”不能为空`);
+        }
+      }
+    });
+
+    return this.listShipmentGroupCustomFieldValues(
+      [shipmentGroupId],
+      definitions.map(({ id }) => id),
+      definitions,
+    );
   }
 
   public confirmShipment(input: unknown): ShipmentConfirmationResult {
@@ -5257,10 +5581,58 @@ export class LocalApplication {
     return values;
   }
 
+  private listShipmentGroupCustomFieldValues(
+    shipmentGroupIds: readonly string[],
+    definitionIds: readonly string[],
+    definitions: readonly CustomFieldDefinition[],
+  ): ShipmentGroupCustomFieldValue[] {
+    if (shipmentGroupIds.length === 0 || definitionIds.length === 0) return [];
+    const workspace = this.requireWorkspace();
+    const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+    const selectedDefinitionIds = [...new Set(definitionIds)];
+    const values: ShipmentGroupCustomFieldValue[] = [];
+    const chunkSize = 400;
+    for (let offset = 0; offset < shipmentGroupIds.length; offset += chunkSize) {
+      const groupChunk = shipmentGroupIds.slice(offset, offset + chunkSize);
+      const groupPlaceholders = groupChunk.map(() => '?').join(', ');
+      const definitionPlaceholders = selectedDefinitionIds.map(() => '?').join(', ');
+      const rows = workspace.database.prepare(`
+        SELECT shipment_group_id, definition_id, value_json
+        FROM shipment_group_custom_field_values
+        WHERE shipment_group_id IN (${groupPlaceholders})
+          AND definition_id IN (${definitionPlaceholders})
+        ORDER BY shipment_group_id, definition_id
+      `).all(...groupChunk, ...selectedDefinitionIds) as unknown as SqlRow[];
+      values.push(...rows.map((row) => {
+        const definitionId = asString(row.definition_id);
+        const definition = definitionsById.get(definitionId);
+        if (!definition || definition.granularity !== 'shipment_group') {
+          throw new Error('数据库发货组自定义字段定义错误');
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(asString(row.value_json));
+        } catch (error) {
+          throw new Error('数据库发货组自定义字段值格式错误', { cause: error });
+        }
+        return {
+          shipmentGroupId: asString(row.shipment_group_id),
+          definitionId,
+          value: parsed === null
+            ? null
+            : normalizeCustomFieldValue(definition.type, parsed, definition.options),
+        };
+      }));
+    }
+    return values;
+  }
+
   private assertRequiredCustomFieldValuesPresent(orderId: string): void {
     const workspace = this.requireWorkspace();
     const requiredDefinitions = this.listCustomFieldDefinitions()
-      .filter((definition) => definition.required);
+      .filter((definition) => (
+        definition.required && definition.granularity !== 'shipment_group'
+      ));
     if (requiredDefinitions.length === 0) return;
 
     const itemIds = (workspace.database.prepare(`
@@ -5345,6 +5717,7 @@ export class LocalApplication {
           orderValues.set(definition.id, structuredClone(definition.defaultValue));
           continue;
         }
+        if (definition.granularity !== 'order_item') continue;
         for (const item of draft.items) {
           const key = JSON.stringify([definition.id, item.id]);
           itemValues.set(key, {
@@ -6649,8 +7022,15 @@ function tableTemplateCustomFieldDependencies(template: TableTemplate): Array<{
 function parseTableTemplateGranularity(
   value: string | number | null | undefined,
 ): TableTemplateGranularity {
-  if (value === 'order' || value === 'order_item') return value;
+  if (value === 'order' || value === 'order_item' || value === 'shipment_group') return value;
   throw new Error('数据库表格模板数据粒度错误');
+}
+
+function normalizeShipmentGroupIdentifier(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('发货组标识无效');
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 200) throw new Error('发货组标识无效');
+  return normalized;
 }
 
 function normalizeTableTemplateId(value: unknown): string {

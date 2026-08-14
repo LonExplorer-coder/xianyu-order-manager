@@ -10,13 +10,22 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from './order-workbench';
+import type {
+  OpenShipmentGroup,
+  ShipmentGroupCustomFieldValue,
+  ShipmentGroupWorkbenchQuery,
+} from './shipment-groups';
 import {
   QUANTITY_SOURCES,
   quantitySourceFromLegacy,
   quantitySourceLabel,
 } from './quantity-source';
 
-export const TABLE_TEMPLATE_GRANULARITIES = ['order', 'order_item'] as const;
+export const TABLE_TEMPLATE_GRANULARITIES = [
+  'order',
+  'order_item',
+  'shipment_group',
+] as const;
 
 export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[number];
 
@@ -50,9 +59,19 @@ export type OrderItemBuiltinTableFieldId =
   | 'quantity'
   | 'quantity_source';
 
+export type ShipmentGroupBuiltinTableFieldId =
+  | 'shipment_group_id'
+  | 'formation'
+  | 'recipient'
+  | 'phone'
+  | 'address'
+  | 'member_order_numbers'
+  | 'product_summary';
+
 export type BuiltinTableFieldId =
   | OrderBuiltinTableFieldId
-  | OrderItemBuiltinTableFieldId;
+  | OrderItemBuiltinTableFieldId
+  | ShipmentGroupBuiltinTableFieldId;
 
 export type ComputedTableFieldId =
   | 'item_quantity_total'
@@ -61,7 +80,10 @@ export type ComputedTableFieldId =
   | 'shipment_summary'
   | 'logistics_summary'
   | 'aftersales_summary'
-  | 'current_todo';
+  | 'current_todo'
+  | 'shipment_group_order_count'
+  | 'shipment_group_total_quantity'
+  | 'shipment_group_total_amount';
 
 export type TableFieldReference =
   | { kind: 'builtin'; key: BuiltinTableFieldId }
@@ -126,6 +148,28 @@ export const DEFAULT_ORDER_ITEM_TABLE_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'computed', key: 'item_subtotal' }, displayName: '商品小计' },
 ];
 
+export const DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS: TableTemplateColumn[] = [
+  { field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' },
+  { field: { kind: 'builtin', key: 'formation' }, displayName: '成组方式' },
+  { field: { kind: 'builtin', key: 'recipient' }, displayName: '最终收件人' },
+  { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+  { field: { kind: 'builtin', key: 'address' }, displayName: '最终收货地址' },
+  { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '成员订单号' },
+  { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品汇总' },
+  {
+    field: { kind: 'computed', key: 'shipment_group_order_count' },
+    displayName: '合并订单数',
+  },
+  {
+    field: { kind: 'computed', key: 'shipment_group_total_quantity' },
+    displayName: '商品总数量',
+  },
+  {
+    field: { kind: 'computed', key: 'shipment_group_total_amount' },
+    displayName: '合并总额',
+  },
+];
+
 type OrderTableTemplateConfiguration = {
   name: string;
   granularity: 'order';
@@ -140,14 +184,22 @@ type OrderItemTableTemplateConfiguration = {
   query: OrderItemWorkbenchQuery;
 };
 
+type ShipmentGroupTableTemplateConfiguration = {
+  name: string;
+  granularity: 'shipment_group';
+  columns: TableTemplateColumn[];
+  query: ShipmentGroupWorkbenchQuery;
+};
+
 export type CreateTableTemplateInput =
   | OrderTableTemplateConfiguration
-  | OrderItemTableTemplateConfiguration;
+  | OrderItemTableTemplateConfiguration
+  | ShipmentGroupTableTemplateConfiguration;
 
 export type UpdateTableTemplateInput = {
   name: string;
   columns: TableTemplateLayoutItem[];
-  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery;
+  query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery;
 };
 
 export type TableTemplate =
@@ -157,10 +209,15 @@ export type TableTemplate =
     updatedAt: string;
   })
   | (OrderItemTableTemplateConfiguration & {
-    id: string;
-    createdAt: string;
-    updatedAt: string;
-  });
+      id: string;
+      createdAt: string;
+      updatedAt: string;
+    })
+  | (ShipmentGroupTableTemplateConfiguration & {
+      id: string;
+      createdAt: string;
+      updatedAt: string;
+    });
 
 export type AvailableTableField = {
   reference: TableFieldReference;
@@ -254,11 +311,29 @@ const ORDER_ITEM_COMPUTED_FIELDS = [
   fixedField('order_item', 'computed', 'item_subtotal', '商品小计', 'money'),
 ] as const satisfies readonly FixedTableField[];
 
+const SHIPMENT_GROUP_BUILTIN_FIELDS = [
+  fixedField('shipment_group', 'builtin', 'shipment_group_id', '发货组标识', 'text'),
+  fixedField('shipment_group', 'builtin', 'formation', '成组方式', 'text'),
+  fixedField('shipment_group', 'builtin', 'recipient', '最终收件人', 'text'),
+  fixedField('shipment_group', 'builtin', 'phone', '手机号', 'text'),
+  fixedField('shipment_group', 'builtin', 'address', '最终收货地址', 'text'),
+  fixedField('shipment_group', 'builtin', 'member_order_numbers', '成员订单号', 'text'),
+  fixedField('shipment_group', 'builtin', 'product_summary', '商品汇总', 'text'),
+] as const satisfies readonly FixedTableField[];
+
+const SHIPMENT_GROUP_COMPUTED_FIELDS = [
+  fixedField('shipment_group', 'computed', 'shipment_group_order_count', '合并订单数', 'number'),
+  fixedField('shipment_group', 'computed', 'shipment_group_total_quantity', '商品总数量', 'number'),
+  fixedField('shipment_group', 'computed', 'shipment_group_total_amount', '合并总额', 'money'),
+] as const satisfies readonly FixedTableField[];
+
 const FIXED_FIELDS: readonly FixedTableField[] = [
   ...ORDER_BUILTIN_FIELDS,
   ...ORDER_COMPUTED_FIELDS,
   ...ORDER_ITEM_BUILTIN_FIELDS,
   ...ORDER_ITEM_COMPUTED_FIELDS,
+  ...SHIPMENT_GROUP_BUILTIN_FIELDS,
+  ...SHIPMENT_GROUP_COMPUTED_FIELDS,
 ];
 
 const ORDER_QUERY_KEYS = [
@@ -286,6 +361,14 @@ const ORDER_ITEM_QUERY_KEYS = [
   'unitPriceCents',
   'quantity',
   'quantitySource',
+  'sortField',
+  'sortDirection',
+  'customFieldFilter',
+  'customFieldSort',
+] as const;
+
+const SHIPMENT_GROUP_QUERY_KEYS = [
+  'text',
   'sortField',
   'sortDirection',
   'customFieldFilter',
@@ -333,6 +416,13 @@ const ORDER_ITEM_SORT_FIELDS = [
   'quantity',
   'quantity_source',
 ] as const;
+const SHIPMENT_GROUP_SORT_FIELDS = [
+  'recipient',
+  'address',
+  'order_count',
+  'total_quantity',
+  'total_amount',
+] as const;
 
 const MAX_TEMPLATE_NAME_LENGTH = 100;
 const MAX_DISPLAY_NAME_LENGTH = 100;
@@ -375,6 +465,17 @@ export function normalizeStoredTableTemplateInput(
   return normalizeTableTemplateInput(input, customFieldDefinitions, false);
 }
 
+export function normalizeShipmentGroupWorkbenchQuery(
+  value: unknown,
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+): ShipmentGroupWorkbenchQuery {
+  return normalizeQuery(
+    value,
+    'shipment_group',
+    customFieldDefinitions,
+  ) as ShipmentGroupWorkbenchQuery;
+}
+
 function normalizeTableTemplateInput(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[],
@@ -394,6 +495,14 @@ function normalizeTableTemplateInput(
       assertOrderTableLayoutFutureHeaderSafety(columns);
     }
     return { name, granularity, columns, query: query as OrderWorkbenchQuery };
+  }
+  if (granularity === 'shipment_group') {
+    return {
+      name,
+      granularity,
+      columns: columns as TableTemplateColumn[],
+      query: query as ShipmentGroupWorkbenchQuery,
+    };
   }
   return {
     name,
@@ -565,6 +674,37 @@ export function projectOrderTableCell(
     case 'ordered_at': return order.orderedAtNormalized;
     case 'paid_at': return order.paidAtNormalized;
     case 'created_at': return order.createdAt;
+    default: return null;
+  }
+}
+
+export function projectShipmentGroupTableCell(
+  group: OpenShipmentGroup,
+  reference: TableFieldReference,
+  customFieldValues: readonly ShipmentGroupCustomFieldValue[] = [],
+): TableCellValue {
+  if (reference.kind === 'custom') {
+    return customFieldValues.find((entry) => (
+      entry.shipmentGroupId === group.id
+      && entry.definitionId === reference.definitionId
+    ))?.value ?? null;
+  }
+  if (reference.kind === 'computed') {
+    if (reference.key === 'shipment_group_order_count') return group.orderCount;
+    if (reference.key === 'shipment_group_total_quantity') return group.totalQuantity;
+    if (reference.key === 'shipment_group_total_amount') return group.totalAmountCents;
+    return null;
+  }
+  switch (reference.key) {
+    case 'shipment_group_id': return group.id;
+    case 'formation': return group.formation === 'manual' ? '手工调整' : '自动成组';
+    case 'recipient': return group.recipient;
+    case 'phone': return group.phone;
+    case 'address': return group.addressOriginal;
+    case 'member_order_numbers': return group.orders.map(({ orderNumber }) => orderNumber).join('；');
+    case 'product_summary': return group.items.map((item) => (
+      `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} ×${item.quantity}`
+    )).join('；');
     default: return null;
   }
 }
@@ -819,10 +959,32 @@ function normalizeQuery(
   value: unknown,
   granularity: TableTemplateGranularity,
   customFieldDefinitions: readonly CustomFieldDefinition[],
-): OrderWorkbenchQuery | OrderItemWorkbenchQuery {
-  const allowedKeys = granularity === 'order' ? ORDER_QUERY_KEYS : ORDER_ITEM_QUERY_KEYS;
+): OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery {
+  const allowedKeys = granularity === 'order'
+    ? ORDER_QUERY_KEYS
+    : granularity === 'order_item'
+      ? ORDER_ITEM_QUERY_KEYS
+      : SHIPMENT_GROUP_QUERY_KEYS;
   const record = strictRecord(value, '表格模板查询', allowedKeys);
   const common = normalizeCustomQueryParts(record, granularity, customFieldDefinitions);
+  if (granularity === 'shipment_group') {
+    const query: ShipmentGroupWorkbenchQuery = { ...common };
+    if (record.text !== undefined) {
+      query.text = nonEmptyText(record.text, '综合搜索', MAX_QUERY_TEXT_LENGTH);
+    }
+    assignOptionalEnum(
+      query,
+      'sortField',
+      record.sortField,
+      SHIPMENT_GROUP_SORT_FIELDS,
+      '发货组排序字段',
+    );
+    assignOptionalEnum(query, 'sortDirection', record.sortDirection, SORT_DIRECTIONS, '排序方向');
+    if (query.sortField && query.customFieldSort) {
+      throw new Error('发货组一次只能使用一种排序');
+    }
+    return query;
+  }
   if (granularity === 'order_item') {
     const query: OrderItemWorkbenchQuery = { ...common };
     if (record.sourceTitle !== undefined) {
@@ -915,8 +1077,8 @@ function normalizeCustomQueryParts(
   record: Record<string, unknown>,
   granularity: TableTemplateGranularity,
   customFieldDefinitions: readonly CustomFieldDefinition[],
-): Pick<OrderItemWorkbenchQuery, 'customFieldFilter' | 'customFieldSort'> {
-  const result: Pick<OrderItemWorkbenchQuery, 'customFieldFilter' | 'customFieldSort'> = {};
+): Pick<ShipmentGroupWorkbenchQuery, 'customFieldFilter' | 'customFieldSort'> {
+  const result: Pick<ShipmentGroupWorkbenchQuery, 'customFieldFilter' | 'customFieldSort'> = {};
   if (record.customFieldFilter !== undefined) {
     const filter = strictRecord(
       record.customFieldFilter,
@@ -1052,7 +1214,7 @@ function assignOptionalText<TKey extends keyof OrderWorkbenchQuery>(
 }
 
 function assignOptionalEnum<
-  TQuery extends OrderWorkbenchQuery | OrderItemWorkbenchQuery,
+  TQuery extends OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery,
   TKey extends keyof TQuery,
   TValue extends string,
 >(

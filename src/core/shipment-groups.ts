@@ -1,4 +1,36 @@
 import type { OriginalOrder } from './contracts';
+import type {
+  CustomFieldDefinition,
+  CustomFieldFilter,
+  CustomFieldSort,
+  CustomFieldValue,
+} from './custom-fields';
+
+export type ShipmentGroupWorkbenchSortField =
+  | 'recipient'
+  | 'address'
+  | 'order_count'
+  | 'total_quantity'
+  | 'total_amount';
+
+export type ShipmentGroupWorkbenchQuery = {
+  text?: string;
+  sortField?: ShipmentGroupWorkbenchSortField;
+  sortDirection?: 'asc' | 'desc';
+  customFieldFilter?: CustomFieldFilter;
+  customFieldSort?: CustomFieldSort;
+};
+
+export type ShipmentGroupCustomFieldValue = {
+  shipmentGroupId: string;
+  definitionId: string;
+  value: CustomFieldValue | null;
+};
+
+export type ShipmentGroupWorkbenchResult = ShipmentGroupProjection & {
+  customFieldValues: ShipmentGroupCustomFieldValue[];
+  allGroupCount: number;
+};
 
 export type ShipmentGroupOrderItem = {
   id: string;
@@ -65,6 +97,158 @@ export type ShipmentGroupProjection = {
   groups: OpenShipmentGroup[];
   attentionOrders: ShipmentGroupAttentionOrder[];
 };
+
+export function buildShipmentGroupWorkbench(
+  projection: ShipmentGroupProjection,
+  query: ShipmentGroupWorkbenchQuery,
+  definitions: readonly CustomFieldDefinition[],
+  storedValues: readonly ShipmentGroupCustomFieldValue[],
+): ShipmentGroupWorkbenchResult {
+  const groupDefinitions = definitions.filter(
+    ({ granularity }) => granularity === 'shipment_group',
+  );
+  const values = effectiveShipmentGroupCustomFieldValues(
+    projection.groups,
+    groupDefinitions,
+    storedValues,
+  );
+  const valueByOwnerAndDefinition = new Map(values.map((entry) => [
+    shipmentGroupCustomFieldValueKey(entry.shipmentGroupId, entry.definitionId),
+    entry.value,
+  ]));
+  const normalizedText = query.text?.normalize('NFKC').trim().toLocaleLowerCase('zh-CN') ?? '';
+  const filtered = projection.groups.filter((group) => {
+    if (normalizedText && !shipmentGroupSearchText(group).includes(normalizedText)) return false;
+    if (!query.customFieldFilter) return true;
+    const value = valueByOwnerAndDefinition.get(shipmentGroupCustomFieldValueKey(
+      group.id,
+      query.customFieldFilter.definitionId,
+    ));
+    return value !== undefined
+      && value !== null
+      && sameCustomFieldValue(value, query.customFieldFilter.value);
+  });
+  const sorted = [...filtered].sort((left, right) => {
+    let compared = 0;
+    if (query.customFieldSort) {
+      compared = compareCustomFieldValues(
+        valueByOwnerAndDefinition.get(shipmentGroupCustomFieldValueKey(
+          left.id,
+          query.customFieldSort.definitionId,
+        )),
+        valueByOwnerAndDefinition.get(shipmentGroupCustomFieldValueKey(
+          right.id,
+          query.customFieldSort.definitionId,
+        )),
+      );
+      if (query.customFieldSort.direction === 'desc') compared *= -1;
+    } else if (query.sortField) {
+      compared = compareShipmentGroupField(left, right, query.sortField);
+      if (query.sortDirection === 'desc') compared *= -1;
+    }
+    return compared || left.id.localeCompare(right.id);
+  });
+  const visibleIds = new Set(sorted.map(({ id }) => id));
+  return {
+    groups: sorted,
+    attentionOrders: projection.attentionOrders.map((order) => ({
+      ...order,
+      reasons: [...order.reasons],
+    })),
+    customFieldValues: values.filter(({ shipmentGroupId }) => visibleIds.has(shipmentGroupId)),
+    allGroupCount: projection.groups.length,
+  };
+}
+
+function effectiveShipmentGroupCustomFieldValues(
+  groups: readonly OpenShipmentGroup[],
+  definitions: readonly CustomFieldDefinition[],
+  storedValues: readonly ShipmentGroupCustomFieldValue[],
+): ShipmentGroupCustomFieldValue[] {
+  const currentGroupIds = new Set(groups.map(({ id }) => id));
+  const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+  const valuesByKey = new Map<string, ShipmentGroupCustomFieldValue>();
+  for (const entry of storedValues) {
+    if (!currentGroupIds.has(entry.shipmentGroupId) || !definitionsById.has(entry.definitionId)) {
+      continue;
+    }
+    valuesByKey.set(
+      shipmentGroupCustomFieldValueKey(entry.shipmentGroupId, entry.definitionId),
+      structuredClone(entry),
+    );
+  }
+  for (const group of groups) {
+    for (const definition of definitions) {
+      if (definition.defaultValue === null) continue;
+      const key = shipmentGroupCustomFieldValueKey(group.id, definition.id);
+      if (valuesByKey.has(key)) continue;
+      valuesByKey.set(key, {
+        shipmentGroupId: group.id,
+        definitionId: definition.id,
+        value: structuredClone(definition.defaultValue),
+      });
+    }
+  }
+  return [...valuesByKey.values()].sort((left, right) => (
+    left.shipmentGroupId.localeCompare(right.shipmentGroupId)
+    || left.definitionId.localeCompare(right.definitionId)
+  ));
+}
+
+function shipmentGroupSearchText(group: OpenShipmentGroup): string {
+  return [
+    group.id,
+    group.recipient,
+    group.phone,
+    group.addressOriginal,
+    ...group.orders.flatMap((order) => [
+      order.orderNumber,
+      order.sellerAccount,
+      order.buyerNickname,
+    ]),
+    ...group.items.flatMap((item) => [item.sourceTitle, item.sourceSpec]),
+  ].join('\n').normalize('NFKC').toLocaleLowerCase('zh-CN');
+}
+
+function compareShipmentGroupField(
+  left: OpenShipmentGroup,
+  right: OpenShipmentGroup,
+  field: ShipmentGroupWorkbenchSortField,
+): number {
+  switch (field) {
+    case 'recipient': return left.recipient.localeCompare(right.recipient, 'zh-CN');
+    case 'address': return left.addressOriginal.localeCompare(right.addressOriginal, 'zh-CN');
+    case 'order_count': return left.orderCount - right.orderCount;
+    case 'total_quantity': return left.totalQuantity - right.totalQuantity;
+    case 'total_amount': return left.totalAmountCents - right.totalAmountCents;
+  }
+}
+
+function compareCustomFieldValues(
+  left: CustomFieldValue | null | undefined,
+  right: CustomFieldValue | null | undefined,
+): number {
+  if (left === undefined || left === null) return right === undefined || right === null ? 0 : 1;
+  if (right === undefined || right === null) return -1;
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (typeof left === 'boolean' && typeof right === 'boolean') return Number(left) - Number(right);
+  return customFieldComparableText(left).localeCompare(customFieldComparableText(right), 'zh-CN');
+}
+
+function customFieldComparableText(value: CustomFieldValue): string {
+  return Array.isArray(value) ? value.join('\n') : String(value);
+}
+
+function sameCustomFieldValue(left: CustomFieldValue, right: CustomFieldValue): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function shipmentGroupCustomFieldValueKey(
+  shipmentGroupId: string,
+  definitionId: string,
+): string {
+  return JSON.stringify([shipmentGroupId, definitionId]);
+}
 
 export type ShipmentMatchKey = Readonly<{
   phoneNormalized: string;

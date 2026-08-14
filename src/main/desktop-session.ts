@@ -8,6 +8,7 @@ import type {
   CustomFieldValueRecord,
   DraftCustomFieldValues,
   SaveCustomFieldValuesInput,
+  SaveShipmentGroupCustomFieldValuesInput,
 } from '../core/custom-fields';
 import type {
   OrderDetails,
@@ -59,7 +60,17 @@ import type {
   OrderExportPreviewResult,
   OrderExportWriteResult,
 } from '../core/order-export';
-import type { ShipmentGroupProjection } from '../core/shipment-groups';
+import type {
+  ShipmentGroupCustomFieldValue,
+  ShipmentGroupProjection,
+  ShipmentGroupWorkbenchQuery,
+  ShipmentGroupWorkbenchResult,
+} from '../core/shipment-groups';
+import type {
+  ShipmentGroupExportInput,
+  ShipmentGroupExportPreviewResult,
+  ShipmentGroupExportWriteResult,
+} from '../core/shipment-group-export';
 import type {
   ShipmentGroupAdjustmentResult,
 } from '../core/shipment-group-adjustments';
@@ -396,6 +407,22 @@ export class DesktopSession {
     return this.requireApplication().queryShipmentGroups();
   }
 
+  public queryShipmentGroupWorkbench(
+    query: ShipmentGroupWorkbenchQuery,
+    customFieldDefinitionIds?: readonly string[],
+  ): ShipmentGroupWorkbenchResult {
+    return this.requireApplication().queryShipmentGroupWorkbench(
+      query,
+      customFieldDefinitionIds,
+    );
+  }
+
+  public saveShipmentGroupCustomFieldValues(
+    input: SaveShipmentGroupCustomFieldValuesInput,
+  ): ShipmentGroupCustomFieldValue[] {
+    return this.requireApplication().saveShipmentGroupCustomFieldValues(input);
+  }
+
   public splitShipmentGroup(input: unknown): ShipmentGroupAdjustmentResult {
     return this.requireApplication().splitShipmentGroup(input);
   }
@@ -521,6 +548,19 @@ export class DesktopSession {
 
   public previewOrderExport(input: OrderExportInput): OrderExportPreviewResult {
     return this.requireApplication().previewOrderExport(input);
+  }
+
+  public exportShipmentGroupsToWorkbook(
+    input: ShipmentGroupExportInput,
+    destinationPath: string,
+  ): Promise<ShipmentGroupExportWriteResult> {
+    return this.requireApplication().exportShipmentGroupsToWorkbook(input, destinationPath);
+  }
+
+  public previewShipmentGroupExport(
+    input: ShipmentGroupExportInput,
+  ): ShipmentGroupExportPreviewResult {
+    return this.requireApplication().previewShipmentGroupExport(input);
   }
 
   public getOrder(orderId: string): OrderDetails {

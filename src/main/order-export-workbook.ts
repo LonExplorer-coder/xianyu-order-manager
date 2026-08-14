@@ -16,6 +16,10 @@ import {
   type OrderExportPreviewSheet,
 } from '../core/order-export';
 import type { OrderItemWorkbenchItem } from '../core/order-workbench';
+import type {
+  OpenShipmentGroup,
+  ShipmentGroupCustomFieldValue,
+} from '../core/shipment-groups';
 import {
   availableTableFields,
   createOrderTableProjectionPlan,
@@ -23,6 +27,7 @@ import {
   fieldReferenceKey,
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
+  projectShipmentGroupTableCell,
   type AvailableTableField,
   type OrderTableProjectionColumn,
   type TableCellValue,
@@ -43,6 +48,9 @@ export type OrderExportWorkbookSource = {
   orderItemCustomFieldValues: CustomFieldValueRecord[];
   addressRegions: ReadonlyMap<string, OrderExportAddressRegion>;
   orderMaximumItemCount?: number;
+  shipmentGroups?: OpenShipmentGroup[];
+  shipmentGroupColumns?: TableTemplateColumn[];
+  shipmentGroupCustomFieldValues?: ShipmentGroupCustomFieldValue[];
 };
 
 type WorkbookCellValue = string | number | boolean | Date | null;
@@ -50,7 +58,7 @@ type WorkbookCellValue = string | number | boolean | Date | null;
 const EXCEL_MAX_COLUMNS = 16_384;
 
 export type OrderExportWorksheetPlan = {
-  name: '订单总表' | '订单商品明细表';
+  name: '订单总表' | '订单商品明细表' | '合并发货表';
   columns: Array<{
     header: string;
     valueType: CustomFieldType;
@@ -146,6 +154,42 @@ export function createOrderExportWorkbookPlan(
         valueType: requireDescriptor(orderItemCatalog, column.field).valueType,
       })),
       rows: orderItemRows,
+    });
+  }
+  if (source.shipmentGroups) {
+    const shipmentGroupColumns = source.shipmentGroupColumns ?? [];
+    assertExcelColumnCount('合并发货表', shipmentGroupColumns.length);
+    const shipmentGroupCatalog = availableTableFields(
+      'shipment_group',
+      source.customFieldDefinitions,
+    );
+    const shipmentGroupRows = source.shipmentGroups.map((group) => (
+      shipmentGroupColumns.map((column) => {
+        const descriptor = requireDescriptor(shipmentGroupCatalog, column.field);
+        const rawValue = projectShipmentGroupTableCell(
+          group,
+          column.field,
+          source.shipmentGroupCustomFieldValues ?? [],
+        );
+        const firstOrderId = group.orders[0]?.id ?? '';
+        const region = source.addressRegions.get(firstOrderId) ?? {
+          province: '',
+          city: '',
+          district: '',
+        };
+        const maskedValue = source.masking === 'masked' && column.field.kind === 'builtin'
+          ? defaultMaskedOrderCell(column.field.key, rawValue, region)
+          : rawValue;
+        return toWorkbookCellValue(column.field, descriptor.valueType, maskedValue);
+      })
+    ));
+    worksheets.push({
+      name: '合并发货表',
+      columns: shipmentGroupColumns.map((column) => ({
+        header: column.displayName,
+        valueType: requireDescriptor(shipmentGroupCatalog, column.field).valueType,
+      })),
+      rows: shipmentGroupRows,
     });
   }
 

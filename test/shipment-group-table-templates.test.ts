@@ -1,0 +1,296 @@
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import ExcelJS from 'exceljs';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import type {
+  RecognitionAttempt,
+  RecognitionResult,
+  Recognizer,
+  RecognizerSource,
+} from '../src/core/contracts';
+import { LocalApplication } from '../src/main/local-application';
+
+const openedApplications: LocalApplication[] = [];
+
+class SequenceRecognizer implements Recognizer {
+  public constructor(private readonly results: RecognitionResult[]) {}
+
+  public async recognize(_source: RecognizerSource): Promise<RecognitionAttempt> {
+    const result = this.results.shift();
+    if (!result) throw new Error('测试识别结果已用尽');
+    return {
+      result: structuredClone(result),
+      evidences: [{
+        provider: 'controlled',
+        model: 'controlled',
+        requestId: '',
+        schemaVersion: 1,
+        rawResponse: JSON.stringify(result),
+      }],
+    };
+  }
+}
+
+function recognition(
+  orderNumber: string,
+  overrides: Partial<RecognitionResult> = {},
+): RecognitionResult {
+  return {
+    platform: 'xianyu',
+    sellerAccount: '发货表测试账号',
+    orderNumber,
+    alipayTransactionNumber: `ALI-${orderNumber}`,
+    buyerNickname: '测试买家',
+    recipient: '刘环湘',
+    phone: '13800000001',
+    phoneNormalized: '13800000001',
+    addressOriginal: '广东省惠州市惠城区水口街道1号',
+    addressNormalized: '广东省惠州市惠城区水口街道1号',
+    province: '广东省',
+    city: '惠州市',
+    district: '惠城区',
+    orderedAtOriginal: '2026-08-14 09:00:00',
+    orderedAtNormalized: '2026-08-14T09:00:00+08:00',
+    paidAtOriginal: '2026-08-14 09:00:08',
+    paidAtNormalized: '2026-08-14T09:00:08+08:00',
+    productTotalCents: 600,
+    shippingFeeCents: 0,
+    amountCents: 600,
+    platformTransactionStatus: 'paid',
+    fulfillmentStatus: 'pending_shipment',
+    items: [{
+      sourceTitle: '白模鞋',
+      sourceSpec: '05M',
+      unitPriceCents: 300,
+      quantity: 2,
+      quantityInferred: false,
+    }],
+    ...overrides,
+  };
+}
+
+async function openApplication(): Promise<{
+  application: LocalApplication;
+  dataDirectory: string;
+}> {
+  return openApplicationWithResults([
+    recognition('XY-GROUP-0001'),
+    recognition('XY-GROUP-0002'),
+  ]);
+}
+
+async function openApplicationWithResults(results: RecognitionResult[]): Promise<{
+  application: LocalApplication;
+  dataDirectory: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'xianyu-shipment-group-template-'));
+  const dataDirectory = join(root, '数据');
+  const uploadDirectory = join(root, '上传');
+  await mkdir(uploadDirectory, { recursive: true });
+  const application = new LocalApplication(new SequenceRecognizer([...results]));
+  openedApplications.push(application);
+  application.openDataDirectory(dataDirectory);
+  for (const [index] of results.entries()) {
+    const sourcePath = join(uploadDirectory, `订单-${index + 1}.png`);
+    await writeFile(sourcePath, Buffer.from(`shipment-group-template-${index + 1}`));
+    const batch = await application.submitRecognitionBatch([sourcePath]);
+    application.confirmDraft(batch.drafts[0]);
+  }
+  return { application, dataDirectory };
+}
+
+afterEach(() => {
+  for (const application of openedApplications.splice(0)) application.close();
+});
+
+describe('发货组字段与模板持久化', () => {
+  it('保存组级字段后可筛选，模板与字段值在重启后保持', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const zone = application.createCustomFieldDefinition({
+      name: '拣货区域',
+      granularity: 'shipment_group',
+      type: 'single_select',
+      required: true,
+      defaultValue: null,
+      options: ['东区', '西区'],
+    });
+    const initial = application.queryShipmentGroupWorkbench({}, [zone.id]);
+    const shipmentGroup = initial.groups[0];
+
+    expect(initial.groups).toHaveLength(1);
+    expect(initial.customFieldValues).toEqual([]);
+
+    application.saveShipmentGroupCustomFieldValues({
+      shipmentGroupId: shipmentGroup.id,
+      expectedMemberOrderIds: shipmentGroup.orders.map(({ id }) => id),
+      values: [{ definitionId: zone.id, value: '东区' }],
+    });
+    const template = application.createTableTemplate({
+      name: '东区合并拣货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '订单集合' },
+        { field: { kind: 'custom', definitionId: zone.id }, displayName: '拣货区' },
+        {
+          field: { kind: 'computed', key: 'shipment_group_total_quantity' },
+          displayName: '总件数',
+        },
+      ],
+      query: {
+        customFieldFilter: { definitionId: zone.id, value: '东区' },
+        sortField: 'total_quantity',
+        sortDirection: 'desc',
+      },
+    });
+    const filtered = application.queryShipmentGroupWorkbench(template.query, [zone.id]);
+
+    expect(filtered.groups.map(({ id }) => id)).toEqual([shipmentGroup.id]);
+    expect(filtered.customFieldValues).toEqual([{
+      shipmentGroupId: shipmentGroup.id,
+      definitionId: zone.id,
+      value: '东区',
+    }]);
+
+    application.close();
+    openedApplications.splice(openedApplications.indexOf(application), 1);
+    const reopened = new LocalApplication({
+      recognize: async () => {
+        throw new Error('重启持久性测试不应调用 OCR');
+      },
+    });
+    openedApplications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+
+    expect(reopened.listTableTemplates('shipment_group')).toEqual([template]);
+    expect(reopened.queryShipmentGroupWorkbench(template.query, [zone.id]))
+      .toMatchObject({
+        groups: [{ id: shipmentGroup.id }],
+        customFieldValues: [{
+          shipmentGroupId: shipmentGroup.id,
+          definitionId: zone.id,
+          value: '东区',
+        }],
+      });
+  });
+
+  it('按三种粒度模板导出并重新读取三张工作表', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const group = application.queryShipmentGroups().groups[0];
+    const zone = application.createCustomFieldDefinition({
+      name: '拣货区域',
+      granularity: 'shipment_group',
+      type: 'single_select',
+      required: false,
+      defaultValue: null,
+      options: ['东区', '西区'],
+    });
+    application.saveShipmentGroupCustomFieldValues({
+      shipmentGroupId: group.id,
+      expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      values: [{ definitionId: zone.id, value: '东区' }],
+    });
+    const orderTemplate = application.createTableTemplate({
+      name: '发货订单总表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'system_order_number' }, displayName: '系统编号' },
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '订单收件人' },
+      ],
+      query: {},
+    });
+    const itemTemplate = application.createTableTemplate({
+      name: '发货订单商品',
+      granularity: 'order_item',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台订单号' },
+        { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
+        { field: { kind: 'builtin', key: 'quantity' }, displayName: '件数' },
+      ],
+      query: {},
+    });
+    const groupTemplate = application.createTableTemplate({
+      name: '合并拣货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '订单集合' },
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '最终收件人' },
+        { field: { kind: 'builtin', key: 'product_summary' }, displayName: '合并商品' },
+        { field: { kind: 'custom', definitionId: zone.id }, displayName: '拣货区' },
+        {
+          field: { kind: 'computed', key: 'shipment_group_total_quantity' },
+          displayName: '合计件数',
+        },
+      ],
+      query: {},
+    });
+    const input = {
+      shipmentGroupIds: [group.id],
+      orderTemplateId: orderTemplate.id,
+      orderItemTemplateId: itemTemplate.id,
+      shipmentGroupTemplateId: groupTemplate.id,
+      masking: 'masked' as const,
+    };
+
+    const preview = application.previewShipmentGroupExport(input);
+    expect(preview).toMatchObject({
+      shipmentGroupCount: 1,
+      orderCount: 2,
+      orderItemCount: 2,
+      sheets: [
+        { name: '订单总表', totalRowCount: 2 },
+        { name: '订单商品明细表', totalRowCount: 2 },
+        { name: '合并发货表', totalRowCount: 1 },
+      ],
+    });
+    expect(preview.sheets[2].rows).toHaveLength(1);
+
+    const destinationPath = join(dataDirectory, '三表导出.xlsx');
+    await application.exportShipmentGroupsToWorkbook(input, destinationPath);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    expect(workbook.worksheets.map(({ name }) => name)).toEqual([
+      '订单总表',
+      '订单商品明细表',
+      '合并发货表',
+    ]);
+    const groupSheet = workbook.getWorksheet('合并发货表');
+    if (!groupSheet) throw new Error('缺少合并发货表');
+    expect(groupSheet.rowCount).toBe(2);
+    expect(groupSheet.getRow(1).values).toEqual([
+      undefined,
+      '订单集合',
+      '最终收件人',
+      '合并商品',
+      '拣货区',
+      '合计件数',
+    ]);
+    expect(groupSheet.getRow(2).values).toEqual([
+      undefined,
+      'XY-GROUP-0001；XY-GROUP-0002',
+      '刘**',
+      '白模鞋 · 05M ×4',
+      '东区',
+      4,
+    ]);
+  });
+
+  it('收件人存在歧义且未确认最终值时禁止导出', async () => {
+    const { application } = await openApplicationWithResults([
+      recognition('XY-AMBIGUOUS-0001'),
+      recognition('XY-AMBIGUOUS-0002', { recipient: '陈海棠' }),
+    ]);
+    const group = application.queryShipmentGroups().groups[0];
+
+    expect(group).toMatchObject({ recipientConflict: true, selectedRecipientOrderId: null });
+    expect(() => application.previewShipmentGroupExport({
+      shipmentGroupIds: [group.id],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: null,
+      masking: 'masked',
+    })).toThrow('请先确认最终收件人再导出');
+  });
+});

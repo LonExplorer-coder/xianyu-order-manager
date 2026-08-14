@@ -1,4 +1,8 @@
-export const CUSTOM_FIELD_GRANULARITIES = ['order', 'order_item'] as const;
+export const CUSTOM_FIELD_GRANULARITIES = [
+  'order',
+  'order_item',
+  'shipment_group',
+] as const;
 
 export type CustomFieldGranularity = (typeof CUSTOM_FIELD_GRANULARITIES)[number];
 
@@ -51,6 +55,15 @@ export type SaveCustomFieldValuesInput = {
   itemValues: Array<{
     definitionId: string;
     orderItemId: string;
+    value: CustomFieldValue | null;
+  }>;
+};
+
+export type SaveShipmentGroupCustomFieldValuesInput = {
+  shipmentGroupId: string;
+  expectedMemberOrderIds: string[];
+  values: Array<{
+    definitionId: string;
     value: CustomFieldValue | null;
   }>;
 };

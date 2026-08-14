@@ -46,7 +46,19 @@ const itemField: CustomFieldDefinition = {
   updatedAt: '2026-07-30T00:00:00.000Z',
 };
 
-const definitions = [orderField, itemField];
+const shipmentGroupField: CustomFieldDefinition = {
+  id: 'field-shipment-group-zone',
+  name: '拣货区域',
+  granularity: 'shipment_group',
+  type: 'single_select',
+  required: false,
+  defaultValue: null,
+  options: ['东区', '西区'],
+  createdAt: '2026-07-30T00:00:00.000Z',
+  updatedAt: '2026-07-30T00:00:00.000Z',
+};
+
+const definitions = [orderField, itemField, shipmentGroupField];
 
 function orderColumn(
   field: TableTemplateColumn['field'],
@@ -129,6 +141,73 @@ function orderSummaryForProjection(
 }
 
 describe('表格模板核心契约', () => {
+  it('发货组模板保存本粒度字段、筛选、排序和受控计算字段', () => {
+    const normalized = normalizeCreateTableTemplateInput({
+      name: '合并拣货表',
+      granularity: 'shipment_group',
+      columns: [
+        orderColumn({ kind: 'builtin', key: 'recipient' }, '最终收件人'),
+        orderColumn({ kind: 'computed', key: 'shipment_group_order_count' }, '合并订单数'),
+        orderColumn({ kind: 'custom', definitionId: shipmentGroupField.id }, '拣货区'),
+      ],
+      query: {
+        text: '惠州',
+        sortField: 'total_amount',
+        sortDirection: 'desc',
+        customFieldFilter: {
+          definitionId: shipmentGroupField.id,
+          value: '东区',
+        },
+      },
+    }, definitions);
+
+    expect(normalized).toEqual({
+      name: '合并拣货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '最终收件人' },
+        { field: { kind: 'computed', key: 'shipment_group_order_count' }, displayName: '合并订单数' },
+        { field: { kind: 'custom', definitionId: shipmentGroupField.id }, displayName: '拣货区' },
+      ],
+      query: {
+        text: '惠州',
+        sortField: 'total_amount',
+        sortDirection: 'desc',
+        customFieldFilter: {
+          definitionId: shipmentGroupField.id,
+          value: '东区',
+        },
+      },
+    });
+    expect(availableTableFields('shipment_group', definitions)).toEqual(expect.arrayContaining([
+      {
+        reference: { kind: 'builtin', key: 'member_order_numbers' },
+        defaultLabel: '成员订单号',
+        valueType: 'text',
+      },
+      {
+        reference: { kind: 'computed', key: 'shipment_group_order_count' },
+        defaultLabel: '合并订单数',
+        valueType: 'number',
+      },
+      {
+        reference: { kind: 'computed', key: 'shipment_group_total_quantity' },
+        defaultLabel: '商品总数量',
+        valueType: 'number',
+      },
+      {
+        reference: { kind: 'computed', key: 'shipment_group_total_amount' },
+        defaultLabel: '合并总额',
+        valueType: 'money',
+      },
+      {
+        reference: { kind: 'custom', definitionId: shipmentGroupField.id },
+        defaultLabel: '拣货区域',
+        valueType: 'single_select',
+      },
+    ]));
+  });
+
   it('订单模板把动态商品列组作为一个不可拆分的布局项并保存三个基础表头', () => {
     const normalized = normalizeCreateTableTemplateInput({
       name: '拣货表',
