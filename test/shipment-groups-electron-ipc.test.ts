@@ -496,6 +496,27 @@ describe('发货组 Electron IPC', () => {
     await expect(invoke('aftersales-cases:query', {
       shipmentRecordId: shipment.record.id,
     })).resolves.toEqual([decided]);
+    await expect(invoke('orders:get', group.orders[0].id)).resolves.toMatchObject({
+      operations: {
+        coordination: {
+          primaryTodo: {
+            priority: 'financial_risk',
+            title: '确认实际退款',
+            target: { aftersalesCaseId: decided.id },
+          },
+        },
+        risks: [expect.objectContaining({
+          packageRole: 'return',
+          exceptionType: 'lost',
+          affectedQuantity: 1,
+        })],
+        facts: expect.arrayContaining([
+          expect.objectContaining({ kind: 'outbound_logistics', value: 'delivered' }),
+          expect.objectContaining({ kind: 'return_logistics', value: 'in_transit' }),
+          expect.objectContaining({ kind: 'logistics_exception', value: 'confirmed' }),
+        ]),
+      },
+    });
   });
 });
 

@@ -430,7 +430,12 @@ export function ProgressAftersalesCaseDialog({
   const [carrierAcceptanceConfirmed, setCarrierAcceptanceConfirmed] = useState(false);
   const [exceptionType, setExceptionType] = useState<
     'lost' | 'delivery_dispute' | 'damaged' | 'misdelivered' | 'other'
-  >('lost');
+  >(returnRecord?.logisticsStatus === 'delivered' ? 'delivery_dispute' : 'lost');
+  const returnExceptionTypeOptions = returnRecord?.logisticsStatus === 'delivered'
+    ? LOGISTICS_EXCEPTION_TYPE_OPTIONS.filter(({ value }) => (
+      value === 'delivery_dispute' || value === 'misdelivered' || value === 'damaged'
+    ))
+    : LOGISTICS_EXCEPTION_TYPE_OPTIONS;
   const exceptionStageOptions = kind === 'progress_return_logistics_exception'
     && returnRecord?.currentException
     ? nextLogisticsExceptionStages(
@@ -932,7 +937,19 @@ export function ProgressAftersalesCaseDialog({
                 onChange={(event) => setLogisticsStatus(event.target.value as AftersalesReturnLogisticsStatus)}
               >
                 {RETURN_LOGISTICS_STATUS_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option
+                    key={option.value}
+                    value={option.value}
+                    disabled={(option.value === 'awaiting_carrier'
+                      && returnRecord?.carrierAcceptedAt !== null)
+                      || (returnRecord?.status !== 'in_transit'
+                        && (option.value === 'awaiting_carrier' || option.value === 'in_transit'))
+                      || ((returnRecord?.logisticsStatus === 'delivered'
+                        || returnRecord?.logisticsStatus === 'returned')
+                        && (option.value === 'awaiting_carrier' || option.value === 'in_transit'))}
+                  >
+                    {option.label}
+                  </option>
                 ))}
               </select>
             </label>
@@ -955,7 +972,7 @@ export function ProgressAftersalesCaseDialog({
                 <span>异常类型</span>
                 <select aria-label="退货物流异常类型" value={exceptionType}
                   onChange={(event) => setExceptionType(event.target.value as typeof exceptionType)}>
-                  {LOGISTICS_EXCEPTION_TYPE_OPTIONS.map((option) => (
+                  {returnExceptionTypeOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>

@@ -4338,7 +4338,7 @@ export class LocalApplication {
       .all(...parameters, ...sortParameters) as unknown as SqlRow[];
 
     const operationsByOrder = new OrderOperationsProjectionService(workspace.database)
-      .getMany(rows.map((row) => asString(row.id)));
+      .getOverviewMany(rows.map((row) => asString(row.id)));
     const orders = rows.map((row) => {
       const id = asString(row.id);
       const itemCount = asNumber(row.item_count);

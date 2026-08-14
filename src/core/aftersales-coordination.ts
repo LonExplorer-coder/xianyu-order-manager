@@ -1,4 +1,6 @@
 import type {
+  CarrierClaimEvent,
+  LogisticsExceptionImpact,
   LogisticsExceptionStage,
   LogisticsExceptionType,
   OutboundLogisticsStatus,
@@ -139,10 +141,14 @@ export type AftersalesSourcePackageEvidence = {
   logisticsStatus: OutboundLogisticsStatus;
   confirmedLost: boolean;
   carrierClaim?: {
+    id: string;
     status: 'pending' | 'approved' | 'rejected' | 'paid';
     requestedAmountCents: number;
     approvedAmountCents: number | null;
     actualCompensationCents: number | null;
+    impact: LogisticsExceptionImpact;
+    updatedAt: string;
+    timeline: CarrierClaimEvent[];
   } | null;
   items: Array<{
     shipmentPackageItemId: string;
@@ -455,11 +461,16 @@ export function sourcePackageEvidenceFromShipmentRecord(
         confirmedLostQuantity === quantity
       )),
       carrierClaim: shipmentPackage.carrierClaim ? {
+        id: shipmentPackage.carrierClaim.id,
         status: shipmentPackage.carrierClaim.status,
         requestedAmountCents: shipmentPackage.carrierClaim.requestedAmountCents,
         approvedAmountCents: shipmentPackage.carrierClaim.approvedAmountCents,
         actualCompensationCents:
           shipmentPackage.carrierClaim.actualCompensation?.amountCents ?? null,
+        impact: shipmentPackage.carrierClaim.impact,
+        updatedAt: shipmentPackage.carrierClaim.timeline.at(-1)?.occurredAt
+          ?? shipmentPackage.carrierClaim.updatedAt,
+        timeline: shipmentPackage.carrierClaim.timeline,
       } : null,
       items,
     }];

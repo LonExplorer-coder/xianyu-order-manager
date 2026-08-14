@@ -287,6 +287,10 @@ function details(
       shipmentRecords: [],
       aftersalesCases: [],
       currentTodo: '无需物流操作',
+      coordination: { primaryTodo: null, secondaryTodoCount: 0, todos: [] },
+      risks: [],
+      facts: [],
+      history: [],
     },
   };
 }

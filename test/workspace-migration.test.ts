@@ -16,6 +16,81 @@ import {
 } from './version31-fixture';
 
 describe('数据库升级', () => {
+  it('将 v36 退款事件升级为同时保留业务发生时间和录入时间', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v36-refund-occurred-at-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: false });
+    try {
+      legacy.exec(`
+        DROP TRIGGER IF EXISTS pending_financial_item_events_require_occurred_at_on_insert;
+        DROP TRIGGER IF EXISTS pending_financial_item_events_are_immutable_on_update;
+        DROP TRIGGER IF EXISTS pending_financial_item_events_are_immutable_on_delete;
+        DROP TABLE pending_financial_item_events;
+        CREATE TABLE pending_financial_item_events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          pending_item_id TEXT NOT NULL
+            REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind IN ('created', 'confirmed', 'cancelled')),
+          requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+          actual_amount_cents INTEGER CHECK (actual_amount_cents > 0),
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+          created_at TEXT NOT NULL,
+          CHECK (
+            (kind = 'created' AND actual_amount_cents IS NULL)
+            OR (kind = 'confirmed' AND actual_amount_cents IS NOT NULL)
+            OR (kind = 'cancelled' AND actual_amount_cents IS NULL)
+          )
+        ) STRICT;
+        INSERT INTO pending_financial_items (
+          id, kind, aftersales_case_id, requested_amount_cents,
+          status, created_at, resolved_at
+        ) VALUES (
+          'pending-refund-v36', 'aftersales_refund', 'legacy-case-v36', 1000,
+          'cancelled', '2026-08-13T02:00:00.000Z', '2026-08-14T03:00:00.000Z'
+        );
+        INSERT INTO pending_financial_item_events (
+          id, pending_item_id, kind, requested_amount_cents,
+          actual_amount_cents, reason, created_at
+        ) VALUES (
+          'refund-event-v36', 'pending-refund-v36', 'cancelled', 1000,
+          NULL, '旧版仅保留录入时间', '2026-08-14T03:00:00.000Z'
+        );
+        DELETE FROM schema_migrations WHERE version = 37;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = Workspace.open(dataDirectory);
+    try {
+      expect(migrated.database.prepare(`
+        SELECT occurred_at, created_at
+        FROM pending_financial_item_events
+        WHERE id = 'refund-event-v36'
+      `).get()).toEqual({
+        occurred_at: '2026-08-14T03:00:00.000Z',
+        created_at: '2026-08-14T03:00:00.000Z',
+      });
+      expect(migrated.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 37 });
+      expect(() => migrated.database.prepare(`
+        INSERT INTO pending_financial_item_events (
+          id, pending_item_id, kind, requested_amount_cents,
+          actual_amount_cents, reason, occurred_at, created_at
+        ) VALUES (
+          'missing-occurred-at-v37', 'pending-refund-v36', 'cancelled', 1000,
+          NULL, '不允许缺失业务时间', NULL, '2026-08-14T04:00:00.000Z'
+        )
+      `).run()).toThrow('pending financial item event occurred_at is required');
+    } finally {
+      migrated.close();
+    }
+  });
+
   it('将真实早期 v35 结构升级为完整正向异常协调事实', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v35-refund-reopening-'));
     const current = Workspace.open(dataDirectory);
@@ -46,7 +121,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(migrated.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN (
@@ -87,7 +162,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(migrated.database.prepare(`
         SELECT name
         FROM sqlite_schema
@@ -141,7 +216,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -337,6 +412,7 @@ describe('数据库升级', () => {
       { version: 34 },
       { version: 35 },
       { version: 36 },
+      { version: 37 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -799,6 +875,7 @@ describe('数据库升级', () => {
       { version: 34 },
       { version: 35 },
       { version: 36 },
+      { version: 37 },
     ]);
     expect(
       (
@@ -1060,6 +1137,7 @@ describe('数据库升级', () => {
         { version: 34 },
         { version: 35 },
         { version: 36 },
+        { version: 37 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1258,7 +1336,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1372,7 +1450,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1392,7 +1470,7 @@ describe('数据库升级', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare(
-        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36) ORDER BY version',
+        'SELECT version FROM schema_migrations WHERE version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37) ORDER BY version',
       ).all()).toEqual([
         { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
         { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 },
@@ -1403,6 +1481,7 @@ describe('数据库升级', () => {
         { version: 34 },
         { version: 35 },
         { version: 36 },
+        { version: 37 },
       ]);
       expect(reopened.database.prepare(
         "SELECT note FROM original_orders WHERE id = 'order-v1'",
@@ -1436,7 +1515,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{

@@ -10,6 +10,9 @@ import {
 import {
   aftersalesStatusLabel,
   aftersalesTodoForCases,
+  coordinateAftersalesOrderOperations,
+  type AftersalesOperationsCoordinationInput,
+  type OrderOperationsCoordination,
 } from '../core/order-operations-projection';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import type { ShipmentRecord } from '../core/shipment-records';
@@ -125,6 +128,181 @@ export function shipmentRecordAftersalesSummary(
   cases: readonly AftersalesCase[],
 ): string {
   return shipmentRecordsAftersalesSummary([record], cases);
+}
+
+export function aftersalesCaseOperationsCoordination(
+  aftersalesCase: AftersalesCase,
+): OrderOperationsCoordination {
+  const scopedReturns = aftersalesReturnsForPresentation(aftersalesCase);
+  return coordinateAftersalesOrderOperations({
+    id: aftersalesCase.id,
+    shipmentRecordId: aftersalesCase.shipmentRecordId,
+    status: aftersalesCase.status,
+    currentTodo: aftersalesCase.coordination.currentTodo,
+    updatedAt: aftersalesCase.updatedAt,
+    itemQuantity: aftersalesCase.items.reduce((total, item) => total + item.quantity, 0),
+    refund: aftersalesCase.refund ? {
+      status: aftersalesCase.refund.status,
+      requestedAmountCents: aftersalesCase.refund.requestedAmountCents,
+      occurredAt: aftersalesCase.refund.latestEventAt,
+    } : null,
+    outboundClaims: aftersalesCase.coordination.sourcePackages.flatMap((sourcePackage) => (
+      sourcePackage.carrierClaim
+        ? outboundClaimForAftersalesSourcePackage(sourcePackage)
+        : []
+    )),
+    outboundExceptions: aftersalesCase.coordination.outboundExceptionHistory.map((exception) => ({
+      id: exception.exceptionId,
+      stage: exception.stage,
+      affectedQuantity: exception.affectedQuantity,
+      occurredAt: exception.occurredAt,
+      requiresDecision: exception.stage === 'confirmed' && exception.decision === null,
+    })),
+    returns: scopedReturns.map((returnRecord) => ({
+      id: returnRecord.id,
+      status: returnRecord.status,
+      logisticsStatus: returnRecord.logisticsStatus,
+      updatedAt: returnRecord.updatedAt,
+      exceptions: returnRecord.logisticsExceptions.map((exception) => ({
+        id: exception.id,
+        exceptionType: exception.exceptionType,
+        stage: exception.stage,
+        affectedQuantity: exception.impact.scope === 'package'
+          ? returnRecord.items.reduce((total, item) => total + item.quantity, 0)
+          : exception.impact.items.reduce((total, item) => total + item.quantity, 0),
+        occurredAt: exception.occurredAt,
+      })),
+      claim: returnRecord.carrierClaim ? {
+        status: returnRecord.carrierClaim.status,
+        updatedAt: returnRecord.carrierClaim.timeline.at(-1)?.occurredAt
+          ?? returnRecord.carrierClaim.updatedAt,
+        affectedQuantity: returnRecord.carrierClaim.impact.scope === 'package'
+          ? returnRecord.items.reduce((total, item) => total + item.quantity, 0)
+          : returnRecord.carrierClaim.impact.items.reduce(
+            (total, item) => total + item.quantity,
+            0,
+          ),
+      } : null,
+    })),
+    hasPendingReturnExceptionDecision: aftersalesCase.coordination.returnException !== null
+      && aftersalesCase.coordination.returnException.decision === null,
+  });
+}
+
+export function aftersalesReturnsForPresentation(
+  aftersalesCase: AftersalesCase,
+): AftersalesCase['returns'] {
+  const caseShipmentItemIds = new Set(aftersalesCase.items.map(({ shipmentPackageItemId }) => (
+    shipmentPackageItemId
+  )));
+  return aftersalesCase.returns.flatMap((returnRecord) => {
+    const items = returnRecord.items.filter(({ shipmentPackageItemId }) => (
+      caseShipmentItemIds.has(shipmentPackageItemId)
+    ));
+    if (items.length === 0) return [];
+    const visibleReturnItemIds = new Set(items.map(({ id }) => id));
+    const visibleShipmentItemIds = new Set(items.map(({ shipmentPackageItemId }) => (
+      shipmentPackageItemId
+    )));
+    const logisticsExceptions = returnRecord.logisticsExceptions.flatMap((exception) => {
+      if (exception.impact.scope === 'package') return [exception];
+      const affectedItems = exception.impact.items.filter(({ sourceItemId }) => (
+        visibleReturnItemIds.has(sourceItemId)
+      ));
+      return affectedItems.length === 0 ? [] : [{
+        ...exception,
+        impact: { scope: 'items' as const, items: affectedItems },
+      }];
+    });
+    const claim = returnRecord.carrierClaim;
+    const scopedClaim = claim?.impact.scope === 'package'
+      ? claim
+      : claim
+        ? (() => {
+          const affectedItems = claim.impact.items.filter(({ sourceItemId }) => (
+            visibleReturnItemIds.has(sourceItemId)
+          ));
+          return affectedItems.length === 0 ? null : {
+            ...claim,
+            impact: { scope: 'items' as const, items: affectedItems },
+          };
+        })()
+        : null;
+    const timeline = returnRecord.timeline.map((event) => {
+      if (event.kind === 'items_combined') return {
+        ...event,
+        items: event.items.filter(({ shipmentPackageItemId }) => (
+          visibleShipmentItemIds.has(shipmentPackageItemId)
+        )),
+      };
+      if (event.kind === 'received') return {
+        ...event,
+        ...(event.items === undefined ? {} : {
+          items: event.items.filter(({ returnRecordItemId }) => (
+            visibleReturnItemIds.has(returnRecordItemId)
+          )),
+        }),
+        ...(event.discrepancies === undefined ? {} : {
+          discrepancies: event.discrepancies.filter((difference) => (
+            difference.returnRecordItemId === undefined
+            || visibleReturnItemIds.has(difference.returnRecordItemId)
+          )),
+        }),
+      };
+      if (event.kind === 'inspected') return {
+        ...event,
+        ...(event.items === undefined ? {} : {
+          items: event.items.filter(({ returnRecordItemId }) => (
+            visibleReturnItemIds.has(returnRecordItemId)
+          )),
+        }),
+        ...(event.discrepancies === undefined ? {} : {
+          discrepancies: event.discrepancies.filter((difference) => (
+            difference.returnRecordItemId === undefined
+            || visibleReturnItemIds.has(difference.returnRecordItemId)
+          )),
+        }),
+      };
+      return event;
+    });
+    return [{
+      ...returnRecord,
+      items,
+      discrepancies: returnRecord.discrepancies.filter((difference) => (
+        difference.returnRecordItemId === undefined
+        || visibleReturnItemIds.has(difference.returnRecordItemId)
+      )),
+      logisticsExceptions,
+      currentException: [...logisticsExceptions].reverse().find(({ stage }) => (
+        isUnresolvedLogisticsExceptionStage(stage)
+      )) as AftersalesCase['returns'][number]['currentException'] ?? null,
+      carrierClaim: scopedClaim,
+      timeline,
+    }];
+  });
+}
+
+function outboundClaimForAftersalesSourcePackage(
+  sourcePackage: AftersalesCase['coordination']['sourcePackages'][number],
+): AftersalesOperationsCoordinationInput['outboundClaims'] {
+  const claim = sourcePackage.carrierClaim;
+  if (!claim) return [];
+  const quantityByItemId = claim.impact.scope === 'package'
+    ? null
+    : new Map(claim.impact.items.map(({ sourceItemId, quantity }) => (
+      [sourceItemId, quantity] as const
+    )));
+  const affectedQuantity = sourcePackage.items.reduce((total, item) => {
+    const claimedQuantity = quantityByItemId?.get(item.shipmentPackageItemId);
+    if (quantityByItemId && claimedQuantity === undefined) return total;
+    return total + Math.min(item.quantity, claimedQuantity ?? item.quantity);
+  }, 0);
+  return affectedQuantity > 0 ? [{
+    packageId: sourcePackage.packageId,
+    status: claim.status,
+    updatedAt: claim.updatedAt,
+    affectedQuantity,
+  }] : [];
 }
 
 export function aftersalesCurrentAction(

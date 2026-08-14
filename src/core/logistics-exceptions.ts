@@ -223,6 +223,9 @@ export function prepareLogisticsExceptionOpening(input: {
     throw new Error('新物流异常不能从已找回或已解决开始');
   }
   assertImpact(input.impact, input.availableItems);
+  if (input.evidence.physicalReceiptAt !== null && input.exceptionType === 'lost') {
+    throw new Error('已有可信收到证据，不能确认丢件');
+  }
   assertConfirmedExceptionEvidence(
     input.exceptionType,
     input.stage,

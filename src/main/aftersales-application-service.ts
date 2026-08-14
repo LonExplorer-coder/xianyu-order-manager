@@ -134,7 +134,9 @@ export class AftersalesApplicationService {
       `).run(
         roundId,
         caseId,
-        prepared.workflow === 'exchange' || prepared.workflow === 'direct_replacement'
+        handlingDirection === 'replacement'
+          ? 'direct_replacement'
+          : prepared.workflow === 'exchange' || prepared.workflow === 'direct_replacement'
           ? prepared.workflow
           : 'legacy',
         prepared.shipmentRecordId,
@@ -195,9 +197,12 @@ export class AftersalesApplicationService {
         this.workspace.database.prepare(`
           INSERT INTO pending_financial_item_events (
             id, pending_item_id, kind, requested_amount_cents,
-            actual_amount_cents, reason, created_at
-          ) VALUES (?, ?, 'created', ?, NULL, ?, ?)
-        `).run(randomUUID(), pendingItemId, requestedAmountCents, prepared.reason, now);
+            actual_amount_cents, reason, occurred_at, created_at
+          ) VALUES (?, ?, 'created', ?, NULL, ?, ?, ?)
+        `).run(
+          randomUUID(), pendingItemId, requestedAmountCents,
+          prepared.reason, prepared.occurredAt, now,
+        );
       }
       this.workspace.database.prepare(`
         INSERT INTO aftersales_case_events (
@@ -363,7 +368,7 @@ export class AftersalesApplicationService {
         '取消退款申请时间不能早于异常处理选择时间',
       );
       this.workspace.transaction(() => {
-        this.cancelPendingRefund(current, prepared.reason, now);
+        this.cancelPendingRefund(current, prepared.reason, prepared.occurredAt, now);
         this.advanceCase(
           current,
           this.allRequiredReplacementRoundsDelivered(current)
@@ -428,6 +433,7 @@ export class AftersalesApplicationService {
             current.id,
             prepared.requestedRefundCents as number,
             prepared.reason,
+            prepared.occurredAt,
             now,
           );
         }
@@ -776,20 +782,23 @@ export class AftersalesApplicationService {
           now,
           interceptionPackageId,
         });
-        if (prepared.handlingDirection === 'replacement'
-          && current.coordination.interceptedReturnInspection) {
-          const inspectionItems = current.coordination.interceptedReturnInspection.items;
+        if (prepared.handlingDirection === 'replacement') {
+          const replacementItems = current.coordination.interceptedReturnInspection?.items
+            ?? current.items.map(({ shipmentPackageItemId, quantity }) => ({
+              shipmentPackageItemId,
+              quantity,
+            }));
           const reusableRound = current.rounds.find((round) => (
             round.workflow === 'direct_replacement'
             && round.sourceShipmentRecordId === current.shipmentRecordId
             && round.replacementShipment === null
-            && sameAftersalesItemAllocation(round.items, inspectionItems)
+            && sameAftersalesItemAllocation(round.items, replacementItems)
           ));
           if (!reusableRound) {
             this.createDirectReplacementRound(
               current,
               current.shipmentRecordId,
-              inspectionItems,
+              replacementItems,
               prepared.occurredAt,
               prepared.reason,
               now,
@@ -1096,7 +1105,7 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'record_return_logistics_exception') {
       const returnRecord = current.returns.find(({ id }) => id === prepared.returnRecordId);
       if (!returnRecord) throw new Error('退货包裹不存在或未关联当前售后');
-      if (returnRecord.status !== 'in_transit') {
+      if (returnRecord.status !== 'in_transit' && prepared.exceptionType !== 'damaged') {
         throw new Error('退货已实际收到，少件、空包、错货或破损请通过退货检查差异记录');
       }
       this.workspace.transaction(() => {
@@ -1112,7 +1121,12 @@ export class AftersalesApplicationService {
           })),
           evidence: {
             carrierAcceptedAt: returnRecord.carrierAcceptedAt,
-            physicalReceiptAt: returnRecord.receivedAt,
+            physicalReceiptAt: returnRecord.receivedAt
+              ?? (returnRecord.logisticsStatus === 'delivered'
+                ? returnRecord.timeline.find((event) => (
+                  event.kind === 'logistics_status_updated' && event.after === 'delivered'
+                ))?.occurredAt ?? returnRecord.createdAt
+                : null),
             carrierConfirmedLoss: prepared.carrierConfirmedLoss ?? false,
           },
           occurredAt: prepared.occurredAt,
@@ -1563,14 +1577,15 @@ export class AftersalesApplicationService {
         this.workspace.database.prepare(`
           INSERT INTO pending_financial_item_events (
             id, pending_item_id, kind, requested_amount_cents,
-            actual_amount_cents, reason, created_at
-          ) VALUES (?, ?, 'confirmed', ?, ?, ?, ?)
+            actual_amount_cents, reason, occurred_at, created_at
+          ) VALUES (?, ?, 'confirmed', ?, ?, ?, ?, ?)
         `).run(
           randomUUID(),
           refund.pendingItemId,
           refund.requestedAmountCents,
           prepared.actualRefundCents,
           prepared.note,
+          prepared.occurredAt,
           now,
         );
         const replacementPending = current.rounds.some(({ replacementRequired }) => (
@@ -1587,11 +1602,8 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'cancel') {
       const refund = current.refund;
-      if (refund && refund.status !== 'pending') {
-        throw new Error('已经确认实际退款的售后不能取消');
-      }
       this.workspace.transaction(() => {
-        if (refund) {
+        if (refund?.status === 'pending') {
           const cancelled = this.workspace.database.prepare(`
             UPDATE pending_financial_items
             SET status = 'cancelled', resolved_at = ?
@@ -1601,11 +1613,11 @@ export class AftersalesApplicationService {
           this.workspace.database.prepare(`
             INSERT INTO pending_financial_item_events (
               id, pending_item_id, kind, requested_amount_cents,
-              actual_amount_cents, reason, created_at
-            ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?)
+              actual_amount_cents, reason, occurred_at, created_at
+            ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?, ?)
           `).run(
             randomUUID(), refund.pendingItemId, refund.requestedAmountCents,
-            prepared.reason, now,
+            prepared.reason, now, now,
           );
         }
         this.advanceCase(current, 'cancelled', prepared.reason, now);
@@ -2380,6 +2392,22 @@ export class AftersalesApplicationService {
       ));
       packages.set(packageId, sourcePackage);
     }
+    for (const sourcePackage of packages.values()) {
+      const claim = this.logisticsExceptionService().getClaim({
+        direction: 'outbound',
+        packageId: sourcePackage.packageId,
+      });
+      sourcePackage.carrierClaim = claim ? {
+        id: claim.id,
+        status: claim.status,
+        requestedAmountCents: claim.requestedAmountCents,
+        approvedAmountCents: claim.approvedAmountCents,
+        actualCompensationCents: claim.actualCompensation?.amountCents ?? null,
+        impact: claim.impact,
+        updatedAt: claim.timeline.at(-1)?.occurredAt ?? claim.updatedAt,
+        timeline: claim.timeline,
+      } : null;
+    }
     return [...packages.values()];
   }
 
@@ -2657,6 +2685,60 @@ export class AftersalesApplicationService {
       FROM financial_records
       WHERE pending_item_id = ?
     `).get(asString(row.id)) as SqlRow | undefined;
+    const caseOccurredAt = asString((this.workspace.database.prepare(`
+      SELECT occurred_at FROM aftersales_cases WHERE id = ?
+    `).get(caseId) as SqlRow).occurred_at);
+    const refundEventRows = this.workspace.database.prepare(`
+      SELECT
+        kind, requested_amount_cents, actual_amount_cents,
+        reason, occurred_at, created_at
+      FROM pending_financial_item_events
+      WHERE pending_item_id = ?
+      ORDER BY sequence
+    `).all(asString(row.id)) as unknown as SqlRow[];
+    const reopeningRows = this.workspace.database.prepare(`
+      SELECT
+        'reopened' AS kind,
+        reopen.requested_amount_cents,
+        NULL AS actual_amount_cents,
+        reopen.reason,
+        reopen.occurred_at,
+        reopen.created_at
+      FROM aftersales_refund_reopening_events AS reopen
+      WHERE reopen.pending_item_id = ?
+      ORDER BY reopen.sequence
+    `).all(asString(row.id)) as unknown as SqlRow[];
+    const timeline = [
+      ...refundEventRows.map((eventRow) => {
+        const kind = asString(eventRow.kind) as 'created' | 'confirmed' | 'cancelled';
+        return {
+          kind,
+          requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+          actualAmountCents: eventRow.actual_amount_cents === null
+            ? null
+            : asNumber(eventRow.actual_amount_cents),
+          reason: asString(eventRow.reason),
+          occurredAt: asString(eventRow.occurred_at),
+          createdAt: asString(eventRow.created_at),
+        };
+      }),
+      ...reopeningRows.map((eventRow) => ({
+        kind: 'reopened' as const,
+        requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+        actualAmountCents: null,
+        reason: asString(eventRow.reason),
+        occurredAt: asString(eventRow.occurred_at),
+        createdAt: asString(eventRow.created_at),
+      })),
+    ].sort((first, second) => {
+      const occurredDifference = Date.parse(first.occurredAt) - Date.parse(second.occurredAt);
+      return occurredDifference !== 0
+        ? occurredDifference
+        : first.createdAt.localeCompare(second.createdAt);
+    });
+    const latestEventAt = timeline.reduce((latest, event) => (
+      Date.parse(event.occurredAt) > Date.parse(latest) ? event.occurredAt : latest
+    ), caseOccurredAt);
     return {
       pendingItemId: asString(row.id),
       requestedAmountCents: asNumber(row.requested_amount_cents),
@@ -2670,6 +2752,8 @@ export class AftersalesApplicationService {
         createdAt: asString(actualRow.created_at),
       } : null,
       createdAt: asString(row.created_at),
+      latestEventAt,
+      timeline,
     };
   }
 
@@ -3154,7 +3238,12 @@ export class AftersalesApplicationService {
     return roundId;
   }
 
-  private cancelPendingRefund(current: AftersalesCase, reason: string, now: string): void {
+  private cancelPendingRefund(
+    current: AftersalesCase,
+    reason: string,
+    occurredAt: string,
+    now: string,
+  ): void {
     const refund = current.refund;
     if (!refund || refund.status !== 'pending') return;
     const cancelled = this.workspace.database.prepare(`
@@ -3166,15 +3255,19 @@ export class AftersalesApplicationService {
     this.workspace.database.prepare(`
       INSERT INTO pending_financial_item_events (
         id, pending_item_id, kind, requested_amount_cents,
-        actual_amount_cents, reason, created_at
-      ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?)
-    `).run(randomUUID(), refund.pendingItemId, refund.requestedAmountCents, reason, now);
+        actual_amount_cents, reason, occurred_at, created_at
+      ) VALUES (?, ?, 'cancelled', ?, NULL, ?, ?, ?)
+    `).run(
+      randomUUID(), refund.pendingItemId, refund.requestedAmountCents,
+      reason, occurredAt, now,
+    );
   }
 
   private createPendingRefund(
     caseId: string,
     requestedAmountCents: number,
     reason: string,
+    occurredAt: string,
     now: string,
   ): void {
     const existing = this.workspace.database.prepare(`
@@ -3195,11 +3288,11 @@ export class AftersalesApplicationService {
       this.workspace.database.prepare(`
         INSERT INTO aftersales_refund_reopening_events (
           id, pending_item_id, previous_requested_amount_cents,
-          requested_amount_cents, reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          requested_amount_cents, reason, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(), asString(existing.id), asNumber(existing.requested_amount_cents),
-        requestedAmountCents, reason, now,
+        requestedAmountCents, reason, occurredAt, now,
       );
       return;
     }
@@ -3213,9 +3306,9 @@ export class AftersalesApplicationService {
     this.workspace.database.prepare(`
       INSERT INTO pending_financial_item_events (
         id, pending_item_id, kind, requested_amount_cents,
-        actual_amount_cents, reason, created_at
-      ) VALUES (?, ?, 'created', ?, NULL, ?, ?)
-    `).run(randomUUID(), pendingItemId, requestedAmountCents, reason, now);
+        actual_amount_cents, reason, occurred_at, created_at
+      ) VALUES (?, ?, 'created', ?, NULL, ?, ?, ?)
+    `).run(randomUUID(), pendingItemId, requestedAmountCents, reason, occurredAt, now);
   }
 
   private allRequiredReplacementRoundsDelivered(current: AftersalesCase): boolean {

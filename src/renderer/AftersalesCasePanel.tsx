@@ -6,8 +6,11 @@ import type {
   ProgressAftersalesCaseInput,
 } from '../core/aftersales-cases';
 import type { ShipmentRecord } from '../core/shipment-records';
+import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
   aftersalesHandlingDirectionLabel,
+  aftersalesCaseOperationsCoordination,
+  aftersalesReturnsForPresentation,
   aftersalesPhysicalControlLabel,
   aftersalesStatusLabel,
   carrierClaimStatusLabel,
@@ -45,7 +48,9 @@ export function AftersalesCasePanel({
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
-      {aftersalesCases.map((aftersalesCase) => (
+      {aftersalesCases.map((aftersalesCase) => {
+        const operationsCoordination = aftersalesCaseOperationsCoordination(aftersalesCase);
+        return (
         <section
           id={`aftersales-case-${aftersalesCase.id}`}
           key={aftersalesCase.id}
@@ -76,7 +81,23 @@ export function AftersalesCasePanel({
             aria-label="售后当前协调"
             role="status"
           >
-            <strong>当前待办：{aftersalesCase.coordination.currentTodo}</strong>
+            <strong>当前待办：{
+              operationsCoordination.primaryTodo?.title
+                ?? aftersalesCase.coordination.currentTodo
+            }</strong>
+            {operationsCoordination.secondaryTodoCount > 0 && (
+              <details className="order-coordination-secondary shipment-records-secondary-todos">
+                <summary>另有 {operationsCoordination.secondaryTodoCount} 项</summary>
+                <ul>
+                  {operationsCoordination.todos.slice(1).map((todo) => (
+                    <li key={todo.id}>
+                      <strong>{todo.title}</strong>
+                      <small>{todo.detail}</small>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
             {aftersalesCase.coordination.risk && (
               <span className="shipment-record-card__coordination-risk">
                 未解决风险：{aftersalesCase.coordination.risk}
@@ -106,6 +127,14 @@ export function AftersalesCasePanel({
                   )
                   : '待选择'}
               </span>
+              <ul aria-label="正向物流异常受影响商品">
+                {aftersalesCase.coordination.outboundException.affectedItems.map((item) => (
+                  <li key={item.shipmentPackageItemId}>
+                    <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                    <strong>× {item.quantity}</strong>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
           {aftersalesCase.coordination.interceptedReturnInspection && (
@@ -164,13 +193,27 @@ export function AftersalesCasePanel({
                     {sourcePackage.confirmedLost ? ' · 已确认丢失' : ''}
                   </p>
                   {sourcePackage.carrierClaim && (
-                    <p>
-                      承运索赔：{carrierClaimStatusLabel(sourcePackage.carrierClaim.status)}
-                      {' · '}申请 {formatMoney(sourcePackage.carrierClaim.requestedAmountCents)}
-                      {sourcePackage.carrierClaim.actualCompensationCents !== null
-                        ? ` · 实际赔付 ${formatMoney(sourcePackage.carrierClaim.actualCompensationCents)}`
-                        : ''}
-                    </p>
+                    <>
+                      <p>
+                        承运索赔：{carrierClaimStatusLabel(sourcePackage.carrierClaim.status)}
+                        {' · '}申请 {formatMoney(sourcePackage.carrierClaim.requestedAmountCents)}
+                        {sourcePackage.carrierClaim.actualCompensationCents !== null
+                          ? ` · 实际赔付 ${formatMoney(sourcePackage.carrierClaim.actualCompensationCents)}`
+                          : ''}
+                      </p>
+                      <details className="shipment-record-card__timeline">
+                        <summary>正向承运索赔完整历史</summary>
+                        <ol>
+                          {sourcePackage.carrierClaim.timeline.map((event) => (
+                            <li key={`${event.kind}-${event.resultRevision}`}>
+                              <strong>{carrierClaimEventLabel(event.kind)}</strong>
+                              <span>{carrierClaimEventDescription(event)}</span>
+                              <small>{formatDateTime(event.occurredAt)}</small>
+                            </li>
+                          ))}
+                        </ol>
+                      </details>
+                    </>
                   )}
                   <ul>
                     {sourcePackage.items.map((item) => (
@@ -190,16 +233,38 @@ export function AftersalesCasePanel({
             </div>
           )}
           {aftersalesCase.refund && (
-            <div className="shipment-record-card__aftersales-facts" aria-label="退款事实">
-              <span>申请退款 <strong>{formatMoney(aftersalesCase.refund.requestedAmountCents)}</strong></span>
-              {aftersalesCase.refund.actualRecord ? (
-                <span>实际退款 <strong>{formatMoney(aftersalesCase.refund.actualRecord.amountCents)}</strong></span>
-              ) : (
-                <span>{aftersalesCase.refund.status === 'cancelled' ? '退款申请已取消' : '实际退款待确认'}</span>
+            <>
+              <div className="shipment-record-card__aftersales-facts" aria-label="退款事实">
+                <span>申请退款 <strong>{formatMoney(aftersalesCase.refund.requestedAmountCents)}</strong></span>
+                {aftersalesCase.refund.actualRecord ? (
+                  <span>实际退款 <strong>{formatMoney(aftersalesCase.refund.actualRecord.amountCents)}</strong></span>
+                ) : (
+                  <span>{aftersalesCase.refund.status === 'cancelled' ? '退款申请已取消' : '实际退款待确认'}</span>
+                )}
+              </div>
+              {aftersalesCase.refund.timeline.length > 0 && (
+                <details className="shipment-record-card__timeline">
+                  <summary>退款完整历史</summary>
+                  <ol>
+                    {aftersalesCase.refund.timeline.map((event) => (
+                      <li key={`${event.kind}-${event.createdAt}`}>
+                        <strong>{refundEventLabel(event.kind)}</strong>
+                        <span>
+                          申请 {formatMoney(event.requestedAmountCents)}
+                          {event.actualAmountCents === null
+                            ? ''
+                            : ` · 实际 ${formatMoney(event.actualAmountCents)}`}
+                          {' · '}{event.reason}
+                        </span>
+                        <small>{formatDateTime(event.occurredAt)}</small>
+                      </li>
+                    ))}
+                  </ol>
+                </details>
               )}
-            </div>
+            </>
           )}
-          {aftersalesCase.returns.map((returnRecord) => (
+          {aftersalesReturnsForPresentation(aftersalesCase).map((returnRecord) => (
             <section
               className="shipment-record-card__return-record"
               key={returnRecord.id}
@@ -217,27 +282,56 @@ export function AftersalesCasePanel({
                   物流信息已更正 · {formatDateTime(lastLogisticsCorrection(returnRecord)?.occurredAt as string)}
                 </small>
               )}
-              {returnRecord.currentException && (
-                <div className="shipment-record-card__return-exception" role="status">
-                  <strong>
-                    物流异常 · {logisticsExceptionTypeLabel(
-                      returnRecord.currentException.exceptionType,
-                    )} · {logisticsExceptionStageLabel(returnRecord.currentException.stage)}
-                  </strong>
-                  <span>{returnRecord.currentException.reason}</span>
-                  {aftersalesCase.coordination.returnException?.exceptionId
-                    === returnRecord.currentException.id && (
-                    <span>
-                      退货异常处理：{aftersalesCase.coordination.returnException.decision
-                        ? returnExceptionDecisionLabel(
-                          aftersalesCase.coordination.returnException.decision,
-                        )
-                        : '待选择'}
-                      {' · '}影响 {aftersalesCase.coordination.returnException.affectedQuantity} 件
-                    </span>
-                  )}
-                </div>
-              )}
+              {returnRecord.logisticsExceptions
+                .filter(({ stage }) => isUnresolvedLogisticsExceptionStage(stage))
+                .map((exception) => (
+                  <div className="shipment-record-card__return-exception" role="status" key={exception.id}>
+                    <strong>
+                      物流异常 · {logisticsExceptionTypeLabel(
+                        exception.exceptionType,
+                      )} · {logisticsExceptionStageLabel(exception.stage)}
+                    </strong>
+                    <span>{exception.reason}</span>
+                    <ul aria-label="退货物流异常受影响商品">
+                      {returnExceptionAffectedItems(returnRecord, exception).map((item) => (
+                        <li key={item.id}>
+                          <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                          <strong>× {item.quantity}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                    {aftersalesCase.coordination.returnException?.exceptionId === exception.id && (
+                      <span>
+                        退货异常处理：{aftersalesCase.coordination.returnException.decision
+                          ? returnExceptionDecisionLabel(
+                            aftersalesCase.coordination.returnException.decision,
+                          )
+                          : '待选择'}
+                        {' · '}影响 {aftersalesCase.coordination.returnException.affectedQuantity} 件
+                      </span>
+                    )}
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      aria-label={`推进退货物流异常 ${logisticsExceptionTypeLabel(exception.exceptionType)}`}
+                      onClick={() => setProgressTarget({
+                        aftersalesCase: {
+                          ...aftersalesCase,
+                          returns: aftersalesCase.returns.map((candidate) => candidate.id === returnRecord.id
+                            ? {
+                              ...candidate,
+                              currentException: { ...exception, direction: 'return' as const },
+                            }
+                            : candidate),
+                        },
+                        kind: 'progress_return_logistics_exception',
+                        returnRecordId: returnRecord.id,
+                      })}
+                    >
+                      推进此异常
+                    </button>
+                  </div>
+                ))}
               <ul aria-label="退货商品真实数量">
                 {returnRecord.items.map((item) => (
                   <li key={item.id}>
@@ -292,18 +386,24 @@ export function AftersalesCasePanel({
                 >
                   更正退货物流
                 </button>
-                <button
-                  className="button button--quiet"
-                  type="button"
-                  onClick={() => setProgressTarget({
-                    aftersalesCase,
-                    kind: 'update_return_logistics_status',
-                    returnRecordId: returnRecord.id,
-                  })}
-                >
-                  更新退货物流状态
-                </button>
-                <button
+                {returnRecord.status === 'in_transit' && (
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setProgressTarget({
+                      aftersalesCase,
+                      kind: 'update_return_logistics_status',
+                      returnRecordId: returnRecord.id,
+                    })}
+                  >
+                    更新退货物流状态
+                  </button>
+                )}
+                {(returnRecord.status === 'in_transit'
+                  || returnRecord.currentException
+                  || returnRecord.status === 'received'
+                  || returnRecord.status === 'inspected') && (
+                  <button
                   className="button button--quiet"
                   type="button"
                   onClick={() => setProgressTarget({
@@ -315,7 +415,8 @@ export function AftersalesCasePanel({
                   })}
                 >
                   {returnRecord.currentException ? '推进退货物流异常' : '登记退货物流异常'}
-                </button>
+                  </button>
+                )}
                 {aftersalesCase.coordination.returnException?.decision
                   && aftersalesCase.coordination.returnException.exceptionId
                     === returnRecord.currentException?.id && (
@@ -383,6 +484,22 @@ export function AftersalesCasePanel({
                   ))}
                 </ol>
               </details>
+              {returnRecord.logisticsExceptions.length > 0 && (
+                <details className="shipment-record-card__timeline">
+                  <summary>退货物流异常完整历史</summary>
+                  <ol>
+                    {returnRecord.logisticsExceptions.flatMap((exception) => (
+                      exception.timeline.map((event) => (
+                        <li key={`${exception.id}-${event.resultRevision}`}>
+                          <strong>{logisticsExceptionTypeLabel(exception.exceptionType)}</strong>
+                          <span>{logisticsExceptionEventDescription(event)}</span>
+                          <small>{formatDateTime(event.occurredAt)}</small>
+                        </li>
+                      ))
+                    ))}
+                  </ol>
+                </details>
+              )}
               {returnRecord.carrierClaim && (
                 <details className="shipment-record-card__timeline">
                   <summary>承运索赔完整历史</summary>
@@ -390,7 +507,7 @@ export function AftersalesCasePanel({
                     {returnRecord.carrierClaim.timeline.map((event) => (
                       <li key={`${event.kind}-${event.resultRevision}`}>
                         <strong>{carrierClaimEventLabel(event.kind)}</strong>
-                        <span>{event.kind === 'compensation_confirmed' ? event.note : event.reason}</span>
+                        <span>{carrierClaimEventDescription(event)}</span>
                         <small>{formatDateTime(event.occurredAt)}</small>
                       </li>
                     ))}
@@ -565,9 +682,8 @@ export function AftersalesCasePanel({
                   {progressActionLabel('complete')}
                 </button>
               )}
-              {(aftersalesCase.refund?.status === 'pending'
-                || aftersalesCase.workflow === 'exchange'
-                || aftersalesCase.workflow === 'direct_replacement') && (
+              {aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled' && (
                 <button
                   className="button button--quiet"
                   type="button"
@@ -676,7 +792,8 @@ export function AftersalesCasePanel({
             </details>
           )}
         </section>
-      ))}
+        );
+      })}
       {progressTarget && (
         <ProgressAftersalesCaseDialog
           aftersalesCase={progressTarget.aftersalesCase}
@@ -962,6 +1079,68 @@ function carrierClaimEventLabel(
     rejected: '承运方拒绝赔付',
     compensation_confirmed: '确认实际赔付',
   }[kind];
+}
+
+function carrierClaimEventDescription(
+  event: NonNullable<AftersalesCase['returns'][number]['carrierClaim']>['timeline'][number],
+): string {
+  if (event.kind === 'opened') {
+    return `申请 ${formatMoney(event.requestedAmountCents)} · ${event.reason}`;
+  }
+  if (event.kind === 'approved') {
+    return `同意 ${formatMoney(event.approvedAmountCents as number)} · ${event.reason}`;
+  }
+  if (event.kind === 'rejected') return event.reason;
+  if (event.kind === 'compensation_confirmed') {
+    return `实际赔付 ${formatMoney(event.amountCents)} · ${event.note}`;
+  }
+  return '';
+}
+
+function refundEventLabel(
+  kind: 'created' | 'confirmed' | 'cancelled' | 'reopened',
+): string {
+  return {
+    created: '申请退款',
+    confirmed: '确认实际退款',
+    cancelled: '取消退款申请',
+    reopened: '重新申请退款',
+  }[kind];
+}
+
+function logisticsExceptionEventDescription(
+  event: AftersalesCase['returns'][number]['logisticsExceptions'][number]['timeline'][number],
+): string {
+  if (event.kind === 'opened') {
+    return `${logisticsExceptionStageLabel(event.stage)} · ${event.reason}`;
+  }
+  return `${logisticsExceptionStageLabel(event.beforeStage)} → ${logisticsExceptionStageLabel(event.afterStage)} · ${event.reason}`;
+}
+
+function returnExceptionAffectedItems(
+  returnRecord: AftersalesCase['returns'][number],
+  exception: AftersalesCase['returns'][number]['logisticsExceptions'][number],
+): Array<{ id: string; sourceTitle: string; sourceSpec: string; quantity: number }> {
+  if (exception.impact.scope === 'package') {
+    return returnRecord.items.map((item) => ({
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      quantity: item.quantity,
+    }));
+  }
+  const quantityById = new Map(exception.impact.items.map(({ sourceItemId, quantity }) => (
+    [sourceItemId, quantity] as const
+  )));
+  return returnRecord.items.flatMap((item) => {
+    const quantity = quantityById.get(item.id);
+    return quantity === undefined ? [] : [{
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      quantity: Math.min(item.quantity, quantity),
+    }];
+  });
 }
 
 function isConfirmedLost(returnRecord: AftersalesCase['returns'][number]): boolean {

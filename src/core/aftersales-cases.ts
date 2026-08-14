@@ -87,6 +87,15 @@ export type AftersalesRefund = {
   status: PendingFinancialItemStatus;
   actualRecord: AftersalesRefundFinancialRecord | null;
   createdAt: string;
+  latestEventAt: string;
+  timeline: Array<{
+    kind: 'created' | 'confirmed' | 'cancelled' | 'reopened';
+    requestedAmountCents: number;
+    actualAmountCents: number | null;
+    reason: string;
+    occurredAt: string;
+    createdAt: string;
+  }>;
 };
 
 export type AftersalesRefundFinancialRecord = {

@@ -127,7 +127,7 @@ import {
 } from './AftersalesCaseDialogs';
 import {
   aftersalesCasesForShipmentRecords,
-  aftersalesCurrentAction,
+  aftersalesCaseOperationsCoordination,
   aftersalesStatusLabel,
   carrierClaimStatusLabel,
   hasActiveParentAftersalesCase,
@@ -138,8 +138,12 @@ import {
   shipmentRecordsAftersalesSummary,
 } from './aftersales-presentation';
 import {
+  aftersalesTodoForCases,
+  coordinateOrderOperations,
+  shipmentOrderOperationCandidates,
   shipmentLogisticsStatusLabel,
   shipmentTodoForStatuses,
+  type OrderOperationsShipmentRecord,
 } from '../core/order-operations-projection';
 import { OrderExportDialog } from './OrderExportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
@@ -2493,6 +2497,10 @@ function ShipmentArchiveSection({
             const progress = archive.totalQuantity === 0
               ? 0
               : Math.round((archive.shippedQuantity / archive.totalQuantity) * 100);
+            const operationsCoordination = shipmentRecordsCoordination(
+              archive.records,
+              aftersalesCases,
+            );
             return (
               <article
                 key={archive.id}
@@ -2580,12 +2588,25 @@ function ShipmentArchiveSection({
                         archive.records,
                         aftersalesCases,
                       )}</span>
-                      <span><strong>当前待办：</strong>{shipmentRecordsCurrentAction(
-                        archive.records,
-                        aftersalesCases,
-                      )}</span>
+                      <span><strong>当前待办：</strong>{
+                        operationsCoordination.primaryTodo?.title
+                          ?? shipmentRecordsCurrentAction(archive.records, aftersalesCases)
+                      }</span>
                     </span>
                   </summary>
+                  {operationsCoordination.secondaryTodoCount > 0 && (
+                    <details className="order-coordination-secondary shipment-records-secondary-todos">
+                      <summary>另有 {operationsCoordination.secondaryTodoCount} 项</summary>
+                      <ul>
+                        {operationsCoordination.todos.slice(1).map((todo) => (
+                          <li key={todo.id}>
+                            <strong>{todo.title}</strong>
+                            <small>{todo.detail}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   <ShipmentRecordsSection
                     embedded
                     records={archive.records}
@@ -2664,6 +2685,7 @@ function ShipmentRecordsSection({
       {records.map((record) => {
         const recordAftersalesCases = aftersalesCasesForShipmentRecords([record], aftersalesCases);
         const hasActiveParentAftersales = hasActiveParentAftersalesCase(record, aftersalesCases);
+        const operationsCoordination = shipmentRecordsCoordination([record], aftersalesCases);
         return (
         <article
           id={`shipment-record-${record.id}`}
@@ -2685,11 +2707,24 @@ function ShipmentRecordsSection({
               record,
               aftersalesCases,
             )}</span>
-            <span><strong>当前待办：</strong>{shipmentRecordCurrentAction(
-              record,
-              aftersalesCases,
-            )}</span>
+            <span><strong>当前待办：</strong>{
+              operationsCoordination.primaryTodo?.title
+                ?? shipmentRecordCurrentAction(record, aftersalesCases)
+            }</span>
           </div>
+          {operationsCoordination.secondaryTodoCount > 0 && (
+            <details className="order-coordination-secondary shipment-records-secondary-todos">
+              <summary>另有 {operationsCoordination.secondaryTodoCount} 项</summary>
+              <ul>
+                {operationsCoordination.todos.slice(1).map((todo) => (
+                  <li key={todo.id}>
+                    <strong>{todo.title}</strong>
+                    <small>{todo.detail}</small>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           {record.status === 'active' && !hasActiveParentAftersales && (
             <div className="shipment-record-card__aftersales-actions">
               <button
@@ -2739,20 +2774,45 @@ function ShipmentRecordsSection({
                     </li>
                   ))}
                 </ul>
-                {shipmentPackage.currentException && (
-                  <div className="shipment-package-exception" role="status">
-                    <strong>正向物流异常 · {logisticsExceptionTypeLabel(
-                      shipmentPackage.currentException.exceptionType,
-                    )} · {logisticsExceptionStageLabel(shipmentPackage.currentException.stage)}</strong>
-                    <span>{shipmentPackage.currentException.impact.scope === 'package'
-                      ? `影响整个包裹（${shipmentPackage.totalQuantity} 件）`
-                      : `影响 ${shipmentPackage.currentException.impact.items.reduce(
-                        (total, item) => total + item.quantity,
-                        0,
-                      )} 件指定商品`}</span>
-                    <small>{shipmentPackage.currentException.reason}</small>
-                  </div>
-                )}
+                {shipmentPackage.logisticsExceptions
+                  .filter(({ stage }) => isUnresolvedLogisticsExceptionStage(stage))
+                  .map((exception) => (
+                    <div className="shipment-package-exception" role="status" key={exception.id}>
+                      <strong>正向物流异常 · {logisticsExceptionTypeLabel(
+                        exception.exceptionType,
+                      )} · {logisticsExceptionStageLabel(exception.stage)}</strong>
+                      <span>{exception.impact.scope === 'package'
+                        ? `影响整个包裹（${shipmentPackage.totalQuantity} 件）`
+                        : `影响 ${exception.impact.items.reduce(
+                          (total, item) => total + item.quantity,
+                          0,
+                        )} 件指定商品`}</span>
+                      <ul aria-label="正向物流异常受影响商品">
+                        {shipmentExceptionAffectedItems(shipmentPackage, exception).map((item) => (
+                          <li key={item.id}>
+                            <span>{item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
+                            <strong>× {item.quantity}</strong>
+                          </li>
+                        ))}
+                      </ul>
+                      <small>{exception.reason}</small>
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        aria-label={`推进物流异常 ${logisticsExceptionTypeLabel(exception.exceptionType)}`}
+                        onClick={() => onProgressLogisticsException(
+                          record,
+                          {
+                            ...shipmentPackage,
+                            currentException: { ...exception, direction: 'outbound' as const },
+                          },
+                          packageIndex,
+                        )}
+                      >
+                        推进此异常
+                      </button>
+                    </div>
+                  ))}
                 {shipmentPackage.carrierClaim && (
                   <div className="shipment-package-exception" role="status">
                     <strong>承运索赔</strong>
@@ -2762,25 +2822,31 @@ function ShipmentRecordsSection({
                 )}
                 {shipmentPackage.status === 'active' && (
                   <footer>
-                    <button
-                      className="button button--quiet"
-                      type="button"
-                      aria-label={`更新物流状态 包裹 ${packageIndex + 1} ${shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}`}
-                      onClick={() => onUpdateLogisticsStatus(record, shipmentPackage, packageIndex)}
-                    >
-                      更新状态
-                    </button>
-                    <button
-                      className="button button--quiet"
-                      type="button"
-                      onClick={() => onProgressLogisticsException(
-                        record,
-                        shipmentPackage,
-                        packageIndex,
-                      )}
-                    >
-                      {shipmentPackage.currentException ? '推进物流异常' : '登记物流异常'}
-                    </button>
+                    {(shipmentPackage.logisticsStatus === 'awaiting_carrier'
+                      || shipmentPackage.logisticsStatus === 'in_transit') && (
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        aria-label={`更新物流状态 包裹 ${packageIndex + 1} ${shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}`}
+                        onClick={() => onUpdateLogisticsStatus(record, shipmentPackage, packageIndex)}
+                      >
+                        更新状态
+                      </button>
+                    )}
+                    {(shipmentPackage.currentException
+                      || shipmentPackage.logisticsStatus !== 'returned') && (
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        onClick={() => onProgressLogisticsException(
+                          record,
+                          shipmentPackage,
+                          packageIndex,
+                        )}
+                      >
+                        {shipmentPackage.currentException ? '推进物流异常' : '登记物流异常'}
+                      </button>
+                    )}
                     <button
                       className="button button--quiet"
                       type="button"
@@ -2789,6 +2855,12 @@ function ShipmentRecordsSection({
                     >
                       更正物流
                     </button>
+                    {shipmentPackage.logisticsStatus === 'delivered' && (
+                      <small>物流状态已终结；签收争议、错投或承运破损可单独登记，物流信息有误请更正</small>
+                    )}
+                    {shipmentPackage.logisticsStatus === 'returned' && (
+                      <small>包裹已退回；承运方或运单号有误时请使用“更正物流”</small>
+                    )}
                     {((shipmentPackage.currentException?.stage === 'confirmed'
                       && !shipmentPackage.carrierClaim)
                       || shipmentPackage.carrierClaim?.status === 'pending'
@@ -2822,6 +2894,36 @@ function ShipmentRecordsSection({
                       </button>
                     )}
                   </footer>
+                )}
+                {shipmentPackage.logisticsExceptions.length > 0 && (
+                  <details className="shipment-record-card__timeline">
+                    <summary>正向物流异常完整历史</summary>
+                    <ol>
+                      {shipmentPackage.logisticsExceptions.flatMap((exception) => (
+                        exception.timeline.map((event) => (
+                          <li key={`${exception.id}-${event.resultRevision}`}>
+                            <strong>{logisticsExceptionTypeLabel(exception.exceptionType)}</strong>
+                            <span>{shipmentExceptionEventDescription(event)}</span>
+                            <small>{formatDateTime(event.occurredAt)}</small>
+                          </li>
+                        ))
+                      ))}
+                    </ol>
+                  </details>
+                )}
+                {shipmentPackage.carrierClaim && (
+                  <details className="shipment-record-card__timeline">
+                    <summary>正向承运索赔完整历史</summary>
+                    <ol>
+                      {shipmentPackage.carrierClaim.timeline.map((event) => (
+                        <li key={`${event.kind}-${event.resultRevision}`}>
+                          <strong>{shipmentClaimEventLabel(event.kind)}</strong>
+                          <span>{shipmentClaimEventDescription(event)}</span>
+                          <small>{formatDateTime(event.occurredAt)}</small>
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
                 )}
                 {shipmentPackage.timeline.length > 0 && (
                   <details className="shipment-record-card__timeline">
@@ -2932,26 +3034,116 @@ function shipmentRecordsCurrentAction(
   records: readonly ShipmentRecord[],
   cases: readonly AftersalesCase[],
 ): string {
-  const currentAftersalesAction = aftersalesCurrentAction(records, cases);
-  if (currentAftersalesAction) return currentAftersalesAction;
+  const coordination = shipmentRecordsCoordination(records, cases);
   const statuses = new Set(activeShipmentLogisticsStatuses(records));
   const carrierClaimStatuses = new Set(records
     .filter(({ status }) => status === 'active')
     .flatMap(({ packages }) => packages)
     .filter(({ status }) => status === 'active')
     .flatMap(({ carrierClaim }) => carrierClaim ? [carrierClaim.status] : []));
-  const hasUnresolvedLogisticsException = records
-    .filter(({ status }) => status === 'active')
-    .some(({ packages }) => packages.some((shipmentPackage) => (
-      shipmentPackage.status === 'active'
-      && shipmentPackage.currentException !== null
-      && isUnresolvedLogisticsExceptionStage(shipmentPackage.currentException.stage)
-    )));
-  return shipmentTodoForStatuses(
-    statuses,
-    carrierClaimStatuses,
-    hasUnresolvedLogisticsException,
-  );
+  return coordination.primaryTodo?.title
+    ?? shipmentTodoForStatuses(statuses, carrierClaimStatuses, false);
+}
+
+function shipmentRecordsCoordination(
+  records: readonly ShipmentRecord[],
+  cases: readonly AftersalesCase[],
+) {
+  const candidates = aftersalesCasesForShipmentRecords(
+    records,
+    cases,
+  ).flatMap((aftersalesCase) => (
+    aftersalesCaseOperationsCoordination(aftersalesCase).todos
+  ));
+  candidates.push(...shipmentOrderOperationCandidates(
+    records.map(shipmentRecordForOperationsCoordination),
+  ));
+  return coordinateOrderOperations(candidates);
+}
+
+function shipmentRecordForOperationsCoordination(
+  record: ShipmentRecord,
+): OrderOperationsShipmentRecord {
+  return {
+    id: record.id,
+    archiveId: record.archiveId,
+    sourceRole: record.sourceRecordRole === 'aftersales_replacement'
+      ? 'replacement'
+      : 'initial',
+    replacementAftersalesCaseId: null,
+    status: record.status,
+    createdAt: record.createdAt,
+    packages: record.packages.map((shipmentPackage) => {
+      const affectedItems = (impact: typeof shipmentPackage.logisticsExceptions[number]['impact']) => (
+        impact.scope === 'package'
+          ? shipmentPackage.items.map((item) => ({
+            sourceTitle: item.sourceTitle,
+            sourceSpec: item.sourceSpec,
+            quantity: item.quantity,
+          }))
+          : impact.items.flatMap((affectedItem) => {
+            const source = shipmentPackage.items.find(({ id }) => id === affectedItem.sourceItemId);
+            return source ? [{
+              sourceTitle: source.sourceTitle,
+              sourceSpec: source.sourceSpec,
+              quantity: affectedItem.quantity,
+            }] : [];
+          })
+      );
+      const occurrenceValues = [
+        record.createdAt,
+        ...shipmentPackage.timeline.map(({ occurredAt }) => occurredAt),
+        ...shipmentPackage.logisticsExceptions.map(({ occurredAt }) => occurredAt),
+        ...(shipmentPackage.carrierClaim ? [shipmentPackage.carrierClaim.updatedAt] : []),
+      ];
+      const updatedAt = occurrenceValues.reduce((latest, occurrence) => (
+        Date.parse(occurrence) > Date.parse(latest) ? occurrence : latest
+      ));
+      const claimAffectedItems = shipmentPackage.carrierClaim
+        ? affectedItems(shipmentPackage.carrierClaim.impact)
+        : undefined;
+      return {
+        id: shipmentPackage.id,
+        position: shipmentPackage.position,
+        status: shipmentPackage.status,
+        logisticsStatus: shipmentPackage.logisticsStatus,
+        updatedAt,
+        shippingCarrier: shipmentPackage.shippingCarrier,
+        trackingNumber: shipmentPackage.trackingNumber,
+        cancellationReason: null,
+        currentException: null,
+        logisticsExceptions: shipmentPackage.logisticsExceptions.map((exception) => ({
+          id: exception.id,
+          direction: 'outbound' as const,
+          exceptionType: exception.exceptionType,
+          stage: exception.stage,
+          affectedQuantity: affectedItems(exception.impact).reduce(
+            (total, item) => total + item.quantity,
+            0,
+          ),
+          affectedItems: affectedItems(exception.impact),
+          reason: exception.reason,
+          occurredAt: exception.occurredAt,
+        })),
+        carrierClaimStatus: shipmentPackage.carrierClaim?.status ?? null,
+        carrierClaimUpdatedAt: shipmentPackage.carrierClaim?.updatedAt ?? null,
+        ...(claimAffectedItems ? {
+          carrierClaimAffectedItems: claimAffectedItems,
+          carrierClaimAffectedQuantity: claimAffectedItems.reduce(
+            (total, item) => total + item.quantity,
+            0,
+          ),
+        } : {}),
+        items: shipmentPackage.items.map((item) => ({
+          shipmentPackageItemId: item.id,
+          orderItemId: item.orderItemId,
+          sourceTitle: item.sourceTitle,
+          sourceSpec: item.sourceSpec,
+          quantity: item.quantity,
+        })),
+      };
+    }),
+  };
 }
 
 function shipmentRecordCurrentAction(
@@ -3061,8 +3253,11 @@ function UpdateShipmentPackageLogisticsStatusDialog({
               <option
                 key={option.value}
                 value={option.value}
-                disabled={option.value === 'awaiting_carrier'
-                  && target.shipmentPackage.carrierAcceptedAt !== null}
+                disabled={(option.value === 'awaiting_carrier'
+                  && target.shipmentPackage.carrierAcceptedAt !== null)
+                  || ((target.shipmentPackage.logisticsStatus === 'delivered'
+                    || target.shipmentPackage.logisticsStatus === 'returned')
+                    && (option.value === 'awaiting_carrier' || option.value === 'in_transit'))}
               >
                 {option.label}
               </option>
@@ -3127,9 +3322,16 @@ function ShipmentPackageLogisticsExceptionDialog({
   const headingId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const current = target.shipmentPackage.currentException;
+  const exceptionTypeOptions = target.shipmentPackage.logisticsStatus === 'delivered'
+    ? LOGISTICS_EXCEPTION_TYPE_OPTIONS.filter(({ value }) => (
+      value === 'delivery_dispute' || value === 'misdelivered' || value === 'damaged'
+    ))
+    : LOGISTICS_EXCEPTION_TYPE_OPTIONS;
   const [exceptionType, setExceptionType] = useState<
     'lost' | 'delivery_dispute' | 'damaged' | 'misdelivered' | 'other'
-  >(current?.exceptionType ?? 'lost');
+  >(current?.exceptionType ?? (target.shipmentPackage.logisticsStatus === 'delivered'
+    ? 'delivery_dispute'
+    : 'lost'));
   const stageOptions = current
     ? nextLogisticsExceptionStages(current.exceptionType, current.stage)
     : ['pending_verification', 'investigating', 'confirmed'] as const;
@@ -3218,7 +3420,7 @@ function ShipmentPackageLogisticsExceptionDialog({
             <span>异常类型</span>
             <select aria-label="异常类型" value={exceptionType} disabled={saving}
               onChange={(event) => setExceptionType(event.target.value as typeof exceptionType)}>
-              {LOGISTICS_EXCEPTION_TYPE_OPTIONS.map((option) => (
+              {exceptionTypeOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
@@ -8575,6 +8777,132 @@ function DetailWorkspace({
             </dl>
           </section>
 
+          <section
+            className="detail-section order-coordination"
+            aria-label="订单当前处理"
+          >
+            <div className="detail-section-title">
+              <div>
+                <span className="section-kicker">统一运营投影</span>
+                <h2>订单当前处理</h2>
+              </div>
+              <span>按期限、资金、实物和普通跟进排序</span>
+            </div>
+            {details.operations.coordination.primaryTodo ? (
+              <div className="order-coordination-primary">
+                <div>
+                  <span className="order-coordination-label">当前待办</span>
+                  <strong>{details.operations.coordination.primaryTodo.title}</strong>
+                  <p>{details.operations.coordination.primaryTodo.detail}</p>
+                </div>
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => {
+                    const { target } = details.operations.coordination.primaryTodo!;
+                    onLocateShipment(
+                      target.shipmentRecordId,
+                      target.kind === 'aftersales_case' ? target.aftersalesCaseId : undefined,
+                    );
+                  }}
+                >
+                  去处理
+                </button>
+              </div>
+            ) : (
+              <p className="order-operations-empty">当前无需处理。</p>
+            )}
+            {details.operations.coordination.secondaryTodoCount > 0 && (
+              <details className="order-coordination-secondary">
+                <summary role="button">另有 {details.operations.coordination.secondaryTodoCount} 项</summary>
+                <ul>
+                  {details.operations.coordination.todos.slice(1).map((todo) => (
+                    <li key={todo.id}>
+                      <div>
+                        <strong>{todo.title}</strong>
+                        <small>{todo.detail}</small>
+                      </div>
+                      <button
+                        className="button button--quiet"
+                        type="button"
+                        onClick={() => onLocateShipment(
+                          todo.target.shipmentRecordId,
+                          todo.target.kind === 'aftersales_case'
+                            ? todo.target.aftersalesCaseId
+                            : undefined,
+                        )}
+                      >
+                        定位
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            <div className="order-coordination-block">
+              <h3>未解决风险</h3>
+              {details.operations.risks.length === 0 ? (
+                <p className="order-coordination-clear">暂无未解决风险</p>
+              ) : (
+                <ul className="order-coordination-risks">
+                  {details.operations.risks.map((risk) => (
+                    <li key={risk.id}>
+                      <strong>
+                        {operationPackageRoleLabel(risk.packageRole)} · {risk.title}
+                        {risk.exceptionType
+                          ? ` · ${logisticsExceptionTypeLabel(risk.exceptionType)}`
+                          : ''}
+                      </strong>
+                      <span>影响 {risk.affectedQuantity} 件</span>
+                      {risk.items.map((item) => (
+                        <span key={`${item.sourceTitle}\u0000${item.sourceSpec}`}>
+                          {item.sourceTitle}{item.sourceSpec ? ` · ${item.sourceSpec}` : ''}
+                          {' × '}{item.quantity}
+                        </span>
+                      ))}
+                      <small>{risk.detail}</small>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="order-coordination-block">
+              <h3>并列事实概览</h3>
+              {details.operations.facts.length === 0 ? (
+                <p className="order-coordination-clear">暂无发货或售后事实</p>
+              ) : (
+                <dl className="order-coordination-facts">
+                  {details.operations.facts.map((fact) => (
+                    <div key={fact.id}>
+                      <dt>{fact.label}</dt>
+                      <dd>
+                        <strong>{operationFactValueLabel(fact.kind, fact.value)}</strong>
+                        <span>{fact.detail}</span>
+                        <small>影响 {fact.affectedQuantity} 件</small>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </div>
+            {details.operations.history.length > 0 && (
+              <details className="order-coordination-history">
+                <summary role="button" aria-label="展开完整历史">
+                  完整历史 · {details.operations.history.length} 条
+                </summary>
+                <ol>
+                  {details.operations.history.map((entry) => (
+                    <li key={entry.id}>
+                      <time>{formatDateTime(entry.occurredAt)}</time>
+                      <strong>{entry.title}</strong>
+                      <span>{entry.detail}</span>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+          </section>
+
           <section className="detail-section" aria-label="历史订单级物流">
             <div className="detail-section-title">
               <h2>历史订单级物流</h2>
@@ -8626,17 +8954,19 @@ function DetailWorkspace({
                               : shipmentLogisticsStatusLabel(shipmentPackage.logisticsStatus)}</span>
                           </div>
                           <p>{shipmentPackageLogisticsLabel(shipmentPackage)}</p>
-                          {shipmentPackage.currentException && (
-                            <p className="shipment-package-exception">
+                          {shipmentPackage.logisticsExceptions
+                            .filter(({ stage }) => isUnresolvedLogisticsExceptionStage(stage))
+                            .map((exception) => (
+                            <p className="shipment-package-exception" key={exception.id}>
                               <strong>正向物流异常：{logisticsExceptionTypeLabel(
-                                shipmentPackage.currentException.exceptionType,
+                                exception.exceptionType,
                               )} · {logisticsExceptionStageLabel(
-                                shipmentPackage.currentException.stage,
+                                exception.stage,
                               )}</strong>
-                              <span>影响 {shipmentPackage.currentException.affectedQuantity} 件</span>
-                              <small>{shipmentPackage.currentException.reason}</small>
+                              <span>影响 {exception.affectedQuantity} 件</span>
+                              <small>{exception.reason}</small>
                             </p>
-                          )}
+                            ))}
                           {shipmentPackage.carrierClaimStatus && (
                             <small>承运索赔：{carrierClaimStatusLabel(
                               shipmentPackage.carrierClaimStatus,
@@ -8710,19 +9040,21 @@ function DetailWorkspace({
                               <strong>退货运输 · {returnPackage.shippingCarrier} · {returnPackage.trackingNumber}</strong>
                               <span>{returnLogisticsStatusLabel(returnPackage.logisticsStatus)}</span>
                             </div>
-                            {returnPackage.currentException && (
-                              <div className="shipment-package-exception">
+                            {returnPackage.logisticsExceptions
+                              .filter(({ stage }) => isUnresolvedLogisticsExceptionStage(stage))
+                              .map((exception) => (
+                              <div className="shipment-package-exception" key={exception.id}>
                                 <strong>
                                   退货物流异常 · {logisticsExceptionTypeLabel(
-                                    returnPackage.currentException.exceptionType,
+                                    exception.exceptionType,
                                   )} · {logisticsExceptionStageLabel(
-                                    returnPackage.currentException.stage,
+                                    exception.stage,
                                   )}
                                 </strong>
-                                <span>影响 {returnPackage.currentException.affectedQuantity} 件</span>
-                                <small>{returnPackage.currentException.reason}</small>
+                                <span>影响 {exception.affectedQuantity} 件</span>
+                                <small>{exception.reason}</small>
                               </div>
-                            )}
+                              ))}
                             <ul>
                               {returnPackage.items.map((item) => (
                                 <li key={item.shipmentPackageItemId}>
@@ -9285,6 +9617,68 @@ function formatMoney(cents: number | null): string {
   return `¥${(cents / 100).toFixed(2)}`;
 }
 
+function shipmentExceptionEventDescription(
+  event: ShipmentRecord['packages'][number]['logisticsExceptions'][number]['timeline'][number],
+): string {
+  if (event.kind === 'opened') {
+    return `${logisticsExceptionStageLabel(event.stage)} · ${event.reason}`;
+  }
+  return `${logisticsExceptionStageLabel(event.beforeStage)} → ${logisticsExceptionStageLabel(event.afterStage)} · ${event.reason}`;
+}
+
+function shipmentExceptionAffectedItems(
+  shipmentPackage: ShipmentRecord['packages'][number],
+  exception: ShipmentRecord['packages'][number]['logisticsExceptions'][number],
+): Array<{ id: string; sourceTitle: string; sourceSpec: string; quantity: number }> {
+  if (exception.impact.scope === 'package') {
+    return shipmentPackage.items.map((item) => ({
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      quantity: item.quantity,
+    }));
+  }
+  const quantityById = new Map(exception.impact.items.map(({ sourceItemId, quantity }) => (
+    [sourceItemId, quantity] as const
+  )));
+  return shipmentPackage.items.flatMap((item) => {
+    const quantity = quantityById.get(item.id);
+    return quantity === undefined ? [] : [{
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      quantity: Math.min(item.quantity, quantity),
+    }];
+  });
+}
+
+function shipmentClaimEventLabel(
+  kind: NonNullable<ShipmentRecord['packages'][number]['carrierClaim']>['timeline'][number]['kind'],
+): string {
+  return {
+    opened: '建立承运索赔',
+    approved: '承运方同意赔付',
+    rejected: '承运方拒绝赔付',
+    compensation_confirmed: '确认实际赔付',
+  }[kind];
+}
+
+function shipmentClaimEventDescription(
+  event: NonNullable<ShipmentRecord['packages'][number]['carrierClaim']>['timeline'][number],
+): string {
+  if (event.kind === 'opened') {
+    return `申请 ${formatMoney(event.requestedAmountCents)} · ${event.reason}`;
+  }
+  if (event.kind === 'approved') {
+    return `同意 ${formatMoney(event.approvedAmountCents)} · ${event.reason}`;
+  }
+  if (event.kind === 'rejected') return event.reason;
+  if (event.kind === 'compensation_confirmed') {
+    return `实际赔付 ${formatMoney(event.amountCents)} · ${event.note}`;
+  }
+  return '';
+}
+
 function formatMoneyInput(cents: number | null): string {
   return cents === null ? '' : (cents / 100).toFixed(2);
 }
@@ -9312,6 +9706,45 @@ function platformTransactionStatusLabel(status: OrderDraft['platformTransactionS
 
 function fulfillmentStatusLabel(status: FulfillmentStatus): string {
   return FULFILLMENT_STATUS_LABELS[status];
+}
+
+function operationPackageRoleLabel(
+  role: OrderDetails['operations']['risks'][number]['packageRole'],
+): string {
+  return {
+    original_outbound: '正向包裹',
+    return: '退货包裹',
+    replacement: '补发包裹',
+  }[role];
+}
+
+function operationFactValueLabel(
+  kind: OrderDetails['operations']['facts'][number]['kind'],
+  value: string,
+): string {
+  if (kind === 'outbound_logistics') {
+    return shipmentLogisticsStatusLabel(value as ShipmentLogisticsStatus);
+  }
+  if (kind === 'return_logistics') {
+    return returnLogisticsStatusLabel(value as AftersalesCase['returns'][number]['logisticsStatus']);
+  }
+  if (kind === 'aftersales') {
+    return aftersalesStatusLabel(value as AftersalesCase['status']);
+  }
+  if (kind === 'logistics_exception') {
+    return logisticsExceptionStageLabel(value as NonNullable<
+      AftersalesCase['returns'][number]['currentException']
+    >['stage']);
+  }
+  if (kind === 'carrier_claim') {
+    return carrierClaimStatusLabel(value as NonNullable<
+      AftersalesCase['returns'][number]['carrierClaim']
+    >['status']);
+  }
+  if (kind === 'refund') {
+    return { pending: '待确认', confirmed: '已退款', cancelled: '已取消' }[value] ?? value;
+  }
+  return value;
 }
 
 function hasShipmentHistory(status: FulfillmentStatus): boolean {

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   RecognitionAttempt,
@@ -66,6 +66,8 @@ class TwoOrderRecognizer implements Recognizer {
 }
 
 async function createApplication() {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-08-14T01:30:00.000Z'));
   const root = await mkdtemp(join(tmpdir(), 'xianyu-outbound-exception-'));
   const sourceDirectory = join(root, '上传');
   await mkdir(sourceDirectory, { recursive: true });
@@ -98,6 +100,7 @@ async function createApplication() {
 
 afterEach(() => {
   for (const application of openedApplications.splice(0)) application.close();
+  vi.useRealTimers();
 });
 
 describe('正向发货异常上层处理', () => {
@@ -105,12 +108,15 @@ describe('正向发货异常上层处理', () => {
     const { application, shipment, root } = await createApplication();
     const shipmentPackage = shipment.record.packages[0];
     const affectedItem = shipmentPackage.items[0];
+    const occurredAt = (offsetMinutes: number) => new Date(
+      Date.parse(shipment.record.createdAt) + offsetMinutes * 60_000,
+    ).toISOString();
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
-      occurredAt: '2026-08-14T09:20:00+08:00',
+      occurredAt: occurredAt(1),
       reason: '早期 v35 选择事件升级',
       items: [{ shipmentPackageItemId: affectedItem.id, quantity: 1 }],
     });
@@ -120,7 +126,7 @@ describe('正向发货异常上层处理', () => {
       expectedRevision: shipmentPackage.revision,
       logisticsStatus: 'in_transit',
       carrierAcceptanceConfirmed: true,
-      occurredAt: '2026-08-14T09:25:00+08:00',
+      occurredAt: occurredAt(2),
       reason: '承运方已揽收',
     });
     const damaged = application.recordShipmentPackageLogisticsException({
@@ -130,7 +136,7 @@ describe('正向发货异常上层处理', () => {
       exceptionType: 'damaged',
       stage: 'confirmed',
       impact: { scope: 'items', items: [{ sourceItemId: affectedItem.id, quantity: 1 }] },
-      occurredAt: '2026-08-14T09:30:00+08:00',
+      occurredAt: occurredAt(3),
       reason: '承运方确认一件破损',
     });
     const exceptionId = damaged.record.packages[0].currentException?.id;
@@ -142,7 +148,7 @@ describe('正向发货异常上层处理', () => {
       packageId: shipmentPackage.id,
       exceptionId,
       decision: 'replacement',
-      occurredAt: '2026-08-14T09:40:00+08:00',
+      occurredAt: occurredAt(4),
       reason: '早期版本选择补发',
     });
     const legacyRound = currentCase.rounds.find(({ replacementRequired }) => replacementRequired);
@@ -152,7 +158,7 @@ describe('正向发货异常上层处理', () => {
       caseId: currentCase.id,
       expectedRevision: currentCase.revision,
       roundId: legacyRound.id,
-      occurredAt: '2026-08-14T09:45:00+08:00',
+      occurredAt: occurredAt(5),
       reason: '早期 v35 建立未交寄补发',
       packages: [{
         shippingCarrier: '顺丰速运',
@@ -210,12 +216,15 @@ describe('正向发货异常上层处理', () => {
     const { application, shipment, root } = await createApplication();
     const shipmentPackage = shipment.record.packages[0];
     const affectedItem = shipmentPackage.items[0];
+    const occurredAt = (offsetMinutes: number) => new Date(
+      Date.parse(shipment.record.createdAt) + offsetMinutes * 60_000,
+    ).toISOString();
     const created = application.createAftersalesCase({
       shipmentRecordId: shipment.record.id,
       workflow: 'return_refund',
       handlingDirection: 'waiting',
       requestedRefundCents: 1_000,
-      occurredAt: '2026-08-14T09:20:00+08:00',
+      occurredAt: occurredAt(1),
       reason: '早期 v35 退款关联升级',
       items: [{ shipmentPackageItemId: affectedItem.id, quantity: 1 }],
     });
@@ -225,7 +234,7 @@ describe('正向发货异常上层处理', () => {
       expectedRevision: shipmentPackage.revision,
       logisticsStatus: 'in_transit',
       carrierAcceptanceConfirmed: true,
-      occurredAt: '2026-08-14T09:25:00+08:00',
+      occurredAt: occurredAt(2),
       reason: '承运方已揽收',
     });
     const damaged = application.recordShipmentPackageLogisticsException({
@@ -235,7 +244,7 @@ describe('正向发货异常上层处理', () => {
       exceptionType: 'damaged',
       stage: 'confirmed',
       impact: { scope: 'items', items: [{ sourceItemId: affectedItem.id, quantity: 1 }] },
-      occurredAt: '2026-08-14T09:30:00+08:00',
+      occurredAt: occurredAt(3),
       reason: '承运方确认商品破损',
     });
     const exceptionId = damaged.record.packages[0].currentException?.id;
@@ -247,7 +256,7 @@ describe('正向发货异常上层处理', () => {
       packageId: shipmentPackage.id,
       exceptionId,
       decision: 'refund_only',
-      occurredAt: '2026-08-14T09:40:00+08:00',
+      occurredAt: occurredAt(4),
       reason: '早期 v35 选择仅退款',
     });
     application.progressAftersalesCase({
@@ -255,7 +264,7 @@ describe('正向发货异常上层处理', () => {
       caseId: decided.id,
       expectedRevision: decided.revision,
       actualRefundCents: 1_000,
-      occurredAt: '2026-08-14T02:00:00Z',
+      occurredAt: occurredAt(5),
       note: '早期 v35 已确认退款',
     });
     application.close();
@@ -736,7 +745,15 @@ describe('正向发货异常上层处理', () => {
     });
     expect(cancelledRefund).toMatchObject({
       status: 'waiting_replacement',
-      refund: { status: 'cancelled' },
+      refund: {
+        status: 'cancelled',
+        latestEventAt: '2026-08-14T12:50:00+08:00',
+        timeline: expect.arrayContaining([expect.objectContaining({
+          kind: 'cancelled',
+          occurredAt: '2026-08-14T12:50:00+08:00',
+          reason: '买家确认只补发,显式取消本次退款',
+        })]),
+      },
     });
     const reopenedRefund = application.progressAftersalesCase({
       kind: 'decide_outbound_logistics_exception',
@@ -754,17 +771,58 @@ describe('正向发货异常上层处理', () => {
       requestedAmountCents: 800,
     });
     if (!reopenedRefund.refund) throw new Error('重开后退款事项不存在');
+    const changedBackAgain = application.progressAftersalesCase({
+      kind: 'decide_outbound_logistics_exception',
+      caseId: created.id,
+      expectedRevision: reopenedRefund.revision,
+      packageId: shipmentPackage.id,
+      exceptionId: exception.id,
+      decision: 'replacement',
+      occurredAt: '2026-08-14T13:10:00+08:00',
+      reason: '再次确认仅补发',
+    });
+    const cancelledAgain = application.progressAftersalesCase({
+      kind: 'cancel_refund_request',
+      caseId: created.id,
+      expectedRevision: changedBackAgain.revision,
+      occurredAt: '2026-08-14T13:20:00+08:00',
+      reason: '取消重新申请的退款',
+    });
+    expect(cancelledAgain.refund?.timeline.map(({ kind }) => kind)).toEqual([
+      'created',
+      'cancelled',
+      'reopened',
+      'cancelled',
+    ]);
+    if (!cancelledAgain.refund) throw new Error('再次取消后退款事项不存在');
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
-      expect(database.prepare(`
-        SELECT previous_requested_amount_cents, requested_amount_cents, reason
+      const reopeningEvent = database.prepare(`
+        SELECT previous_requested_amount_cents, requested_amount_cents, reason, created_at
         FROM aftersales_refund_reopening_events
         WHERE pending_item_id = ?
-      `).get(reopenedRefund.refund.pendingItemId)).toMatchObject({
+      `).get(cancelledAgain.refund.pendingItemId) as Record<string, unknown>;
+      expect(reopeningEvent).toMatchObject({
         previous_requested_amount_cents: 1_000,
         requested_amount_cents: 800,
         reason: '买家协商后重新申请部分退款',
       });
+      expect(cancelledAgain.refund.latestEventAt).toBe('2026-08-14T13:20:00+08:00');
+      expect(database.prepare(`
+        SELECT occurred_at, created_at
+        FROM pending_financial_item_events
+        WHERE pending_item_id = ? AND kind = 'cancelled'
+        ORDER BY sequence
+      `).all(cancelledAgain.refund.pendingItemId)).toEqual([
+        expect.objectContaining({
+          occurred_at: '2026-08-14T12:50:00+08:00',
+          created_at: '2026-08-14T01:30:00.000Z',
+        }),
+        expect.objectContaining({
+          occurred_at: '2026-08-14T13:20:00+08:00',
+          created_at: '2026-08-14T01:30:00.000Z',
+        }),
+      ]);
     } finally {
       database.close();
     }

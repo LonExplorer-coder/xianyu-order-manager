@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   RecognitionAttempt,
@@ -63,6 +63,8 @@ class OneOrderRecognizer implements Recognizer {
 }
 
 async function createApplication(root?: string, seedOrder = true) {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-08-14T01:30:00.000Z'));
   const applicationRoot = root ?? await mkdtemp(join(tmpdir(), 'xianyu-aftersales-replacement-'));
   const sourceDirectory = join(applicationRoot, '上传');
   await mkdir(sourceDirectory, { recursive: true });
@@ -107,6 +109,7 @@ function confirmOriginalShipment(application: LocalApplication) {
 
 afterEach(() => {
   for (const application of openedApplications.splice(0)) application.close();
+  vi.useRealTimers();
 });
 
 describe('换货、直接补发与多轮售后', () => {
@@ -698,7 +701,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 36 });
+        .toEqual({ version: 37 });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);

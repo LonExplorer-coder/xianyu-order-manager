@@ -21,24 +21,42 @@ export type OrderOperationsPackage = {
   position: number;
   status: 'active' | 'cancelled';
   logisticsStatus: ShipmentLogisticsStatus;
+  updatedAt: string;
   shippingCarrier: string;
   trackingNumber: string;
   cancellationReason: string | null;
-  currentException: {
-    direction: 'outbound';
-    exceptionType: LogisticsExceptionType;
-    stage: LogisticsExceptionStage;
-    affectedQuantity: number;
-    reason: string;
-    occurredAt: string;
-  } | null;
+  currentException: OrderOperationsLogisticsException | null;
+  logisticsExceptions: OrderOperationsLogisticsException[];
   carrierClaimStatus: CarrierClaimStatus | null;
+  carrierClaimUpdatedAt: string | null;
+  carrierClaimAffectedQuantity?: number;
+  carrierClaimAffectedItems?: OrderOperationsAffectedItem[];
   items: OrderOperationsShipmentItem[];
+};
+
+export type OrderOperationsLogisticsException = {
+  id: string;
+  direction: 'outbound' | 'return';
+  exceptionType: LogisticsExceptionType;
+  stage: LogisticsExceptionStage;
+  affectedQuantity: number;
+  affectedItems: OrderOperationsAffectedItem[];
+  reason: string;
+  occurredAt: string;
+};
+
+export type OrderOperationsAffectedItem = {
+  shipmentPackageItemId?: string;
+  sourceTitle: string;
+  sourceSpec: string;
+  quantity: number;
 };
 
 export type OrderOperationsShipmentRecord = {
   id: string;
   archiveId: string;
+  sourceRole: 'initial' | 'replacement';
+  replacementAftersalesCaseId: string | null;
   status: 'active' | 'voided';
   createdAt: string;
   packages: OrderOperationsPackage[];
@@ -59,7 +77,14 @@ export type OrderOperationsAftersalesCase = {
   status: AftersalesStatus;
   reason: string;
   occurredAt: string;
+  updatedAt: string;
   currentTodo: string;
+  refund: {
+    requestedAmountCents: number;
+    status: 'pending' | 'confirmed' | 'cancelled';
+    actualAmountCents: number | null;
+    occurredAt: string | null;
+  } | null;
   items: OrderOperationsAftersalesItem[];
   returnPackages: Array<{
     id: string;
@@ -67,16 +92,14 @@ export type OrderOperationsAftersalesCase = {
     shippingCarrier: string;
     trackingNumber: string;
     logisticsStatus: AftersalesReturnLogisticsStatus;
-    currentException: {
-      direction: 'return';
-      exceptionType: LogisticsExceptionType;
-      stage: LogisticsExceptionStage;
-      affectedQuantity: number;
-      reason: string;
-      occurredAt: string;
-    } | null;
+    updatedAt: string;
+    currentException: OrderOperationsLogisticsException | null;
+    logisticsExceptions: OrderOperationsLogisticsException[];
     discrepancies: AftersalesReturnDiscrepancy[];
     carrierClaimStatus: CarrierClaimStatus | null;
+    carrierClaimUpdatedAt: string | null;
+    carrierClaimAffectedQuantity?: number;
+    carrierClaimAffectedItems?: OrderOperationsAffectedItem[];
     items: Array<{
       shipmentPackageItemId: string;
       sourceTitle: string;
@@ -92,7 +115,388 @@ export type OrderOperationsProjection = {
   shipmentRecords: OrderOperationsShipmentRecord[];
   aftersalesCases: OrderOperationsAftersalesCase[];
   currentTodo: string;
+  coordination: OrderOperationsCoordination;
+  risks: OrderOperationsRisk[];
+  facts: OrderOperationsFact[];
+  history: OrderOperationsHistoryEntry[];
 };
+
+export type OrderOperationsTarget =
+  | {
+    kind: 'shipment_record';
+    shipmentRecordId: string;
+    packageId?: string;
+  }
+  | {
+    kind: 'aftersales_case';
+    shipmentRecordId: string;
+    aftersalesCaseId: string;
+    returnRecordId?: string;
+  };
+
+export type OrderOperationsTodoPriority =
+  | 'deadline'
+  | 'financial_risk'
+  | 'physical_risk'
+  | 'follow_up';
+
+export type OrderOperationsTodoCandidate = {
+  id: string;
+  priority: OrderOperationsTodoPriority;
+  title: string;
+  detail: string;
+  dueAt?: string;
+  occurredAt: string;
+  target: OrderOperationsTarget;
+};
+
+export type OrderOperationsCoordination = {
+  primaryTodo: OrderOperationsTodoCandidate | null;
+  secondaryTodoCount: number;
+  todos: OrderOperationsTodoCandidate[];
+};
+
+export type AftersalesOperationsCoordinationInput = {
+  id: string;
+  shipmentRecordId: string;
+  status: AftersalesStatus;
+  currentTodo: string;
+  updatedAt: string;
+  itemQuantity: number;
+  refund: null | {
+    status: 'pending' | 'confirmed' | 'cancelled';
+    requestedAmountCents: number;
+    occurredAt: string;
+  };
+  outboundClaims: Array<{
+    packageId: string;
+    status: CarrierClaimStatus;
+    updatedAt: string;
+    affectedQuantity: number;
+  }>;
+  outboundExceptions: Array<{
+    id: string;
+    stage: LogisticsExceptionStage;
+    affectedQuantity: number;
+    occurredAt: string;
+    requiresDecision?: boolean;
+  }>;
+  returns: Array<{
+    id: string;
+    status: AftersalesReturnStatus;
+    logisticsStatus: AftersalesReturnLogisticsStatus;
+    updatedAt: string;
+    exceptions: Array<{
+      id: string;
+      exceptionType: LogisticsExceptionType;
+      stage: LogisticsExceptionStage;
+      affectedQuantity: number;
+      occurredAt: string;
+    }>;
+    claim: null | {
+      status: CarrierClaimStatus;
+      updatedAt: string;
+      affectedQuantity: number;
+    };
+  }>;
+  hasPendingReturnExceptionDecision: boolean;
+  suppressGenericTodo?: boolean;
+};
+
+export type OrderOperationsRisk = {
+  id: string;
+  kind: 'logistics_exception' | 'refund_without_goods' | 'replacement_before_return';
+  packageRole: 'original_outbound' | 'return' | 'replacement';
+  exceptionType?: LogisticsExceptionType;
+  affectedQuantity: number;
+  items: OrderOperationsAffectedItem[];
+  title: string;
+  detail: string;
+  occurredAt: string;
+  target: OrderOperationsTarget;
+};
+
+export type OrderOperationsFact = {
+  id: string;
+  kind:
+    | 'outbound_logistics'
+    | 'logistics_exception'
+    | 'aftersales'
+    | 'return_logistics'
+    | 'refund'
+    | 'replacement'
+    | 'carrier_claim';
+  label: string;
+  value: string;
+  detail: string;
+  affectedQuantity: number;
+  occurredAt: string;
+  target: OrderOperationsTarget;
+};
+
+export type OrderOperationsHistoryEntry = {
+  id: string;
+  kind:
+    | 'shipment'
+    | 'logistics'
+    | 'logistics_exception'
+    | 'aftersales'
+    | 'return'
+    | 'refund'
+    | 'replacement'
+    | 'carrier_claim';
+  title: string;
+  detail: string;
+  occurredAt: string;
+  target: OrderOperationsTarget;
+};
+
+const TODO_PRIORITY_RANK: Readonly<Record<OrderOperationsTodoPriority, number>> = {
+  deadline: 0,
+  financial_risk: 1,
+  physical_risk: 2,
+  follow_up: 3,
+};
+
+export function coordinateOrderOperations(
+  candidates: readonly OrderOperationsTodoCandidate[],
+): OrderOperationsCoordination {
+  const newestById = new Map<string, OrderOperationsTodoCandidate>();
+  for (const candidate of candidates) {
+    const current = newestById.get(candidate.id);
+    if (!current || compareOccurredAt(candidate.occurredAt, current.occurredAt) >= 0) {
+      newestById.set(candidate.id, candidate);
+    }
+  }
+  const todos = [...newestById.values()].sort((first, second) => {
+    const priorityDifference = TODO_PRIORITY_RANK[first.priority]
+      - TODO_PRIORITY_RANK[second.priority];
+    if (priorityDifference !== 0) return priorityDifference;
+    if (first.dueAt !== undefined || second.dueAt !== undefined) {
+      if (first.dueAt === undefined) return 1;
+      if (second.dueAt === undefined) return -1;
+      const dueDifference = compareOccurredAt(first.dueAt, second.dueAt);
+      if (dueDifference !== 0) return dueDifference;
+    }
+    const occurredDifference = compareOccurredAt(second.occurredAt, first.occurredAt);
+    return occurredDifference !== 0 ? occurredDifference : first.id.localeCompare(second.id);
+  });
+  return {
+    primaryTodo: todos[0] ?? null,
+    secondaryTodoCount: Math.max(0, todos.length - 1),
+    todos,
+  };
+}
+
+export function shipmentOrderOperationCandidates(
+  records: readonly OrderOperationsShipmentRecord[],
+): OrderOperationsTodoCandidate[] {
+  const candidates: OrderOperationsTodoCandidate[] = [];
+  for (const record of records) {
+    if (record.status !== 'active') continue;
+    for (const shipmentPackage of record.packages) {
+      if (shipmentPackage.status !== 'active') continue;
+      const target = {
+        kind: 'shipment_record' as const,
+        shipmentRecordId: record.id,
+        packageId: shipmentPackage.id,
+      };
+      for (const exception of shipmentPackage.logisticsExceptions) {
+        if (!isUnresolvedLogisticsExceptionStageValue(exception.stage)) continue;
+        candidates.push({
+          id: `logistics-exception:${exception.id}`,
+          priority: 'physical_risk',
+          title: record.sourceRole === 'replacement'
+            ? '处理补发物流异常'
+            : '处理正向物流异常',
+          detail: `${exception.exceptionType} · 影响 ${exception.affectedQuantity} 件商品`,
+          occurredAt: exception.occurredAt,
+          target,
+        });
+      }
+      if (shipmentPackage.carrierClaimStatus === 'pending'
+        || shipmentPackage.carrierClaimStatus === 'approved') {
+        candidates.push({
+          id: `carrier-claim:outbound:${shipmentPackage.id}`,
+          priority: 'financial_risk',
+          title: shipmentPackage.carrierClaimStatus === 'pending'
+            ? '跟进承运索赔'
+            : '确认承运赔付',
+          detail: `影响 ${shipmentPackage.carrierClaimAffectedQuantity
+            ?? shipmentPackage.items.reduce((total, item) => total + item.quantity, 0)
+          } 件商品 · 承运责任与买家侧处理分别推进`,
+          occurredAt: shipmentPackage.carrierClaimUpdatedAt ?? shipmentPackage.updatedAt,
+          target,
+        });
+      }
+      if (shipmentPackage.logisticsStatus !== 'delivered') {
+        candidates.push({
+          id: `outbound-logistics:${shipmentPackage.id}`,
+          priority: 'follow_up',
+          title: shipmentPackage.logisticsStatus === 'returned'
+            ? '确认退回货物'
+            : shipmentPackage.logisticsStatus === 'awaiting_carrier'
+              ? '确认承运方接收'
+              : '跟进运输进度',
+          detail: `${record.sourceRole === 'replacement' ? '补发包裹' : '正向包裹'} · ${shipmentPackage.items.reduce(
+            (total, item) => total + item.quantity,
+            0,
+          )} 件商品`,
+          occurredAt: shipmentPackage.updatedAt,
+          target,
+        });
+      }
+    }
+  }
+  return candidates;
+}
+
+export function coordinateAftersalesOrderOperations(
+  input: AftersalesOperationsCoordinationInput,
+): OrderOperationsCoordination {
+  const baseTarget = {
+    kind: 'aftersales_case' as const,
+    shipmentRecordId: input.shipmentRecordId,
+    aftersalesCaseId: input.id,
+  };
+  const candidates: OrderOperationsTodoCandidate[] = [];
+  if (input.refund?.status === 'pending') {
+    candidates.push({
+      id: `refund:${input.id}`,
+      priority: 'financial_risk',
+      title: '确认实际退款',
+      detail: `待退款 ¥${(input.refund.requestedAmountCents / 100).toFixed(2)}`,
+      occurredAt: input.refund.occurredAt,
+      target: baseTarget,
+    });
+  }
+  for (const claim of input.outboundClaims) {
+    if (claim.status !== 'pending' && claim.status !== 'approved') continue;
+    candidates.push({
+      id: `carrier-claim:outbound:${claim.packageId}`,
+      priority: 'financial_risk',
+      title: claim.status === 'pending' ? '跟进承运索赔' : '确认承运赔付',
+      detail: `正向包裹影响 ${claim.affectedQuantity} 件商品 · 承运责任与买家侧处理分别推进`,
+      occurredAt: claim.updatedAt,
+      target: baseTarget,
+    });
+  }
+  for (const exception of input.outboundExceptions) {
+    if (!isUnresolvedLogisticsExceptionStageValue(exception.stage)) continue;
+    candidates.push({
+      id: `logistics-exception:${exception.id}`,
+      priority: 'physical_risk',
+      title: input.currentTodo.includes('正向物流异常')
+        ? input.currentTodo
+        : exception.requiresDecision
+          ? '选择正向异常处理'
+          : '处理正向物流异常',
+      detail: `影响 ${exception.affectedQuantity} 件商品`,
+      occurredAt: exception.occurredAt,
+      target: baseTarget,
+    });
+  }
+  for (const returnPackage of input.returns) {
+    const target = { ...baseTarget, returnRecordId: returnPackage.id };
+    for (const exception of returnPackage.exceptions) {
+      if (!isUnresolvedLogisticsExceptionStageValue(exception.stage)) continue;
+      candidates.push({
+        id: `logistics-exception:${exception.id}`,
+        priority: 'physical_risk',
+        title: input.currentTodo.includes('退货物流异常')
+          ? input.currentTodo
+          : '处理退货物流异常',
+        detail: `${exception.exceptionType} · 影响 ${exception.affectedQuantity} 件商品`,
+        occurredAt: exception.occurredAt,
+        target,
+      });
+    }
+    const claim = returnPackage.claim;
+    if (claim?.status === 'pending' || claim?.status === 'approved') {
+      candidates.push({
+        id: `carrier-claim:return:${returnPackage.id}`,
+        priority: 'financial_risk',
+        title: claim.status === 'pending' ? '跟进承运索赔' : '确认承运赔付',
+        detail: `退货影响 ${claim.affectedQuantity} 件商品 · 承运责任与买家侧处理分别推进`,
+        occurredAt: claim.updatedAt,
+        target,
+      });
+    }
+  }
+  const independentTodo = aftersalesTodoForCases([{
+    status: input.status,
+    returnStatuses: input.returns.map(({ status }) => status),
+    returnLogisticsStatuses: input.returns.map(({ logisticsStatus }) => logisticsStatus),
+    carrierClaimStatuses: input.returns.flatMap(({ claim }) => claim ? [claim.status] : []),
+    hasUnresolvedLogisticsException: input.returns.some(({ exceptions }) => (
+      exceptions.some(({ stage }) => isUnresolvedLogisticsExceptionStageValue(stage))
+    )),
+    hasPendingReturnExceptionDecision: input.hasPendingReturnExceptionDecision,
+  }]);
+  const terminal = input.status === 'completed' || input.status === 'cancelled';
+  const title = terminal ? independentTodo : input.currentTodo;
+  if (!input.suppressGenericTodo
+    && title
+    && !caseTodoCoveredBySpecificCandidate(title, candidates)) {
+    const occurredAt = terminal
+      ? latestOccurredAt([input.updatedAt, ...input.returns.map(({ updatedAt }) => updatedAt)])
+      : input.updatedAt;
+    candidates.push({
+      id: `aftersales:${input.id}`,
+      priority: operationTodoPriority(title),
+      title,
+      detail: `${input.itemQuantity} 件商品`,
+      occurredAt,
+      target: baseTarget,
+    });
+  }
+  return coordinateOrderOperations(candidates);
+}
+
+function latestOccurredAt(values: readonly string[]): string {
+  return values.reduce((latest, value) => (
+    compareOccurredAt(value, latest) > 0 ? value : latest
+  ));
+}
+
+function isUnresolvedLogisticsExceptionStageValue(stage: LogisticsExceptionStage): boolean {
+  return stage !== 'recovered' && stage !== 'resolved';
+}
+
+function caseTodoCoveredBySpecificCandidate(
+  title: string,
+  candidates: readonly OrderOperationsTodoCandidate[],
+): boolean {
+  if (title === '处理售后问题' && candidates.length > 0) return true;
+  return candidates.some((candidate) => (
+    candidate.title === title
+    || (candidate.id.startsWith('refund:')
+      && (title === '确认退款' || title === '确认实际退款'))
+    || (candidate.id.startsWith('carrier-claim:')
+      && (title === '跟进承运索赔' || title === '确认承运赔付'))
+  ));
+}
+
+function operationTodoPriority(title: string): OrderOperationsTodoCandidate['priority'] {
+  if (title.includes('今天') || title.includes('截止') || title.includes('期限')) return 'deadline';
+  if (title.includes('确认实际退款') || title.includes('赔付') || title.includes('索赔')) {
+    return 'financial_risk';
+  }
+  if (title.includes('异常') || title.includes('退货') || title.includes('检查')
+    || title.includes('拦截') || title.includes('收回')) {
+    return 'physical_risk';
+  }
+  return 'follow_up';
+}
+
+function compareOccurredAt(first: string, second: string): number {
+  const firstTimestamp = Date.parse(first);
+  const secondTimestamp = Date.parse(second);
+  if (Number.isNaN(firstTimestamp) || Number.isNaN(secondTimestamp)) {
+    return first.localeCompare(second);
+  }
+  return firstTimestamp - secondTimestamp;
+}
 
 export type OrderOperationsOverview = {
   shipmentSummary: string;

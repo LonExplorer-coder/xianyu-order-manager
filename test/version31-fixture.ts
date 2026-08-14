@@ -118,7 +118,7 @@ export function removeVersion36ExtensionArtifacts(database: DatabaseSync): void 
     DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_update;
     DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_delete;
     DROP TABLE IF EXISTS aftersales_refund_reopening_events;
-    DELETE FROM schema_migrations WHERE version = 36;
+    DELETE FROM schema_migrations WHERE version IN (36, 37);
     PRAGMA foreign_keys = ON;
   `);
 }

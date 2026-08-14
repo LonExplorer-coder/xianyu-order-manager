@@ -108,6 +108,18 @@ describe('共同物流事实与异常事项规则', () => {
         carrierConfirmedLoss: false,
       },
     })).not.toThrow();
+    expect(() => prepareLogisticsExceptionOpening({
+      exceptionType: 'damaged',
+      stage: 'investigating',
+      impact: { scope: 'items', items: [{ sourceItemId: 'item-1', quantity: 1 }] },
+      availableItems: [{ sourceItemId: 'item-1', quantity: 2 }],
+      occurredAt: '2026-08-14T11:10:00+08:00',
+      evidence: {
+        carrierAcceptedAt: '2026-08-14T10:20:00+08:00',
+        physicalReceiptAt: '2026-08-14T11:05:00+08:00',
+        carrierConfirmedLoss: false,
+      },
+    })).not.toThrow();
   });
 
   it('异常阶段只允许向前推进，丢件可找回且终态不可再改', () => {

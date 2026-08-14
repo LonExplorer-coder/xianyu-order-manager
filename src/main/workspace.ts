@@ -189,6 +189,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(34)) migrateToVersion34(database);
   if (!versions.has(35)) migrateToVersion35(database);
   if (!versions.has(36)) migrateToVersion36(database);
+  if (!versions.has(37)) migrateToVersion37(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -2946,6 +2947,7 @@ function migrateToVersion28(database: DatabaseSync): void {
         requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
         actual_amount_cents INTEGER CHECK (actual_amount_cents > 0),
         reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
         CHECK (
           (kind = 'created' AND actual_amount_cents IS NULL)
@@ -4605,6 +4607,7 @@ const VERSION_36_SCHEMA_STATEMENTS = {
       previous_requested_amount_cents INTEGER NOT NULL CHECK (previous_requested_amount_cents > 0),
       requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
       reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      occurred_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     ) STRICT`,
   aftersales_refund_reopening_events_are_immutable_on_update: `
@@ -4864,6 +4867,91 @@ function migrateToVersion36(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion37(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      DROP TRIGGER IF EXISTS pending_financial_item_events_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS pending_financial_item_events_are_immutable_on_delete;
+      DROP TRIGGER IF EXISTS pending_financial_item_events_require_occurred_at_on_insert;
+      DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_update;
+      DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_are_immutable_on_delete;
+      DROP TRIGGER IF EXISTS aftersales_refund_reopening_events_require_occurred_at_on_insert;
+    `);
+    const columns = database.prepare(`
+      SELECT name FROM pragma_table_info('pending_financial_item_events')
+    `).all() as Array<{ name: string }>;
+    if (!columns.some(({ name }) => name === 'occurred_at')) {
+      database.exec('ALTER TABLE pending_financial_item_events ADD COLUMN occurred_at TEXT;');
+    }
+    const reopeningColumns = database.prepare(`
+      SELECT name FROM pragma_table_info('aftersales_refund_reopening_events')
+    `).all() as Array<{ name: string }>;
+    if (!reopeningColumns.some(({ name }) => name === 'occurred_at')) {
+      database.exec('ALTER TABLE aftersales_refund_reopening_events ADD COLUMN occurred_at TEXT;');
+    }
+    database.exec(`
+      UPDATE pending_financial_item_events
+      SET occurred_at = created_at
+      WHERE occurred_at IS NULL;
+
+      UPDATE aftersales_refund_reopening_events AS reopen
+      SET occurred_at = COALESCE((
+        SELECT decisions.occurred_at
+        FROM pending_financial_items AS pending
+        JOIN aftersales_outbound_exception_decision_events AS decisions
+          ON decisions.case_id = pending.aftersales_case_id
+        WHERE pending.id = reopen.pending_item_id
+          AND decisions.after_decision IN ('refund_only', 'refund_and_replacement')
+          AND decisions.created_at <= reopen.created_at
+        ORDER BY decisions.sequence DESC
+        LIMIT 1
+      ), reopen.created_at)
+      WHERE occurred_at IS NULL;
+
+      CREATE TRIGGER pending_financial_item_events_require_occurred_at_on_insert
+      BEFORE INSERT ON pending_financial_item_events
+      WHEN NEW.occurred_at IS NULL OR length(trim(NEW.occurred_at)) = 0
+      BEGIN
+        SELECT RAISE(ABORT, 'pending financial item event occurred_at is required');
+      END;
+
+      CREATE TRIGGER pending_financial_item_events_are_immutable_on_update
+      BEFORE UPDATE ON pending_financial_item_events
+      BEGIN
+        SELECT RAISE(ABORT, 'pending financial item events are immutable');
+      END;
+
+      CREATE TRIGGER pending_financial_item_events_are_immutable_on_delete
+      BEFORE DELETE ON pending_financial_item_events
+      BEGIN
+        SELECT RAISE(ABORT, 'pending financial item events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_refund_reopening_events_require_occurred_at_on_insert
+      BEFORE INSERT ON aftersales_refund_reopening_events
+      WHEN NEW.occurred_at IS NULL OR length(trim(NEW.occurred_at)) = 0
+      BEGIN
+        SELECT RAISE(ABORT, 'refund reopening event occurred_at is required');
+      END;
+
+      CREATE TRIGGER aftersales_refund_reopening_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_refund_reopening_events
+      BEGIN SELECT RAISE(ABORT, 'refund reopening events are immutable'); END;
+
+      CREATE TRIGGER aftersales_refund_reopening_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_refund_reopening_events
+      BEGIN SELECT RAISE(ABORT, 'refund reopening events are immutable'); END;
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (37, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    try { database.exec('ROLLBACK;'); } catch { /* Preserve migration failure. */ }
+    throw error;
   }
 }
 
