@@ -4246,7 +4246,7 @@ function CancelShipmentPackageDialog({
           <span className="section-kicker">发货记录 · 包裹 {target.packageIndex + 1}</span>
           <h2 id={headingId}>撤销未交寄包裹</h2>
           <p id={descriptionId}>
-            仅适用于尚未真实交给承运方的包裹。撤销后记录和原因仍会保留，商品数量退回开放发货组。
+            仅适用于尚未真实交给承运方的包裹。撤销后记录和原因仍会保留，商品数量退回发货组档案的剩余待发清单（部分发货分类），可从档案继续发货。
           </p>
         </header>
         <label>
