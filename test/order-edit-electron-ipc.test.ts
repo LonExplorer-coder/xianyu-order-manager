@@ -110,6 +110,81 @@ describe('订单人工修改 Electron IPC', () => {
       }),
     ]);
   });
+
+  it('新增商品可携带标准商品建立人工关联，拒绝已有商品携带与未知标准商品', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-order-edit-link-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '待新增商品订单.png');
+    await writeFile(sourcePath, Buffer.from('order-edit-link-ipc'));
+    const recognition = completeRecognition();
+    const seeder = new LocalApplication(new ControlledRecognizer(recognition));
+    seeder.openDataDirectory(dataDirectory);
+    const [draft] = (await seeder.submitRecognitionBatch([sourcePath])).drafts;
+    const order = seeder.confirmDraft(draft);
+    const product = seeder.createStandardProduct({
+      sku: 'SKU-IPC-ADD-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: 1_299,
+      priceChangeReason: '首次定价',
+    });
+    seeder.close();
+
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+    registerIpcHandlers(session);
+    const input = orderEditInput(order);
+    const newItem = {
+      id: null,
+      sourceTitle: '十二分娃鞋',
+      sourceSpec: '白色小号',
+      unitPriceCents: 1_299,
+      quantity: 1,
+      standardProductId: product.id,
+    };
+
+    await expect(invoke('orders:update', {
+      ...input,
+      items: [{ ...input.items[0], standardProductId: product.id }],
+    })).rejects.toThrow('已有商品的商品标准化关联请在订单详情中单独维护');
+    await expect(invoke('orders:update', {
+      ...input,
+      items: [{ ...newItem, standardProductId: 'missing-product-id' }],
+    })).rejects.toThrow('标准商品不存在，请刷新后重试');
+    expect(session.getOrder(order.id)).toMatchObject({
+      order: { revision: 1 },
+      changeEvents: [],
+    });
+
+    const saved = await invoke('orders:update', {
+      ...input,
+      productTotalCents: 2_099,
+      items: [...input.items, newItem],
+    });
+    expect(saved).toEqual(expect.objectContaining({
+      order: expect.objectContaining({
+        revision: 2,
+        productTotalCents: 2_099,
+        amountCents: 800,
+        shippingFeeCents: 0,
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            sourceTitle: '十二分娃鞋',
+            unitPriceCents: 1_299,
+            subtotalCents: 1_299,
+            standardProduct: expect.objectContaining({ id: product.id, sku: 'SKU-IPC-ADD-001' }),
+            standardizationSource: 'manual',
+            standardDisplayPreference: 'prefer_standard',
+          }),
+        ]),
+      }),
+    }));
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {

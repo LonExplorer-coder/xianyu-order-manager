@@ -430,6 +430,8 @@ export type OrderEditItemInput = {
   sourceSpec: string;
   unitPriceCents: number;
   quantity: number;
+  /** 仅新增商品可携带：保存时同时建立商品标准化关联。 */
+  standardProductId?: string | null;
   customFieldValues?: Array<{
     definitionId: string;
     value: CustomFieldValue | null;

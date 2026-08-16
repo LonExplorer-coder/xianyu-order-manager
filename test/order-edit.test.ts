@@ -531,6 +531,188 @@ describe('已入库原始订单人工修改', () => {
   });
 });
 
+describe('人工新增订单商品一次性带入标准商品', () => {
+  async function openSeededOrder(orderNumber: string) {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-manual-item-import-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '待新增商品订单.png');
+    await writeFile(sourcePath, Buffer.from(`manual-item-import-${orderNumber}`));
+    const application = new LocalApplication(new ControlledRecognizer(
+      completeRecognition(orderNumber),
+    ));
+    openedApplications.push(application);
+    application.openDataDirectory(dataDirectory);
+    const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+    const order = application.confirmDraft(draft);
+    const product = application.createStandardProduct({
+      sku: 'SKU-MANUAL-ADD-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: 1_299,
+      priceChangeReason: '首次定价',
+    });
+    return { application, order, product };
+  }
+
+  it('新增商品行携带标准商品保存后建立人工关联、默认优先展示并写入修改记录', async () => {
+    const { application, order, product } = await openSeededOrder('XY-MANUAL-ADD-0001');
+    const input: OrderEditInput = {
+      ...orderEditInput(order),
+      productTotalCents: 3_699,
+      items: [
+        ...orderEditInput(order).items,
+        {
+          id: null,
+          sourceTitle: '十二分娃鞋',
+          sourceSpec: '白色小号',
+          unitPriceCents: 1_299,
+          quantity: 1,
+          standardProductId: product.id,
+        },
+      ],
+    };
+
+    const review = application.reviewOrderEdit(input);
+    expect(review.changes).toEqual(expect.arrayContaining([
+      { path: 'productTotalCents', before: 2_400, after: 3_699 },
+      { path: 'items[2].standardProductSku', before: null, after: 'SKU-MANUAL-ADD-001' },
+      { path: 'items[2].standardizationSource', before: null, after: 'manual' },
+      { path: 'items[2].standardDisplayPreference', before: null, after: 'prefer_standard' },
+    ]));
+
+    const saved = application.confirmOrderEdit(review.input);
+    expect(saved.order).toMatchObject({
+      revision: 2,
+      productTotalCents: 3_699,
+      shippingFeeCents: 100,
+      amountCents: 2_500,
+    });
+    expect(saved.order.items[2]).toMatchObject({
+      sourceTitle: '十二分娃鞋',
+      sourceSpec: '白色小号',
+      unitPriceCents: 1_299,
+      quantity: 1,
+      subtotalCents: 1_299,
+      standardProduct: expect.objectContaining({ id: product.id, sku: 'SKU-MANUAL-ADD-001' }),
+      standardizationSource: 'manual',
+      standardDisplayPreference: 'prefer_standard',
+    });
+    expect(saved.changeEvents[0]).toMatchObject({ source: 'manual_edit' });
+    expect(saved.changeEvents[0].changes).toEqual(expect.arrayContaining([
+      { path: 'items[2].standardProductSku', before: null, after: 'SKU-MANUAL-ADD-001' },
+      { path: 'items[2].standardizationSource', before: null, after: 'manual' },
+      { path: 'items[2].standardDisplayPreference', before: null, after: 'prefer_standard' },
+    ]));
+  });
+
+  it('用户拒绝同步商品总价时保持原总价，成交金额与运费不被改动', async () => {
+    const { application, order, product } = await openSeededOrder('XY-MANUAL-ADD-0002');
+    const saved = application.confirmOrderEdit({
+      ...orderEditInput(order),
+      items: [
+        ...orderEditInput(order).items,
+        {
+          id: null,
+          sourceTitle: '十二分娃鞋',
+          sourceSpec: '白色小号',
+          unitPriceCents: 1_299,
+          quantity: 1,
+          standardProductId: product.id,
+        },
+      ],
+    });
+
+    expect(saved.order).toMatchObject({
+      productTotalCents: 2_400,
+      shippingFeeCents: 100,
+      amountCents: 2_500,
+    });
+    expect(saved.order.items[2]).toMatchObject({
+      unitPriceCents: 1_299,
+      subtotalCents: 1_299,
+      standardProduct: expect.objectContaining({ id: product.id }),
+    });
+    expect(saved.changeEvents[0].changes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'productTotalCents' }),
+      expect.objectContaining({ path: 'amountCents' }),
+      expect.objectContaining({ path: 'shippingFeeCents' }),
+    ]));
+  });
+
+  it('带入为一次性快照：之后修改标准商品不改写已录入订单行', async () => {
+    const { application, order, product } = await openSeededOrder('XY-MANUAL-ADD-0003');
+    const saved = application.confirmOrderEdit({
+      ...orderEditInput(order),
+      items: [
+        ...orderEditInput(order).items,
+        {
+          id: null,
+          sourceTitle: '十二分娃鞋',
+          sourceSpec: '白色小号',
+          unitPriceCents: 1_299,
+          quantity: 1,
+          standardProductId: product.id,
+        },
+      ],
+    });
+
+    application.updateStandardProduct(product.id, {
+      sku: 'SKU-MANUAL-ADD-001',
+      name: '十二分娃鞋改名',
+      specification: '白色大号',
+      defaultOrderPriceCents: 999,
+      priceChangeReason: '调价',
+      expectedRevision: product.revision,
+    });
+
+    const reloaded = application.getOrder(order.id);
+    expect(reloaded.order.items[2]).toMatchObject({
+      sourceTitle: saved.order.items[2].sourceTitle,
+      sourceSpec: saved.order.items[2].sourceSpec,
+      unitPriceCents: 1_299,
+      subtotalCents: 1_299,
+    });
+    expect(reloaded.order.items[2].standardProduct).toMatchObject({
+      name: '十二分娃鞋改名',
+      defaultOrderPriceCents: 999,
+    });
+  });
+
+  it('拒绝已有商品携带标准商品标识与不存在的标准商品', async () => {
+    const { application, order, product } = await openSeededOrder('XY-MANUAL-ADD-0004');
+    const base = orderEditInput(order);
+
+    expect(() => application.reviewOrderEdit({
+      ...base,
+      items: [{ ...base.items[0], standardProductId: product.id }, base.items[1]],
+    })).toThrowError('已有商品的商品标准化关联请在订单详情中单独维护');
+    expect(() => application.reviewOrderEdit({
+      ...base,
+      items: [...base.items, {
+        id: null,
+        sourceTitle: '十二分娃鞋',
+        sourceSpec: '白色小号',
+        unitPriceCents: 1_299,
+        quantity: 1,
+        standardProductId: 'missing-product-id',
+      }],
+    })).toThrowError('标准商品不存在，请刷新后重试');
+    expect(() => application.reviewOrderEdit({
+      ...base,
+      items: [...base.items, {
+        id: null,
+        sourceTitle: '十二分娃鞋',
+        sourceSpec: '白色小号',
+        unitPriceCents: 1_299,
+        quantity: 1,
+        standardProductId: 42,
+      }],
+    } as unknown as OrderEditInput)).toThrowError('商品 3 标准商品标识无效');
+    expect(application.getOrder(order.id).order.revision).toBe(1);
+    expect(application.getOrder(order.id).changeEvents).toHaveLength(0);
+  });
+});
+
 function orderEditInput(order: OriginalOrder): OrderEditInput {
   return {
     orderId: order.id,

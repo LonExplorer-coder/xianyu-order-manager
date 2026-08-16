@@ -18,6 +18,7 @@ import type {
 import type {
   OrderDetails,
   OrderDraft,
+  OrderEditInput,
   OrderSummary,
   OriginalOrder,
   RecognitionAttempt,
@@ -6643,6 +6644,122 @@ describe('订单管理工作台', () => {
     );
     expect(await screen.findByText(/SKU-UI-LINK-001/u)).toBeVisible();
     expect(screen.queryByRole('dialog', { name: '关联标准商品' })).not.toBeInTheDocument();
+  });
+
+  it('人工新增商品选择标准商品一次性带入并确认同步商品总价', async () => {
+    const user = userEvent.setup();
+    const productWithoutPrice = {
+      id: 'product-ui-add-0',
+      sku: 'SKU-UI-ADD-000',
+      name: '无默认价商品',
+      specification: '均码',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const product = {
+      id: 'product-ui-add-1',
+      sku: 'SKU-UI-ADD-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: 1_299,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const savedOrder: OriginalOrder = {
+      ...confirmedOrder,
+      revision: 2,
+      productTotalCents: 2_899,
+      items: [
+        confirmedOrder.items[0],
+        {
+          ...confirmedOrder.items[0],
+          id: 'item-ui-added',
+          position: 1,
+          sourceTitle: '十二分娃鞋',
+          sourceSpec: '白色小号',
+          unitPriceCents: 1_299,
+          quantity: 1,
+          subtotalCents: 1_299,
+          standardProduct: product,
+          standardizationSource: 'manual',
+          standardDisplayPreference: 'prefer_standard',
+        },
+      ],
+    };
+    const savedDetails: OrderDetails = { ...orderDetails, order: savedOrder };
+    const updateOrder = vi.fn().mockResolvedValue(savedDetails);
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(orderDetails),
+      listStandardProducts: vi.fn().mockResolvedValue([productWithoutPrice, product]),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+    Object.assign(api, { updateOrder });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }));
+    await user.click(await screen.findByRole('button', { name: '编辑订单' }));
+    await user.click(screen.getByRole('button', { name: '添加商品' }));
+
+    const productSelect = await screen.findByRole('combobox', { name: '商品 2 标准商品' });
+    await user.selectOptions(productSelect, productWithoutPrice.id);
+    expect(screen.getByRole('checkbox', { name: '带入标准商品名' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: '带入标准规格' })).toBeChecked();
+    expect(screen.queryByRole('checkbox', { name: '带入单价' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '商品 2 标题' })).toHaveValue('无默认价商品');
+    expect(screen.getByRole('textbox', { name: '商品 2 规格' })).toHaveValue('均码');
+    expect(screen.getByRole('spinbutton', { name: '商品 2 单价' })).toHaveValue(null);
+
+    await user.selectOptions(productSelect, product.id);
+    expect(screen.getByRole('checkbox', { name: '带入标准商品名' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: '带入标准规格' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: '带入单价' })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: '商品 2 标题' })).toHaveValue('十二分娃鞋');
+    expect(screen.getByRole('textbox', { name: '商品 2 规格' })).toHaveValue('白色小号');
+    expect(screen.getByRole('spinbutton', { name: '商品 2 单价' })).toHaveValue(12.99);
+    expect(screen.getByRole('spinbutton', { name: '商品 2 数量' })).toHaveValue(1);
+
+    const prompt = await screen.findByRole('status', { name: '商品 2 金额提示' });
+    expect(prompt).toHaveTextContent('商品单价：¥0.00 → ¥12.99');
+    expect(prompt).toHaveTextContent('商品小计：¥0.00 → ¥12.99');
+    expect(prompt).toHaveTextContent('商品总价：¥8.00 → ¥28.99（建议值）');
+    expect(prompt).toHaveTextContent('成交金额：保持不变');
+    expect(prompt).toHaveTextContent(
+      '商品明细合计与成交金额存在差异，可能存在优惠、议价或其他原因',
+    );
+
+    expect(screen.getByRole('spinbutton', { name: '商品总价' })).toHaveValue(8);
+    await user.click(within(prompt).getByRole('button', { name: '同步更新商品总价' }));
+    expect(screen.getByRole('spinbutton', { name: '商品总价' })).toHaveValue(28.99);
+
+    await user.click(screen.getByRole('button', { name: '预览修改' }));
+    const dialog = await screen.findByRole('dialog', { name: '确认订单修改' });
+    expect(dialog).toHaveTextContent('标准商品（SKU）');
+    expect(dialog).toHaveTextContent('SKU-UI-ADD-001');
+    await user.click(within(dialog).getByRole('button', { name: '确认保存' }));
+
+    await waitFor(() => expect(updateOrder).toHaveBeenCalledTimes(1));
+    const input = updateOrder.mock.calls[0][0] as OrderEditInput;
+    expect(input.productTotalCents).toBe(2_899);
+    expect(input.amountCents).toBe(800);
+    expect(input.shippingFeeCents).toBe(0);
+    expect(input.items[1]).toEqual(expect.objectContaining({
+      id: null,
+      sourceTitle: '十二分娃鞋',
+      sourceSpec: '白色小号',
+      unitPriceCents: 1_299,
+      quantity: 1,
+      standardProductId: product.id,
+    }));
   });
 
   it('取消订单编辑不写入，且仅剩一件商品时禁止删除', async () => {

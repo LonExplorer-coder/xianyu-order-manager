@@ -29,8 +29,13 @@ import {
   quantitySourceFromLegacy,
   type QuantitySource,
 } from './quantity-source';
+import type { StandardProduct } from './product-standardization';
+
+/** 人工新增订单商品携带标准商品时，core 校验与修改记录所需的最小标准商品信息。 */
+export type OrderEditStandardProductReference = Pick<StandardProduct, 'id' | 'sku'>;
 
 export type PreparedOrderEditItem = OrderEditItemInput & {
+  standardProductId: string | null;
   quantitySource: QuantitySource;
   quantityInferred: boolean;
   subtotalCents: number;
@@ -93,9 +98,10 @@ const ITEM_KEYS = new Set([
   'sourceSpec',
   'unitPriceCents',
   'quantity',
+  'standardProductId',
   'customFieldValues',
 ]);
-const ITEM_OPTIONAL_KEYS = new Set(['customFieldValues']);
+const ITEM_OPTIONAL_KEYS = new Set(['standardProductId', 'customFieldValues']);
 const ITEM_CUSTOM_FIELD_VALUE_KEYS = new Set(['definitionId', 'value']);
 const ORDER_NUMBER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/u;
 const INVALID_RECIPIENT_PATTERN = /(?:\*|复制|去发货|\d{7,})/u;
@@ -105,12 +111,14 @@ export function reviewOrderEdit(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[] = [],
   currentCustomFieldValues: readonly CustomFieldValueRecord[] = [],
+  standardProducts: readonly OrderEditStandardProductReference[] = [],
 ): OrderEditReview {
   return prepareOrderEdit(
     current,
     input,
     customFieldDefinitions,
     currentCustomFieldValues,
+    standardProducts,
   ).review;
 }
 
@@ -119,11 +127,60 @@ export function orderEditTargetId(input: unknown): string {
   return requiredText(record.orderId, 200, '订单标识');
 }
 
+/** 规格 5.3 金额提示：商品单价、商品小计、商品总价（建议值）与成交金额四行数据。 */
+export type OrderItemAmountPrompt = {
+  /** 商品单价：原值 → 新值（整数分）。 */
+  unitPrice: { beforeCents: number; afterCents: number };
+  /** 商品小计：原值 → 新值（整数分，单价 × 数量自动重算）。 */
+  subtotal: { beforeCents: number; afterCents: number };
+  /** 商品总价：原值 → 建议值，建议值为新的商品明细合计，只在用户确认后提交。 */
+  productTotal: { beforeCents: number; suggestedCents: number };
+  /** 成交金额：永远不自动修改。 */
+  amountCents: number;
+  /** 新的商品明细合计（整数分）。 */
+  itemsTotalCents: number;
+  /** 商品明细合计与成交金额存在差异时只提示可能原因，不自动对齐。 */
+  differsFromAmount: boolean;
+};
+
+export function planOrderItemAmountPrompt(input: {
+  before: { unitPriceCents: number; quantity: number };
+  after: { unitPriceCents: number; quantity: number };
+  productTotalCents: number;
+  amountCents: number;
+  otherItemsSubtotalCents?: number;
+}): OrderItemAmountPrompt {
+  const beforeUnitPriceCents = requiredMoney(input.before.unitPriceCents, '商品单价');
+  const beforeQuantity = requiredPositiveInteger(input.before.quantity, '商品数量');
+  const afterUnitPriceCents = requiredMoney(input.after.unitPriceCents, '商品单价');
+  const afterQuantity = requiredPositiveInteger(input.after.quantity, '商品数量');
+  const productTotalCents = requiredMoney(input.productTotalCents, '商品总价');
+  const amountCents = requiredMoney(input.amountCents, '成交金额');
+  const otherItemsSubtotalCents = input.otherItemsSubtotalCents === undefined
+    ? 0
+    : requiredMoney(input.otherItemsSubtotalCents, '商品明细合计');
+  const beforeSubtotalCents = safeSubtotal(beforeUnitPriceCents, beforeQuantity);
+  const afterSubtotalCents = safeSubtotal(afterUnitPriceCents, afterQuantity);
+  const itemsTotalCents = otherItemsSubtotalCents + afterSubtotalCents;
+  if (!Number.isSafeInteger(itemsTotalCents)) {
+    throw new Error('商品明细合计超出安全范围');
+  }
+  return {
+    unitPrice: { beforeCents: beforeUnitPriceCents, afterCents: afterUnitPriceCents },
+    subtotal: { beforeCents: beforeSubtotalCents, afterCents: afterSubtotalCents },
+    productTotal: { beforeCents: productTotalCents, suggestedCents: itemsTotalCents },
+    amountCents,
+    itemsTotalCents,
+    differsFromAmount: itemsTotalCents !== amountCents,
+  };
+}
+
 export function prepareOrderEdit(
   current: OriginalOrder,
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[] = [],
   currentCustomFieldValues: readonly CustomFieldValueRecord[] = [],
+  standardProducts: readonly OrderEditStandardProductReference[] = [],
 ): PreparedOrderEdit {
   const record = strictRecord(input, '订单修改', ORDER_EDIT_KEYS);
   const orderId = requiredText(record.orderId, 200, '订单标识');
@@ -181,6 +238,14 @@ export function prepareOrderEdit(
     normalizeItems(record.items, current.items),
     customFieldDefinitions,
   );
+  const standardProductById = new Map(
+    standardProducts.map((product) => [product.id, product] as const),
+  );
+  for (const item of items) {
+    if (item.standardProductId !== null && !standardProductById.has(item.standardProductId)) {
+      throw new Error('标准商品不存在，请刷新后重试');
+    }
+  }
 
   const normalizedInput: OrderEditInput = {
     orderId,
@@ -228,6 +293,7 @@ export function prepareOrderEdit(
     values,
     items,
     currentCustomFieldValues,
+    standardProductById,
   );
   return {
     review: {
@@ -283,6 +349,19 @@ function normalizeItems(value: unknown, currentItems: readonly OrderItem[]): Pre
       record.customFieldValues,
       `商品 ${index + 1}`,
     );
+    let standardProductId: string | null = null;
+    if (record.standardProductId !== undefined && record.standardProductId !== null) {
+      if (
+        typeof record.standardProductId !== 'string' ||
+        !record.standardProductId.trim()
+      ) {
+        throw new Error(`商品 ${index + 1} 标准商品标识无效`);
+      }
+      standardProductId = record.standardProductId.trim();
+    }
+    if (standardProductId !== null && id !== null) {
+      throw new Error('已有商品的商品标准化关联请在订单详情中单独维护');
+    }
     const prior = id === null ? undefined : currentById.get(id);
     const quantitySource: QuantitySource = !prior || prior.quantity !== quantity
       ? 'manual'
@@ -293,6 +372,7 @@ function normalizeItems(value: unknown, currentItems: readonly OrderItem[]): Pre
       sourceSpec,
       unitPriceCents,
       quantity,
+      standardProductId,
       customFieldValues,
       quantitySource,
       quantityInferred: quantityInferredFromSource(quantitySource),
@@ -320,6 +400,7 @@ function diffManualOrderEdit(
   values: PreparedOrderEdit['values'],
   items: readonly PreparedOrderEditItem[],
   currentCustomFieldValues: readonly CustomFieldValueRecord[],
+  standardProductById: ReadonlyMap<string, OrderEditStandardProductReference>,
 ): OrderFieldChange[] {
   const changes: OrderFieldChange[] = [];
   appendChange(changes, 'platform', current.platform, identity.platform);
@@ -358,6 +439,24 @@ function diffManualOrderEdit(
   items.forEach((item, index) => {
     if (item.id === null) {
       changes.push({ path: `items[${index}]`, before: null, after: addedItemChangeValue(item) });
+      if (item.standardProductId !== null) {
+        const product = standardProductById.get(item.standardProductId);
+        changes.push({
+          path: `items[${index}].standardProductSku`,
+          before: null,
+          after: product?.sku ?? null,
+        });
+        changes.push({
+          path: `items[${index}].standardizationSource`,
+          before: null,
+          after: 'manual',
+        });
+        changes.push({
+          path: `items[${index}].standardDisplayPreference`,
+          before: null,
+          after: 'prefer_standard',
+        });
+      }
       return;
     }
     retainedIds.add(item.id);

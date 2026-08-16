@@ -37,7 +37,11 @@ import type {
   RecognitionBatchView,
   RecognitionBatchItemStatus,
 } from '../core/contracts';
-import { reviewOrderEdit } from '../core/order-edit';
+import {
+  planOrderItemAmountPrompt,
+  reviewOrderEdit,
+  type OrderItemAmountPrompt,
+} from '../core/order-edit';
 import { FULFILLMENT_STATUS_LABELS } from '../core/fulfillment-status';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
@@ -8541,6 +8545,7 @@ function orderChangeFieldLabel(path: string): string {
     quantitySource: '数量来源',
     standardProductSku: '标准商品（SKU）',
     standardizationSource: '标准化来源',
+    standardDisplayPreference: '标准商品显示偏好',
   } as Record<string, string>)[field] : '整项';
   return `商品 ${position} · ${label ?? field}`;
 }
@@ -8562,6 +8567,13 @@ function formatOrderChangeValue(path: string, value: OrderChangeValue): string {
         manual: '本次人工确认',
       };
       return standardizationLabels[value] ?? value;
+    }
+    if (path.endsWith('.standardDisplayPreference')) {
+      const preferenceLabels: Record<string, string> = {
+        prefer_standard: '优先展示标准商品信息',
+        prefer_source: '优先展示订单来源原文',
+      };
+      return preferenceLabels[value] ?? value;
     }
     if (path === 'platformTransactionStatus') {
       return platformTransactionStatusLabel(value as OrderDraft['platformTransactionStatus']);
@@ -8668,6 +8680,14 @@ type OrderEditMoneyInputs = {
   itemUnitPrices: string[];
 };
 
+/** 人工新增商品行的标准商品一次性带入选项；带入为快照，取消勾选不回滚已带入值。 */
+type NewItemStandardImport = {
+  productId: string;
+  importName: boolean;
+  importSpec: boolean;
+  importPrice: boolean;
+};
+
 function createOrderEditInput(order: OriginalOrder): OrderEditInput {
   return {
     orderId: order.id,
@@ -8707,6 +8727,7 @@ function createOrderEditMoneyInputs(input: OrderEditInput): OrderEditMoneyInputs
 }
 
 function OrderEditWorkspace({
+  api,
   details,
   screenshotUrl,
   saving,
@@ -8716,6 +8737,7 @@ function OrderEditWorkspace({
   onSave,
   onRefresh,
 }: {
+  api: DesktopApi;
   details: OrderDetails;
   screenshotUrl: string;
   saving: boolean;
@@ -8733,6 +8755,10 @@ function OrderEditWorkspace({
   const [review, setReview] = useState<OrderEditReview | null>(null);
   const [localError, setLocalError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [standardProducts, setStandardProducts] = useState<StandardProduct[] | null>(null);
+  const [newItemStandardImports, setNewItemStandardImports] = useState<
+    Record<number, NewItemStandardImport>
+  >({});
   const previewButtonRef = useRef<HTMLButtonElement>(null);
   const reviewDialogRef = useRef<HTMLDivElement>(null);
   const reviewFirstActionRef = useRef<HTMLButtonElement>(null);
@@ -8753,6 +8779,20 @@ function OrderEditWorkspace({
   }, [dirty, onDirtyChange]);
 
   useEffect(() => {
+    let active = true;
+    void api.listStandardProducts()
+      .then((listed) => {
+        if (active) setStandardProducts(listed);
+      })
+      .catch((value: unknown) => {
+        if (active) setLocalError(errorMessage(value));
+      });
+    return () => {
+      active = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
     if (!review) return undefined;
     const returnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -8760,6 +8800,54 @@ function OrderEditWorkspace({
     reviewFirstActionRef.current?.focus();
     return () => (returnFocus ?? previewButtonRef.current)?.focus();
   }, [review]);
+
+  const amountPrompts = useMemo(() => {
+    const prompts = new Map<number, OrderItemAmountPrompt>();
+    const productTotalCents = yuanToCents(moneyInputs.productTotal);
+    const amountCents = yuanToCents(moneyInputs.amount);
+    const itemUnitPrices = moneyInputs.itemUnitPrices.map(yuanToCents);
+    if (
+      productTotalCents === null ||
+      amountCents === null ||
+      itemUnitPrices.some((value) => value === null)
+    ) {
+      return prompts;
+    }
+    const subtotals: number[] = [];
+    for (const [index, item] of input.items.entries()) {
+      const subtotal = itemUnitPrices[index]! * item.quantity;
+      if (!Number.isSafeInteger(subtotal) || subtotal < 0) return prompts;
+      subtotals.push(subtotal);
+    }
+    input.items.forEach((item, index) => {
+      const baselineItem = item.id === null
+        ? null
+        : baselineInput.items.find((baseline) => baseline.id === item.id) ?? null;
+      const before = baselineItem
+        ? { unitPriceCents: baselineItem.unitPriceCents, quantity: baselineItem.quantity }
+        : { unitPriceCents: 0, quantity: 1 };
+      const after = { unitPriceCents: itemUnitPrices[index]!, quantity: item.quantity };
+      if (before.unitPriceCents === after.unitPriceCents && before.quantity === after.quantity) {
+        return;
+      }
+      const otherItemsSubtotalCents = subtotals.reduce(
+        (total, subtotal, itemIndex) => (itemIndex === index ? total : total + subtotal),
+        0,
+      );
+      try {
+        prompts.set(index, planOrderItemAmountPrompt({
+          before,
+          after,
+          productTotalCents,
+          amountCents,
+          otherItemsSubtotalCents,
+        }));
+      } catch {
+        // 数量等输入暂时非法时不显示提示，保存前校验会给出错误。
+      }
+    });
+    return prompts;
+  }, [baselineInput.items, input.items, moneyInputs]);
 
   function patchInput(patch: Partial<OrderEditInput>) {
     setLocalError('');
@@ -8810,6 +8898,13 @@ function OrderEditWorkspace({
         return [[`${itemIndex > index ? itemIndex - 1 : itemIndex}:${definitionId}`, valid]];
       }),
     ));
+    setNewItemStandardImports((current) => Object.fromEntries(
+      Object.entries(current).flatMap(([key, entry]) => {
+        const itemIndex = Number(key);
+        if (!Number.isInteger(itemIndex) || itemIndex === index) return [];
+        return [[itemIndex > index ? itemIndex - 1 : itemIndex, entry]];
+      }),
+    ));
     patchInput({ items: input.items.filter((_, itemIndex) => itemIndex !== index) });
     setMoneyInputs((current) => ({
       ...current,
@@ -8854,6 +8949,65 @@ function OrderEditWorkspace({
     });
   }
 
+  function selectNewItemStandardProduct(index: number, productId: string) {
+    setLocalError('');
+    setReview(null);
+    if (!productId) {
+      // 一次性快照：取消关联不回滚已带入的名称、规格或单价。
+      setNewItemStandardImports((current) => {
+        const next = { ...current };
+        delete next[index];
+        return next;
+      });
+      return;
+    }
+    const product = standardProducts?.find(({ id }) => id === productId);
+    if (!product) return;
+    const nextImport: NewItemStandardImport = {
+      productId,
+      importName: true,
+      importSpec: true,
+      importPrice: product.defaultOrderPriceCents !== null,
+    };
+    setNewItemStandardImports((current) => ({ ...current, [index]: nextImport }));
+    applyNewItemImport(index, product, nextImport);
+  }
+
+  function changeNewItemImportOption(
+    index: number,
+    key: 'importName' | 'importSpec' | 'importPrice',
+    checked: boolean,
+  ) {
+    const entry = newItemStandardImports[index];
+    if (!entry) return;
+    setNewItemStandardImports((current) => ({
+      ...current,
+      [index]: { ...entry, [key]: checked },
+    }));
+    if (!checked) return;
+    const product = standardProducts?.find(({ id }) => id === entry.productId);
+    if (!product) return;
+    applyNewItemImport(index, product, {
+      importName: key === 'importName',
+      importSpec: key === 'importSpec',
+      importPrice: key === 'importPrice',
+    });
+  }
+
+  function applyNewItemImport(
+    index: number,
+    product: StandardProduct,
+    options: { importName: boolean; importSpec: boolean; importPrice: boolean },
+  ) {
+    patchItem(index, {
+      ...(options.importName ? { sourceTitle: product.name } : {}),
+      ...(options.importSpec ? { sourceSpec: product.specification } : {}),
+    });
+    if (options.importPrice && product.defaultOrderPriceCents !== null) {
+      patchItemMoney(index, formatMoneyInput(product.defaultOrderPriceCents));
+    }
+  }
+
   function finalizedInput(): OrderEditInput | null {
     const productTotalCents = yuanToCents(moneyInputs.productTotal);
     const shippingFeeCents = yuanToCents(moneyInputs.shippingFee);
@@ -8876,6 +9030,9 @@ function OrderEditWorkspace({
       items: input.items.map((item, index) => ({
         ...item,
         unitPriceCents: itemUnitPrices[index]!,
+        ...(item.id === null
+          ? { standardProductId: newItemStandardImports[index]?.productId ?? null }
+          : {}),
       })),
     };
   }
@@ -8907,6 +9064,7 @@ function OrderEditWorkspace({
         finalized,
         details.customFieldDefinitions,
         details.customFieldValues,
+        standardProducts ?? [],
       );
       if (nextReview.changes.length === 0) {
         setLocalError('当前没有需要保存的修改。');
@@ -8937,6 +9095,7 @@ function OrderEditWorkspace({
       const latestInput = createOrderEditInput(latest.order);
       setInput(latestInput);
       setMoneyInputs(createOrderEditMoneyInputs(latestInput));
+      setNewItemStandardImports({});
     } catch {
       // The shared error banner already explains why the refresh failed.
     } finally {
@@ -9210,6 +9369,125 @@ function OrderEditWorkspace({
                           />
                         </Field>
                       </div>
+                      {item.id === null && (
+                        <div className="item-standard-import">
+                          <Field label="标准商品">
+                            <select
+                              aria-label={`商品 ${index + 1} 标准商品`}
+                              value={newItemStandardImports[index]?.productId ?? ''}
+                              disabled={saving || standardProducts === null}
+                              onChange={(event) => selectNewItemStandardProduct(
+                                index,
+                                event.target.value,
+                              )}
+                            >
+                              <option value="">不关联标准商品</option>
+                              {(standardProducts ?? []).map((product) => (
+                                <option value={product.id} key={product.id}>
+                                  {product.sku} · {product.name} · {product.specification}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                          {(() => {
+                            const entry = newItemStandardImports[index];
+                            const product = entry
+                              ? standardProducts?.find(({ id }) => id === entry.productId) ?? null
+                              : null;
+                            if (!entry || !product) return null;
+                            return (
+                              <div className="item-standard-import__options">
+                                <label className="fields-check-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={entry.importName}
+                                    disabled={saving}
+                                    onChange={(event) => changeNewItemImportOption(
+                                      index,
+                                      'importName',
+                                      event.target.checked,
+                                    )}
+                                  />
+                                  <span>带入标准商品名</span>
+                                </label>
+                                <label className="fields-check-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={entry.importSpec}
+                                    disabled={saving}
+                                    onChange={(event) => changeNewItemImportOption(
+                                      index,
+                                      'importSpec',
+                                      event.target.checked,
+                                    )}
+                                  />
+                                  <span>带入标准规格</span>
+                                </label>
+                                {product.defaultOrderPriceCents !== null && (
+                                  <label className="fields-check-row">
+                                    <input
+                                      type="checkbox"
+                                      checked={entry.importPrice}
+                                      disabled={saving}
+                                      onChange={(event) => changeNewItemImportOption(
+                                        index,
+                                        'importPrice',
+                                        event.target.checked,
+                                      )}
+                                    />
+                                    <span>带入单价</span>
+                                  </label>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+                      {amountPrompts.has(index) && (() => {
+                        const prompt = amountPrompts.get(index)!;
+                        return (
+                          <div
+                            className="order-edit-amount-prompt"
+                            role="status"
+                            aria-label={`商品 ${index + 1} 金额提示`}
+                          >
+                            <p>
+                              商品单价：{formatMoney(prompt.unitPrice.beforeCents)}
+                              {' → '}
+                              {formatMoney(prompt.unitPrice.afterCents)}
+                            </p>
+                            <p>
+                              商品小计：{formatMoney(prompt.subtotal.beforeCents)}
+                              {' → '}
+                              {formatMoney(prompt.subtotal.afterCents)}
+                            </p>
+                            <p>
+                              商品总价：{formatMoney(prompt.productTotal.beforeCents)}
+                              {' → '}
+                              {formatMoney(prompt.productTotal.suggestedCents)}（建议值）
+                            </p>
+                            <p>成交金额：保持不变</p>
+                            {prompt.differsFromAmount && (
+                              <p>商品明细合计与成交金额存在差异，可能存在优惠、议价或其他原因，请人工核对。</p>
+                            )}
+                            {prompt.productTotal.suggestedCents !==
+                              prompt.productTotal.beforeCents && (
+                              <button
+                                className="button button--quiet"
+                                type="button"
+                                disabled={saving}
+                                onClick={() => patchOrderMoney(
+                                  'productTotal',
+                                  'productTotalCents',
+                                  formatMoneyInput(prompt.productTotal.suggestedCents),
+                                )}
+                              >
+                                同步更新商品总价
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
                       {item.id === null && itemCustomFieldDefinitions.length > 0 && (
                         <div className="item-custom-fields">
                           <span className="item-custom-fields__title">新增商品自定义字段</span>
@@ -9507,6 +9785,7 @@ function DetailWorkspace({
   if (editing) {
     return (
       <OrderEditWorkspace
+        api={api}
         details={details}
         screenshotUrl={screenshotUrl}
         saving={orderEditSaving}

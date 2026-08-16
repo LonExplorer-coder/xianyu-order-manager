@@ -2969,6 +2969,7 @@ export class LocalApplication {
       input,
       this.listCustomFieldDefinitions(),
       this.listCustomFieldValuesForOrder(current.id),
+      this.listStandardProducts(),
     );
     this.assertOrderEditIdentityAvailable(
       current.id,
@@ -2987,6 +2988,7 @@ export class LocalApplication {
       input,
       this.listCustomFieldDefinitions(),
       this.listCustomFieldValuesForOrder(current.id),
+      this.listStandardProducts(),
     );
     this.assertOrderEditIdentityAvailable(
       current.id,
@@ -3090,8 +3092,9 @@ export class LocalApplication {
         const insertItem = workspace.database.prepare(`
           INSERT INTO order_items (
             id, order_id, position, source_title, source_spec,
-            unit_price_cents, quantity, quantity_source, subtotal_cents
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            unit_price_cents, quantity, quantity_source, subtotal_cents,
+            standard_product_id, standardization_source, standard_display_preference
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         prepared.items.forEach((item, position) => {
           if (item.id !== null) {
@@ -3123,6 +3126,9 @@ export class LocalApplication {
             item.quantity,
             item.quantitySource,
             item.subtotalCents,
+            item.standardProductId,
+            item.standardProductId === null ? null : 'manual',
+            plannedStandardDisplayPreference(item.standardProductId, undefined),
           );
           const insertCustomValue = workspace.database.prepare(`
             INSERT INTO custom_field_values (
