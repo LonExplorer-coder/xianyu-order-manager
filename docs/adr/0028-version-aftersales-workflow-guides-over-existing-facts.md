@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0034
 ---
 
 # 在既有售后事实之上提供版本化流程向导
