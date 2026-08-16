@@ -34,6 +34,10 @@ import type { CandidateAdjudicationAuditView } from './candidate-adjudication-au
 import type {
   CreateStandardProductInput,
   DraftItemProductStandardization,
+  OrderItemStandardizationBatchApplyInput,
+  OrderItemStandardizationBatchPreview,
+  OrderItemStandardizationBatchPreviewInput,
+  OrderItemStandardizationBatchResult,
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
@@ -260,6 +264,12 @@ export interface DesktopApi {
     itemId: string,
     input: UpdateOrderItemStandardizationInput,
   ): Promise<OrderDetails>;
+  previewOrderItemStandardizationBatch(
+    input: OrderItemStandardizationBatchPreviewInput,
+  ): Promise<OrderItemStandardizationBatchPreview>;
+  applyOrderItemStandardizationBatch(
+    input: OrderItemStandardizationBatchApplyInput,
+  ): Promise<OrderItemStandardizationBatchResult>;
   updateOrderPlatformTransactionStatus(
     input: OrderPlatformTransactionStatusUpdateInput,
   ): Promise<OrderDetails[]>;

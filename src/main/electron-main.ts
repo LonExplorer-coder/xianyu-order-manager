@@ -32,6 +32,8 @@ import type {
 import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
+  normalizeOrderItemStandardizationBatchApplyInput,
+  normalizeOrderItemStandardizationBatchPreviewInput,
   normalizeProductStandardizationConfirmations,
   normalizeStandardProductInput,
   normalizeUpdateOrderItemStandardizationInput,
@@ -422,6 +424,16 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       )
     ),
   );
+  ipcMain.handle('order-items:preview-standardization-batch', (_event, input: unknown) => (
+    desktopSession.previewOrderItemStandardizationBatch(
+      normalizeOrderItemStandardizationBatchPreviewInput(input),
+    )
+  ));
+  ipcMain.handle('order-items:apply-standardization-batch', (_event, input: unknown) => (
+    desktopSession.applyOrderItemStandardizationBatch(
+      normalizeOrderItemStandardizationBatchApplyInput(input),
+    )
+  ));
   ipcMain.handle('orders:update-platform-transaction-status', (_event, input: unknown) => (
     desktopSession.updateOrderPlatformTransactionStatus(input)
   ));
@@ -623,6 +635,7 @@ function parseOrderWorkbenchQuery(input: unknown): OrderWorkbenchQuery {
 const ORDER_ITEM_WORKBENCH_QUERY_KEYS = new Set([
   'sourceTitle',
   'sourceSpec',
+  'similarText',
   'unitPriceCents',
   'quantity',
   'quantitySource',
@@ -647,6 +660,7 @@ function parseOrderItemWorkbenchQuery(input: unknown): OrderItemWorkbenchQuery {
   return {
     sourceTitle: optionalWorkbenchSourceText(input.sourceTitle, 20_000),
     sourceSpec: optionalWorkbenchSourceText(input.sourceSpec, 20_000),
+    similarText: optionalWorkbenchSourceText(input.similarText, 300),
     unitPriceCents: optionalWorkbenchInteger(input.unitPriceCents, 0, '商品单价'),
     quantity: optionalWorkbenchInteger(input.quantity, 1, '商品数量'),
     quantitySource: optionalWorkbenchEnum(

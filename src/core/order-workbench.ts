@@ -67,6 +67,7 @@ export type OrderItemWorkbenchSortField =
 export type OrderItemWorkbenchQuery = {
   sourceTitle?: string;
   sourceSpec?: string;
+  similarText?: string;
   unitPriceCents?: number;
   quantity?: number;
   quantitySource?: QuantitySource;

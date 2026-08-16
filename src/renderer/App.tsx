@@ -172,6 +172,7 @@ import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
+import { OrderItemStandardizationBatchDialog } from './OrderItemStandardizationBatchDialog';
 import type {
   DraftItemProductStandardization,
   ProductStandardizationConfirmation,
@@ -1515,6 +1516,7 @@ export function App({ api }: AppProps) {
   } else {
     workspace = (
       <OrdersWorkspace
+        api={api}
         orders={orderWorkbench?.orders ?? bootstrap.orders}
         batches={recognitionBatches}
         pendingConfirmationCount={recognitionBatches.reduce(
@@ -4704,6 +4706,7 @@ function shipmentArchiveRecipientDifferenceLabel(
 }
 
 type OrdersWorkspaceProps = {
+  api: DesktopApi;
   orders: OrderSummary[];
   batches: RecognitionBatchView[];
   pendingConfirmationCount: number;
@@ -4747,6 +4750,7 @@ type OrdersWorkspaceProps = {
 };
 
 function OrdersWorkspace({
+  api,
   orders,
   batches,
   pendingConfirmationCount,
@@ -5475,6 +5479,7 @@ function OrdersWorkspace({
         </div>
       ) : (
         <OrderItemsWorkbench
+          api={api}
           items={orderItems}
           definitions={customFieldDefinitions}
           customFieldValues={orderItemCustomFieldValues}
@@ -5640,6 +5645,7 @@ function OrderPlatformTransactionStatusDialog({
 }
 
 type OrderItemsWorkbenchProps = {
+  api: DesktopApi;
   items: OrderItemWorkbenchResult['items'];
   definitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];
@@ -5652,6 +5658,7 @@ type OrderItemsWorkbenchProps = {
 };
 
 function OrderItemsWorkbench({
+  api,
   items,
   definitions,
   customFieldValues,
@@ -5669,9 +5676,29 @@ function OrderItemsWorkbench({
   const [selectedFilterId, setSelectedFilterId] = useState(
     query.customFieldFilter?.definitionId ?? '',
   );
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(() => new Set());
+  const [batchLinkItems, setBatchLinkItems] = useState<Array<{
+    id: string;
+    sourceTitle: string;
+  }> | null>(null);
+  const selectAllItemsRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setSelectedFilterId(query.customFieldFilter?.definitionId ?? '');
   }, [query.customFieldFilter?.definitionId]);
+  useEffect(() => {
+    const visibleIds = new Set(items.map(({ id }) => id));
+    setSelectedItemIds((current) => {
+      const retained = new Set([...current].filter((id) => visibleIds.has(id)));
+      return retained.size === current.size ? current : retained;
+    });
+  }, [items]);
+  const selectedItems = items.filter(({ id }) => selectedItemIds.has(id));
+  useEffect(() => {
+    if (selectAllItemsRef.current) {
+      selectAllItemsRef.current.indeterminate = selectedItems.length > 0 &&
+        selectedItems.length < items.length;
+    }
+  }, [items.length, selectedItems.length]);
   const itemFields = definitions.filter(
     (definition) => definition.granularity === 'order_item',
   );
@@ -5683,7 +5710,8 @@ function OrderItemsWorkbench({
     onQueryChange({ ...query, ...patch });
   };
   const hasActiveQuery = Boolean(
-    query.sourceTitle || query.sourceSpec || query.unitPriceCents !== undefined ||
+    query.sourceTitle || query.sourceSpec || query.similarText ||
+    query.unitPriceCents !== undefined ||
     query.quantity !== undefined || query.quantitySource || query.sortField ||
     query.customFieldFilter || query.customFieldSort,
   );
@@ -5734,6 +5762,17 @@ function OrderItemsWorkbench({
               value={query.sourceSpec ?? ''}
               onChange={(event) => patchQuery({
                 sourceSpec: event.target.value || undefined,
+              })}
+            />
+          </label>
+          <label>
+            <span>相似标题／规格</span>
+            <input
+              type="search"
+              aria-label="相似标题规格筛选"
+              value={query.similarText ?? ''}
+              onChange={(event) => patchQuery({
+                similarText: event.target.value || undefined,
               })}
             />
           </label>
@@ -5902,12 +5941,36 @@ function OrderItemsWorkbench({
             <span><strong>{items.length}</strong> 条订单商品明细</span>
             <span><strong>{items.reduce((total, item) => total + item.quantity, 0)}</strong> 件商品</span>
             <span><strong>{formatMoney(items.reduce((total, item) => total + item.subtotalCents, 0))}</strong> 商品小计</span>
+            <button
+              className="button button--quiet table-toolbar__export"
+              type="button"
+              disabled={loading || selectedItems.length === 0}
+              onClick={() => setBatchLinkItems(
+                selectedItems.map((item) => ({ id: item.id, sourceTitle: item.sourceTitle })),
+              )}
+            >
+              统一关联到一个 SKU{selectedItems.length > 0 ? `（已选 ${selectedItems.length} 条）` : ''}
+            </button>
           </div>
 
           <div className="table-frame order-items-table-frame">
             <table aria-label="订单商品明细">
               <thead>
                 <tr>
+                  <th className="order-selection-cell order-selection-cell--header" scope="col">
+                    <input
+                      ref={selectAllItemsRef}
+                      className="order-selection-checkbox"
+                      type="checkbox"
+                      aria-label="选择当前结果全部订单商品明细"
+                      checked={items.length > 0 && selectedItems.length === items.length}
+                      onChange={(event) => {
+                        setSelectedItemIds(event.target.checked
+                          ? new Set(items.map(({ id }) => id))
+                          : new Set());
+                      }}
+                    />
+                  </th>
                   {columns.map((column) => (
                     <th key={fieldReferenceKey(column.field)}>{column.displayName}</th>
                   ))}
@@ -5916,7 +5979,23 @@ function OrderItemsWorkbench({
               </thead>
               <tbody>
                 {items.map((item) => (
-                  <tr key={item.id}>
+                  <tr className={selectedItemIds.has(item.id) ? 'is-selected' : undefined} key={item.id}>
+                    <td className="order-selection-cell">
+                      <input
+                        className="order-selection-checkbox"
+                        type="checkbox"
+                        aria-label={`选择订单商品 ${item.sourceTitle || '未命名商品'}`}
+                        checked={selectedItemIds.has(item.id)}
+                        onChange={(event) => {
+                          setSelectedItemIds((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(item.id);
+                            else next.delete(item.id);
+                            return next;
+                          });
+                        }}
+                      />
+                    </td>
                     {columns.map((column) => {
                       const descriptor = findTableFieldDescriptor(fieldCatalog, column.field);
                       const value = projectOrderItemTableCell(
@@ -5960,6 +6039,14 @@ function OrderItemsWorkbench({
             </table>
           </div>
         </>
+      )}
+      {batchLinkItems && (
+        <OrderItemStandardizationBatchDialog
+          api={api}
+          items={batchLinkItems}
+          onApplied={() => setSelectedItemIds(new Set())}
+          onClose={() => setBatchLinkItems(null)}
+        />
       )}
     </div>
   );

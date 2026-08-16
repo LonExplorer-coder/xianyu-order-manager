@@ -99,13 +99,26 @@ import {
 import { matchOrderItemIds } from '../core/order-item-matching';
 import {
   fuzzyProductSimilarity,
+  normalizeOrderItemStandardizationBatchApplyInput,
+  normalizeOrderItemStandardizationBatchPreviewInput,
   normalizeProductText,
   normalizeProductStandardizationConfirmations,
   normalizeSkuKey,
   normalizeStandardProductInput,
   normalizeUpdateOrderItemStandardizationInput,
   normalizeUpdateStandardProductInput,
+  planOrderItemStandardizationBatch,
+  PRODUCT_SIMILARITY_THRESHOLD,
   type DraftItemProductStandardization,
+  type OrderItemStandardizationBatchApplyInput,
+  type OrderItemStandardizationBatchBlockReason,
+  type OrderItemStandardizationBatchItemResult,
+  type OrderItemStandardizationBatchItemState,
+  type OrderItemStandardizationBatchOrderState,
+  type OrderItemStandardizationBatchPreview,
+  type OrderItemStandardizationBatchPreviewItem,
+  type OrderItemStandardizationBatchPreviewOrder,
+  type OrderItemStandardizationBatchResult,
   type ProductStandardizationConfirmation,
   type ProductStandardizationSource,
   type StandardDisplayPreference,
@@ -3380,6 +3393,429 @@ export class LocalApplication {
     return this.getOrder(current.id);
   }
 
+  public previewOrderItemStandardizationBatch(
+    input: unknown,
+  ): OrderItemStandardizationBatchPreview {
+    const normalized = normalizeOrderItemStandardizationBatchPreviewInput(input);
+    const product = this.getStandardProduct(normalized.standardProductId);
+    const { itemRowsById, orderRowsById } = this.loadOrderItemStandardizationBatchRows(
+      normalized.itemIds,
+    );
+    if (normalized.itemIds.some((itemId) => !itemRowsById.has(itemId))) {
+      throw new Error('订单商品不存在，请刷新后重试');
+    }
+    const plan = planOrderItemStandardizationBatch({
+      items: normalized.itemIds.map((itemId) => itemRowsById.get(itemId)!.state),
+      orders: [...orderRowsById.values()].map((order) => order.state),
+      product,
+      options: normalized.options,
+    });
+    return {
+      standardProduct: product,
+      options: normalized.options,
+      priceSyncRequested: plan.priceSyncRequested,
+      priceSyncAvailable: plan.priceSyncAvailable,
+      defaultOrderPriceCents: plan.defaultOrderPriceCents,
+      orderCount: plan.orderCount,
+      itemCount: plan.itemCount,
+      totalQuantity: plan.totalQuantity,
+      unlinkedCount: plan.unlinkedCount,
+      sameProductCount: plan.sameProductCount,
+      otherProductCount: plan.otherProductCount,
+      shippedOrderCount: plan.shippedOrderCount,
+      aftersalesOrderCount: plan.aftersalesOrderCount,
+      priceAffectedItemCount: plan.priceAffectedItemCount,
+      suggestedProductTotalOrderCount: plan.suggestedProductTotalOrderCount,
+      items: plan.items.map((itemPlan): OrderItemStandardizationBatchPreviewItem => {
+        const row = itemRowsById.get(itemPlan.itemId)!;
+        return {
+          itemId: itemPlan.itemId,
+          orderId: itemPlan.orderId,
+          orderNumber: row.orderNumber,
+          systemOrderNumber: row.systemOrderNumber,
+          position: row.state.position,
+          sourceTitle: row.sourceTitle,
+          sourceSpec: row.sourceSpec,
+          quantity: row.state.quantity,
+          currentUnitPriceCents: row.state.unitPriceCents,
+          plannedUnitPriceCents: itemPlan.plannedUnitPriceCents,
+          currentSubtotalCents: row.state.subtotalCents,
+          plannedSubtotalCents: itemPlan.plannedSubtotalCents,
+          beforeStandardProductSku: row.beforeStandardProductSku,
+          linkState: itemPlan.linkState,
+          blockReasons: itemPlan.blockReasons,
+        };
+      }),
+      orders: plan.orders.map((orderPlan): OrderItemStandardizationBatchPreviewOrder => {
+        const row = orderRowsById.get(orderPlan.orderId)!;
+        return {
+          orderId: orderPlan.orderId,
+          orderNumber: row.orderNumber,
+          systemOrderNumber: row.systemOrderNumber,
+          revision: orderPlan.revision,
+          shippedOrDelivered: orderPlan.shippedOrDelivered,
+          hasAftersales: orderPlan.hasAftersales,
+          productTotalCents: orderPlan.productTotalCents,
+          shippingFeeCents: orderPlan.shippingFeeCents,
+          amountCents: orderPlan.amountCents,
+          suggestedProductTotalCents: orderPlan.suggestedProductTotalCents,
+          productTotalChanges: orderPlan.productTotalChanges,
+          amountMismatch: orderPlan.amountMismatch,
+        };
+      }),
+    };
+  }
+
+  public applyOrderItemStandardizationBatch(
+    input: unknown,
+  ): OrderItemStandardizationBatchResult {
+    const workspace = this.requireWorkspace();
+    const normalized: OrderItemStandardizationBatchApplyInput =
+      normalizeOrderItemStandardizationBatchApplyInput(input);
+    const product = this.getStandardProduct(normalized.standardProductId);
+    if (normalized.options.useDefaultOrderPrice && product.defaultOrderPriceCents === null) {
+      throw new Error('标准商品未设置默认订单单价，无法同步商品单价');
+    }
+    const batchId = randomUUID();
+    const now = new Date().toISOString();
+    return workspace.transaction(() => {
+      const { itemRowsById, orderRowsById } = this.loadOrderItemStandardizationBatchRows(
+        normalized.itemIds,
+      );
+      if (normalized.itemIds.some((itemId) => !itemRowsById.has(itemId))) {
+        throw new Error('订单商品不存在，请刷新后重试');
+      }
+      const expectedRevisionByOrderId = new Map(
+        normalized.expectedOrderRevisions.map(
+          ({ orderId, revision }) => [orderId, revision] as const,
+        ),
+      );
+      for (const [orderId, orderRow] of orderRowsById) {
+        const expectedRevision = expectedRevisionByOrderId.get(orderId);
+        if (expectedRevision === undefined) {
+          throw new Error('订单版本无效，请刷新后重试');
+        }
+        if (orderRow.state.revision !== expectedRevision) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+      }
+      const plan = planOrderItemStandardizationBatch({
+        items: normalized.itemIds.map((itemId) => itemRowsById.get(itemId)!.state),
+        orders: [...orderRowsById.values()].map((order) => order.state),
+        product,
+        options: normalized.options,
+      });
+      const confirmedOverrideItemIds = new Set(normalized.confirmedOverrideItemIds);
+      const confirmedAmountMismatchOrderIds = new Set(normalized.confirmedAmountMismatchOrderIds);
+      const changesByOrderId = new Map<string, OrderFieldChange[]>();
+      const appliedSubtotalDeltaByOrderId = new Map<string, number>();
+      const results: OrderItemStandardizationBatchItemResult[] = [];
+      const eventRows: Array<{
+        orderId: string;
+        orderItemId: string;
+        beforeStandardProductId: string | null;
+        afterStandardProductId: string | null;
+        applied: 0 | 1;
+        blockReason: OrderItemStandardizationBatchBlockReason | null;
+      }> = [];
+
+      for (const itemPlan of plan.items) {
+        const row = itemRowsById.get(itemPlan.itemId)!;
+        const blockReason = itemPlan.blockReasons.find((reason) => (
+          reason === 'linked_other_product'
+            ? !confirmedOverrideItemIds.has(itemPlan.itemId)
+            : !confirmedAmountMismatchOrderIds.has(itemPlan.orderId)
+        )) ?? null;
+        if (blockReason !== null) {
+          results.push({
+            itemId: itemPlan.itemId,
+            orderId: itemPlan.orderId,
+            applied: false,
+            blockReason,
+            beforeStandardProductSku: row.beforeStandardProductSku,
+            afterStandardProductSku: null,
+          });
+          eventRows.push({
+            orderId: itemPlan.orderId,
+            orderItemId: itemPlan.itemId,
+            beforeStandardProductId: row.state.standardProductId,
+            afterStandardProductId: null,
+            applied: 0,
+            blockReason,
+          });
+          continue;
+        }
+
+        const position = row.state.position;
+        const productChanged = itemPlan.linkState !== 'same_product';
+        const afterSource: ProductStandardizationSource | null = productChanged
+          ? 'manual'
+          : row.standardizationSource;
+        const afterPreference = normalized.options.standardDisplayPreference;
+        workspace.database.prepare(`
+          UPDATE order_items
+          SET
+            standard_product_id = ?,
+            standardization_source = ?,
+            standard_display_preference = ?,
+            unit_price_cents = ?,
+            subtotal_cents = ?
+          WHERE id = ? AND order_id = ?
+        `).run(
+          product.id,
+          afterSource,
+          afterPreference,
+          itemPlan.plannedUnitPriceCents,
+          itemPlan.plannedSubtotalCents,
+          itemPlan.itemId,
+          itemPlan.orderId,
+        );
+        const orderChanges = changesByOrderId.get(itemPlan.orderId) ?? [];
+        changesByOrderId.set(itemPlan.orderId, orderChanges);
+        if (productChanged) {
+          orderChanges.push({
+            path: `items[${position}].standardProductSku`,
+            before: row.beforeStandardProductSku,
+            after: product.sku,
+          });
+        }
+        if (row.standardizationSource !== afterSource) {
+          orderChanges.push({
+            path: `items[${position}].standardizationSource`,
+            before: row.standardizationSource,
+            after: afterSource,
+          });
+        }
+        if (row.standardDisplayPreference !== afterPreference) {
+          orderChanges.push({
+            path: `items[${position}].standardDisplayPreference`,
+            before: row.standardDisplayPreference,
+            after: afterPreference,
+          });
+        }
+        if (itemPlan.unitPriceChanges) {
+          orderChanges.push({
+            path: `items[${position}].unitPriceCents`,
+            before: row.state.unitPriceCents,
+            after: itemPlan.plannedUnitPriceCents,
+          });
+        }
+        appliedSubtotalDeltaByOrderId.set(
+          itemPlan.orderId,
+          (appliedSubtotalDeltaByOrderId.get(itemPlan.orderId) ?? 0) +
+            itemPlan.plannedSubtotalCents - row.state.subtotalCents,
+        );
+        results.push({
+          itemId: itemPlan.itemId,
+          orderId: itemPlan.orderId,
+          applied: true,
+          blockReason: null,
+          beforeStandardProductSku: row.beforeStandardProductSku,
+          afterStandardProductSku: product.sku,
+        });
+        eventRows.push({
+          orderId: itemPlan.orderId,
+          orderItemId: itemPlan.itemId,
+          beforeStandardProductId: row.state.standardProductId,
+          afterStandardProductId: product.id,
+          applied: 1,
+          blockReason: null,
+        });
+      }
+
+      for (const [orderId, orderChanges] of changesByOrderId) {
+        const orderRow = orderRowsById.get(orderId)!;
+        if (normalized.options.updateProductTotal) {
+          const delta = appliedSubtotalDeltaByOrderId.get(orderId) ?? 0;
+          const suggestedTotalCents = orderRow.state.itemsSubtotalCents + delta;
+          if (!Number.isSafeInteger(suggestedTotalCents) || suggestedTotalCents < 0) {
+            throw new Error('商品明细合计超出安全范围');
+          }
+          if (delta !== 0 && suggestedTotalCents !== orderRow.state.productTotalCents) {
+            orderChanges.push({
+              path: 'productTotalCents',
+              before: orderRow.state.productTotalCents,
+              after: suggestedTotalCents,
+            });
+          }
+        }
+        if (orderChanges.length === 0) continue;
+        const appliedDelta = normalized.options.updateProductTotal
+          ? appliedSubtotalDeltaByOrderId.get(orderId) ?? 0
+          : 0;
+        const finalProductTotalCents = appliedDelta !== 0
+          ? orderRow.state.itemsSubtotalCents + appliedDelta
+          : orderRow.state.productTotalCents;
+        const expectedRevision = expectedRevisionByOrderId.get(orderId)!;
+        const updated = workspace.database.prepare(`
+          UPDATE original_orders
+          SET
+            product_total_cents = ?,
+            revision = revision + 1,
+            updated_at = ?
+          WHERE id = ? AND revision = ?
+        `).run(finalProductTotalCents, now, orderId, expectedRevision);
+        if (updated.changes !== 1) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+        const eventId = randomUUID();
+        workspace.database.prepare(`
+          INSERT INTO order_change_events (
+            id, order_id, source_snapshot_id, source,
+            base_revision, result_revision, created_at
+          ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+        `).run(eventId, orderId, expectedRevision, expectedRevision + 1, now);
+        const insertChange = workspace.database.prepare(`
+          INSERT INTO order_field_changes (
+            id, event_id, field_path, before_json, after_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const change of orderChanges) {
+          insertChange.run(
+            randomUUID(),
+            eventId,
+            change.path,
+            JSON.stringify(change.before),
+            JSON.stringify(change.after),
+          );
+        }
+      }
+
+      const insertBatchEvent = workspace.database.prepare(`
+        INSERT INTO order_item_standardization_batch_events (
+          id, batch_id, order_id, order_item_id,
+          target_standard_product_id, before_standard_product_id, after_standard_product_id,
+          standard_display_preference, use_default_order_price,
+          applied, block_reason, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const eventRow of eventRows) {
+        insertBatchEvent.run(
+          randomUUID(),
+          batchId,
+          eventRow.orderId,
+          eventRow.orderItemId,
+          product.id,
+          eventRow.beforeStandardProductId,
+          eventRow.afterStandardProductId,
+          normalized.options.standardDisplayPreference,
+          normalized.options.useDefaultOrderPrice ? 1 : 0,
+          eventRow.applied,
+          eventRow.blockReason,
+          now,
+          now,
+        );
+      }
+      return {
+        batchId,
+        standardProduct: product,
+        appliedItemCount: results.filter((result) => result.applied).length,
+        blockedItemCount: results.filter((result) => !result.applied).length,
+        results,
+      };
+    });
+  }
+
+  private loadOrderItemStandardizationBatchRows(itemIds: readonly string[]): {
+    itemRowsById: Map<string, OrderItemStandardizationBatchItemRow>;
+    orderRowsById: Map<string, OrderItemStandardizationBatchOrderRow>;
+  } {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database.prepare(`
+      SELECT
+        items.id AS item_id,
+        items.order_id AS order_id,
+        items.position AS position,
+        items.source_title AS source_title,
+        items.source_spec AS source_spec,
+        items.quantity AS quantity,
+        items.unit_price_cents AS unit_price_cents,
+        items.subtotal_cents AS subtotal_cents,
+        items.standard_product_id AS standard_product_id,
+        items.standardization_source AS standardization_source,
+        items.standard_display_preference AS standard_display_preference,
+        before_products.sku AS before_standard_product_sku,
+        orders.system_order_number AS system_order_number,
+        orders.platform_order_number AS order_number,
+        orders.revision AS order_revision,
+        orders.fulfillment_status AS fulfillment_status,
+        orders.product_total_cents AS product_total_cents,
+        orders.shipping_fee_cents AS shipping_fee_cents,
+        orders.amount_cents AS amount_cents,
+        (
+          SELECT COALESCE(SUM(all_items.subtotal_cents), 0)
+          FROM order_items AS all_items
+          WHERE all_items.order_id = orders.id
+        ) AS items_subtotal_cents,
+        EXISTS (
+          SELECT 1
+          FROM aftersales_case_items AS case_items
+          JOIN shipment_package_items AS shipment_items
+            ON shipment_items.id = case_items.shipment_package_item_id
+          WHERE shipment_items.order_id = orders.id
+        ) AS has_aftersales
+      FROM order_items AS items
+      JOIN original_orders AS orders ON orders.id = items.order_id
+      LEFT JOIN standard_products AS before_products
+        ON before_products.id = items.standard_product_id
+      WHERE orders.lifecycle_status = 'active'
+        AND items.id IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(itemIds)) as unknown as SqlRow[];
+    const rowByItemId = new Map(rows.map((row) => [asString(row.item_id), row] as const));
+    const itemRowsById = new Map<string, OrderItemStandardizationBatchItemRow>();
+    const orderRowsById = new Map<string, OrderItemStandardizationBatchOrderRow>();
+    for (const itemId of itemIds) {
+      const row = rowByItemId.get(itemId);
+      if (!row) continue;
+      const orderId = asString(row.order_id);
+      itemRowsById.set(itemId, {
+        state: {
+          itemId,
+          orderId,
+          position: asNumber(row.position),
+          quantity: asNumber(row.quantity),
+          unitPriceCents: asNumber(row.unit_price_cents),
+          subtotalCents: asNumber(row.subtotal_cents),
+          standardProductId: row.standard_product_id === null
+            ? null
+            : asString(row.standard_product_id),
+        },
+        sourceTitle: asString(row.source_title),
+        sourceSpec: asString(row.source_spec),
+        standardizationSource: row.standardization_source === null
+          ? null
+          : asProductStandardizationSource(row.standardization_source),
+        standardDisplayPreference: row.standard_display_preference === null
+          ? null
+          : asStandardDisplayPreference(row.standard_display_preference),
+        beforeStandardProductSku: row.before_standard_product_sku === null
+          ? null
+          : asString(row.before_standard_product_sku),
+        orderNumber: asString(row.order_number),
+        systemOrderNumber: asString(row.system_order_number),
+      });
+      if (!orderRowsById.has(orderId)) {
+        orderRowsById.set(orderId, {
+          state: {
+            orderId,
+            revision: asNumber(row.order_revision),
+            shippedOrDelivered: ['partially_shipped', 'shipped', 'delivered'].includes(
+              asString(row.fulfillment_status),
+            ),
+            hasAftersales: asNumber(row.has_aftersales) === 1,
+            productTotalCents: asNumber(row.product_total_cents),
+            shippingFeeCents: asNumber(row.shipping_fee_cents),
+            amountCents: asNumber(row.amount_cents),
+            itemsSubtotalCents: asNumber(row.items_subtotal_cents),
+          },
+          orderNumber: asString(row.order_number),
+          systemOrderNumber: asString(row.system_order_number),
+        });
+      }
+    }
+    return { itemRowsById, orderRowsById };
+  }
+
   public listOrders(): OrderSummary[] {
     return this.queryOrders({}, []).orders;
   }
@@ -3650,7 +4086,7 @@ export class LocalApplication {
               mappingSuggested: correctionCount > 0,
             };
           })
-          .filter(({ score }) => score >= 0.35)
+          .filter(({ score }) => score >= PRODUCT_SIMILARITY_THRESHOLD)
           .sort((left, right) => right.score - left.score || (
             left.product.sku.localeCompare(right.product.sku, 'zh-CN')
           ))
@@ -5606,6 +6042,10 @@ export class LocalApplication {
       where.push('items.source_spec = ? COLLATE NOCASE');
       parameters.push(sourceSpec);
     }
+    const similarText = query.similarText?.trim();
+    if (similarText && similarText.length > 300) {
+      throw new Error('相似标题规格筛选值无效');
+    }
     if (query.unitPriceCents !== undefined) {
       if (!Number.isSafeInteger(query.unitPriceCents) || query.unitPriceCents < 0) {
         throw new Error('商品单价筛选值无效');
@@ -5785,11 +6225,19 @@ export class LocalApplication {
         left.id.localeCompare(right.id)
       ));
     }
+    // 相同或相似筛选复用商品标准化候选的相似度口径，在 SQL 精确筛选之后按文本计算。
+    const filteredItems = similarText
+      ? items.filter((item) => fuzzyProductSimilarity(
+        item.sourceTitle,
+        item.sourceSpec,
+        { name: similarText, specification: '' },
+      ) >= PRODUCT_SIMILARITY_THRESHOLD)
+      : items;
     return {
-      items,
+      items: filteredItems,
       customFieldValues: this.listWorkbenchCustomFieldValues(
         'order_item',
-        items.map((item) => item.id),
+        filteredItems.map((item) => item.id),
         customFieldDefinitionIds,
       ),
     };
@@ -8012,6 +8460,23 @@ function plannedStandardDisplayPreference(
   }
   return 'prefer_standard';
 }
+
+type OrderItemStandardizationBatchItemRow = {
+  state: OrderItemStandardizationBatchItemState;
+  sourceTitle: string;
+  sourceSpec: string;
+  standardizationSource: ProductStandardizationSource | null;
+  standardDisplayPreference: StandardDisplayPreference | null;
+  beforeStandardProductSku: string | null;
+  orderNumber: string;
+  systemOrderNumber: string;
+};
+
+type OrderItemStandardizationBatchOrderRow = {
+  state: OrderItemStandardizationBatchOrderState;
+  orderNumber: string;
+  systemOrderNumber: string;
+};
 
 function orderWorkbenchDateColumn(
   field: OrderWorkbenchDateField,

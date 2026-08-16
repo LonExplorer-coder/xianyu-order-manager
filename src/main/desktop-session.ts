@@ -36,6 +36,10 @@ import { hasEquivalentOrderContent } from '../core/order-comparison';
 import type {
   CreateStandardProductInput,
   DraftItemProductStandardization,
+  OrderItemStandardizationBatchApplyInput,
+  OrderItemStandardizationBatchPreview,
+  OrderItemStandardizationBatchPreviewInput,
+  OrderItemStandardizationBatchResult,
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
@@ -689,6 +693,20 @@ export class DesktopSession {
       .updateOrderItemStandardization(orderId, itemId, input);
     this.refreshOrders();
     return details;
+  }
+
+  public previewOrderItemStandardizationBatch(
+    input: OrderItemStandardizationBatchPreviewInput,
+  ): OrderItemStandardizationBatchPreview {
+    return this.requireApplication().previewOrderItemStandardizationBatch(input);
+  }
+
+  public applyOrderItemStandardizationBatch(
+    input: OrderItemStandardizationBatchApplyInput,
+  ): OrderItemStandardizationBatchResult {
+    const result = this.requireApplication().applyOrderItemStandardizationBatch(input);
+    this.refreshOrders();
+    return result;
   }
 
   public updateOrderPlatformTransactionStatus(input: unknown): OrderDetails[] {

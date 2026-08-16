@@ -556,6 +556,8 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     mergeRecipients: vi.fn(),
     updateOrder: vi.fn(),
     updateOrderItemStandardization: vi.fn(),
+    previewOrderItemStandardizationBatch: vi.fn(),
+    applyOrderItemStandardizationBatch: vi.fn(),
     updateOrderPlatformTransactionStatus: vi.fn().mockResolvedValue([]),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
@@ -10160,7 +10162,7 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
 
     const table = await screen.findByRole('table', { name: '订单商品明细' });
-    expect(within(table).getAllByRole('columnheader').slice(0, -1).map((cell) => cell.textContent))
+    expect(within(table).getAllByRole('columnheader').slice(1, -1).map((cell) => cell.textContent))
       .toEqual([
         '系统订单编号',
         '订单号',
@@ -10240,6 +10242,215 @@ describe('订单管理工作台', () => {
     ));
   });
 
+  it('订单商品明细可相似筛选、多选并批量关联标准商品，确认前完整预览影响', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const firstItem = {
+      ...confirmedOrder.items[0],
+      id: 'item-batch-ui-1',
+      orderId: confirmedOrder.id,
+      systemOrderNumber: confirmedOrder.systemOrderNumber,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const secondItem = {
+      ...confirmedOrder.items[0],
+      id: 'item-batch-ui-2',
+      sourceTitle: '脱敏测试商品（大号）',
+      orderId: confirmedOrder.id,
+      systemOrderNumber: confirmedOrder.systemOrderNumber,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const product = {
+      id: 'product-batch-ui-1',
+      sku: 'SKU-BATCH-UI-001',
+      name: '十二分娃鞋',
+      specification: '白色',
+      defaultOrderPriceCents: 1299,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const batchOptions = {
+      standardDisplayPreference: 'prefer_standard' as const,
+      useDefaultOrderPrice: false,
+      updateProductTotal: false,
+    };
+    const preview = {
+      standardProduct: product,
+      options: batchOptions,
+      priceSyncRequested: false,
+      priceSyncAvailable: true,
+      defaultOrderPriceCents: 1299,
+      orderCount: 1,
+      itemCount: 2,
+      totalQuantity: 4,
+      unlinkedCount: 1,
+      sameProductCount: 0,
+      otherProductCount: 1,
+      shippedOrderCount: 0,
+      aftersalesOrderCount: 0,
+      priceAffectedItemCount: 0,
+      suggestedProductTotalOrderCount: 0,
+      items: [
+        {
+          itemId: firstItem.id,
+          orderId: confirmedOrder.id,
+          orderNumber: confirmedOrder.orderNumber,
+          systemOrderNumber: confirmedOrder.systemOrderNumber,
+          position: 0,
+          sourceTitle: firstItem.sourceTitle,
+          sourceSpec: firstItem.sourceSpec,
+          quantity: 2,
+          currentUnitPriceCents: 800,
+          plannedUnitPriceCents: 800,
+          currentSubtotalCents: 1600,
+          plannedSubtotalCents: 1600,
+          beforeStandardProductSku: null,
+          linkState: 'unlinked' as const,
+          blockReasons: [] as string[],
+        },
+        {
+          itemId: secondItem.id,
+          orderId: confirmedOrder.id,
+          orderNumber: confirmedOrder.orderNumber,
+          systemOrderNumber: confirmedOrder.systemOrderNumber,
+          position: 1,
+          sourceTitle: secondItem.sourceTitle,
+          sourceSpec: secondItem.sourceSpec,
+          quantity: 2,
+          currentUnitPriceCents: 800,
+          plannedUnitPriceCents: 800,
+          currentSubtotalCents: 1600,
+          plannedSubtotalCents: 1600,
+          beforeStandardProductSku: 'SKU-BATCH-UI-OLD',
+          linkState: 'other_product' as const,
+          blockReasons: ['linked_other_product' as const],
+        },
+      ],
+      orders: [{
+        orderId: confirmedOrder.id,
+        orderNumber: confirmedOrder.orderNumber,
+        systemOrderNumber: confirmedOrder.systemOrderNumber,
+        revision: confirmedOrder.revision,
+        shippedOrDelivered: false,
+        hasAftersales: false,
+        productTotalCents: 3200,
+        shippingFeeCents: 0,
+        amountCents: 3200,
+        suggestedProductTotalCents: 3200,
+        productTotalChanges: false,
+        amountMismatch: false,
+      }],
+    };
+    const previewOrderItemStandardizationBatch = vi.fn().mockResolvedValue(preview);
+    const applyOrderItemStandardizationBatch = vi.fn().mockResolvedValue({
+      batchId: 'batch-ui-1',
+      standardProduct: product,
+      appliedItemCount: 2,
+      blockedItemCount: 0,
+      results: [
+        {
+          itemId: firstItem.id,
+          orderId: confirmedOrder.id,
+          applied: true,
+          blockReason: null,
+          beforeStandardProductSku: null,
+          afterStandardProductSku: product.sku,
+        },
+        {
+          itemId: secondItem.id,
+          orderId: confirmedOrder.id,
+          applied: true,
+          blockReason: null,
+          beforeStandardProductSku: 'SKU-BATCH-UI-OLD',
+          afterStandardProductSku: product.sku,
+        },
+      ],
+    });
+    const queryOrderItems = vi.fn().mockResolvedValue({
+      items: [firstItem, secondItem],
+      customFieldValues: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems,
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+    });
+    Object.assign(api, {
+      previewOrderItemStandardizationBatch,
+      applyOrderItemStandardizationBatch,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
+    const table = await screen.findByRole('table', { name: '订单商品明细' });
+
+    await user.type(screen.getByRole('searchbox', { name: '相似标题规格筛选' }), '脱敏测试商品');
+    await waitFor(() => expect(queryOrderItems).toHaveBeenLastCalledWith(
+      expect.objectContaining({ similarText: '脱敏测试商品' }),
+      [],
+    ));
+
+    await user.click(
+      within(table).getByRole('checkbox', { name: '选择当前结果全部订单商品明细' }),
+    );
+    await user.click(screen.getByRole('button', { name: /统一关联到一个 SKU/u }));
+
+    const dialog = await screen.findByRole('dialog', { name: '批量关联标准商品' });
+    expect(within(dialog).getByRole('checkbox', { name: '关联到所选 SKU' })).toBeChecked();
+    expect(
+      within(dialog).getByRole('checkbox', { name: '优先展示标准商品信息' }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole('checkbox', { name: '使用标准商品默认单价' }),
+    ).not.toBeChecked();
+
+    await within(dialog).findByRole('option', { name: /SKU-BATCH-UI-001/u });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '标准商品' }),
+      product.id,
+    );
+    await waitFor(() => expect(previewOrderItemStandardizationBatch).toHaveBeenCalledWith({
+      itemIds: [firstItem.id, secondItem.id],
+      standardProductId: product.id,
+      options: batchOptions,
+    }));
+    expect(await within(dialog).findByText(/订单数量/u)).toBeInTheDocument();
+    expect(within(dialog).getByText(/商品明细数量/u)).toBeInTheDocument();
+    expect(within(dialog).getByText(/商品总数量/u)).toBeInTheDocument();
+    expect(within(dialog).getByText(/未关联/u)).toBeInTheDocument();
+    expect(within(dialog).getByText(/已关联相同 SKU/u)).toBeInTheDocument();
+    expect(within(dialog).getAllByText(/已关联其他 SKU/u).length).toBeGreaterThan(0);
+    expect(within(dialog).getByText('成交金额保持不变')).toBeInTheDocument();
+    expect(within(dialog).getByText('来源原文保持不变')).toBeInTheDocument();
+    expect(within(dialog).getByText(/已关联其他 SKU：SKU-BATCH-UI-OLD/u)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole(
+      'checkbox',
+      { name: `覆盖订单商品 ${secondItem.sourceTitle} 的现有关联` },
+    ));
+    await user.click(within(dialog).getByRole('button', { name: '确认批量关联' }));
+
+    await waitFor(() => expect(applyOrderItemStandardizationBatch).toHaveBeenCalledWith({
+      itemIds: [firstItem.id, secondItem.id],
+      standardProductId: product.id,
+      options: batchOptions,
+      confirmedOverrideItemIds: [secondItem.id],
+      confirmedAmountMismatchOrderIds: [],
+      expectedOrderRevisions: [{ orderId: confirmedOrder.id, revision: confirmedOrder.revision }],
+    }));
+    expect(await within(dialog).findByText(/已关联 2 条商品明细/u)).toBeVisible();
+    await user.click(within(dialog).getByRole('button', { name: '完成' }));
+    expect(screen.queryByRole('dialog', { name: '批量关联标准商品' })).not.toBeInTheDocument();
+  });
+
+
   it('应用商品模板时切换数据粒度并按模板列展示商品自定义值', async () => {
     const user = userEvent.setup();
     const summary = orderSummary();
@@ -10305,7 +10516,7 @@ describe('订单管理工作台', () => {
     expect(screen.getByRole('tab', { name: '订单商品明细' }))
       .toHaveAttribute('aria-selected', 'true');
     const table = await screen.findByRole('table', { name: '订单商品明细' });
-    expect(within(table).getAllByRole('columnheader').slice(0, 3).map((cell) => cell.textContent))
+    expect(within(table).getAllByRole('columnheader').slice(1, 4).map((cell) => cell.textContent))
       .toEqual(['关联单号', '货位', '行金额']);
     expect(within(table).getByText('A-01')).toBeVisible();
     expect(within(table).getByText('¥16.00')).toBeVisible();

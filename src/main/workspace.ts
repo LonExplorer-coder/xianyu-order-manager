@@ -198,6 +198,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(42)) migrateToVersion42(database);
   if (!versions.has(43)) migrateToVersion43(database);
   if (!versions.has(44)) migrateToVersion44(database);
+  if (!versions.has(45)) migrateToVersion45(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5704,6 +5705,66 @@ function migrateToVersion44(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (44, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion45(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE order_item_standardization_batch_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        batch_id TEXT NOT NULL,
+        order_id TEXT NOT NULL
+          REFERENCES original_orders(id) ON DELETE RESTRICT,
+        order_item_id TEXT NOT NULL
+          REFERENCES order_items(id) ON DELETE RESTRICT,
+        target_standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        before_standard_product_id TEXT
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        after_standard_product_id TEXT
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        standard_display_preference TEXT NOT NULL
+          CHECK (standard_display_preference IN ('prefer_standard', 'prefer_source')),
+        use_default_order_price INTEGER NOT NULL
+          CHECK (use_default_order_price IN (0, 1)),
+        applied INTEGER NOT NULL CHECK (applied IN (0, 1)),
+        block_reason TEXT CHECK (
+          block_reason IS NULL
+          OR block_reason IN ('linked_other_product', 'amount_mismatch')
+        ),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (applied = 1 AND block_reason IS NULL)
+          OR (applied = 0 AND block_reason IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX order_item_standardization_batch_events_by_batch
+      ON order_item_standardization_batch_events (batch_id, sequence);
+
+      CREATE TRIGGER order_item_standardization_batch_events_are_immutable_on_update
+      BEFORE UPDATE ON order_item_standardization_batch_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standardization batch events are immutable');
+      END;
+
+      CREATE TRIGGER order_item_standardization_batch_events_are_immutable_on_delete
+      BEFORE DELETE ON order_item_standardization_batch_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standardization batch events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (45, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

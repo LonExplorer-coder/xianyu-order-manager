@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import type { RecognitionResult } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
+import { removeVersion45ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
 
@@ -356,6 +357,7 @@ describe('标准商品显示偏好迁移', () => {
     const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
     try {
+      removeVersion45ExtensionArtifacts(legacy);
       legacy.exec(`
         DELETE FROM schema_migrations WHERE version = 44;
         DROP TRIGGER order_items_standard_display_preference_is_consistent_on_insert;
@@ -387,7 +389,7 @@ describe('标准商品显示偏好迁移', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 44 });
+        .toEqual({ version: 45 });
       expect(() => verified.prepare(`
         UPDATE order_items SET standard_display_preference = NULL WHERE id = ?
       `).run(linkedOrder.items[0].id)).toThrow(/inconsistent/u);

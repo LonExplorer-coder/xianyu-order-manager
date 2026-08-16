@@ -167,6 +167,12 @@ const api: DesktopApi = {
   updateOrderItemStandardization: (orderId, itemId, input) => (
     ipcRenderer.invoke('orders:update-item-standardization', orderId, itemId, input)
   ),
+  previewOrderItemStandardizationBatch: (input) => (
+    ipcRenderer.invoke('order-items:preview-standardization-batch', input)
+  ),
+  applyOrderItemStandardizationBatch: (input) => (
+    ipcRenderer.invoke('order-items:apply-standardization-batch', input)
+  ),
   updateOrderPlatformTransactionStatus: (input) => (
     ipcRenderer.invoke('orders:update-platform-transaction-status', input)
   ),

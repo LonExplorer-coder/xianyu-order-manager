@@ -1,6 +1,32 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion45ExtensionArtifacts(database: DatabaseSync): void {
+  const hasEventsTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'order_item_standardization_batch_events'
+  `).get();
+  if (!hasEventsTable) return;
+  const eventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM order_item_standardization_batch_events',
+  ).get() as { count: number };
+  if (eventCount.count > 0) {
+    throw new Error('v45 测试降级前必须移除批量关联留痕数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS order_item_standardization_batch_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS order_item_standardization_batch_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS order_item_standardization_batch_events_by_batch;
+    DROP TABLE order_item_standardization_batch_events;
+    DELETE FROM schema_migrations WHERE version = 45;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion44ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion45ExtensionArtifacts(database);
   const hasPreferenceColumn = database.prepare(`
     SELECT 1 FROM pragma_table_info('order_items') WHERE name = 'standard_display_preference'
   `).get();
