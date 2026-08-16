@@ -436,11 +436,15 @@ describe('发货组 Electron IPC', () => {
     registerIpcHandlers(session);
 
     const sourcePackage = shipment.record.packages[0];
+    const baseOccurredAt = Date.parse(shipment.record.createdAt) + 60_000;
+    const occurredAt = (offsetMinutes: number) => (
+      new Date(baseOccurredAt + offsetMinutes * 60_000).toISOString()
+    );
     const created = await invoke('aftersales-cases:create', {
       shipmentRecordId: shipment.record.id,
       workflowTemplateId: 'system-aftersales-return-refund',
       handlingDirection: 'intercept',
-      occurredAt: '2026-08-15T09:00:00+08:00',
+      occurredAt: occurredAt(0),
       reason: '包裹运输中申请拦截',
       requestedRefundCents: 800,
       items: [{ shipmentPackageItemId: sourcePackage.items[0].id, quantity: 1 }],
@@ -460,7 +464,7 @@ describe('发货组 Electron IPC', () => {
       caseId: created.id,
       expectedRevision: created.revision,
       result: 'failed',
-      occurredAt: '2026-08-15T09:10:00+08:00',
+      occurredAt: occurredAt(10),
       reason: '承运方确认拦截失败',
     }) as AftersalesCase;
     await invoke('shipment-records:update-package-logistics-status', {
@@ -468,7 +472,7 @@ describe('发货组 Electron IPC', () => {
       packageId: sourcePackage.id,
       expectedRevision: sourcePackage.revision,
       logisticsStatus: 'delivered',
-      occurredAt: '2026-08-15T10:00:00+08:00',
+      occurredAt: occurredAt(60),
       reason: '承运方回传已签收',
     });
     await expect(invoke('aftersales-cases:progress', {
@@ -476,7 +480,7 @@ describe('发货组 Electron IPC', () => {
       caseId: failed.id,
       expectedRevision: failed.revision,
       handlingDirection: 'replacement',
-      occurredAt: '2026-08-15T10:05:00+08:00',
+      occurredAt: occurredAt(65),
       reason: '不应绕过买家签收后的明确处理',
     })).rejects.toThrow('只能明确转为买家退回或仅退款');
     const changed = await invoke('aftersales-cases:progress', {
@@ -484,7 +488,7 @@ describe('发货组 Electron IPC', () => {
       caseId: failed.id,
       expectedRevision: failed.revision,
       handlingDirection: 'buyer_return',
-      occurredAt: '2026-08-15T10:10:00+08:00',
+      occurredAt: occurredAt(70),
       reason: '拦截失败且买家已签收，改为买家寄回',
     }) as AftersalesCase;
 
@@ -511,7 +515,7 @@ describe('发货组 Electron IPC', () => {
       expectedRevision: changed.revision,
       shippingCarrier: '中通快递',
       trackingNumber: 'ZT-AFTERSALES-COORDINATION-IPC',
-      occurredAt: '2026-08-15T10:20:00+08:00',
+      occurredAt: occurredAt(80),
       reason: '买家已实际交寄退货',
     }) as AftersalesCase;
     const accepted = await invoke('aftersales-cases:progress', {
@@ -521,7 +525,7 @@ describe('发货组 Electron IPC', () => {
       returnRecordId: registered.returns[0].id,
       logisticsStatus: 'in_transit',
       carrierAcceptanceConfirmed: true,
-      occurredAt: '2026-08-15T10:30:00+08:00',
+      occurredAt: occurredAt(90),
       reason: '承运方确认揽收',
     }) as AftersalesCase;
     const lost = await invoke('aftersales-cases:progress', {
@@ -533,7 +537,7 @@ describe('发货组 Electron IPC', () => {
       stage: 'confirmed',
       impact: { scope: 'package' },
       carrierConfirmedLoss: true,
-      occurredAt: '2026-08-15T10:40:00+08:00',
+      occurredAt: occurredAt(100),
       reason: '承运方确认退货丢失',
     }) as AftersalesCase;
     await expect(invoke('aftersales-cases:progress', {
@@ -541,7 +545,7 @@ describe('发货组 Electron IPC', () => {
       caseId: lost.id,
       expectedRevision: lost.revision,
       returnRecordId: registered.returns[0].id,
-      occurredAt: '2026-08-15T10:45:00+08:00',
+      occurredAt: occurredAt(105),
       reason: '不应用全部收到零件绕过整包丢失门禁',
       items: registered.returns[0].items.map((item) => ({
         returnRecordItemId: item.id,
@@ -556,7 +560,7 @@ describe('发货组 Electron IPC', () => {
       returnRecordId: registered.returns[0].id,
       exceptionId: lost.coordination.returnException?.exceptionId,
       decision: 'refund_in_advance',
-      occurredAt: '2026-08-15T10:50:00+08:00',
+      occurredAt: occurredAt(110),
       reason: '买家侧先行退款，承运异常继续处理',
     }) as AftersalesCase;
     expect(decided.coordination.returnException).toMatchObject({
