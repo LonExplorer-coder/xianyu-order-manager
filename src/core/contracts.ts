@@ -303,6 +303,7 @@ export type OrderDraftConfirmation = {
 export type OrderSummary = {
   id: string;
   systemOrderNumber: string;
+  readableOrderNumber: string | null;
   platform: OrderPlatform;
   sellerAccount: string;
   orderNumber: string;
@@ -411,6 +412,7 @@ export type OrderDetails = {
   customFieldDefinitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];
   operations: OrderOperationsProjection;
+  readableOrderNumber: string | null;
 };
 
 export type OrderEditIdentityCorrection = {

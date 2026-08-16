@@ -1260,6 +1260,79 @@ describe('默认脱敏的订单工作簿导出', () => {
     expect(await readFile(destinationPath)).toEqual(originalContents);
     expect((await readdir(testRoot)).filter((name) => name.includes('.tmp.xlsx'))).toEqual([]);
   });
+
+  it('模板选择可读订单编号字段时经同一解析缝随订单导出', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-EXPORT-READABLE-0001' }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    const readableOrderNumber = application.readableOrderNumbers([order.id])[order.id];
+    expect(readableOrderNumber).toBeTruthy();
+    const template = application.createTableTemplate({
+      name: '可读编号订单表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'system_order_number' }, displayName: '系统订单编号' },
+        { field: { kind: 'builtin', key: 'readable_order_number' }, displayName: '可读订单编号' },
+      ],
+      query: {},
+    });
+    const destinationPath = join(testRoot, '可读编号订单表.xlsx');
+
+    await application.exportOrdersToWorkbook({
+      scope: { kind: 'selected_orders', orderIds: [order.id] },
+      orderTemplateId: template.id,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+      masking: 'masked',
+    }, destinationPath);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    const orders = workbook.getWorksheet('订单总表');
+    if (!orders) throw new Error('缺少订单总表');
+    expect(rowValues(orders, 1)).toEqual(['系统订单编号', '可读订单编号']);
+    expect(rowValues(orders, 2)).toEqual([order.systemOrderNumber, readableOrderNumber]);
+  });
+
+  it('发货组三表导出默认在系统订单编号旁携带可读订单编号', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-EXPORT-READABLE-G01' }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    const readableOrderNumber = application.readableOrderNumbers([order.id])[order.id];
+    const group = application.queryShipmentGroups().groups[0];
+    const destinationPath = join(testRoot, '三表默认可读编号.xlsx');
+
+    await application.exportShipmentGroupsToWorkbook({
+      shipmentGroups: [{
+        id: group.id,
+        expectedMemberOrderIds: group.orders.map(({ id }) => id),
+      }],
+      orderTemplateId: null,
+      orderItemTemplateId: null,
+      shipmentGroupTemplateId: null,
+      masking: 'masked',
+    }, destinationPath);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    const orders = workbook.getWorksheet('订单总表');
+    const items = workbook.getWorksheet('订单商品明细表');
+    if (!orders || !items) throw new Error('缺少发货组导出表');
+    const orderHeaders = rowValues(orders, 1);
+    expect(orderHeaders.slice(0, 2)).toEqual(['系统订单编号', '可读订单编号']);
+    expect(rowValues(orders, 2).slice(0, 2)).toEqual([
+      order.systemOrderNumber,
+      readableOrderNumber,
+    ]);
+    const itemHeaders = rowValues(items, 1);
+    expect(itemHeaders.slice(0, 2)).toEqual(['系统订单编号', '可读订单编号']);
+    expect(rowValues(items, 2).slice(0, 2)).toEqual([
+      order.systemOrderNumber,
+      readableOrderNumber,
+    ]);
+  });
 });
 
 function cellByHeader(

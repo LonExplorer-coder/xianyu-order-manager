@@ -97,6 +97,11 @@ import type {
   UpdateTableTemplateInput,
 } from '../core/table-templates';
 import type { AftersalesCase } from '../core/aftersales-cases';
+import type {
+  FulfillmentPlanProgressView,
+  FulfillmentPlanView,
+} from '../core/fulfillment-plans';
+import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
   LocalApplication,
@@ -572,6 +577,50 @@ export class DesktopSession {
     return result;
   }
 
+  public queryFulfillmentPlans(input?: unknown): FulfillmentPlanView[] {
+    return this.requireApplication().queryFulfillmentPlans(input);
+  }
+
+  public createFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    return this.requireApplication().createFulfillmentPlan(input);
+  }
+
+  public addFulfillmentPlanOrders(input: unknown): FulfillmentPlanView {
+    const result = this.requireApplication().addFulfillmentPlanOrders(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public removeFulfillmentPlanOrder(input: unknown): FulfillmentPlanView {
+    const result = this.requireApplication().removeFulfillmentPlanOrder(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public releaseFulfillmentPlanOrders(input: unknown): FulfillmentPlanView {
+    const result = this.requireApplication().releaseFulfillmentPlanOrders(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public updateFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    return this.requireApplication().updateFulfillmentPlan(input);
+  }
+
+  public closeFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    const result = this.requireApplication().closeFulfillmentPlan(input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public queryFulfillmentPlanProgress(input: unknown): FulfillmentPlanProgressView {
+    return this.requireApplication().queryFulfillmentPlanProgress(input);
+  }
+
+  public queryFulfillmentPlanOrderCandidates(): OrderSummary[] {
+    return this.requireApplication().queryFulfillmentPlanOrderCandidates();
+  }
+
   public exportOrdersToWorkbook(
     input: OrderExportInput,
     destinationPath: string,
@@ -598,6 +647,24 @@ export class DesktopSession {
 
   public getOrder(orderId: string): OrderDetails {
     return this.requireApplication().getOrder(orderId);
+  }
+
+  public getReadableOrderNumbers(orderIds: unknown): Record<string, string | null> {
+    return this.requireApplication().readableOrderNumbers(orderIds);
+  }
+
+  public queryRecipients(): RecipientSummaryView[] {
+    return this.requireApplication().queryRecipientSummaries();
+  }
+
+  public queryRecipientOrders(input: unknown): OrderSummary[] {
+    return this.requireApplication().queryRecipientOrders(input);
+  }
+
+  public mergeRecipients(input: unknown): RecipientSummaryView[] {
+    const result = this.requireApplication().mergeRecipients(input);
+    this.refreshOrders();
+    return result;
   }
 
   public updateOrder(input: unknown): OrderDetails {

@@ -134,6 +134,8 @@ import {
 } from '../core/quantity-source';
 import {
   DEFAULT_ORDER_ITEM_EXPORT_COLUMNS,
+  DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_COLUMNS,
+  DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_ITEM_COLUMNS,
   normalizeOrderExportInput,
   normalizeOrderExportOrderIds,
   type OrderExportAddressRegion,
@@ -194,6 +196,10 @@ import {
 } from '../core/logistics-exceptions';
 import type { AftersalesCase } from '../core/aftersales-cases';
 import type {
+  FulfillmentPlanProgressView,
+  FulfillmentPlanView,
+} from '../core/fulfillment-plans';
+import type {
   AftersalesWorkflowTemplate,
   CopyAftersalesWorkflowTemplateInput,
   CreateAftersalesWorkflowTemplateInput,
@@ -229,6 +235,9 @@ import {
 } from '../core/system-order-number';
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
+import { FulfillmentPlanService } from './fulfillment-plan-service';
+import { RecipientService, type RecipientView } from './recipient-service';
+import type { RecipientSummaryView } from '../core/recipients';
 import { OrderFulfillmentProjectionService } from './order-fulfillment-projection-service';
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { LogisticsExceptionService } from './logistics-exception-service';
@@ -1845,8 +1854,9 @@ export class LocalApplication {
       throw new Error('部分订单已变化，请刷新发货组后重新导出');
     }
 
-    const orderColumns = orderTemplate?.columns ?? DEFAULT_ORDER_TABLE_COLUMNS;
-    const orderItemColumns = orderItemTemplate?.columns ?? DEFAULT_ORDER_ITEM_EXPORT_COLUMNS;
+    const orderColumns = orderTemplate?.columns ?? DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_COLUMNS;
+    const orderItemColumns = orderItemTemplate?.columns
+      ?? DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_ITEM_COLUMNS;
     const shipmentGroupColumns = shipmentGroupTemplate?.columns
       ?? DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS;
     const orderCustomDefinitionIds = tableTemplateCustomFieldDefinitionIds(orderColumns);
@@ -2329,6 +2339,7 @@ export class LocalApplication {
           now,
           now,
         );
+      this.recipientService().ensureRecipient(draft.recipient, draft.phoneNormalized, now);
 
       const insertItem = workspace.database.prepare(`
         INSERT INTO order_items (
@@ -2707,6 +2718,7 @@ export class LocalApplication {
       if (updatedOrder.changes !== 1) {
         throw new Error('订单已在其他操作中更新，请刷新对比后重试');
       }
+      this.recipientService().ensureRecipient(draft.recipient, draft.phoneNormalized, now);
 
       workspace.database
         .prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
@@ -3030,6 +3042,11 @@ export class LocalApplication {
         if (updated.changes !== 1) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
         }
+        this.recipientService().ensureRecipient(
+          prepared.values.recipient,
+          prepared.values.phoneNormalized,
+          now,
+        );
 
         workspace.database
           .prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
@@ -3521,6 +3538,7 @@ export class LocalApplication {
           )
         )
         AND platform_transaction_status NOT IN ('cancelled', 'refunded')
+        AND ${unreleasedPlanMemberGateSql('original_orders.id')}
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[];
     return rows.flatMap((row) => {
@@ -3906,9 +3924,12 @@ export class LocalApplication {
           id, shipment_record_id, order_id,
           order_number, seller_account, buyer_nickname,
           recipient, phone, address_original,
-          amount_cents, revision, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          amount_cents, revision, readable_order_number, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const readableNumberByOrderId = this.recipientService().readableOrderNumbers(
+        [...allocatedOrderIds],
+      );
       for (const orderId of allocatedOrderIds) {
         const sourceOrder = sourceOrderById.get(orderId);
         if (!sourceOrder) throw new Error('发货订单来源已变化，请刷新后重试');
@@ -3924,6 +3945,7 @@ export class LocalApplication {
           sourceOrder.addressOriginal,
           sourceOrder.amountCents,
           sourceOrder.revision,
+          readableNumberByOrderId.get(orderId) ?? null,
           now,
         );
       }
@@ -4549,6 +4571,79 @@ export class LocalApplication {
     return this.aftersalesService().progress(input);
   }
 
+  public queryFulfillmentPlans(input?: unknown): FulfillmentPlanView[] {
+    return this.fulfillmentPlanService().query(input);
+  }
+
+  public createFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().create(input);
+  }
+
+  public addFulfillmentPlanOrders(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().addOrders(input);
+  }
+
+  public removeFulfillmentPlanOrder(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().removeOrder(input);
+  }
+
+  public releaseFulfillmentPlanOrders(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().releaseOrders(input);
+  }
+
+  public updateFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().update(input);
+  }
+
+  public closeFulfillmentPlan(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().close(input);
+  }
+
+  public queryFulfillmentPlanProgress(input: unknown): FulfillmentPlanProgressView {
+    return this.fulfillmentPlanService().progress(input);
+  }
+
+  public queryFulfillmentPlanOrderCandidates(): OrderSummary[] {
+    return this.queryOrders(
+      { fulfillmentStatus: 'pending_shipment' },
+      undefined,
+      undefined,
+      { excludeReleasedPlanMembers: true },
+    ).orders;
+  }
+
+  public queryRecipients(): RecipientView[] {
+    return this.recipientService().queryRecipients();
+  }
+
+  public queryRecipientSummaries(): RecipientSummaryView[] {
+    return this.recipientService().queryRecipientSummaries();
+  }
+
+  public queryRecipientOrders(input: unknown): OrderSummary[] {
+    if (typeof input !== 'string' || !input.trim() || input.length > 200) {
+      throw new Error('收件人标识无效');
+    }
+    const orderIds = this.recipientService().orderIdsForRecipient(input);
+    if (orderIds.length === 0) return [];
+    return this.queryOrders({ lifecycleStatus: 'all' }, undefined, orderIds).orders;
+  }
+
+  public mergeRecipients(input: unknown): RecipientSummaryView[] {
+    return this.recipientService().mergeRecipients(input);
+  }
+
+  public readableOrderNumbers(input: unknown): Record<string, string | null> {
+    if (!Array.isArray(input)) throw new Error('订单标识列表无效');
+    const orderIds = [...new Set(input.map((value) => {
+      if (typeof value !== 'string' || !value.trim() || value.length > 200) {
+        throw new Error('订单标识无效');
+      }
+      return value;
+    }))];
+    return Object.fromEntries(this.recipientService().readableOrderNumbers(orderIds));
+  }
+
   private getShipmentRecord(recordId: string): ShipmentRecord {
     const workspace = this.requireWorkspace();
     const row = workspace.database.prepare(`
@@ -4562,13 +4657,25 @@ export class LocalApplication {
       ORDER BY position, id
     `).all(recordId) as unknown as SqlRow[];
     const sourceOrderRows = workspace.database.prepare(`
-      SELECT *
-      FROM shipment_record_order_snapshots
-      WHERE shipment_record_id = ?
-      ORDER BY order_number, order_id
+      SELECT
+        snapshots.*,
+        orders.system_order_number AS system_order_number
+      FROM shipment_record_order_snapshots AS snapshots
+      JOIN original_orders AS orders ON orders.id = snapshots.order_id
+      WHERE snapshots.shipment_record_id = ?
+      ORDER BY snapshots.order_number, snapshots.order_id
     `).all(recordId) as unknown as SqlRow[];
+    const liveReadableNumberByOrder = this.recipientService().readableOrderNumbers(
+      sourceOrderRows
+        .filter((row) => row.readable_order_number === null)
+        .map((row) => asString(row.order_id)),
+    );
     const sourceOrders = sourceOrderRows.map((sourceOrderRow): ShipmentSourceOrderSnapshot => ({
       orderId: asString(sourceOrderRow.order_id),
+      systemOrderNumber: asString(sourceOrderRow.system_order_number),
+      readableOrderNumber: sourceOrderRow.readable_order_number === null
+        ? liveReadableNumberByOrder.get(asString(sourceOrderRow.order_id)) ?? null
+        : asString(sourceOrderRow.readable_order_number),
       orderNumber: asString(sourceOrderRow.order_number),
       sellerAccount: asString(sourceOrderRow.seller_account),
       buyerNickname: asString(sourceOrderRow.buyer_nickname),
@@ -4883,6 +4990,7 @@ export class LocalApplication {
     query: OrderWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
     scopedOrderIds?: readonly string[],
+    options?: { excludeReleasedPlanMembers?: boolean },
   ): OrderWorkbenchResult {
     const workspace = this.requireWorkspace();
     const where = [
@@ -4982,6 +5090,10 @@ export class LocalApplication {
       parameters.push(query.fulfillmentStatus);
       if (query.fulfillmentStatus === 'pending_shipment') {
         where.push("orders.platform_transaction_status NOT IN ('cancelled', 'refunded')");
+        where.push(unreleasedPlanMemberGateSql('orders.id'));
+        if (options?.excludeReleasedPlanMembers) {
+          where.push(releasedPlanMemberGateSql('orders.id'));
+        }
       }
     }
     const dateColumn = orderWorkbenchDateColumn(query.dateField ?? 'created_at');
@@ -5148,6 +5260,8 @@ export class LocalApplication {
 
     const operationsByOrder = new OrderOperationsProjectionService(workspace.database)
       .getOverviewMany(rows.map((row) => asString(row.id)));
+    const readableNumberByOrder = this.recipientService()
+      .readableOrderNumbers(rows.map((row) => asString(row.id)));
     const orders = rows.map((row) => {
       const id = asString(row.id);
       const itemCount = asNumber(row.item_count);
@@ -5156,6 +5270,7 @@ export class LocalApplication {
       return {
         id,
         systemOrderNumber: asString(row.system_order_number),
+        readableOrderNumber: readableNumberByOrder.get(id) ?? null,
         platform: asOrderPlatform(row.platform),
         sellerAccount: asString(row.seller_account),
         orderNumber: asString(row.platform_order_number),
@@ -5391,12 +5506,16 @@ export class LocalApplication {
       WHERE ${where.join('\n        AND ')}
       ORDER BY ${sortExpression} ${sortDirection}, items.id
     `).all(...parameters, ...sortParameters) as unknown as SqlRow[];
+    const readableNumberByOrder = this.recipientService().readableOrderNumbers(
+      [...new Set(rows.map((row) => asString(row.order_id)))],
+    );
     const items = rows.map((row) => {
       const quantitySource = asQuantitySource(row.quantity_source);
       return {
         id: asString(row.id),
         orderId: asString(row.order_id),
         systemOrderNumber: asString(row.system_order_number),
+        readableOrderNumber: readableNumberByOrder.get(asString(row.order_id)) ?? null,
         orderNumber: asString(row.order_number),
         position: asNumber(row.position),
         sourceTitle: asString(row.source_title),
@@ -5689,6 +5808,8 @@ export class LocalApplication {
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       customFieldValues: this.listCustomFieldValuesForOrder(orderId),
       operations: new OrderOperationsProjectionService(workspace.database).get(orderId),
+      readableOrderNumber: this.recipientService().readableOrderNumbers([orderId])
+        .get(orderId) ?? null,
     };
   }
 
@@ -6330,6 +6451,14 @@ export class LocalApplication {
       this.requireWorkspace(),
       (recordId) => this.getShipmentRecord(recordId),
     );
+  }
+
+  private fulfillmentPlanService(): FulfillmentPlanService {
+    return new FulfillmentPlanService(this.requireWorkspace());
+  }
+
+  private recipientService(): RecipientService {
+    return new RecipientService(this.requireWorkspace());
   }
 
   private aftersalesWorkflowTemplateService(): AftersalesWorkflowTemplateService {
@@ -7561,6 +7690,25 @@ function parseCustomFieldGranularity(
 
 function containsLikePattern(value: string): string {
   return `%${value.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`;
+}
+
+function unreleasedPlanMemberGateSql(orderIdColumn: string): string {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM fulfillment_plan_members
+    WHERE fulfillment_plan_members.order_id = ${orderIdColumn}
+      AND fulfillment_plan_members.released_at IS NULL
+      AND fulfillment_plan_members.removed_at IS NULL
+  )`;
+}
+
+function releasedPlanMemberGateSql(orderIdColumn: string): string {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM fulfillment_plan_members
+    WHERE fulfillment_plan_members.order_id = ${orderIdColumn}
+      AND fulfillment_plan_members.released_at IS NOT NULL
+  )`;
 }
 
 function customFieldTextCollation(type: CustomFieldDefinition['type']): string {

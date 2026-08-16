@@ -2409,6 +2409,10 @@ select:focus-visible {
   flex: 0 0 auto;
 }
 
+.workspace-query {
+  margin: 20px 0 0;
+}
+
 .order-item-query__heading {
   display: flex;
   flex-direction: column;
@@ -5660,12 +5664,17 @@ select:focus-visible {
 }
 
 .aftersales-workflow-card > header,
-.aftersales-workflow-card > footer,
-.aftersales-workflow-editor > header,
-.aftersales-workflow-editor > footer {
+.aftersales-workflow-card > footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+
+.aftersales-workflow-editor > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 12px;
 }
 
@@ -6545,6 +6554,325 @@ select:focus-visible {
   .paid-call-actions {
     align-self: flex-end;
   }
+}
+
+.fulfillment-plans-workspace {
+  min-width: 0;
+  padding: 32px 40px 56px;
+}
+
+.recipients-workspace {
+  min-width: 0;
+  padding: 32px 40px 56px;
+}
+
+.fulfillment-plan-list {
+  display: grid;
+  gap: 18px;
+}
+
+.fulfillment-plan-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.fulfillment-plan-events {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fulfillment-plan-events li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(20 28 38 / 4%);
+}
+
+.fulfillment-plan-progress {
+  display: grid;
+  gap: 10px;
+}
+
+.fulfillment-plan-progress h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.fulfillment-plan-progress__hint {
+  margin: 0;
+  color: var(--navy-500);
+  font-size: 12px;
+}
+
+.fulfillment-plan-progress-order {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(20 28 38 / 4%);
+  font-size: 13px;
+}
+
+.fulfillment-plan-progress-order header {
+  display: flex;
+  gap: 12px;
+}
+
+.fulfillment-plan-progress-order p {
+  margin: 0;
+}
+
+.fulfillment-plan-progress-pending {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-deep);
+  color: var(--navy-700);
+  font-size: 12px;
+}
+
+.fulfillment-plan-progress-shipments,
+.fulfillment-plan-progress-shipments ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.recipient-list {
+  display: grid;
+  gap: 14px;
+}
+
+.recipient-detail {
+  display: grid;
+  gap: 10px;
+}
+
+.recipient-addresses {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.recipient-merged {
+  margin-top: 14px;
+}
+
+.recipient-merged ul {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recipient-merged li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(20 28 38 / 4%);
+  font-size: 13px;
+}
+
+.recipient-merge-parties {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.recipient-merge-parties section {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.recipient-merge-parties h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.recipient-merge-parties p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.recipient-merge-parties small {
+  color: var(--navy-500);
+}
+
+.shipment-record-card__source-orders {
+  margin: 0;
+  color: var(--navy-500);
+  font-size: 12px;
+}
+
+.shared-dialog {
+  width: min(560px, 100%);
+  min-width: 0;
+  padding: 27px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 30px 90px rgb(8 17 27 / 28%);
+}
+
+.shared-dialog--wide {
+  width: min(720px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+}
+
+.shared-dialog header h2 {
+  margin: 7px 0 0;
+  color: var(--navy-950);
+  font-size: 21px;
+}
+
+.shared-dialog header p {
+  margin: 10px 0 0;
+  color: var(--navy-500);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.shared-dialog > label {
+  display: grid;
+  gap: 7px;
+  margin-top: 20px;
+}
+
+.shared-dialog > label > span {
+  color: var(--navy-700);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.shared-dialog input,
+.shared-dialog select,
+.shared-dialog textarea {
+  padding: 10px 11px;
+  border: 1px solid #d5d7d5;
+  border-radius: 7px;
+  color: var(--navy-900);
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.shared-dialog select {
+  min-height: 38px;
+}
+
+.shared-dialog textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.shared-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.shared-dialog > label.shared-dialog__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shared-dialog__check input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--navy-900);
+}
+
+.shared-dialog__list {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shared-dialog__list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-confirm-dialog--wide {
+  width: min(720px, 100%);
+}
+
+.template-confirm-dialog--wide > label {
+  display: grid;
+  gap: 7px;
+  margin-top: 16px;
+}
+
+.template-confirm-dialog--wide > label > span {
+  color: var(--navy-700);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.template-confirm-dialog--wide textarea {
+  min-height: 88px;
+  padding: 10px 11px;
+  border: 1px solid #d5d7d5;
+  border-radius: 7px;
+  color: var(--navy-900);
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.table-frame--embedded {
+  margin: 0;
+}
+
+.table-frame--embedded table {
+  min-width: 0;
+}
+
+.aftersales-workflow-card > footer {
+  flex-wrap: wrap;
+}
+
+.aftersales-workflow-card__heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.aftersales-workflow-card__select {
+  display: flex;
+  align-items: center;
+}
+
+.aftersales-workflow-card__select input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--navy-900);
+  cursor: pointer;
 }
 
 @media (prefers-reduced-motion: reduce) {

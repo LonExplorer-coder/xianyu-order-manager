@@ -194,6 +194,8 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(38)) migrateToVersion38(database);
   if (!versions.has(39)) migrateToVersion39(database);
   if (!versions.has(40)) migrateToVersion40(database);
+  if (!versions.has(41)) migrateToVersion41(database);
+  if (!versions.has(42)) migrateToVersion42(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5460,6 +5462,160 @@ function migrateToVersion40(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (40, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion41(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE fulfillment_plans (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('presale', 'group_buy')),
+        name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 100),
+        status TEXT NOT NULL CHECK (status IN (
+          'pending', 'partially_released', 'released', 'delayed', 'closed'
+        )),
+        expected_ship_at TEXT,
+        target_quantity INTEGER CHECK (target_quantity IS NULL OR target_quantity > 0),
+        deadline_at TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at TEXT,
+        CHECK ((status = 'closed') = (closed_at IS NOT NULL))
+      ) STRICT;
+
+      CREATE TABLE fulfillment_plan_members (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE RESTRICT,
+        joined_at TEXT NOT NULL,
+        join_reason TEXT NOT NULL CHECK (length(trim(join_reason)) BETWEEN 1 AND 500),
+        released_at TEXT,
+        released_reason TEXT CHECK (
+          released_reason IS NULL OR length(trim(released_reason)) BETWEEN 1 AND 500
+        ),
+        removed_at TEXT,
+        removed_reason TEXT CHECK (
+          removed_reason IS NULL OR length(trim(removed_reason)) BETWEEN 1 AND 500
+        ),
+        CHECK ((released_at IS NULL) = (released_reason IS NULL)),
+        CHECK ((removed_at IS NULL) = (removed_reason IS NULL)),
+        CHECK (released_at IS NULL OR removed_at IS NULL)
+      ) STRICT;
+
+      CREATE UNIQUE INDEX fulfillment_plan_members_one_active_per_order
+      ON fulfillment_plan_members (order_id)
+      WHERE released_at IS NULL AND removed_at IS NULL;
+
+      CREATE INDEX fulfillment_plan_members_by_plan
+      ON fulfillment_plan_members (plan_id, joined_at);
+
+      CREATE TABLE fulfillment_plan_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'created', 'orders_added', 'order_removed', 'orders_released',
+          'updated', 'delayed', 'closed'
+        )),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        payload_json TEXT NOT NULL CHECK (
+          json_valid(payload_json) AND json_type(payload_json) = 'object'
+        ),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX fulfillment_plan_events_by_plan
+      ON fulfillment_plan_events (plan_id, sequence);
+
+      CREATE TRIGGER fulfillment_plan_events_are_immutable_on_update
+      BEFORE UPDATE ON fulfillment_plan_events
+      BEGIN
+        SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+      END;
+
+      CREATE TRIGGER fulfillment_plan_events_are_immutable_on_delete
+      BEFORE DELETE ON fulfillment_plan_events
+      BEGIN
+        SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (41, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion42(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE recipients (
+        id TEXT PRIMARY KEY,
+        recipient_number INTEGER NOT NULL UNIQUE CHECK (recipient_number > 0),
+        name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+        phone_normalized TEXT NOT NULL CHECK (length(phone_normalized) > 0),
+        display_name TEXT,
+        merged_into_recipient_id TEXT REFERENCES recipients(id),
+        merged_reason TEXT CHECK (
+          merged_reason IS NULL OR length(trim(merged_reason)) BETWEEN 1 AND 500
+        ),
+        merged_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (name, phone_normalized),
+        CHECK (
+          (merged_into_recipient_id IS NULL) = (merged_reason IS NULL)
+          AND (merged_reason IS NULL) = (merged_at IS NULL)
+        )
+      ) STRICT;
+
+      CREATE TRIGGER recipients_identity_is_immutable_on_update
+      BEFORE UPDATE ON recipients
+      WHEN OLD.name <> NEW.name
+        OR OLD.phone_normalized <> NEW.phone_normalized
+        OR OLD.recipient_number <> NEW.recipient_number
+      BEGIN
+        SELECT RAISE(ABORT, 'recipient identity is immutable');
+      END;
+
+      ALTER TABLE shipment_record_order_snapshots
+        ADD COLUMN readable_order_number TEXT;
+    `);
+    database.prepare(`
+      INSERT INTO recipients (id, recipient_number, name, phone_normalized, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        ROW_NUMBER() OVER (ORDER BY first_created_at, first_order_id),
+        name,
+        phone_normalized,
+        ?
+      FROM (
+        SELECT
+          recipient AS name,
+          phone_normalized,
+          MIN(created_at) AS first_created_at,
+          MIN(id) AS first_order_id
+        FROM original_orders
+        WHERE trim(recipient) <> '' AND phone_normalized <> ''
+        GROUP BY recipient, phone_normalized
+      )
+      ORDER BY first_created_at, first_order_id
+    `).run(new Date().toISOString());
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (42, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

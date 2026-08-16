@@ -16,6 +16,7 @@ import {
   coordinateOrderOperations,
   shipmentOrderOperationCandidates,
   shipmentTodoForStatuses,
+  type OrderFulfillmentPlanAttribution,
   type OrderOperationsAftersalesCase,
   type OrderOperationsPackage,
   type OrderOperationsProjection,
@@ -25,6 +26,10 @@ import {
   type OrderOperationsRisk,
   type OrderOperationsTodoCandidate,
 } from '../core/order-operations-projection';
+import {
+  isFulfillmentPlanType,
+  type FulfillmentPlanType,
+} from '../core/fulfillment-plans';
 import {
   isShipmentLogisticsStatus,
   type ShipmentLogisticsStatus,
@@ -73,6 +78,7 @@ export class OrderOperationsProjectionService {
     if (uniqueOrderIds.length === 0) return new Map();
     const shipmentRecordsByOrder = this.shipmentRecords(uniqueOrderIds);
     const aftersalesCasesByOrder = this.aftersalesCases(uniqueOrderIds);
+    const attributionsByOrder = this.fulfillmentPlanAttributions(uniqueOrderIds);
     const historyByOrder = includeHistory
       ? this.historyEntries(uniqueOrderIds)
       : new Map<string, OrderOperationsHistoryEntry[]>();
@@ -80,8 +86,56 @@ export class OrderOperationsProjectionService {
       const shipmentRecords = shipmentRecordsByOrder.get(orderId) ?? [];
       const aftersalesCases = aftersalesCasesByOrder.get(orderId) ?? [];
       const history = historyByOrder.get(orderId) ?? [];
-      return [orderId, buildProjection(shipmentRecords, aftersalesCases, history)] as const;
+      return [orderId, buildProjection(
+        shipmentRecords,
+        aftersalesCases,
+        history,
+        attributionsByOrder.get(orderId) ?? { status: 'none' },
+      )] as const;
     }));
+  }
+
+  private fulfillmentPlanAttributions(
+    orderIds: readonly string[],
+  ): ReadonlyMap<string, OrderFulfillmentPlanAttribution> {
+    const rows = this.database.prepare(`
+      SELECT
+        members.order_id,
+        members.released_at,
+        members.removed_at,
+        plans.id AS plan_id,
+        plans.type AS plan_type,
+        plans.name AS plan_name
+      FROM fulfillment_plan_members AS members
+      JOIN fulfillment_plans AS plans ON plans.id = members.plan_id
+      WHERE members.order_id IN (SELECT value FROM json_each(?))
+      ORDER BY members.joined_at, members.id
+    `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
+    const activeByOrder = new Map<string, SqlRow>();
+    const releasedByOrder = new Map<string, SqlRow>();
+    for (const row of rows) {
+      const orderId = asString(row.order_id);
+      if (row.released_at === null && row.removed_at === null) {
+        if (!activeByOrder.has(orderId)) activeByOrder.set(orderId, row);
+      } else if (row.released_at !== null && !releasedByOrder.has(orderId)) {
+        releasedByOrder.set(orderId, row);
+      }
+    }
+    const result = new Map<string, OrderFulfillmentPlanAttribution>();
+    for (const orderId of orderIds) {
+      const row = activeByOrder.get(orderId) ?? releasedByOrder.get(orderId);
+      if (!row) {
+        result.set(orderId, { status: 'none' });
+        continue;
+      }
+      result.set(orderId, {
+        status: row.released_at === null ? 'active' : 'released',
+        planId: asString(row.plan_id),
+        planType: asFulfillmentPlanType(row.plan_type),
+        planName: asString(row.plan_name),
+      });
+    }
+    return result;
   }
 
   private shipmentRecords(
@@ -1303,6 +1357,57 @@ export class OrderOperationsProjectionService {
         target,
       });
     }
+    const planRows = this.database.prepare(`
+      SELECT
+        members.order_id,
+        members.id AS member_id,
+        members.joined_at,
+        members.join_reason,
+        members.released_at,
+        members.released_reason,
+        members.removed_at,
+        members.removed_reason,
+        plans.id AS plan_id,
+        plans.name AS plan_name
+      FROM fulfillment_plan_members AS members
+      JOIN fulfillment_plans AS plans ON plans.id = members.plan_id
+      WHERE members.order_id IN (SELECT value FROM json_each(?))
+      ORDER BY members.order_id, members.joined_at, members.id
+    `).all(JSON.stringify(orderIds)) as unknown as SqlRow[];
+    for (const row of planRows) {
+      const memberId = asString(row.member_id);
+      const planId = asString(row.plan_id);
+      const planName = asString(row.plan_name);
+      const target = { kind: 'fulfillment_plan' as const, planId };
+      append(row, {
+        id: `fulfillment-plan:joined:${memberId}`,
+        kind: 'fulfillment_plan',
+        title: '加入履约计划',
+        detail: `${planName} · ${asString(row.join_reason)}`,
+        occurredAt: asString(row.joined_at),
+        target,
+      });
+      if (row.released_at !== null) {
+        append(row, {
+          id: `fulfillment-plan:released:${memberId}`,
+          kind: 'fulfillment_plan',
+          title: '被履约计划释放',
+          detail: `${planName} · ${asString(row.released_reason)}`,
+          occurredAt: asString(row.released_at),
+          target,
+        });
+      }
+      if (row.removed_at !== null) {
+        append(row, {
+          id: `fulfillment-plan:removed:${memberId}`,
+          kind: 'fulfillment_plan',
+          title: '退出履约计划',
+          detail: `${planName} · ${asString(row.removed_reason)}`,
+          occurredAt: asString(row.removed_at),
+          target,
+        });
+      }
+    }
     for (const history of result.values()) {
       history.sort((first, second) => Date.parse(second.occurredAt) - Date.parse(first.occurredAt));
     }
@@ -1360,6 +1465,7 @@ function buildProjection(
   shipmentRecords: OrderOperationsShipmentRecord[],
   projectedAftersalesCases: ProjectedAftersalesCase[],
   sourceHistory: readonly OrderOperationsHistoryEntry[] = [],
+  fulfillmentPlanAttribution: OrderFulfillmentPlanAttribution = { status: 'none' },
 ): OrderOperationsProjection {
   const aftersalesCases = projectedAftersalesCases.map(({ value }) => value);
   const aftersalesTodo = aftersalesTodoForCases(projectedAftersalesCases.map((projectedCase) => ({
@@ -1775,6 +1881,7 @@ function buildProjection(
     risks,
     facts,
     history,
+    fulfillmentPlanAttribution,
   };
 }
 
@@ -1796,6 +1903,11 @@ function asNumber(value: unknown): number {
 
 function asShipmentLogisticsStatus(value: unknown): ShipmentLogisticsStatus {
   if (!isShipmentLogisticsStatus(value)) throw new Error('数据库包裹物流状态格式错误');
+  return value;
+}
+
+function asFulfillmentPlanType(value: unknown): FulfillmentPlanType {
+  if (!isFulfillmentPlanType(value)) throw new Error('数据库履约计划类型格式错误');
   return value;
 }
 

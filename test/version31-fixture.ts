@@ -1,6 +1,65 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion42ExtensionArtifacts(database: DatabaseSync): void {
+  const hasRecipientsTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'recipients'
+  `).get();
+  if (!hasRecipientsTable) return;
+  const mergedCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM recipients
+    WHERE merged_into_recipient_id IS NOT NULL OR display_name IS NOT NULL
+  `).get() as { count: number };
+  if (mergedCount.count > 0) {
+    throw new Error('v42 测试降级前必须移除收件人合并数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS recipients_identity_is_immutable_on_update;
+    DELETE FROM recipients;
+    DROP TABLE recipients;
+    ALTER TABLE shipment_record_order_snapshots DROP COLUMN readable_order_number;
+    DELETE FROM schema_migrations WHERE version = 42;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+export function removeVersion41ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion42ExtensionArtifacts(database);
+  const hasPlansTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'fulfillment_plans'
+  `).get();
+  if (!hasPlansTable) return;
+  const planCount = database.prepare('SELECT COUNT(*) AS count FROM fulfillment_plans')
+    .get() as { count: number };
+  const memberCount = database.prepare('SELECT COUNT(*) AS count FROM fulfillment_plan_members')
+    .get() as { count: number };
+  const eventCount = database.prepare('SELECT COUNT(*) AS count FROM fulfillment_plan_events')
+    .get() as { count: number };
+  if (planCount.count > 0 || memberCount.count > 0 || eventCount.count > 0) {
+    throw new Error('v41 测试降级前必须移除履约计划数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS fulfillment_plan_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS fulfillment_plan_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS fulfillment_plan_events_by_plan;
+    DROP INDEX IF EXISTS fulfillment_plan_members_by_plan;
+    DROP INDEX IF EXISTS fulfillment_plan_members_one_active_per_order;
+    DROP TABLE fulfillment_plan_events;
+    DROP TABLE fulfillment_plan_members;
+    DROP TABLE fulfillment_plans;
+    DELETE FROM schema_migrations WHERE version = 41;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion40ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion41ExtensionArtifacts(database);
   const productCount = database.prepare('SELECT COUNT(*) AS count FROM standard_products')
     .get() as { count: number };
   const mappingCount = database.prepare('SELECT COUNT(*) AS count FROM product_mappings')

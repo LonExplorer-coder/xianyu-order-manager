@@ -120,6 +120,25 @@ const api: DesktopApi = {
   ),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),
   progressAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:progress', input),
+  queryFulfillmentPlans: (query) => ipcRenderer.invoke('fulfillment-plans:query', query),
+  createFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:create', input),
+  addFulfillmentPlanOrders: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:add-orders', input)
+  ),
+  removeFulfillmentPlanOrder: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:remove-order', input)
+  ),
+  releaseFulfillmentPlanOrders: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:release-orders', input)
+  ),
+  updateFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:update', input),
+  closeFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:close', input),
+  queryFulfillmentPlanProgress: (planId) => (
+    ipcRenderer.invoke('fulfillment-plans:progress', planId)
+  ),
+  queryFulfillmentPlanOrderCandidates: () => (
+    ipcRenderer.invoke('fulfillment-plans:order-candidates')
+  ),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   exportShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:export', input),
@@ -137,6 +156,10 @@ const api: DesktopApi = {
     };
   },
   getOrder: (orderId) => ipcRenderer.invoke('orders:get', orderId),
+  getReadableOrderNumbers: (orderIds) => ipcRenderer.invoke('orders:readable-numbers', orderIds),
+  queryRecipients: () => ipcRenderer.invoke('recipients:query'),
+  queryRecipientOrders: (recipientId) => ipcRenderer.invoke('recipients:orders', recipientId),
+  mergeRecipients: (input) => ipcRenderer.invoke('recipients:merge', input),
   updateOrder: (input) => ipcRenderer.invoke('orders:update', input),
   updateOrderPlatformTransactionStatus: (input) => (
     ipcRenderer.invoke('orders:update-platform-transaction-status', input)

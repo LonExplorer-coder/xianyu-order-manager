@@ -111,6 +111,7 @@ function orderSummaryForProjection(
   return {
     id,
     systemOrderNumber: `20260730-${id === 'order-1' ? '000001' : '000002'}`,
+    readableOrderNumber: null,
     platform: 'xianyu',
     sellerAccount: '主账号',
     orderNumber,
@@ -365,6 +366,11 @@ describe('表格模板核心契约', () => {
         valueType: 'text',
       },
       {
+        reference: { kind: 'builtin', key: 'readable_order_number' },
+        defaultLabel: '可读订单编号',
+        valueType: 'text',
+      },
+      {
         reference: { kind: 'builtin', key: 'order_number' },
         defaultLabel: '订单号',
         valueType: 'text',
@@ -606,6 +612,7 @@ describe('表格模板核心契约', () => {
     const order: OrderSummary = {
       id: 'order-1',
       systemOrderNumber: '20260730-000001',
+      readableOrderNumber: '260701-001-PT',
       platform: 'xianyu',
       sellerAccount: '主账号',
       orderNumber: 'XY-001',
@@ -680,6 +687,7 @@ describe('表格模板核心契约', () => {
       id: 'item-1',
       orderId: 'order-1',
       systemOrderNumber: '20260730-000001',
+      readableOrderNumber: '260701-001-PT',
       orderNumber: 'XY-001',
       position: 0,
       sourceTitle: '海棠杯',

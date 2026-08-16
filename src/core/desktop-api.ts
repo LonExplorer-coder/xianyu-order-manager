@@ -105,6 +105,21 @@ import type {
   CreateAftersalesWorkflowTemplateInput,
   UpdateAftersalesWorkflowTemplateInput,
 } from './aftersales-workflow-templates';
+import type {
+  AddFulfillmentPlanOrdersInput,
+  CloseFulfillmentPlanInput,
+  CreateFulfillmentPlanInput,
+  FulfillmentPlanProgressView,
+  FulfillmentPlanQuery,
+  FulfillmentPlanView,
+  ReleaseFulfillmentPlanOrdersInput,
+  RemoveFulfillmentPlanOrderInput,
+  UpdateFulfillmentPlanInput,
+} from './fulfillment-plans';
+import type {
+  MergeRecipientsInput,
+  RecipientSummaryView,
+} from './recipients';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -210,6 +225,19 @@ export interface DesktopApi {
   ): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
   progressAftersalesCase(input: ProgressAftersalesCaseInput): Promise<AftersalesCase>;
+  queryFulfillmentPlans(query?: FulfillmentPlanQuery): Promise<FulfillmentPlanView[]>;
+  createFulfillmentPlan(input: CreateFulfillmentPlanInput): Promise<FulfillmentPlanView>;
+  addFulfillmentPlanOrders(input: AddFulfillmentPlanOrdersInput): Promise<FulfillmentPlanView>;
+  removeFulfillmentPlanOrder(
+    input: RemoveFulfillmentPlanOrderInput,
+  ): Promise<FulfillmentPlanView>;
+  releaseFulfillmentPlanOrders(
+    input: ReleaseFulfillmentPlanOrdersInput,
+  ): Promise<FulfillmentPlanView>;
+  updateFulfillmentPlan(input: UpdateFulfillmentPlanInput): Promise<FulfillmentPlanView>;
+  closeFulfillmentPlan(input: CloseFulfillmentPlanInput): Promise<FulfillmentPlanView>;
+  queryFulfillmentPlanProgress(planId: string): Promise<FulfillmentPlanProgressView>;
+  queryFulfillmentPlanOrderCandidates(): Promise<OrderSummary[]>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;
@@ -218,6 +246,10 @@ export interface DesktopApi {
   ): Promise<ShipmentGroupExportPreviewResult>;
   onOrdersChanged(listener: (orders: OrderSummary[]) => void): () => void;
   getOrder(orderId: string): Promise<OrderDetails>;
+  getReadableOrderNumbers(orderIds: string[]): Promise<Record<string, string | null>>;
+  queryRecipients(): Promise<RecipientSummaryView[]>;
+  queryRecipientOrders(recipientId: string): Promise<OrderSummary[]>;
+  mergeRecipients(input: MergeRecipientsInput): Promise<RecipientSummaryView[]>;
   updateOrder(input: OrderEditInput): Promise<OrderDetails>;
   updateOrderPlatformTransactionStatus(
     input: OrderPlatformTransactionStatusUpdateInput,

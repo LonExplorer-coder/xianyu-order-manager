@@ -151,6 +151,7 @@ import {
 import {
   aftersalesTodoForCases,
   coordinateOrderOperations,
+  fulfillmentPlanAttributionLabel,
   shipmentOrderOperationCandidates,
   shipmentLogisticsStatusLabel,
   shipmentTodoForStatuses,
@@ -161,6 +162,8 @@ import { ShipmentGroupExportDialog } from './ShipmentGroupExportDialog';
 import { ShipmentGroupCustomFieldsDialog } from './ShipmentGroupCustomFieldsDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
+import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
+import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import type {
   DraftItemProductStandardization,
@@ -179,7 +182,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -1275,6 +1278,10 @@ export function App({ api }: AppProps) {
     );
   } else if (activePage === 'aftersales_workflows') {
     workspace = <AftersalesWorkflowTemplatesWorkspace api={api} />;
+  } else if (activePage === 'fulfillment_plans') {
+    workspace = <FulfillmentPlansWorkspace api={api} />;
+  } else if (activePage === 'recipients') {
+    workspace = <RecipientsWorkspace api={api} />;
   } else if (activePage === 'products') {
     workspace = <StandardProductsWorkspace api={api} />;
   } else if (activePage === 'templates') {
@@ -1527,6 +1534,26 @@ function AppFrame({
           >
             <Icon name="shipment" />
             <span className="nav-label">发货组</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'fulfillment_plans' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="履约计划"
+            aria-current={activePage === 'fulfillment_plans' ? 'page' : undefined}
+            onClick={() => onNavigate('fulfillment_plans')}
+          >
+            <Icon name="lock" />
+            <span className="nav-label">履约计划</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'recipients' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="收件人"
+            aria-current={activePage === 'recipients' ? 'page' : undefined}
+            onClick={() => onNavigate('recipients')}
+          >
+            <Icon name="user" />
+            <span className="nav-label">收件人</span>
           </button>
           <button
             className={`nav-item${activePage === 'aftersales_workflows' ? ' is-active' : ''}`}
@@ -3213,6 +3240,13 @@ function ShipmentRecordsSection({
                 ?? shipmentRecordCurrentAction(record, aftersalesCases)
             }</span>
           </div>
+          {record.sourceOrders.length > 0 && (
+            <p className="shipment-record-card__source-orders">
+              来源订单：{record.sourceOrders.map((source) => (
+                `${source.systemOrderNumber} ${source.readableOrderNumber ?? '—'}`
+              )).join('；')}
+            </p>
+          )}
           {operationsCoordination.secondaryTodoCount > 0 && (
             <details className="order-coordination-secondary shipment-records-secondary-todos">
               <summary>另有 {operationsCoordination.secondaryTodoCount} 项</summary>
@@ -9497,6 +9531,13 @@ function DetailWorkspace({
                 value={platformTransactionStatusLabel(order.platformTransactionStatus)}
               />
               <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
+              <DetailTerm label="可读编号" value={details.readableOrderNumber ?? '—'} />
+              <DetailTerm
+                label="履约计划"
+                value={fulfillmentPlanAttributionLabel(
+                  details.operations.fulfillmentPlanAttribution,
+                )}
+              />
               <DetailTerm label="生命周期状态" value={lifecycleStatusLabel(order.lifecycleStatus)} />
             </dl>
           </section>
@@ -10256,7 +10297,8 @@ type IconName =
   | 'check'
   | 'history'
   | 'fields'
-  | 'settings';
+  | 'settings'
+  | 'user';
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
@@ -10274,6 +10316,7 @@ function Icon({ name }: { name: IconName }) {
     check: <path d="m5 12.5 4 4L19 7" />,
     history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 7.5V12l3 2" /></>,
     fields: <><path d="M5 5h14v4H5zM5 13h14v6H5z" /><path d="M9 5v4M15 13v6" /></>,
+    user: <><circle cx="12" cy="8" r="3.5" /><path d="M4.5 20c1.4-3.6 4.1-5.5 7.5-5.5s6.1 1.9 7.5 5.5" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06-2.76 2.76-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.08 1.65V21H10v-.09A1.8 1.8 0 0 0 8.92 19.3a1.8 1.8 0 0 0-2 .36l-.06.06-2.76-2.76.06-.06a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.91 14H2.8v-4h.11a1.8 1.8 0 0 0 1.61-1.08 1.8 1.8 0 0 0-.36-2l-.06-.06L6.86 4.1l.06.06a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10 2.91V2.8h4v.11a1.8 1.8 0 0 0 1.08 1.61 1.8 1.8 0 0 0 2-.36l.06-.06 2.76 2.76-.06.06a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.09 10h.11v4h-.11A1.8 1.8 0 0 0 19.4 15Z" /></>,
   };
   return (

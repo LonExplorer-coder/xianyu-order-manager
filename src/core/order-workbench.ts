@@ -79,6 +79,7 @@ export type OrderItemWorkbenchQuery = {
 export type OrderItemWorkbenchItem = OrderItem & {
   orderId: string;
   systemOrderNumber: string;
+  readableOrderNumber: string | null;
   orderNumber: string;
 };
 

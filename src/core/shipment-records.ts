@@ -43,6 +43,8 @@ export type ShipmentPackageItem = ShipmentItemQuantityInput & {
 
 export type ShipmentSourceOrderSnapshot = {
   orderId: string;
+  systemOrderNumber: string;
+  readableOrderNumber: string | null;
   orderNumber: string;
   sellerAccount: string;
   buyerNickname: string;

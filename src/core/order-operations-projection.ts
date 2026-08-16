@@ -6,6 +6,7 @@ import type {
   CarrierClaimStatus,
 } from './aftersales-cases';
 import type { ShipmentLogisticsStatus } from './shipment-records';
+import type { FulfillmentPlanType } from './fulfillment-plans';
 import type { LogisticsExceptionStage, LogisticsExceptionType } from './logistics-exceptions';
 
 export type OrderOperationsShipmentItem = {
@@ -119,7 +120,27 @@ export type OrderOperationsProjection = {
   risks: OrderOperationsRisk[];
   facts: OrderOperationsFact[];
   history: OrderOperationsHistoryEntry[];
+  fulfillmentPlanAttribution: OrderFulfillmentPlanAttribution;
 };
+
+export type OrderFulfillmentPlanAttribution =
+  | { status: 'none' }
+  | {
+    status: 'active' | 'released';
+    planId: string;
+    planType: FulfillmentPlanType;
+    planName: string;
+  };
+
+export function fulfillmentPlanAttributionLabel(
+  attribution: OrderFulfillmentPlanAttribution,
+): string {
+  if (attribution.status === 'none') return '未归属';
+  if (attribution.status === 'active') {
+    return `${attribution.planType === 'presale' ? '预售' : '团购'}·${attribution.planName}（进行中）`;
+  }
+  return `已被${attribution.planName}释放`;
+}
 
 export type OrderOperationsTarget =
   | {
@@ -234,6 +255,13 @@ export type OrderOperationsFact = {
   target: OrderOperationsTarget;
 };
 
+export type OrderOperationsHistoryTarget =
+  | OrderOperationsTarget
+  | {
+    kind: 'fulfillment_plan';
+    planId: string;
+  };
+
 export type OrderOperationsHistoryEntry = {
   id: string;
   kind:
@@ -244,11 +272,12 @@ export type OrderOperationsHistoryEntry = {
     | 'return'
     | 'refund'
     | 'replacement'
-    | 'carrier_claim';
+    | 'carrier_claim'
+    | 'fulfillment_plan';
   title: string;
   detail: string;
   occurredAt: string;
-  target: OrderOperationsTarget;
+  target: OrderOperationsHistoryTarget;
 };
 
 const TODO_PRIORITY_RANK: Readonly<Record<OrderOperationsTodoPriority, number>> = {

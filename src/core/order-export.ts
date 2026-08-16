@@ -1,7 +1,9 @@
 import {
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
+  DEFAULT_ORDER_TABLE_COLUMNS,
   type TableCellValue,
   type TableTemplateColumn,
+  type TableTemplateLayoutItem,
 } from './table-templates';
 import type { CustomFieldType } from './custom-fields';
 import type { RecognitionBatchItemStatus } from './contracts';
@@ -52,6 +54,25 @@ export type OrderExportAddressRegion = {
 
 export const DEFAULT_ORDER_ITEM_EXPORT_COLUMNS: TableTemplateColumn[] = [
   ...DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
+];
+
+const READABLE_ORDER_NUMBER_COLUMN: TableTemplateColumn = {
+  field: { kind: 'builtin', key: 'readable_order_number' },
+  displayName: '可读订单编号',
+};
+
+/** 发货组三表导出的订单总表默认列：系统订单编号与可读订单编号成对出现。 */
+export const DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_COLUMNS: TableTemplateLayoutItem[] = [
+  DEFAULT_ORDER_TABLE_COLUMNS[0],
+  READABLE_ORDER_NUMBER_COLUMN,
+  ...DEFAULT_ORDER_TABLE_COLUMNS.slice(1),
+];
+
+/** 发货组三表导出的订单商品明细表默认列：系统订单编号与可读订单编号成对出现。 */
+export const DEFAULT_SHIPMENT_GROUP_EXPORT_ORDER_ITEM_COLUMNS: TableTemplateColumn[] = [
+  DEFAULT_ORDER_ITEM_EXPORT_COLUMNS[0],
+  READABLE_ORDER_NUMBER_COLUMN,
+  ...DEFAULT_ORDER_ITEM_EXPORT_COLUMNS.slice(1),
 ];
 
 export function normalizeOrderExportInput(value: unknown): OrderExportInput {

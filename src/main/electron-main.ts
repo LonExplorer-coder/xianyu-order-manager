@@ -323,6 +323,33 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('aftersales-cases:progress', (_event, input: unknown) => (
     desktopSession.progressAftersalesCase(input)
   ));
+  ipcMain.handle('fulfillment-plans:query', (_event, input: unknown) => (
+    desktopSession.queryFulfillmentPlans(input)
+  ));
+  ipcMain.handle('fulfillment-plans:create', (_event, input: unknown) => (
+    desktopSession.createFulfillmentPlan(input)
+  ));
+  ipcMain.handle('fulfillment-plans:add-orders', (_event, input: unknown) => (
+    desktopSession.addFulfillmentPlanOrders(input)
+  ));
+  ipcMain.handle('fulfillment-plans:remove-order', (_event, input: unknown) => (
+    desktopSession.removeFulfillmentPlanOrder(input)
+  ));
+  ipcMain.handle('fulfillment-plans:release-orders', (_event, input: unknown) => (
+    desktopSession.releaseFulfillmentPlanOrders(input)
+  ));
+  ipcMain.handle('fulfillment-plans:update', (_event, input: unknown) => (
+    desktopSession.updateFulfillmentPlan(input)
+  ));
+  ipcMain.handle('fulfillment-plans:close', (_event, input: unknown) => (
+    desktopSession.closeFulfillmentPlan(input)
+  ));
+  ipcMain.handle('fulfillment-plans:progress', (_event, planId: unknown) => (
+    desktopSession.queryFulfillmentPlanProgress(planId)
+  ));
+  ipcMain.handle('fulfillment-plans:order-candidates', () => (
+    desktopSession.queryFulfillmentPlanOrderCandidates()
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
@@ -370,6 +397,16 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.previewShipmentGroupExport(normalizeShipmentGroupExportInput(input))
   ));
   ipcMain.handle('orders:get', (_event, orderId: string) => desktopSession.getOrder(orderId));
+  ipcMain.handle('orders:readable-numbers', (_event, orderIds: unknown) => (
+    desktopSession.getReadableOrderNumbers(orderIds)
+  ));
+  ipcMain.handle('recipients:query', () => desktopSession.queryRecipients());
+  ipcMain.handle('recipients:orders', (_event, recipientId: unknown) => (
+    desktopSession.queryRecipientOrders(recipientId)
+  ));
+  ipcMain.handle('recipients:merge', (_event, input: unknown) => (
+    desktopSession.mergeRecipients(input)
+  ));
   ipcMain.handle('orders:update', (_event, input: unknown) => desktopSession.updateOrder(input));
   ipcMain.handle('orders:update-platform-transaction-status', (_event, input: unknown) => (
     desktopSession.updateOrderPlatformTransactionStatus(input)

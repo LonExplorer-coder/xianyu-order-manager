@@ -209,6 +209,7 @@ function summary(order: OriginalOrder = confirmedOrder): OrderSummary {
   return {
     id: order.id,
     systemOrderNumber: order.systemOrderNumber,
+    readableOrderNumber: null,
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
@@ -263,6 +264,7 @@ function itemWorkbenchResult(): OrderItemWorkbenchResult {
       ...item,
       orderId: confirmedOrder.id,
       systemOrderNumber: confirmedOrder.systemOrderNumber,
+      readableOrderNumber: null,
       orderNumber: confirmedOrder.orderNumber,
     })),
     customFieldValues: [],
@@ -293,7 +295,9 @@ function details(
       risks: [],
       facts: [],
       history: [],
+      fulfillmentPlanAttribution: { status: 'none' },
     },
+    readableOrderNumber: null,
   };
 }
 

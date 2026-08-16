@@ -35,6 +35,7 @@ export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[num
 
 export type OrderBuiltinTableFieldId =
   | 'system_order_number'
+  | 'readable_order_number'
   | 'order_number'
   | 'alipay_transaction_number'
   | 'platform'
@@ -55,6 +56,7 @@ export type OrderBuiltinTableFieldId =
 
 export type OrderItemBuiltinTableFieldId =
   | 'system_order_number'
+  | 'readable_order_number'
   | 'order_number'
   | 'item_sequence'
   | 'product_title'
@@ -289,6 +291,7 @@ type FixedTableField = AvailableTableField & {
 
 const ORDER_BUILTIN_FIELDS = [
   fixedField('order', 'builtin', 'system_order_number', '系统订单编号', 'text'),
+  fixedField('order', 'builtin', 'readable_order_number', '可读订单编号', 'text'),
   fixedField('order', 'builtin', 'order_number', '订单号', 'text'),
   fixedField('order', 'builtin', 'alipay_transaction_number', '支付宝交易号', 'text'),
   fixedField('order', 'builtin', 'platform', '平台', 'text'),
@@ -318,6 +321,7 @@ const ORDER_COMPUTED_FIELDS = [
 
 const ORDER_ITEM_BUILTIN_FIELDS = [
   fixedField('order_item', 'builtin', 'system_order_number', '系统订单编号', 'text'),
+  fixedField('order_item', 'builtin', 'readable_order_number', '可读订单编号', 'text'),
   fixedField('order_item', 'builtin', 'order_number', '订单号', 'text'),
   fixedField('order_item', 'builtin', 'item_sequence', '商品序号', 'number'),
   fixedField('order_item', 'builtin', 'product_title', '原始商品标题', 'text'),
@@ -678,6 +682,7 @@ export function projectOrderTableCell(
   }
   switch (reference.key) {
     case 'system_order_number': return order.systemOrderNumber;
+    case 'readable_order_number': return order.readableOrderNumber ?? null;
     case 'order_number': return order.orderNumber;
     case 'alipay_transaction_number': return order.alipayTransactionNumber;
     case 'platform': return order.platform;
@@ -844,7 +849,11 @@ export function projectOrderTableProjectionRow(
 }
 
 export function projectOrderItemTableCell(
-  item: OrderItemWorkbenchItem & { systemOrderNumber?: string; orderNumber?: string },
+  item: OrderItemWorkbenchItem & {
+    systemOrderNumber?: string;
+    readableOrderNumber?: string | null;
+    orderNumber?: string;
+  },
   reference: TableFieldReference,
   customFieldValues: CustomFieldValueProjectionSource = [],
 ): TableCellValue {
@@ -860,6 +869,7 @@ export function projectOrderItemTableCell(
   }
   switch (reference.key) {
     case 'system_order_number': return item.systemOrderNumber ?? null;
+    case 'readable_order_number': return item.readableOrderNumber ?? null;
     case 'order_number': return item.orderNumber ?? null;
     case 'item_sequence': return item.position + 1;
     case 'product_title': return item.sourceTitle;

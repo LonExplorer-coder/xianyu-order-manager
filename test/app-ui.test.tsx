@@ -201,7 +201,9 @@ const orderDetails: OrderDetails = {
     risks: [],
     facts: [],
     history: [],
+    fulfillmentPlanAttribution: { status: 'none' },
   },
+  readableOrderNumber: null,
 };
 
 function orderSummary(
@@ -211,6 +213,7 @@ function orderSummary(
   return {
     id: order.id,
     systemOrderNumber: order.systemOrderNumber,
+    readableOrderNumber: null,
     platform: order.platform,
     sellerAccount: order.sellerAccount,
     orderNumber: order.orderNumber,
@@ -383,8 +386,10 @@ function shipmentRecordForGroup(
       timeline: [],
       createdAt,
     }],
-    sourceOrders: group.orders.map((order) => ({
+    sourceOrders: group.orders.map((order, index) => ({
       orderId: order.id,
+      systemOrderNumber: `20260812-00000${index + 1}`,
+      readableOrderNumber: null,
       orderNumber: order.orderNumber,
       sellerAccount: order.sellerAccount,
       buyerNickname: order.buyerNickname,
@@ -518,6 +523,15 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     changeAftersalesCaseWorkflowTemplate: vi.fn(),
     updateAftersalesCase: vi.fn(),
     progressAftersalesCase: vi.fn(),
+    queryFulfillmentPlans: vi.fn().mockResolvedValue([]),
+    createFulfillmentPlan: vi.fn(),
+    addFulfillmentPlanOrders: vi.fn(),
+    removeFulfillmentPlanOrder: vi.fn(),
+    releaseFulfillmentPlanOrders: vi.fn(),
+    updateFulfillmentPlan: vi.fn(),
+    closeFulfillmentPlan: vi.fn(),
+    queryFulfillmentPlanProgress: vi.fn(),
+    queryFulfillmentPlanOrderCandidates: vi.fn().mockResolvedValue([]),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     previewOrderExport: vi.fn().mockResolvedValue({
       orderCount: 0,
@@ -533,6 +547,10 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     }),
     onOrdersChanged: vi.fn(() => () => undefined),
     getOrder: vi.fn(),
+    getReadableOrderNumbers: vi.fn().mockResolvedValue({}),
+    queryRecipients: vi.fn().mockResolvedValue([]),
+    queryRecipientOrders: vi.fn().mockResolvedValue([]),
+    mergeRecipients: vi.fn(),
     updateOrder: vi.fn(),
     updateOrderPlatformTransactionStatus: vi.fn().mockResolvedValue([]),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
@@ -6090,6 +6108,7 @@ describe('订单管理工作台', () => {
           occurredAt: record.createdAt,
           target: { kind: 'shipment_record', shipmentRecordId: record.id },
         }],
+        fulfillmentPlanAttribution: { status: 'none' },
       },
     };
     const api = createApi({

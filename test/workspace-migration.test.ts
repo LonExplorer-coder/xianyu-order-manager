@@ -16,6 +16,8 @@ import {
   removeVersion38ExtensionArtifacts,
   removeVersion39ExtensionArtifacts,
   removeVersion40ExtensionArtifacts,
+  removeVersion41ExtensionArtifacts,
+  removeVersion42ExtensionArtifacts,
 } from './version31-fixture';
 
 function productMigrationRecognition(): RecognitionResult {
@@ -44,6 +46,78 @@ function productMigrationRecognition(): RecognitionResult {
     fulfillmentStatus: 'pending_shipment',
     items: [{
       sourceTitle: '迁移标准商品',
+      sourceSpec: '标准规格',
+      unitPriceCents: 1000,
+      quantity: 1,
+      quantityInferred: false,
+    }],
+  };
+}
+
+function fulfillmentPlanMigrationRecognition(): RecognitionResult {
+  return {
+    platform: 'xianyu',
+    sellerAccount: '迁移测试账号',
+    orderNumber: 'XY-V41-PLAN',
+    alipayTransactionNumber: 'ALI-V41-PLAN',
+    buyerNickname: '迁***户',
+    recipient: '迁移收件人',
+    phone: '13900000041',
+    phoneNormalized: '13900000041',
+    addressOriginal: '广东省深圳市南山区迁移路41号',
+    addressNormalized: '广东省深圳市南山区迁移路41号',
+    province: '广东省',
+    city: '深圳市',
+    district: '南山区',
+    orderedAtOriginal: '2026-08-14 10:00:00',
+    orderedAtNormalized: '2026-08-14T10:00:00+08:00',
+    paidAtOriginal: '2026-08-14 10:00:08',
+    paidAtNormalized: '2026-08-14T10:00:08+08:00',
+    productTotalCents: 1000,
+    shippingFeeCents: 0,
+    amountCents: 1000,
+    platformTransactionStatus: 'paid',
+    fulfillmentStatus: 'pending_shipment',
+    items: [{
+      sourceTitle: '迁移预售商品',
+      sourceSpec: '标准规格',
+      unitPriceCents: 1000,
+      quantity: 2,
+      quantityInferred: false,
+    }],
+  };
+}
+
+function recipientMigrationRecognition(
+  orderNumber: string,
+  recipient: string,
+  phone: string,
+): RecognitionResult {
+  return {
+    platform: 'xianyu',
+    sellerAccount: '迁移测试账号',
+    orderNumber,
+    alipayTransactionNumber: '',
+    buyerNickname: '迁***户',
+    recipient,
+    phone,
+    phoneNormalized: phone,
+    addressOriginal: '广东省深圳市南山区迁移路42号',
+    addressNormalized: '广东省深圳市南山区迁移路42号',
+    province: '广东省',
+    city: '深圳市',
+    district: '南山区',
+    orderedAtOriginal: '2026-08-14 10:00:00',
+    orderedAtNormalized: '2026-08-14T10:00:00+08:00',
+    paidAtOriginal: '2026-08-14 10:00:08',
+    paidAtNormalized: '2026-08-14T10:00:08+08:00',
+    productTotalCents: 1000,
+    shippingFeeCents: 0,
+    amountCents: 1000,
+    platformTransactionStatus: 'paid',
+    fulfillmentStatus: 'pending_shipment',
+    items: [{
+      sourceTitle: '迁移商品',
       sourceSpec: '标准规格',
       unitPriceCents: 1000,
       quantity: 1,
@@ -115,7 +189,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 40 });
+      ).get()).toEqual({ version: 42 });
       expect(() => verified.database.prepare(`
         UPDATE order_items
         SET standardization_source = NULL
@@ -169,7 +243,7 @@ describe('数据库升级', () => {
     try {
       expect(repaired.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 40 });
+      ).get()).toEqual({ version: 42 });
       expect(repaired.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN ('standard_products', 'product_mappings')
@@ -180,6 +254,207 @@ describe('数据库升级', () => {
       ]);
     } finally {
       repaired.close();
+    }
+  });
+
+  it('将真实 v40 工作区升级为履约计划并在重启后保持计划与归属', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v40-fulfillment-plans-'));
+    const current = Workspace.open(dataDirectory);
+    current.close();
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      removeVersion41ExtensionArtifacts(legacy);
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 40 });
+      expect(legacy.prepare(`
+        SELECT name FROM sqlite_schema WHERE name IN (
+          'fulfillment_plans', 'fulfillment_plan_members', 'fulfillment_plan_events'
+        )
+      `).all()).toEqual([]);
+    } finally {
+      legacy.close();
+    }
+
+    const sourcePath = join(dataDirectory, '预售迁移订单.png');
+    await writeFile(sourcePath, Buffer.from('v40-fulfillment-plans'));
+    const application = new LocalApplication({
+      recognize: async () => ({
+        result: fulfillmentPlanMigrationRecognition(),
+        evidences: [{
+          provider: 'controlled',
+          model: 'controlled',
+          requestId: 'v40-fulfillment-plans',
+          schemaVersion: 1,
+          rawResponse: '{}',
+        }],
+      }),
+    });
+    application.openDataDirectory(dataDirectory);
+    const [draft] = (await application.submitRecognitionBatch([sourcePath])).drafts;
+    const order = application.confirmDraft(draft);
+    const plan = application.createFulfillmentPlan({
+      type: 'presale',
+      name: '迁移预售',
+      expectedShipAt: '2026-09-01T00:00:00.000Z',
+      reason: '预售开始备货',
+    });
+    const withMember = application.addFulfillmentPlanOrders({
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      orderIds: [order.id],
+      reason: '加入预售',
+    });
+    expect(withMember).toMatchObject({ activeOrderCount: 1, status: 'pending' });
+    application.close();
+
+    const reopened = new LocalApplication({
+      recognize: async () => { throw new Error('重启读取不应调用 OCR'); },
+    });
+    reopened.openDataDirectory(dataDirectory);
+    try {
+      expect(reopened.queryFulfillmentPlans()).toEqual([
+        expect.objectContaining({
+          id: plan.id,
+          name: '迁移预售',
+          status: 'pending',
+          members: [expect.objectContaining({
+            orderId: order.id,
+            joinReason: '加入预售',
+            releasedAt: null,
+            removedAt: null,
+          })],
+          events: expect.arrayContaining([
+            expect.objectContaining({ eventType: 'created', reason: '预售开始备货' }),
+            expect.objectContaining({ eventType: 'orders_added', reason: '加入预售' }),
+          ]),
+        }),
+      ]);
+    } finally {
+      reopened.close();
+    }
+
+    const verified = Workspace.open(dataDirectory);
+    try {
+      expect(verified.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 42 });
+      expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(() => verified.database.prepare(`
+        INSERT INTO fulfillment_plan_members (
+          id, plan_id, order_id, joined_at, join_reason
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        'member-duplicate-active',
+        plan.id,
+        order.id,
+        '2026-08-14T11:00:00.000Z',
+        '重复加入',
+      )).toThrow();
+      expect(() => verified.database.prepare(`
+        UPDATE fulfillment_plan_events SET reason = '篡改' WHERE plan_id = ?
+      `).run(plan.id)).toThrow(/fulfillment plan events are immutable/);
+    } finally {
+      verified.close();
+    }
+  });
+
+  it('将真实 v41 工作区升级为收件人注册表并按首次入库回填编号', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v41-recipients-'));
+    const sourceA1 = join(dataDirectory, '回填订单A1.png');
+    const sourceA2 = join(dataDirectory, '回填订单A2.png');
+    const sourceB1 = join(dataDirectory, '回填订单B1.png');
+    const sourceC1 = join(dataDirectory, '回填订单C1.png');
+    await writeFile(sourceA1, Buffer.from('v41-recipients-a1'));
+    await writeFile(sourceA2, Buffer.from('v41-recipients-a2'));
+    await writeFile(sourceB1, Buffer.from('v41-recipients-b1'));
+    await writeFile(sourceC1, Buffer.from('v41-recipients-c1'));
+    const recognitions = [
+      recipientMigrationRecognition('XY-V42-A1', '迁移收件人甲', '13900000042'),
+      recipientMigrationRecognition('XY-V42-A2', '迁移收件人甲', '13900000042'),
+      recipientMigrationRecognition('XY-V42-B1', '迁移收件人乙', '13900000043'),
+      recipientMigrationRecognition('XY-V42-C1', '迁移收件人丙', '13900000044'),
+    ];
+    const seeder = new LocalApplication({
+      recognize: async () => {
+        const result = recognitions.shift();
+        if (!result) throw new Error('识别结果已用尽');
+        return {
+          result,
+          evidences: [{
+            provider: 'controlled',
+            model: 'controlled',
+            requestId: 'v41-recipients',
+            schemaVersion: 1,
+            rawResponse: '{}',
+          }],
+        };
+      },
+    });
+    seeder.openDataDirectory(dataDirectory);
+    const drafts = (await seeder.submitRecognitionBatch([
+      sourceA1,
+      sourceA2,
+      sourceB1,
+      sourceC1,
+    ])).drafts;
+    seeder.confirmDraft(drafts[0]);
+    seeder.confirmDraft(drafts[1]);
+    seeder.confirmDraft(drafts[2]);
+    const orderC1 = seeder.confirmDraft(drafts[3]);
+    seeder.close();
+
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      // 丙订单缺少手机号，回填应跳过；自动建档派生行可随降级移除
+      legacy.prepare(`
+        UPDATE original_orders SET phone = '', phone_normalized = '' WHERE id = ?
+      `).run(orderC1.id);
+      removeVersion42ExtensionArtifacts(legacy);
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 41 });
+      expect(legacy.prepare(`
+        SELECT name FROM sqlite_schema WHERE name = 'recipients'
+      `).all()).toEqual([]);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = Workspace.open(dataDirectory);
+    try {
+      const recipients = migrated.database.prepare(`
+        SELECT * FROM recipients ORDER BY recipient_number
+      `).all() as Array<Record<string, string | number | null>>;
+      expect(recipients).toHaveLength(2);
+      expect(recipients[0]).toMatchObject({
+        recipient_number: 1,
+        name: '迁移收件人甲',
+        phone_normalized: '13900000042',
+        display_name: null,
+        merged_into_recipient_id: null,
+      });
+      expect(recipients[1]).toMatchObject({
+        recipient_number: 2,
+        name: '迁移收件人乙',
+        phone_normalized: '13900000043',
+      });
+      expect((migrated.database.prepare(
+        'PRAGMA table_info(shipment_record_order_snapshots)',
+      ).all() as Array<{ name: string }>).map(({ name }) => name))
+        .toContain('readable_order_number');
+      expect(migrated.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(() => migrated.database.prepare(`
+        UPDATE recipients SET name = '篡改' WHERE id = ?
+      `).run(recipients[0].id as string)).toThrow(/recipient identity is immutable/);
+      expect(() => migrated.database.prepare(`
+        UPDATE recipients SET recipient_number = 99 WHERE id = ?
+      `).run(recipients[0].id as string)).toThrow(/recipient identity is immutable/);
+      expect(migrated.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 42 });
+    } finally {
+      migrated.close();
     }
   });
 
@@ -248,7 +523,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 40 });
+      ).get()).toEqual({ version: 42 });
       expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       verified.close();
@@ -344,7 +619,7 @@ describe('数据库升级', () => {
       });
       expect(migrated.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 40 });
+      ).get()).toEqual({ version: 42 });
       expect(() => migrated.database.prepare(`
         INSERT INTO pending_financial_item_events (
           id, pending_item_id, kind, requested_amount_cents,
@@ -389,7 +664,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       expect(migrated.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN (
@@ -430,7 +705,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       expect(migrated.database.prepare(`
         SELECT name
         FROM sqlite_schema
@@ -484,7 +759,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -684,6 +959,8 @@ describe('数据库升级', () => {
       { version: 38 },
       { version: 39 },
       { version: 40 },
+      { version: 41 },
+      { version: 42 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -1150,6 +1427,8 @@ describe('数据库升级', () => {
       { version: 38 },
       { version: 39 },
       { version: 40 },
+      { version: 41 },
+      { version: 42 },
     ]);
     expect(
       (
@@ -1415,6 +1694,8 @@ describe('数据库升级', () => {
         { version: 38 },
         { version: 39 },
         { version: 40 },
+        { version: 41 },
+        { version: 42 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1618,7 +1899,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -1732,7 +2013,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -1800,7 +2081,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 40 });
+        .toEqual({ version: 42 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
