@@ -65,6 +65,60 @@ export type UpdateStandardProductInput = Omit<CreateStandardProductInput, 'defau
   expectedRevision: number;
 };
 
+export type StandardDisplayPreference = 'prefer_standard' | 'prefer_source';
+
+export type UpdateOrderItemStandardizationInput = {
+  standardProductId: string | null;
+  standardDisplayPreference?: StandardDisplayPreference;
+  expectedRevision: number;
+};
+
+export function normalizeUpdateOrderItemStandardizationInput(
+  value: unknown,
+): UpdateOrderItemStandardizationInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('商品标准化修改内容无效');
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(['standardProductId', 'standardDisplayPreference', 'expectedRevision']);
+  if (Object.keys(record).some((key) => !allowed.has(key))) {
+    throw new Error('商品标准化修改包含未知字段');
+  }
+  if (!('standardProductId' in record)) {
+    throw new Error('标准商品标识无效');
+  }
+  if (
+    record.standardProductId !== null &&
+    (typeof record.standardProductId !== 'string' || !record.standardProductId.trim())
+  ) {
+    throw new Error('标准商品标识无效');
+  }
+  if (!Number.isSafeInteger(record.expectedRevision) || (record.expectedRevision as number) < 1) {
+    throw new Error('订单版本无效，请刷新后重试');
+  }
+  let standardDisplayPreference: StandardDisplayPreference | undefined;
+  if ('standardDisplayPreference' in record) {
+    if (
+      record.standardDisplayPreference !== 'prefer_standard' &&
+      record.standardDisplayPreference !== 'prefer_source'
+    ) {
+      throw new Error('标准商品显示偏好无效');
+    }
+    standardDisplayPreference = record.standardDisplayPreference;
+  }
+  const standardProductId = typeof record.standardProductId === 'string'
+    ? record.standardProductId.trim()
+    : null;
+  if (standardProductId === null && standardDisplayPreference !== undefined) {
+    throw new Error('解除商品标准化关联时不能设置标准商品显示偏好');
+  }
+  return {
+    standardProductId,
+    ...(standardDisplayPreference !== undefined ? { standardDisplayPreference } : {}),
+    expectedRevision: record.expectedRevision as number,
+  };
+}
+
 export function normalizeProductStandardizationConfirmations(
   value: unknown,
 ): ProductStandardizationConfirmation[] {

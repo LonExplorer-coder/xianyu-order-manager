@@ -1,6 +1,32 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion44ExtensionArtifacts(database: DatabaseSync): void {
+  const hasPreferenceColumn = database.prepare(`
+    SELECT 1 FROM pragma_table_info('order_items') WHERE name = 'standard_display_preference'
+  `).get();
+  if (!hasPreferenceColumn) return;
+  const preferenceCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM order_items
+    WHERE standard_display_preference IS NOT NULL
+  `).get() as { count: number };
+  if (preferenceCount.count > 0) {
+    throw new Error('v44 测试降级前必须移除标准商品显示偏好数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS order_items_standard_display_preference_is_consistent_on_insert;
+    DROP TRIGGER IF EXISTS order_items_standard_display_preference_is_consistent_on_update;
+    ALTER TABLE order_items DROP COLUMN standard_display_preference;
+    DELETE FROM schema_migrations WHERE version = 44;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion43ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion44ExtensionArtifacts(database);
   const hasEventsTable = database.prepare(`
     SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'standard_product_price_events'
   `).get();

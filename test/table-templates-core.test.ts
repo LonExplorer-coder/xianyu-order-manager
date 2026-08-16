@@ -709,6 +709,7 @@ describe('表格模板核心契约', () => {
         updatedAt: '2026-07-30T01:00:00.000Z',
       },
       standardizationSource: 'manual',
+      standardDisplayPreference: 'prefer_standard',
     };
     const customValues: CustomFieldValueRecord[] = [{
       definitionId: itemField.id,

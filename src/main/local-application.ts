@@ -103,10 +103,12 @@ import {
   normalizeProductStandardizationConfirmations,
   normalizeSkuKey,
   normalizeStandardProductInput,
+  normalizeUpdateOrderItemStandardizationInput,
   normalizeUpdateStandardProductInput,
   type DraftItemProductStandardization,
   type ProductStandardizationConfirmation,
   type ProductStandardizationSource,
+  type StandardDisplayPreference,
   type StandardProduct,
   type StandardProductPriceEvent,
 } from '../core/product-standardization';
@@ -2346,8 +2348,8 @@ export class LocalApplication {
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
           unit_price_cents, quantity, quantity_source, subtotal_cents,
-          standard_product_id, standardization_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          standard_product_id, standardization_source, standard_display_preference
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       draft.items.forEach((item, position) => {
         const unitPriceCents = requireMoney('商品单价', item.unitPriceCents);
@@ -2368,6 +2370,7 @@ export class LocalApplication {
           safeSubtotal(unitPriceCents, item.quantity),
           standardization.standardProductId,
           standardization.source,
+          plannedStandardDisplayPreference(standardization.standardProductId, undefined),
         );
         if (standardization.createMapping && standardization.standardProductId) {
           this.upsertProductMapping(item, standardization.standardProductId, now);
@@ -2594,6 +2597,17 @@ export class LocalApplication {
           after: prepared.source,
         });
       }
+      const afterDisplayPreference = plannedStandardDisplayPreference(
+        prepared.standardProductId,
+        existingItem,
+      );
+      if ((existingItem?.standardDisplayPreference ?? null) !== afterDisplayPreference) {
+        standardizationChanges.push({
+          path: `items[${index}].standardDisplayPreference`,
+          before: existingItem?.standardDisplayPreference ?? null,
+          after: afterDisplayPreference,
+        });
+      }
     });
     const changes = [...contentChanges, ...standardizationChanges];
     if (changes.length === 0) {
@@ -2728,8 +2742,8 @@ export class LocalApplication {
         INSERT INTO order_items (
           id, order_id, position, source_title, source_spec,
           unit_price_cents, quantity, quantity_source, subtotal_cents,
-          standard_product_id, standardization_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          standard_product_id, standardization_source, standard_display_preference
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateItem = workspace.database.prepare(`
         UPDATE order_items
@@ -2742,7 +2756,8 @@ export class LocalApplication {
           quantity_source = ?,
           subtotal_cents = ?,
           standard_product_id = ?,
-          standardization_source = ?
+          standardization_source = ?,
+          standard_display_preference = ?
         WHERE id = ? AND order_id = ?
       `);
       draft.items.forEach((item, position) => {
@@ -2752,6 +2767,11 @@ export class LocalApplication {
         if (!itemId) throw new Error('订单草稿商品标识无效');
         const standardization = preparedProductStandardizations.get(item.id);
         if (!standardization) throw new Error('订单草稿商品标准化结果无效');
+        const previousItem = existingItemsById.get(itemId);
+        const standardDisplayPreference = plannedStandardDisplayPreference(
+          standardization.standardProductId,
+          previousItem,
+        );
         if (existingItemIds.has(itemId)) {
           updateItem.run(
             position,
@@ -2763,6 +2783,7 @@ export class LocalApplication {
             safeSubtotal(unitPriceCents, item.quantity),
             standardization.standardProductId,
             standardization.source,
+            standardDisplayPreference,
             itemId,
             orderId,
           );
@@ -2779,6 +2800,7 @@ export class LocalApplication {
             safeSubtotal(unitPriceCents, item.quantity),
             standardization.standardProductId,
             standardization.source,
+            standardDisplayPreference,
           );
           workspace.database.prepare(`
             INSERT INTO custom_field_values (
@@ -3236,6 +3258,120 @@ export class LocalApplication {
       }
     });
     return prepared.targets.map((target) => this.getOrder(target.orderId));
+  }
+
+  public updateOrderItemStandardization(
+    orderId: string,
+    itemId: string,
+    input: unknown,
+  ): OrderDetails {
+    const workspace = this.requireWorkspace();
+    const normalized = normalizeUpdateOrderItemStandardizationInput(input);
+    const current = this.getOrder(orderId).order;
+    const itemIndex = current.items.findIndex((item) => item.id === itemId);
+    if (itemIndex < 0) throw new Error('订单商品不属于该订单');
+    const item = current.items[itemIndex];
+    const afterProduct = normalized.standardProductId === null
+      ? null
+      : this.getStandardProduct(normalized.standardProductId);
+    if (current.revision !== normalized.expectedRevision) {
+      throw new Error('订单已在其他操作中更新，请刷新后重试');
+    }
+
+    const beforeProductId = item.standardProduct?.id ?? null;
+    const productChanged = beforeProductId !== normalized.standardProductId;
+    const afterSource = normalized.standardProductId === null
+      ? null
+      : productChanged
+        ? 'manual' as const
+        : item.standardizationSource;
+    const afterPreference = normalized.standardProductId === null
+      ? null
+      : normalized.standardDisplayPreference ?? (
+        !productChanged && item.standardDisplayPreference !== null
+          ? item.standardDisplayPreference
+          : 'prefer_standard'
+      );
+    const changes: OrderFieldChange[] = [];
+    if (productChanged) {
+      changes.push({
+        path: `items[${itemIndex}].standardProductSku`,
+        before: item.standardProduct?.sku ?? null,
+        after: afterProduct?.sku ?? null,
+      });
+    }
+    if (item.standardizationSource !== afterSource) {
+      changes.push({
+        path: `items[${itemIndex}].standardizationSource`,
+        before: item.standardizationSource,
+        after: afterSource,
+      });
+    }
+    if (item.standardDisplayPreference !== afterPreference) {
+      changes.push({
+        path: `items[${itemIndex}].standardDisplayPreference`,
+        before: item.standardDisplayPreference,
+        after: afterPreference,
+      });
+    }
+    if (changes.length === 0) return this.getOrder(current.id);
+
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      const updatedOrder = workspace.database.prepare(`
+        UPDATE original_orders
+        SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(now, current.id, normalized.expectedRevision);
+      if (updatedOrder.changes !== 1) {
+        throw new Error('订单已在其他操作中更新，请刷新后重试');
+      }
+      const updatedItem = workspace.database.prepare(`
+        UPDATE order_items
+        SET
+          standard_product_id = ?,
+          standardization_source = ?,
+          standard_display_preference = ?
+        WHERE id = ? AND order_id = ?
+      `).run(
+        normalized.standardProductId,
+        afterSource,
+        afterPreference,
+        itemId,
+        current.id,
+      );
+      if (updatedItem.changes !== 1) {
+        throw new Error('订单商品已变化，请刷新后重试');
+      }
+      const eventId = randomUUID();
+      workspace.database.prepare(`
+        INSERT INTO order_change_events (
+          id, order_id, source_snapshot_id, source,
+          base_revision, result_revision, created_at
+        ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+      `).run(
+        eventId,
+        current.id,
+        normalized.expectedRevision,
+        normalized.expectedRevision + 1,
+        now,
+      );
+      const insertChange = workspace.database.prepare(`
+        INSERT INTO order_field_changes (
+          id, event_id, field_path, before_json, after_json
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const change of changes) {
+        insertChange.run(
+          randomUUID(),
+          eventId,
+          change.path,
+          JSON.stringify(change.before),
+          JSON.stringify(change.after),
+        );
+      }
+    });
+    return this.getOrder(current.id);
   }
 
   public listOrders(): OrderSummary[] {
@@ -5627,6 +5763,9 @@ export class LocalApplication {
         standardizationSource: row.standardization_source === null
           ? null
           : asProductStandardizationSource(row.standardization_source),
+        standardDisplayPreference: row.standard_display_preference === null
+          ? null
+          : asStandardDisplayPreference(row.standard_display_preference),
       };
     });
     if (normalizedScopedOrderIds) {
@@ -5742,6 +5881,9 @@ export class LocalApplication {
         standardizationSource: item.standardization_source === null
           ? null
           : asProductStandardizationSource(item.standardization_source),
+        standardDisplayPreference: item.standard_display_preference === null
+          ? null
+          : asStandardDisplayPreference(item.standard_display_preference),
       };
     });
 
@@ -7845,6 +7987,24 @@ function asProductStandardizationSource(
 ): ProductStandardizationSource {
   if (value === 'exact' || value === 'mapping' || value === 'manual') return value;
   throw new Error('数据库商品标准化来源无效');
+}
+
+function asStandardDisplayPreference(
+  value: string | number | null | undefined,
+): StandardDisplayPreference {
+  if (value === 'prefer_standard' || value === 'prefer_source') return value;
+  throw new Error('数据库标准商品显示偏好无效');
+}
+
+function plannedStandardDisplayPreference(
+  standardProductId: string | null,
+  existingItem: OrderItem | undefined,
+): StandardDisplayPreference | null {
+  if (standardProductId === null) return null;
+  if (existingItem?.standardProduct?.id === standardProductId) {
+    return existingItem.standardDisplayPreference ?? 'prefer_standard';
+  }
+  return 'prefer_standard';
 }
 
 function orderWorkbenchDateColumn(

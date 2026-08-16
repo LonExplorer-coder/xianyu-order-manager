@@ -157,6 +157,7 @@ const confirmedOrder: OriginalOrder = {
     subtotalCents: 800,
     standardProduct: null,
     standardizationSource: null,
+    standardDisplayPreference: null,
   }],
 };
 

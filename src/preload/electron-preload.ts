@@ -164,6 +164,9 @@ const api: DesktopApi = {
   queryRecipientOrders: (recipientId) => ipcRenderer.invoke('recipients:orders', recipientId),
   mergeRecipients: (input) => ipcRenderer.invoke('recipients:merge', input),
   updateOrder: (input) => ipcRenderer.invoke('orders:update', input),
+  updateOrderItemStandardization: (orderId, itemId, input) => (
+    ipcRenderer.invoke('orders:update-item-standardization', orderId, itemId, input)
+  ),
   updateOrderPlatformTransactionStatus: (input) => (
     ipcRenderer.invoke('orders:update-platform-transaction-status', input)
   ),

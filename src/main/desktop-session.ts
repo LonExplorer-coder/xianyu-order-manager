@@ -39,6 +39,7 @@ import type {
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
+  UpdateOrderItemStandardizationInput,
   UpdateStandardProductInput,
 } from '../core/product-standardization';
 import { createHash, randomUUID } from 'node:crypto';
@@ -675,6 +676,17 @@ export class DesktopSession {
 
   public updateOrder(input: unknown): OrderDetails {
     const details = this.requireApplication().confirmOrderEdit(input);
+    this.refreshOrders();
+    return details;
+  }
+
+  public updateOrderItemStandardization(
+    orderId: string,
+    itemId: string,
+    input: UpdateOrderItemStandardizationInput,
+  ): OrderDetails {
+    const details = this.requireApplication()
+      .updateOrderItemStandardization(orderId, itemId, input);
     this.refreshOrders();
     return details;
   }

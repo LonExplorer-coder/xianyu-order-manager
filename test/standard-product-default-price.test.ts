@@ -11,6 +11,7 @@ import {
   normalizeUpdateStandardProductInput,
 } from '../src/core/product-standardization';
 import { LocalApplication } from '../src/main/local-application';
+import { removeVersion44ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
 const unusedRecognizer = new ControlledRecognizer({} as RecognitionResult);
@@ -255,6 +256,7 @@ describe('修改标准商品默认订单单价', () => {
     const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
     try {
+      removeVersion44ExtensionArtifacts(legacy);
       legacy.exec(`
         DELETE FROM schema_migrations WHERE version = 43;
         DROP TABLE standard_product_price_events;
@@ -279,7 +281,7 @@ describe('修改标准商品默认订单单价', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 43 });
+        .toEqual({ version: 44 });
       verified.prepare(`
         INSERT INTO standard_product_price_events (
           id, standard_product_id,

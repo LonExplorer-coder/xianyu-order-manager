@@ -7,6 +7,7 @@ import type { QuantitySource } from './quantity-source';
 import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
 import type {
   ProductStandardizationSource,
+  StandardDisplayPreference,
   StandardProduct,
 } from './product-standardization';
 import type {
@@ -270,6 +271,7 @@ export type OrderItem = Omit<RecognitionItem, 'unitPriceCents'> & {
   subtotalCents: number;
   standardProduct: StandardProduct | null;
   standardizationSource: ProductStandardizationSource | null;
+  standardDisplayPreference: StandardDisplayPreference | null;
 };
 
 export type OriginalOrder = Omit<

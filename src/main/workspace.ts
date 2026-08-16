@@ -197,6 +197,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(41)) migrateToVersion41(database);
   if (!versions.has(42)) migrateToVersion42(database);
   if (!versions.has(43)) migrateToVersion43(database);
+  if (!versions.has(44)) migrateToVersion44(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5667,6 +5668,42 @@ function migrateToVersion43(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (43, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion44(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE order_items
+      ADD COLUMN standard_display_preference TEXT
+        CHECK (standard_display_preference IN ('prefer_standard', 'prefer_source'));
+
+      UPDATE order_items
+      SET standard_display_preference = 'prefer_standard'
+      WHERE standard_product_id IS NOT NULL;
+
+      CREATE TRIGGER order_items_standard_display_preference_is_consistent_on_insert
+      BEFORE INSERT ON order_items
+      WHEN (NEW.standard_product_id IS NULL) <> (NEW.standard_display_preference IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standard display preference is inconsistent');
+      END;
+
+      CREATE TRIGGER order_items_standard_display_preference_is_consistent_on_update
+      BEFORE UPDATE OF standard_product_id, standard_display_preference ON order_items
+      WHEN (NEW.standard_product_id IS NULL) <> (NEW.standard_display_preference IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'order item standard display preference is inconsistent');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (44, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

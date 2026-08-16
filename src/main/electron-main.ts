@@ -34,6 +34,7 @@ import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeProductStandardizationConfirmations,
   normalizeStandardProductInput,
+  normalizeUpdateOrderItemStandardizationInput,
   normalizeUpdateStandardProductInput,
 } from '../core/product-standardization';
 import {
@@ -411,6 +412,16 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.mergeRecipients(input)
   ));
   ipcMain.handle('orders:update', (_event, input: unknown) => desktopSession.updateOrder(input));
+  ipcMain.handle(
+    'orders:update-item-standardization',
+    (_event, orderId: unknown, itemId: unknown, input: unknown) => (
+      desktopSession.updateOrderItemStandardization(
+        parseWorkflowId(orderId, '订单'),
+        parseWorkflowId(itemId, '订单商品'),
+        normalizeUpdateOrderItemStandardizationInput(input),
+      )
+    ),
+  );
   ipcMain.handle('orders:update-platform-transaction-status', (_event, input: unknown) => (
     desktopSession.updateOrderPlatformTransactionStatus(input)
   ));

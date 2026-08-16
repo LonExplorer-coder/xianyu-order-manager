@@ -352,7 +352,8 @@ describe('默认脱敏的订单工作簿导出', () => {
       `).run(currentResultIds[0]);
       database.prepare(`
         UPDATE order_items
-        SET standard_product_id = ?, standardization_source = 'manual'
+        SET standard_product_id = ?, standardization_source = 'manual',
+          standard_display_preference = 'prefer_standard'
         WHERE order_id = ? AND position = 0
       `).run(standardProduct.id, currentResultIds[0]);
     } finally {

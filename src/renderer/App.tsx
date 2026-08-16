@@ -167,6 +167,7 @@ import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTempla
 import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
+import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
 import type {
   DraftItemProductStandardization,
   ProductStandardizationConfirmation,
@@ -1469,6 +1470,7 @@ export function App({ api }: AppProps) {
   } else if ((activePage === 'orders' || activePage === 'shipments') && orderDetails) {
     workspace = (
       <DetailWorkspace
+        api={api}
         details={orderDetails}
         screenshotUrl={detailScreenshotUrl}
         selectedScreenshotId={detailScreenshotId}
@@ -9338,6 +9340,7 @@ function OrderEditWorkspace({
 }
 
 function DetailWorkspace({
+  api,
   details,
   screenshotUrl,
   selectedScreenshotId,
@@ -9357,6 +9360,7 @@ function DetailWorkspace({
   onLocateShipment,
   onOpenShipmentGroups,
 }: {
+  api: DesktopApi;
   details: OrderDetails;
   screenshotUrl: string;
   selectedScreenshotId: string;
@@ -9380,6 +9384,7 @@ function DetailWorkspace({
 }) {
   const { order } = details;
   const [editing, setEditing] = useState(false);
+  const [standardizationItemId, setStandardizationItemId] = useState<string | null>(null);
   const [maintainingStatusAndLogistics, setMaintainingStatusAndLogistics] = useState(false);
   const [statusLogisticsFeedback, setStatusLogisticsFeedback] = useState('');
   const [orderEditDirty, setOrderEditDirty] = useState(false);
@@ -10007,13 +10012,44 @@ function DetailWorkspace({
                     <strong>{item.sourceTitle}</strong>
                     <small>{item.sourceSpec || '无规格'}</small>
                     <small>数量来源：{draftItemQuantitySourceLabel(item)}</small>
+                    {item.standardProduct && (
+                      <small>
+                        标准商品：{item.standardProduct.sku} · {item.standardProduct.name}
+                        {item.standardDisplayPreference === 'prefer_source' && '（优先展示来源原文）'}
+                      </small>
+                    )}
                   </div>
                   <span>{formatMoney(item.unitPriceCents)} × {item.quantity}</span>
                   <strong>{formatMoney(item.subtotalCents)}</strong>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setStandardizationItemId(item.id)}
+                  >
+                    关联标准商品
+                  </button>
                 </div>
               ))}
             </div>
           </section>
+          {standardizationItemId && (() => {
+            const standardizationItem = order.items.find(
+              (item) => item.id === standardizationItemId,
+            );
+            if (!standardizationItem) return null;
+            return (
+              <UpdateOrderItemStandardizationDialog
+                api={api}
+                order={order}
+                item={standardizationItem}
+                onClose={() => setStandardizationItemId(null)}
+                onSaved={async () => {
+                  await onRefreshOrder(order.id);
+                  setStandardizationItemId(null);
+                }}
+              />
+            );
+          })()}
 
           {definitions.length > 0 && (
             <section className="detail-section detail-custom-fields">

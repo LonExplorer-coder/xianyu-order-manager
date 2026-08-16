@@ -164,6 +164,7 @@ const confirmedOrder: OriginalOrder = {
     subtotalCents: 1_600,
     standardProduct: null,
     standardizationSource: null,
+    standardDisplayPreference: null,
   }],
 };
 
@@ -553,6 +554,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     queryRecipientOrders: vi.fn().mockResolvedValue([]),
     mergeRecipients: vi.fn(),
     updateOrder: vi.fn(),
+    updateOrderItemStandardization: vi.fn(),
     updateOrderPlatformTransactionStatus: vi.fn().mockResolvedValue([]),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
@@ -6561,6 +6563,86 @@ describe('订单管理工作台', () => {
       .toHaveTextContent('新收件人');
     expect(screen.getByRole('heading', { name: '订单信息' }).closest('section'))
       .toHaveTextContent('人工核对完成');
+  });
+
+  it('订单详情可单笔关联标准商品并保存标准商品显示偏好', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-link-1',
+      sku: 'SKU-UI-LINK-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: 1299,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const linkedDetails: OrderDetails = {
+      ...orderDetails,
+      order: {
+        ...confirmedOrder,
+        revision: 2,
+        items: [{
+          ...confirmedOrder.items[0],
+          standardProduct: product,
+          standardizationSource: 'manual',
+          standardDisplayPreference: 'prefer_standard',
+        }],
+      },
+    };
+    const updateOrderItemStandardization = vi.fn().mockResolvedValue(linkedDetails);
+    const getOrder = vi.fn()
+      .mockResolvedValueOnce(orderDetails)
+      .mockResolvedValue(linkedDetails);
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder,
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+    Object.assign(api, { updateOrderItemStandardization });
+
+    render(<App api={api} />);
+    await user.click(
+      await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }),
+    );
+    expect(await screen.findByRole('heading', { name: '订单详情' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '关联标准商品' }));
+    const dialog = await screen.findByRole('dialog', { name: '关联标准商品' });
+    expect(dialog).toHaveTextContent('脱敏测试商品');
+    expect(dialog).toHaveTextContent('白色');
+    expect(dialog).toHaveTextContent('未关联');
+
+    await within(dialog).findByRole('option', { name: /SKU-UI-LINK-001/u });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '标准商品' }),
+      product.id,
+    );
+    expect(dialog).toHaveTextContent('默认订单单价 ¥12.99');
+    expect(
+      within(dialog).getByRole('checkbox', { name: '优先展示标准商品信息' }),
+    ).toBeChecked();
+
+    await user.click(within(dialog).getByRole('button', { name: '保存关联' }));
+    await waitFor(() => expect(updateOrderItemStandardization).toHaveBeenCalledTimes(1));
+    expect(updateOrderItemStandardization).toHaveBeenCalledWith(
+      confirmedOrder.id,
+      confirmedOrder.items[0].id,
+      {
+        standardProductId: product.id,
+        standardDisplayPreference: 'prefer_standard',
+        expectedRevision: confirmedOrder.revision,
+      },
+    );
+    expect(await screen.findByText(/SKU-UI-LINK-001/u)).toBeVisible();
+    expect(screen.queryByRole('dialog', { name: '关联标准商品' })).not.toBeInTheDocument();
   });
 
   it('取消订单编辑不写入，且仅剩一件商品时禁止删除', async () => {

@@ -37,6 +37,7 @@ import type {
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
+  UpdateOrderItemStandardizationInput,
   UpdateStandardProductInput,
 } from './product-standardization';
 import type {
@@ -254,6 +255,11 @@ export interface DesktopApi {
   queryRecipientOrders(recipientId: string): Promise<OrderSummary[]>;
   mergeRecipients(input: MergeRecipientsInput): Promise<RecipientSummaryView[]>;
   updateOrder(input: OrderEditInput): Promise<OrderDetails>;
+  updateOrderItemStandardization(
+    orderId: string,
+    itemId: string,
+    input: UpdateOrderItemStandardizationInput,
+  ): Promise<OrderDetails>;
   updateOrderPlatformTransactionStatus(
     input: OrderPlatformTransactionStatusUpdateInput,
   ): Promise<OrderDetails[]>;
