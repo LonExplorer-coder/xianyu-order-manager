@@ -4377,6 +4377,7 @@ describe('订单管理工作台', () => {
         sourceSpec: draft.items[0].sourceSpec,
         automaticProduct: null,
         automaticSource: null,
+        automaticMappingScope: null,
         candidates: [{
           product,
           reason: 'fuzzy',
@@ -4441,6 +4442,7 @@ describe('订单管理工作台', () => {
         sourceSpec: draft.items[0].sourceSpec,
         automaticProduct: null,
         automaticSource: null,
+        automaticMappingScope: null,
         candidates: [{
           product,
           reason: 'previous_manual_choice',
@@ -4470,6 +4472,44 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('自动关联命中映射时说明命中级别', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-mapping-scope',
+      sku: 'SKU-UI-MAPPING',
+      name: '映射命中商品',
+      specification: '标准规格',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: product,
+        automaticSource: 'mapping',
+        automaticMappingScope: 'current_platform',
+        candidates: [],
+      }]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    expect(await screen.findByRole('combobox', { name: '商品 1 标准商品' }))
+      .toHaveValue('__automatic__');
+    expect(screen.getByText(/命中映射：当前平台/u)).toBeVisible();
+  });
+
   it('商品原文改动后清除旧候选并等待当前匹配完成', async () => {
     const user = userEvent.setup();
     const product = {
@@ -4493,6 +4533,7 @@ describe('订单管理工作台', () => {
         sourceSpec: draft.items[0].sourceSpec,
         automaticProduct: null,
         automaticSource: null,
+        automaticMappingScope: null,
         candidates: [{
           product,
           reason: 'fuzzy',
@@ -4530,6 +4571,7 @@ describe('订单管理工作台', () => {
       sourceSpec: draft.items[0].sourceSpec,
       automaticProduct: null,
       automaticSource: null,
+      automaticMappingScope: null,
       candidates: [],
     }]));
     await waitFor(() => expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled());

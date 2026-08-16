@@ -21,14 +21,63 @@ export type StandardProductPriceEvent = {
 
 export type ProductStandardizationSource = 'exact' | 'mapping' | 'manual';
 
+/** 商品映射的三级适用范围：当前平台与卖家账号、当前平台全部账号或整个工作区。 */
+export type ProductMappingScope = 'current_account' | 'current_platform' | 'workspace';
+
 export type ProductMapping = {
   id: string;
   sourceTitle: string;
   sourceSpec: string;
+  scope: ProductMappingScope;
+  platform: string | null;
+  sellerAccount: string | null;
   standardProductId: string;
   createdAt: string;
   updatedAt: string;
 };
+
+/** 映射匹配上下文：待匹配订单商品所属的平台与卖家账号。 */
+export type ProductMappingMatchContext = {
+  platform: string;
+  sellerAccount: string;
+};
+
+export type ProductMappingMatch = {
+  standardProductId: string;
+  scope: ProductMappingScope;
+};
+
+/**
+ * 规格 4.3 的映射匹配优先级：当前账号映射 → 当前平台映射 → 工作区映射。
+ * 传入的候选映射已由调用方按规范化原文标题与规格筛好。
+ */
+export function selectProductMappingMatch(
+  mappings: readonly Pick<
+    ProductMapping,
+    'scope' | 'platform' | 'sellerAccount' | 'standardProductId'
+  >[],
+  context: ProductMappingMatchContext,
+): ProductMappingMatch | null {
+  const account = mappings.find((mapping) => (
+    mapping.scope === 'current_account' &&
+    mapping.platform === context.platform &&
+    mapping.sellerAccount === context.sellerAccount
+  ));
+  if (account) {
+    return { standardProductId: account.standardProductId, scope: 'current_account' };
+  }
+  const platform = mappings.find((mapping) => (
+    mapping.scope === 'current_platform' && mapping.platform === context.platform
+  ));
+  if (platform) {
+    return { standardProductId: platform.standardProductId, scope: 'current_platform' };
+  }
+  const workspace = mappings.find((mapping) => mapping.scope === 'workspace');
+  if (workspace) {
+    return { standardProductId: workspace.standardProductId, scope: 'workspace' };
+  }
+  return null;
+}
 
 export type ProductStandardizationCandidate = {
   product: StandardProduct;
@@ -43,6 +92,7 @@ export type DraftItemProductStandardization = {
   sourceSpec: string;
   automaticProduct: StandardProduct | null;
   automaticSource: Extract<ProductStandardizationSource, 'exact' | 'mapping'> | null;
+  automaticMappingScope: ProductMappingScope | null;
   candidates: ProductStandardizationCandidate[];
 };
 

@@ -109,6 +109,7 @@ import {
   normalizeUpdateStandardProductInput,
   planOrderItemStandardizationBatch,
   PRODUCT_SIMILARITY_THRESHOLD,
+  selectProductMappingMatch,
   type DraftItemProductStandardization,
   type OrderItemStandardizationBatchApplyInput,
   type OrderItemStandardizationBatchBlockReason,
@@ -119,6 +120,9 @@ import {
   type OrderItemStandardizationBatchPreviewItem,
   type OrderItemStandardizationBatchPreviewOrder,
   type OrderItemStandardizationBatchResult,
+  type ProductMappingMatch,
+  type ProductMappingMatchContext,
+  type ProductMappingScope,
   type ProductStandardizationConfirmation,
   type ProductStandardizationSource,
   type StandardDisplayPreference,
@@ -2290,6 +2294,7 @@ export class LocalApplication {
     const preparedProductStandardizations = this.prepareProductStandardizations(
       draft.items,
       productStandardizations,
+      { platform: draft.platform, sellerAccount: draft.sellerAccount },
     );
     const orderId = randomUUID();
     const now = new Date().toISOString();
@@ -2386,7 +2391,12 @@ export class LocalApplication {
           plannedStandardDisplayPreference(standardization.standardProductId, undefined),
         );
         if (standardization.createMapping && standardization.standardProductId) {
-          this.upsertProductMapping(item, standardization.standardProductId, now);
+          this.insertProductMapping(
+            item,
+            standardization.standardProductId,
+            { platform: draft.platform, sellerAccount: draft.sellerAccount },
+            now,
+          );
         }
       });
 
@@ -2569,6 +2579,7 @@ export class LocalApplication {
     const preparedProductStandardizations = this.prepareProductStandardizations(
       draft.items,
       productStandardizations,
+      { platform: existing.platform, sellerAccount: existing.sellerAccount },
     );
     const explicitStandardizationItemIds = new Set(
       (productStandardizations ?? []).map(({ draftItemId }) => draftItemId),
@@ -2628,7 +2639,12 @@ export class LocalApplication {
         for (const item of draft.items) {
           const standardization = preparedProductStandardizations.get(item.id);
           if (standardization?.createMapping && standardization.standardProductId) {
-            this.upsertProductMapping(item, standardization.standardProductId, now);
+            this.insertProductMapping(
+              item,
+              standardization.standardProductId,
+              { platform: existing.platform, sellerAccount: existing.sellerAccount },
+              now,
+            );
           }
         }
         this.deleteDraftCustomFieldValuesForOrderUpdate(
@@ -2829,7 +2845,12 @@ export class LocalApplication {
           `).run(itemId, now, now);
         }
         if (standardization.createMapping && standardization.standardProductId) {
-          this.upsertProductMapping(item, standardization.standardProductId, now);
+          this.insertProductMapping(
+            item,
+            standardization.standardProductId,
+            { platform: existing.platform, sellerAccount: existing.sellerAccount },
+            now,
+          );
         }
       });
       if (unusedExistingItemIds.size > 0) {
@@ -4013,19 +4034,25 @@ export class LocalApplication {
     return rows.length === 1 ? asString(rows[0].id) : null;
   }
 
-  private mappedStandardProductId(
+  private matchedProductMapping(
     item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
-  ): string | null {
+    context: ProductMappingMatchContext,
+  ): ProductMappingMatch | null {
     const workspace = this.requireWorkspace();
-    const row = workspace.database.prepare(`
-      SELECT standard_product_id
+    const rows = workspace.database.prepare(`
+      SELECT scope, platform, seller_account, standard_product_id
       FROM product_mappings
       WHERE source_title_key = ? AND source_spec_key = ?
-    `).get(
+    `).all(
       normalizeProductText(item.sourceTitle),
       normalizeProductText(item.sourceSpec),
-    ) as SqlRow | undefined;
-    return row ? asString(row.standard_product_id) : null;
+    ) as unknown as SqlRow[];
+    return selectProductMappingMatch(rows.map((row) => ({
+      scope: asProductMappingScope(row.scope),
+      platform: row.platform === null ? null : asString(row.platform),
+      sellerAccount: row.seller_account === null ? null : asString(row.seller_account),
+      standardProductId: asString(row.standard_product_id),
+    })), context);
   }
 
   public previewDraftProductStandardizations(
@@ -4049,10 +4076,14 @@ export class LocalApplication {
     }
     const products = this.listStandardProducts();
     const workspace = this.requireWorkspace();
+    const mappingContext: ProductMappingMatchContext = {
+      platform: draft.platform,
+      sellerAccount: draft.sellerAccount,
+    };
     return draft.items.map((item) => {
-      const mappedId = this.mappedStandardProductId(item);
-      const exactId = mappedId ? null : this.exactStandardProductId(item);
-      const automaticProductId = mappedId ?? exactId;
+      const mapping = this.matchedProductMapping(item, mappingContext);
+      const exactId = mapping ? null : this.exactStandardProductId(item);
+      const automaticProductId = mapping?.standardProductId ?? exactId;
       const automaticProduct = automaticProductId
         ? products.find(({ id }) => id === automaticProductId) ?? null
         : null;
@@ -4096,7 +4127,8 @@ export class LocalApplication {
         sourceTitle: item.sourceTitle,
         sourceSpec: item.sourceSpec,
         automaticProduct,
-        automaticSource: mappedId ? 'mapping' : exactId ? 'exact' : null,
+        automaticSource: mapping ? 'mapping' : exactId ? 'exact' : null,
+        automaticMappingScope: mapping?.scope ?? null,
         candidates,
       };
     });
@@ -4104,7 +4136,8 @@ export class LocalApplication {
 
   private prepareProductStandardizations(
     items: readonly DraftItem[],
-    confirmations?: readonly ProductStandardizationConfirmation[],
+    confirmations: readonly ProductStandardizationConfirmation[] | undefined,
+    mappingContext: ProductMappingMatchContext,
   ): Map<string, {
     standardProductId: string | null;
     source: ProductStandardizationSource | null;
@@ -4136,10 +4169,10 @@ export class LocalApplication {
           createMapping: choice.createMapping,
         }];
       }
-      const mappedId = this.mappedStandardProductId(item);
-      if (mappedId) {
+      const mapping = this.matchedProductMapping(item, mappingContext);
+      if (mapping) {
         return [item.id, {
-          standardProductId: mappedId,
+          standardProductId: mapping.standardProductId,
           source: 'mapping',
           createMapping: false,
         }];
@@ -4154,29 +4187,47 @@ export class LocalApplication {
     return new Map(entries);
   }
 
-  private upsertProductMapping(
+  private insertProductMapping(
     item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
     standardProductId: string,
+    context: ProductMappingMatchContext,
     now: string,
   ): void {
     const workspace = this.requireWorkspace();
+    const sourceTitleKey = normalizeProductText(item.sourceTitle);
+    const sourceSpecKey = normalizeProductText(item.sourceSpec);
+    const existing = workspace.database.prepare(`
+      SELECT standard_product_id
+      FROM product_mappings
+      WHERE scope = 'current_account'
+        AND platform = ?
+        AND seller_account = ?
+        AND source_title_key = ?
+        AND source_spec_key = ?
+    `).get(
+      context.platform,
+      context.sellerAccount,
+      sourceTitleKey,
+      sourceSpecKey,
+    ) as SqlRow | undefined;
+    if (existing) {
+      if (asString(existing.standard_product_id) === standardProductId) return;
+      throw new Error('当前平台与卖家账号已存在指向其他 SKU 的商品映射');
+    }
     workspace.database.prepare(`
       INSERT INTO product_mappings (
         id, source_title, source_spec, source_title_key, source_spec_key,
-        standard_product_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (source_title_key, source_spec_key) DO UPDATE SET
-        source_title = excluded.source_title,
-        source_spec = excluded.source_spec,
-        standard_product_id = excluded.standard_product_id,
-        updated_at = excluded.updated_at
+        standard_product_id, scope, platform, seller_account, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'current_account', ?, ?, ?, ?)
     `).run(
       randomUUID(),
       item.sourceTitle,
       item.sourceSpec,
-      normalizeProductText(item.sourceTitle),
-      normalizeProductText(item.sourceSpec),
+      sourceTitleKey,
+      sourceSpecKey,
       standardProductId,
+      context.platform,
+      context.sellerAccount,
       now,
       now,
     );
@@ -8443,6 +8494,15 @@ function asProductStandardizationSource(
 ): ProductStandardizationSource {
   if (value === 'exact' || value === 'mapping' || value === 'manual') return value;
   throw new Error('数据库商品标准化来源无效');
+}
+
+function asProductMappingScope(
+  value: string | number | null | undefined,
+): ProductMappingScope {
+  if (value === 'current_account' || value === 'current_platform' || value === 'workspace') {
+    return value;
+  }
+  throw new Error('数据库商品映射适用范围无效');
 }
 
 function asStandardDisplayPreference(

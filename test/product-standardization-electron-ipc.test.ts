@@ -154,6 +154,38 @@ describe('标准商品 Electron IPC', () => {
       }],
     )).rejects.toThrow('商品标准化确认包含未知字段');
   });
+
+  it('预览结果携带映射命中级别通过 IPC 边界', async () => {
+    const product = {
+      id: 'product-ipc-mapping',
+      sku: 'SKU-IPC-MAPPING',
+      name: 'IPC 映射商品',
+      specification: '标准规格',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const preview = [{
+      draftItemId: 'item-ipc-mapping',
+      sourceTitle: 'IPC 映射原文',
+      sourceSpec: '标准规格',
+      automaticProduct: product,
+      automaticSource: 'mapping',
+      automaticMappingScope: 'current_account',
+      candidates: [],
+    }];
+    const previewDraftProductStandardizations = vi.fn().mockReturnValue(preview);
+    registerIpcHandlers({
+      previewDraftProductStandardizations,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+
+    const draft = { id: 'draft-ipc-mapping' } as OrderDraft;
+    await expect(invoke('products:preview-draft-standardizations', draft)).resolves.toEqual(preview);
+    expect(previewDraftProductStandardizations).toHaveBeenCalledWith(draft);
+  });
 });
 
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {

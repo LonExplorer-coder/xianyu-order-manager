@@ -199,6 +199,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(43)) migrateToVersion43(database);
   if (!versions.has(44)) migrateToVersion44(database);
   if (!versions.has(45)) migrateToVersion45(database);
+  if (!versions.has(46)) migrateToVersion46(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5770,6 +5771,73 @@ function migrateToVersion45(database: DatabaseSync): void {
   } catch (error) {
     rollbackQuietly(database);
     throw error;
+  }
+}
+
+function migrateToVersion46(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  try {
+    database.exec('BEGIN IMMEDIATE;');
+    database.exec(`
+      CREATE TABLE product_mappings_v46 (
+        id TEXT PRIMARY KEY,
+        source_title TEXT NOT NULL CHECK (length(trim(source_title)) BETWEEN 1 AND 300),
+        source_spec TEXT NOT NULL CHECK (length(source_spec) <= 300),
+        source_title_key TEXT NOT NULL CHECK (length(trim(source_title_key)) BETWEEN 1 AND 300),
+        source_spec_key TEXT NOT NULL CHECK (length(source_spec_key) <= 300),
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        scope TEXT NOT NULL
+          CHECK (scope IN ('current_account', 'current_platform', 'workspace')),
+        platform TEXT CHECK (platform IS NULL OR length(trim(platform)) BETWEEN 1 AND 200),
+        seller_account TEXT CHECK (
+          seller_account IS NULL OR length(trim(seller_account)) BETWEEN 1 AND 200
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (scope = 'current_account' AND platform IS NOT NULL AND seller_account IS NOT NULL)
+          OR (scope = 'current_platform' AND platform IS NOT NULL AND seller_account IS NULL)
+          OR (scope = 'workspace' AND platform IS NULL AND seller_account IS NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO product_mappings_v46 (
+        id, source_title, source_spec, source_title_key, source_spec_key,
+        standard_product_id, scope, platform, seller_account, created_at, updated_at
+      )
+      SELECT
+        id, source_title, source_spec, source_title_key, source_spec_key,
+        standard_product_id, 'workspace', NULL, NULL, created_at, updated_at
+      FROM product_mappings;
+
+      DROP TABLE product_mappings;
+      ALTER TABLE product_mappings_v46 RENAME TO product_mappings;
+
+      CREATE UNIQUE INDEX product_mappings_one_per_account_source
+      ON product_mappings (platform, seller_account, source_title_key, source_spec_key)
+      WHERE scope = 'current_account';
+
+      CREATE UNIQUE INDEX product_mappings_one_per_platform_source
+      ON product_mappings (platform, source_title_key, source_spec_key)
+      WHERE scope = 'current_platform';
+
+      CREATE UNIQUE INDEX product_mappings_one_per_workspace_source
+      ON product_mappings (source_title_key, source_spec_key)
+      WHERE scope = 'workspace';
+
+      CREATE INDEX product_mappings_by_standard_product
+      ON product_mappings (standard_product_id, source_title_key, source_spec_key);
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (46, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

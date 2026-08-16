@@ -1,6 +1,54 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion46ExtensionArtifacts(database: DatabaseSync): void {
+  const hasScopeColumn = database.prepare(`
+    SELECT 1 FROM pragma_table_info('product_mappings') WHERE name = 'scope'
+  `).get();
+  if (!hasScopeColumn) return;
+  const narrowedCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM product_mappings WHERE scope <> 'workspace'
+  `).get() as { count: number };
+  if (narrowedCount.count > 0) {
+    throw new Error('v46 测试降级前必须移除非工作区级映射数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP INDEX IF EXISTS product_mappings_one_per_account_source;
+    DROP INDEX IF EXISTS product_mappings_one_per_platform_source;
+    DROP INDEX IF EXISTS product_mappings_one_per_workspace_source;
+    CREATE TABLE product_mappings_v45_fixture (
+      id TEXT PRIMARY KEY,
+      source_title TEXT NOT NULL CHECK (length(trim(source_title)) BETWEEN 1 AND 300),
+      source_spec TEXT NOT NULL CHECK (length(source_spec) <= 300),
+      source_title_key TEXT NOT NULL CHECK (length(trim(source_title_key)) BETWEEN 1 AND 300),
+      source_spec_key TEXT NOT NULL CHECK (length(source_spec_key) <= 300),
+      standard_product_id TEXT NOT NULL
+        REFERENCES standard_products(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (source_title_key, source_spec_key)
+    ) STRICT;
+    INSERT INTO product_mappings_v45_fixture (
+      id, source_title, source_spec, source_title_key, source_spec_key,
+      standard_product_id, created_at, updated_at
+    )
+    SELECT
+      id, source_title, source_spec, source_title_key, source_spec_key,
+      standard_product_id, created_at, updated_at
+    FROM product_mappings;
+    DROP TABLE product_mappings;
+    ALTER TABLE product_mappings_v45_fixture RENAME TO product_mappings;
+    CREATE INDEX product_mappings_by_standard_product
+    ON product_mappings (standard_product_id, source_title_key, source_spec_key);
+    DELETE FROM schema_migrations WHERE version = 46;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion45ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion46ExtensionArtifacts(database);
   const hasEventsTable = database.prepare(`
     SELECT 1 FROM sqlite_schema
     WHERE type = 'table' AND name = 'order_item_standardization_batch_events'

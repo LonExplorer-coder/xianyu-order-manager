@@ -175,6 +175,7 @@ import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardi
 import { OrderItemStandardizationBatchDialog } from './OrderItemStandardizationBatchDialog';
 import type {
   DraftItemProductStandardization,
+  ProductMappingScope,
   ProductStandardizationConfirmation,
   StandardProduct,
 } from '../core/product-standardization';
@@ -8429,6 +8430,16 @@ function ReviewWorkspace({
   );
 }
 
+const PRODUCT_MAPPING_SCOPE_LABELS: Record<ProductMappingScope, string> = {
+  current_account: '当前卖家账号',
+  current_platform: '当前平台',
+  workspace: '工作区',
+};
+
+function productMappingScopeLabel(scope: ProductMappingScope | null | undefined): string {
+  return scope ? PRODUCT_MAPPING_SCOPE_LABELS[scope] : '—';
+}
+
 function ProductStandardizationEditor({
   item,
   itemIndex,
@@ -8459,7 +8470,8 @@ function ProductStandardizationEditor({
   const automaticLabel = currentProduct
     ? `保持当前关联：${currentProduct.sku} · ${currentProduct.name}`
     : preview?.automaticSource === 'mapping'
-      ? `按已有映射关联：${automaticProduct?.sku} · ${automaticProduct?.name}`
+      ? `命中映射：${productMappingScopeLabel(preview.automaticMappingScope)} · ` +
+        `${automaticProduct?.sku} · ${automaticProduct?.name}`
       : `按标题和规格精确关联：${automaticProduct?.sku} · ${automaticProduct?.name}`;
 
   return (
