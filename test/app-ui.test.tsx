@@ -10552,7 +10552,7 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(setEnabled).toHaveBeenCalledWith(refundOnly.id, false));
 
     await user.click(screen.getByRole('button', { name: '新建自定义流程' }));
-    const dialog = screen.getByRole('dialog', { name: '编辑售后流程' });
+    const dialog = screen.getByRole('dialog', { name: '新建自定义流程' });
     await user.type(within(dialog).getByLabelText('流程名称'), '客服协商处理');
     await user.click(within(dialog).getByRole('button', { name: '+添加步骤' }));
     const steps = within(dialog).getAllByRole('group');

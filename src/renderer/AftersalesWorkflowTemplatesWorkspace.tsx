@@ -13,6 +13,12 @@ import {
   type AftersalesWorkflowTemplate,
 } from '../core/aftersales-workflow-templates';
 
+import {
+  DialogShell,
+  EmptyState,
+  InlineError,
+} from './DialogShell';
+
 type EditorState = {
   templateId: string | null;
   expectedVersion: number | null;
@@ -119,7 +125,7 @@ export function AftersalesWorkflowTemplatesWorkspace({ api }: { api: DesktopApi 
           <p>预置流程可直接停用或复制；自定义流程的每次保存都会形成新版本。</p>
         </div>
         <button
-          className="primary-action"
+          className="button button--primary"
           type="button"
           onClick={() => setEditor(blankEditor())}
         >
@@ -127,10 +133,10 @@ export function AftersalesWorkflowTemplatesWorkspace({ api }: { api: DesktopApi 
         </button>
       </header>
 
-      {error && <div className="inline-error" role="alert">{error}</div>}
+      <InlineError message={error} />
       {feedback && <div className="settings-notice settings-notice--success" role="status">{feedback}</div>}
       {loading ? (
-        <div className="empty-panel" role="status">正在读取售后流程…</div>
+        <EmptyState title="正在读取售后流程…" status />
       ) : (
         <div className="aftersales-workflow-grid" aria-label="售后流程列表">
           {templates.map((template) => (
@@ -143,7 +149,7 @@ export function AftersalesWorkflowTemplatesWorkspace({ api }: { api: DesktopApi 
                   <span>{template.origin === 'system' ? '系统预置' : '自定义'}</span>
                   <h2>{template.name}</h2>
                 </div>
-                <strong>{template.enabled ? '已启用' : '已停用'}</strong>
+                <span className="status-chip">{template.enabled ? '已启用' : '已停用'}</span>
               </header>
               <p>{scenarioLabel(template.scenario)} · 版本 {template.version} · {template.steps.length} 个步骤</p>
               <ol>
@@ -156,15 +162,28 @@ export function AftersalesWorkflowTemplatesWorkspace({ api }: { api: DesktopApi 
               </ol>
               <footer>
                 <button
+                  className="button button--quiet"
                   type="button"
                   disabled={savingId === template.id}
                   onClick={() => void toggleEnabled(template)}
                 >
                   {template.enabled ? '停用' : '启用'}
                 </button>
-                <button type="button" onClick={() => copy(template)}>复制并编辑</button>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  onClick={() => copy(template)}
+                >
+                  复制并编辑
+                </button>
                 {template.origin === 'custom' && (
-                  <button type="button" onClick={() => edit(template)}>编辑新版本</button>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => edit(template)}
+                  >
+                    编辑新版本
+                  </button>
                 )}
               </footer>
             </article>
@@ -225,15 +244,14 @@ function WorkflowEditor({
     });
   }
   return (
-    <div className="order-export-backdrop" role="dialog" aria-modal="true" aria-label="编辑售后流程">
-      <form className="aftersales-workflow-editor" onSubmit={onSubmit}>
-        <header>
-          <div>
-            <span className="section-kicker">有限步骤·无循环脚本</span>
-            <h2>{value.templateId ? '编辑自定义流程' : '新建自定义流程'}</h2>
-          </div>
-          <button type="button" disabled={saving} onClick={onClose}>关闭</button>
-        </header>
+    <DialogShell
+      kicker="有限步骤·无循环脚本"
+      title={value.templateId ? '编辑自定义流程' : '新建自定义流程'}
+      dialogClassName="aftersales-workflow-editor"
+      busy={saving}
+      onClose={onClose}
+      onSubmit={onSubmit}
+    >
         <div className="aftersales-workflow-editor__identity">
           <label>
             <span>流程名称</span>
@@ -338,9 +356,24 @@ function WorkflowEditor({
                 )}
               </div>
               <div className="aftersales-workflow-editor__step-actions">
-                <button type="button" disabled={saving || index === 0} onClick={() => move(index, -1)}>上移</button>
-                <button type="button" disabled={saving || index === value.steps.length - 1} onClick={() => move(index, 1)}>下移</button>
                 <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={saving || index === 0}
+                  onClick={() => move(index, -1)}
+                >
+                  上移
+                </button>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={saving || index === value.steps.length - 1}
+                  onClick={() => move(index, 1)}
+                >
+                  下移
+                </button>
+                <button
+                  className="button button--quiet"
                   type="button"
                   disabled={saving || value.steps.length === 1}
                   onClick={() => onChange({ ...value, steps: value.steps.filter((_, position) => position !== index) })}
@@ -350,16 +383,33 @@ function WorkflowEditor({
               </div>
             </fieldset>
           ))}
-          <button type="button" disabled={saving || value.steps.length >= 50} onClick={addStep}>+添加步骤</button>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={saving || value.steps.length >= 50}
+            onClick={addStep}
+          >
+            +添加步骤
+          </button>
         </div>
         <footer>
-          <button type="button" disabled={saving} onClick={onClose}>取消</button>
-          <button className="primary-action" type="submit" disabled={saving || !value.name.trim() || value.steps.length === 0}>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            type="submit"
+            disabled={saving || !value.name.trim() || value.steps.length === 0}
+          >
             {saving ? '正在保存…' : '保存流程版本'}
           </button>
         </footer>
-      </form>
-    </div>
+    </DialogShell>
   );
 }
 
