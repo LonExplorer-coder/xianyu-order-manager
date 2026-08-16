@@ -222,6 +222,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       )
     ),
   );
+  ipcMain.handle('products:price-events', (_event, productId: unknown) => (
+    desktopSession.listStandardProductPriceEvents(parseWorkflowId(productId, '标准商品'))
+  ));
   ipcMain.handle(
     'products:preview-draft-standardizations',
     (_event, draft: OrderDraft) => desktopSession.previewDraftProductStandardizations(draft),

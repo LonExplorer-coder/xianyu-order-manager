@@ -496,6 +496,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     listStandardProducts: vi.fn().mockResolvedValue([]),
     createStandardProduct: vi.fn(),
     updateStandardProduct: vi.fn(),
+    listStandardProductPriceEvents: vi.fn().mockResolvedValue([]),
     previewDraftProductStandardizations: vi.fn().mockResolvedValue([]),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
@@ -4253,6 +4254,7 @@ describe('订单管理工作台', () => {
       sku: 'SKU-UI-001',
       name: '娃鞋白模',
       specification: '05M',
+      defaultOrderPriceCents: null,
       revision: 1,
       createdAt: '2026-08-14T10:00:00.000Z',
       updatedAt: '2026-08-14T10:00:00.000Z',
@@ -4280,6 +4282,7 @@ describe('订单管理工作台', () => {
       sku: created.sku,
       name: created.name,
       specification: created.specification,
+      defaultOrderPriceCents: null,
     });
     expect(await screen.findByText(created.sku)).toBeVisible();
     expect(screen.getByText(created.name)).toBeVisible();
@@ -4292,6 +4295,7 @@ describe('订单管理工作台', () => {
       sku: 'SKU-LOCK-001',
       name: '待修改商品',
       specification: '规格一',
+      defaultOrderPriceCents: null,
       revision: 1,
       createdAt: '2026-08-14T10:00:00.000Z',
       updatedAt: '2026-08-14T10:00:00.000Z',

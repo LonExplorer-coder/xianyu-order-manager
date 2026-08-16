@@ -260,6 +260,7 @@ describe('标准商品与商品映射', () => {
       sku: 'SHOE-05M',
       name: '古风娃鞋',
       specification: '05M 白模',
+      defaultOrderPriceCents: null,
       expectedRevision: product.revision,
     });
     expect(updated).toMatchObject({
@@ -273,6 +274,7 @@ describe('标准商品与商品映射', () => {
       sku: 'SHOE-05M',
       name: '过期修改',
       specification: '05M',
+      defaultOrderPriceCents: null,
       expectedRevision: 1,
     })).toThrowError('标准商品已在其他操作中更新');
     expect(application.getOrder(order.id).order.items[0]).toMatchObject({

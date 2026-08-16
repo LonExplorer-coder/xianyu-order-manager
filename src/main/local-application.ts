@@ -108,6 +108,7 @@ import {
   type ProductStandardizationConfirmation,
   type ProductStandardizationSource,
   type StandardProduct,
+  type StandardProductPriceEvent,
 } from '../core/product-standardization';
 import {
   assessAutomaticImport,
@@ -3250,25 +3251,81 @@ export class LocalApplication {
     ).get(skuKey)) {
       throw new Error('SKU 已存在');
     }
+    const price = normalized.defaultOrderPriceCents ?? null;
+    const initialEvent = price === null
+      ? null
+      : { price, reason: normalized.priceChangeReason ?? '' };
+    if (initialEvent && !initialEvent.reason) {
+      throw new Error('默认订单单价变更必须填写原因');
+    }
+    if (!initialEvent && normalized.priceChangeReason) {
+      throw new Error('价格未变更时不能填写价格变更原因');
+    }
     const id = randomUUID();
     const now = new Date().toISOString();
-    workspace.database.prepare(`
-      INSERT INTO standard_products (
-        id, sku, sku_key, name, specification,
-        name_key, specification_key, revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(
-      id,
-      normalized.sku,
-      skuKey,
-      normalized.name,
-      normalized.specification,
-      normalizeProductText(normalized.name),
-      normalizeProductText(normalized.specification),
-      now,
-      now,
-    );
-    return this.getStandardProduct(id);
+    return workspace.transaction(() => {
+      workspace.database.prepare(`
+        INSERT INTO standard_products (
+          id, sku, sku_key, name, specification,
+          name_key, specification_key, default_order_price_cents,
+          revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        normalized.sku,
+        skuKey,
+        normalized.name,
+        normalized.specification,
+        normalizeProductText(normalized.name),
+        normalizeProductText(normalized.specification),
+        price,
+        now,
+        now,
+      );
+      if (initialEvent) {
+        this.insertStandardProductPriceEvent(
+          id,
+          null,
+          initialEvent.price,
+          initialEvent.reason,
+          now,
+        );
+      }
+      return this.getStandardProduct(id);
+    });
+  }
+
+  public listStandardProductPriceEvents(productId: string): StandardProductPriceEvent[] {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    if (!workspace.database.prepare(
+      'SELECT 1 AS found FROM standard_products WHERE id = ?',
+    ).get(id)) {
+      throw new Error('未找到标准商品');
+    }
+    return (workspace.database.prepare(`
+      SELECT *
+      FROM standard_product_price_events
+      WHERE standard_product_id = ?
+      ORDER BY sequence
+    `).all(id) as unknown as SqlRow[]).map(parseStandardProductPriceEventRow);
+  }
+
+  private insertStandardProductPriceEvent(
+    productId: string,
+    previousPrice: number | null,
+    price: number | null,
+    reason: string,
+    now: string,
+  ): void {
+    this.requireWorkspace().database.prepare(`
+      INSERT INTO standard_product_price_events (
+        id, standard_product_id,
+        previous_default_order_price_cents, default_order_price_cents,
+        reason, occurred_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(randomUUID(), productId, previousPrice, price, reason, now, now);
   }
 
   public listStandardProducts(): StandardProduct[] {
@@ -3293,36 +3350,63 @@ export class LocalApplication {
     `).get(skuKey, id);
     if (duplicate) throw new Error('SKU 已存在');
     const now = new Date().toISOString();
-    const result = workspace.database.prepare(`
-      UPDATE standard_products
-      SET
-        sku = ?,
-        sku_key = ?,
-        name = ?,
-        specification = ?,
-        name_key = ?,
-        specification_key = ?,
-        revision = revision + 1,
-        updated_at = ?
-      WHERE id = ? AND revision = ?
-    `).run(
-      normalized.sku,
-      skuKey,
-      normalized.name,
-      normalized.specification,
-      normalizeProductText(normalized.name),
-      normalizeProductText(normalized.specification),
-      now,
-      id,
-      normalized.expectedRevision,
-    );
-    if (result.changes !== 1) {
-      if (!workspace.database.prepare(
-        'SELECT 1 AS found FROM standard_products WHERE id = ?',
-      ).get(id)) throw new Error('未找到标准商品');
-      throw new Error('标准商品已在其他操作中更新，请刷新后重试');
-    }
-    return this.getStandardProduct(id);
+    return workspace.transaction(() => {
+      const currentRow = workspace.database.prepare(`
+        SELECT default_order_price_cents
+        FROM standard_products
+        WHERE id = ?
+      `).get(id) as SqlRow | undefined;
+      if (!currentRow) throw new Error('未找到标准商品');
+      const previousPrice = currentRow.default_order_price_cents === null
+        ? null
+        : asNumber(currentRow.default_order_price_cents);
+      const priceChanged = previousPrice !== normalized.defaultOrderPriceCents;
+      const priceChangeReason = normalized.priceChangeReason ?? '';
+      if (priceChanged && !priceChangeReason) {
+        throw new Error('默认订单单价变更必须填写原因');
+      }
+      if (!priceChanged && priceChangeReason) {
+        throw new Error('价格未变更时不能填写价格变更原因');
+      }
+      const result = workspace.database.prepare(`
+        UPDATE standard_products
+        SET
+          sku = ?,
+          sku_key = ?,
+          name = ?,
+          specification = ?,
+          name_key = ?,
+          specification_key = ?,
+          default_order_price_cents = ?,
+          revision = revision + 1,
+          updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(
+        normalized.sku,
+        skuKey,
+        normalized.name,
+        normalized.specification,
+        normalizeProductText(normalized.name),
+        normalizeProductText(normalized.specification),
+        normalized.defaultOrderPriceCents,
+        now,
+        id,
+        normalized.expectedRevision,
+      );
+      if (result.changes !== 1) {
+        throw new Error('标准商品已在其他操作中更新，请刷新后重试');
+      }
+      if (priceChanged) {
+        this.insertStandardProductPriceEvent(
+          id,
+          previousPrice,
+          normalized.defaultOrderPriceCents,
+          priceChangeReason,
+          now,
+        );
+      }
+      return this.getStandardProduct(id);
+    });
   }
 
   private getStandardProduct(productId: string): StandardProduct {
@@ -5497,6 +5581,7 @@ export class LocalApplication {
         products.sku AS standard_sku,
         products.name AS standard_name,
         products.specification AS standard_specification,
+        products.default_order_price_cents AS standard_default_order_price_cents,
         products.revision AS standard_revision,
         products.created_at AS standard_created_at,
         products.updated_at AS standard_updated_at
@@ -5532,6 +5617,9 @@ export class LocalApplication {
               sku: asString(row.standard_sku),
               name: asString(row.standard_name),
               specification: asString(row.standard_specification),
+              defaultOrderPriceCents: row.standard_default_order_price_cents === null
+                ? null
+                : asNumber(row.standard_default_order_price_cents),
               revision: asNumber(row.standard_revision),
               createdAt: asString(row.standard_created_at),
               updatedAt: asString(row.standard_updated_at),
@@ -5615,6 +5703,7 @@ export class LocalApplication {
           products.sku AS standard_sku,
           products.name AS standard_name,
           products.specification AS standard_specification,
+          products.default_order_price_cents AS standard_default_order_price_cents,
           products.revision AS standard_revision,
           products.created_at AS standard_created_at,
           products.updated_at AS standard_updated_at
@@ -5643,6 +5732,9 @@ export class LocalApplication {
               sku: asString(item.standard_sku),
               name: asString(item.standard_name),
               specification: asString(item.standard_specification),
+              defaultOrderPriceCents: item.standard_default_order_price_cents === null
+                ? null
+                : asNumber(item.standard_default_order_price_cents),
               revision: asNumber(item.standard_revision),
               createdAt: asString(item.standard_created_at),
               updatedAt: asString(item.standard_updated_at),
@@ -7723,9 +7815,28 @@ function parseStandardProductRow(row: SqlRow): StandardProduct {
     sku: asString(row.sku),
     name: asString(row.name),
     specification: asString(row.specification),
+    defaultOrderPriceCents: row.default_order_price_cents === null
+      ? null
+      : asNumber(row.default_order_price_cents),
     revision: asNumber(row.revision),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
+  };
+}
+
+function parseStandardProductPriceEventRow(row: SqlRow): StandardProductPriceEvent {
+  return {
+    id: asString(row.id),
+    standardProductId: asString(row.standard_product_id),
+    previousDefaultOrderPriceCents: row.previous_default_order_price_cents === null
+      ? null
+      : asNumber(row.previous_default_order_price_cents),
+    defaultOrderPriceCents: row.default_order_price_cents === null
+      ? null
+      : asNumber(row.default_order_price_cents),
+    reason: asString(row.reason),
+    occurredAt: asString(row.occurred_at),
+    createdAt: asString(row.created_at),
   };
 }
 

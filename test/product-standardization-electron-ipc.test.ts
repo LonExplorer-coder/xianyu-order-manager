@@ -36,18 +36,30 @@ describe('标准商品 Electron IPC', () => {
       sku: 'SKU-IPC-001',
       name: 'IPC 标准商品',
       specification: '标准规格',
+      defaultOrderPriceCents: 800,
       revision: 1,
       createdAt: '2026-08-14T10:00:00.000Z',
       updatedAt: '2026-08-14T10:00:00.000Z',
     };
+    const priceEvent = {
+      id: 'price-event-ipc-1',
+      standardProductId: product.id,
+      previousDefaultOrderPriceCents: null,
+      defaultOrderPriceCents: 800,
+      reason: '首次定价',
+      occurredAt: '2026-08-14T10:00:00.000Z',
+      createdAt: '2026-08-14T10:00:00.000Z',
+    };
     const createStandardProduct = vi.fn().mockReturnValue(product);
     const updateStandardProduct = vi.fn().mockReturnValue({ ...product, revision: 2 });
+    const listStandardProductPriceEvents = vi.fn().mockReturnValue([priceEvent]);
     const previewDraftProductStandardizations = vi.fn().mockReturnValue([]);
     const confirmDraft = vi.fn().mockReturnValue({ order: {}, resolution: 'new_order' });
     registerIpcHandlers({
       listStandardProducts: vi.fn().mockReturnValue([product]),
       createStandardProduct,
       updateStandardProduct,
+      listStandardProductPriceEvents,
       previewDraftProductStandardizations,
       confirmDraft,
       onRecognitionBatchesChanged: vi.fn(),
@@ -66,6 +78,20 @@ describe('标准商品 Electron IPC', () => {
       specification: '标准规格',
     });
     await expect(invoke('products:create', {
+      sku: 'SKU-IPC-003',
+      name: '定价商品',
+      specification: '规格',
+      defaultOrderPriceCents: 800,
+      priceChangeReason: ' 首次定价 ',
+    })).resolves.toEqual(product);
+    expect(createStandardProduct).toHaveBeenCalledWith({
+      sku: 'SKU-IPC-003',
+      name: '定价商品',
+      specification: '规格',
+      defaultOrderPriceCents: 800,
+      priceChangeReason: '首次定价',
+    });
+    await expect(invoke('products:create', {
       sku: 'SKU-IPC-002',
       name: '非法商品',
       specification: '规格',
@@ -77,13 +103,26 @@ describe('标准商品 Electron IPC', () => {
       name: product.name,
       specification: product.specification,
       expectedRevision: 1,
+    })).rejects.toThrow('默认订单单价无效');
+    await expect(invoke('products:update', product.id, {
+      sku: product.sku,
+      name: product.name,
+      specification: product.specification,
+      defaultOrderPriceCents: 900,
+      priceChangeReason: ' 调价 ',
+      expectedRevision: 1,
     })).resolves.toMatchObject({ revision: 2 });
     expect(updateStandardProduct).toHaveBeenCalledWith(product.id, {
       sku: product.sku,
       name: product.name,
       specification: product.specification,
+      defaultOrderPriceCents: 900,
+      priceChangeReason: '调价',
       expectedRevision: 1,
     });
+
+    await expect(invoke('products:price-events', product.id)).resolves.toEqual([priceEvent]);
+    expect(listStandardProductPriceEvents).toHaveBeenCalledWith(product.id);
 
     const draft = { id: 'draft-ipc-1' } as OrderDraft;
     await expect(invoke('products:preview-draft-standardizations', draft)).resolves.toEqual([]);

@@ -57,6 +57,9 @@ const api: DesktopApi = {
   updateStandardProduct: (productId, input) => (
     ipcRenderer.invoke('products:update', productId, input)
   ),
+  listStandardProductPriceEvents: (productId) => (
+    ipcRenderer.invoke('products:price-events', productId)
+  ),
   previewDraftProductStandardizations: (draft) => (
     ipcRenderer.invoke('products:preview-draft-standardizations', draft)
   ),

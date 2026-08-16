@@ -102,6 +102,7 @@ describe('桌面启动状态', () => {
       sku: product.sku,
       name: '统一白模娃鞋',
       specification: product.specification,
+      defaultOrderPriceCents: null,
       expectedRevision: product.revision,
     });
 

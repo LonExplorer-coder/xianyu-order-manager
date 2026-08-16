@@ -36,6 +36,7 @@ import type {
   DraftItemProductStandardization,
   ProductStandardizationConfirmation,
   StandardProduct,
+  StandardProductPriceEvent,
   UpdateStandardProductInput,
 } from './product-standardization';
 import type {
@@ -162,6 +163,7 @@ export interface DesktopApi {
     productId: string,
     input: UpdateStandardProductInput,
   ): Promise<StandardProduct>;
+  listStandardProductPriceEvents(productId: string): Promise<StandardProductPriceEvent[]>;
   previewDraftProductStandardizations(
     draft: OrderDraft,
   ): Promise<DraftItemProductStandardization[]>;

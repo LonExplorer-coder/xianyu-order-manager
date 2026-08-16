@@ -1,20 +1,32 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { DesktopApi } from '../core/desktop-api';
-import type { StandardProduct } from '../core/product-standardization';
+import type {
+  StandardProduct,
+  StandardProductPriceEvent,
+} from '../core/product-standardization';
 
 type ProductForm = {
   sku: string;
   name: string;
   specification: string;
+  defaultOrderPrice: string;
+  priceChangeReason: string;
 };
 
-const EMPTY_FORM: ProductForm = { sku: '', name: '', specification: '' };
+const EMPTY_FORM: ProductForm = {
+  sku: '',
+  name: '',
+  specification: '',
+  defaultOrderPrice: '',
+  priceChangeReason: '',
+};
 
 export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
   const [products, setProducts] = useState<StandardProduct[]>([]);
   const [editing, setEditing] = useState<StandardProduct | null>(null);
   const [form, setForm] = useState<ProductForm>(EMPTY_FORM);
+  const [priceEvents, setPriceEvents] = useState<StandardProductPriceEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{
@@ -38,12 +50,30 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
     return () => { active = false; };
   }, [api]);
 
+  useEffect(() => {
+    if (!editing) {
+      setPriceEvents([]);
+      return;
+    }
+    let active = true;
+    void api.listStandardProductPriceEvents(editing.id)
+      .then((result) => {
+        if (active) setPriceEvents(result);
+      })
+      .catch(() => {
+        if (active) setPriceEvents([]);
+      });
+    return () => { active = false; };
+  }, [api, editing]);
+
   function beginEdit(product: StandardProduct) {
     setEditing(product);
     setForm({
       sku: product.sku,
       name: product.name,
       specification: product.specification,
+      defaultOrderPrice: formatMoneyInput(product.defaultOrderPriceCents),
+      priceChangeReason: '',
     });
     setFeedback(null);
   }
@@ -55,15 +85,34 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
 
   async function saveProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const price = parsePriceInput(form.defaultOrderPrice);
+    if (price === undefined) {
+      setFeedback({ kind: 'error', message: '默认订单单价必须是大于等于零的金额（最多两位小数）' });
+      return;
+    }
+    const priceChanged = editing
+      ? price !== editing.defaultOrderPriceCents
+      : price !== null;
+    const priceChangeReason = priceChanged ? form.priceChangeReason.trim() : '';
     setSaving(true);
     setFeedback(null);
     try {
       const saved = editing
         ? await api.updateStandardProduct(editing.id, {
-          ...form,
+          sku: form.sku,
+          name: form.name,
+          specification: form.specification,
+          defaultOrderPriceCents: price,
+          ...(priceChangeReason ? { priceChangeReason } : {}),
           expectedRevision: editing.revision,
         })
-        : await api.createStandardProduct(form);
+        : await api.createStandardProduct({
+          sku: form.sku,
+          name: form.name,
+          specification: form.specification,
+          defaultOrderPriceCents: price,
+          ...(priceChangeReason ? { priceChangeReason } : {}),
+        });
       setProducts((current) => {
         const next = current.some(({ id }) => id === saved.id)
           ? current.map((product) => product.id === saved.id ? saved : product)
@@ -116,6 +165,7 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
                   </div>
                   <div className="field-definition-card__meta">
                     <span>{product.specification}</span>
+                    <span>默认单价 {formatMoney(product.defaultOrderPriceCents)}</span>
                     <span>版本 {product.revision}</span>
                   </div>
                   <button
@@ -171,6 +221,45 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
               }))}
             />
           </label>
+          <label className="field">
+            <span className="field-label">默认订单单价（元，可留空）</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              disabled={saving}
+              value={form.defaultOrderPrice}
+              onChange={(event) => setForm((current) => ({
+                ...current,
+                defaultOrderPrice: event.target.value,
+              }))}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">价格变更原因（首次定价或修改单价时必填）</span>
+            <input
+              disabled={saving}
+              value={form.priceChangeReason}
+              onChange={(event) => setForm((current) => ({
+                ...current,
+                priceChangeReason: event.target.value,
+              }))}
+            />
+          </label>
+
+          {editing && priceEvents.length > 0 && (
+            <div className="field-definition-card__meta" aria-label="价格变更记录">
+              <span>价格变更记录</span>
+              {priceEvents.map((event) => (
+                <span key={event.id}>
+                  {formatMoney(event.previousDefaultOrderPriceCents)}
+                  {' → '}
+                  {formatMoney(event.defaultOrderPriceCents)}
+                  {` · ${event.reason} · ${event.occurredAt.slice(0, 10)}`}
+                </span>
+              ))}
+            </div>
+          )}
 
           {feedback && (
             <p
@@ -194,6 +283,22 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
       </div>
     </section>
   );
+}
+
+function formatMoney(cents: number | null): string {
+  if (cents === null) return '未设置';
+  return `¥${(cents / 100).toFixed(2)}`;
+}
+
+function formatMoneyInput(cents: number | null): string {
+  return cents === null ? '' : (cents / 100).toFixed(2);
+}
+
+function parsePriceInput(value: string): number | null | undefined {
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  if (!/^\d+(\.\d{1,2})?$/u.test(trimmed)) return undefined;
+  return Math.round(Number(trimmed) * 100);
 }
 
 function errorMessage(error: unknown): string {

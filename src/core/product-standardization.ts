@@ -3,9 +3,20 @@ export type StandardProduct = {
   sku: string;
   name: string;
   specification: string;
+  defaultOrderPriceCents: number | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type StandardProductPriceEvent = {
+  id: string;
+  standardProductId: string;
+  previousDefaultOrderPriceCents: number | null;
+  defaultOrderPriceCents: number | null;
+  reason: string;
+  occurredAt: string;
+  createdAt: string;
 };
 
 export type ProductStandardizationSource = 'exact' | 'mapping' | 'manual';
@@ -45,9 +56,12 @@ export type CreateStandardProductInput = {
   sku: string;
   name: string;
   specification: string;
+  defaultOrderPriceCents?: number | null;
+  priceChangeReason?: string;
 };
 
-export type UpdateStandardProductInput = CreateStandardProductInput & {
+export type UpdateStandardProductInput = Omit<CreateStandardProductInput, 'defaultOrderPriceCents'> & {
+  defaultOrderPriceCents: number | null;
   expectedRevision: number;
 };
 
@@ -99,15 +113,30 @@ export function normalizeStandardProductInput(
     throw new Error('标准商品内容无效');
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(['sku', 'name', 'specification']);
+  const allowed = new Set([
+    'sku',
+    'name',
+    'specification',
+    'defaultOrderPriceCents',
+    'priceChangeReason',
+  ]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new Error('标准商品包含未知字段');
   }
-  return {
+  const normalized: CreateStandardProductInput = {
     sku: requiredProductText(record.sku, 'SKU', 100),
     name: requiredProductText(record.name, '标准商品名', 300),
     specification: requiredProductText(record.specification, '标准规格', 300),
   };
+  if ('defaultOrderPriceCents' in record) {
+    normalized.defaultOrderPriceCents = normalizeDefaultOrderPriceCents(
+      record.defaultOrderPriceCents,
+    );
+  }
+  if ('priceChangeReason' in record) {
+    normalized.priceChangeReason = normalizePriceChangeReason(record.priceChangeReason);
+  }
+  return normalized;
 }
 
 export function normalizeUpdateStandardProductInput(
@@ -117,12 +146,22 @@ export function normalizeUpdateStandardProductInput(
     throw new Error('标准商品修改内容无效');
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(['sku', 'name', 'specification', 'expectedRevision']);
+  const allowed = new Set([
+    'sku',
+    'name',
+    'specification',
+    'defaultOrderPriceCents',
+    'priceChangeReason',
+    'expectedRevision',
+  ]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new Error('标准商品修改包含未知字段');
   }
   if (!Number.isSafeInteger(record.expectedRevision) || (record.expectedRevision as number) < 1) {
     throw new Error('标准商品版本无效');
+  }
+  if (!('defaultOrderPriceCents' in record)) {
+    throw new Error('默认订单单价无效');
   }
   return {
     ...normalizeStandardProductInput({
@@ -130,6 +169,10 @@ export function normalizeUpdateStandardProductInput(
       name: record.name,
       specification: record.specification,
     }),
+    defaultOrderPriceCents: normalizeDefaultOrderPriceCents(record.defaultOrderPriceCents),
+    ...('priceChangeReason' in record
+      ? { priceChangeReason: normalizePriceChangeReason(record.priceChangeReason) }
+      : {}),
     expectedRevision: record.expectedRevision as number,
   };
 }
@@ -180,6 +223,21 @@ function characterPairs(value: string): Set<string> {
   return new Set(characters.slice(0, -1).map((character, index) => (
     `${character}${characters[index + 1]}`
   )));
+}
+
+function normalizeDefaultOrderPriceCents(value: unknown): number | null {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error('默认订单单价无效');
+  }
+  return value as number;
+}
+
+function normalizePriceChangeReason(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('价格变更原因无效');
+  const reason = value.trim();
+  if (!reason || reason.length > 500) throw new Error('价格变更原因无效');
+  return reason;
 }
 
 function requiredProductText(value: unknown, label: string, maximumLength: number): string {

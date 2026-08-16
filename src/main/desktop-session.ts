@@ -38,6 +38,7 @@ import type {
   DraftItemProductStandardization,
   ProductStandardizationConfirmation,
   StandardProduct,
+  StandardProductPriceEvent,
   UpdateStandardProductInput,
 } from '../core/product-standardization';
 import { createHash, randomUUID } from 'node:crypto';
@@ -416,6 +417,10 @@ export class DesktopSession {
     const product = this.requireApplication().updateStandardProduct(productId, input);
     this.refreshOrders();
     return product;
+  }
+
+  public listStandardProductPriceEvents(productId: string): StandardProductPriceEvent[] {
+    return this.requireApplication().listStandardProductPriceEvents(productId);
   }
 
   public previewDraftProductStandardizations(

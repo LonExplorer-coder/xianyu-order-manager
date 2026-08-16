@@ -1,6 +1,37 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion43ExtensionArtifacts(database: DatabaseSync): void {
+  const hasEventsTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'standard_product_price_events'
+  `).get();
+  if (!hasEventsTable) return;
+  const eventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM standard_product_price_events',
+  ).get() as { count: number };
+  const pricedCount = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM standard_products
+    WHERE default_order_price_cents IS NOT NULL
+  `).get() as { count: number };
+  if (eventCount.count > 0 || pricedCount.count > 0) {
+    throw new Error('v43 测试降级前必须移除默认订单单价数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS standard_product_price_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS standard_product_price_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS standard_product_price_events_by_product;
+    DROP TABLE standard_product_price_events;
+    ALTER TABLE standard_products DROP COLUMN default_order_price_cents;
+    DELETE FROM schema_migrations WHERE version = 43;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion42ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion43ExtensionArtifacts(database);
   const hasRecipientsTable = database.prepare(`
     SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'recipients'
   `).get();

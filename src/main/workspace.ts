@@ -196,6 +196,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(40)) migrateToVersion40(database);
   if (!versions.has(41)) migrateToVersion41(database);
   if (!versions.has(42)) migrateToVersion42(database);
+  if (!versions.has(43)) migrateToVersion43(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5616,6 +5617,56 @@ function migrateToVersion42(database: DatabaseSync): void {
     `).run(new Date().toISOString());
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (42, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion43(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE standard_products
+      ADD COLUMN default_order_price_cents INTEGER
+        CHECK (
+          default_order_price_cents IS NULL OR default_order_price_cents >= 0
+        );
+
+      CREATE TABLE standard_product_price_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        previous_default_order_price_cents INTEGER
+          CHECK (
+            previous_default_order_price_cents IS NULL
+            OR previous_default_order_price_cents >= 0
+          ),
+        default_order_price_cents INTEGER
+          CHECK (
+            default_order_price_cents IS NULL OR default_order_price_cents >= 0
+          ),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX standard_product_price_events_by_product
+      ON standard_product_price_events (standard_product_id, sequence);
+
+      CREATE TRIGGER standard_product_price_events_are_immutable_on_update
+      BEFORE UPDATE ON standard_product_price_events
+      BEGIN SELECT RAISE(ABORT, 'standard product price events are immutable'); END;
+
+      CREATE TRIGGER standard_product_price_events_are_immutable_on_delete
+      BEFORE DELETE ON standard_product_price_events
+      BEGIN SELECT RAISE(ABORT, 'standard product price events are immutable'); END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (43, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {
