@@ -180,6 +180,10 @@ const api: DesktopApi = {
   deleteTableTemplate: (templateId) => (
     ipcRenderer.invoke('table-templates:delete', templateId)
   ),
+  getActiveTableTemplates: () => ipcRenderer.invoke('table-templates:get-active'),
+  setActiveTableTemplate: (granularity, templateId) => (
+    ipcRenderer.invoke('table-templates:set-active', granularity, templateId)
+  ),
   saveCustomFieldValues: (input) => ipcRenderer.invoke('custom-fields:save-values', input),
   getScreenshotDataUrl: (screenshotId) =>
     ipcRenderer.invoke('evidence:get-screenshot-data-url', screenshotId),

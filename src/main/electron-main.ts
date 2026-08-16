@@ -459,6 +459,12 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('table-templates:delete', (_event, templateId: unknown) => (
     desktopSession.deleteTableTemplate(parseTableTemplateId(templateId))
   ));
+  ipcMain.handle('table-templates:get-active', () => (
+    desktopSession.getActiveTableTemplates()
+  ));
+  ipcMain.handle('table-templates:set-active', (_event, granularity: unknown, templateId: unknown) => (
+    desktopSession.setActiveTableTemplate(granularity, templateId)
+  ));
   ipcMain.handle('evidence:get-screenshot-data-url', (_event, screenshotId: string) => {
     return desktopSession.getScreenshotDataUrl(screenshotId);
   });

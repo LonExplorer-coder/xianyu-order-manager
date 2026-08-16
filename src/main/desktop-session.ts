@@ -91,6 +91,7 @@ import type {
   ShipmentCarrierClaimProgressResult,
 } from '../core/shipment-records';
 import type {
+  ActiveTableTemplateIds,
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -710,6 +711,23 @@ export class DesktopSession {
 
   public deleteTableTemplate(templateId: string): void {
     this.requireApplication().deleteTableTemplate(templateId);
+    const active = this.preferences.getActiveTableTemplates();
+    for (const [granularity, id] of Object.entries(active)) {
+      if (id === templateId) {
+        this.preferences.setActiveTableTemplate(granularity, null);
+      }
+    }
+  }
+
+  public getActiveTableTemplates(): ActiveTableTemplateIds {
+    return this.preferences.getActiveTableTemplates();
+  }
+
+  public setActiveTableTemplate(
+    granularity: unknown,
+    templateId: unknown,
+  ): ActiveTableTemplateIds {
+    return this.preferences.setActiveTableTemplate(granularity, templateId);
   }
 
   public saveCustomFieldValues(

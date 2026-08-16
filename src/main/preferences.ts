@@ -5,11 +5,16 @@ import type {
   OrderIntakeSettingsView,
   SaveOrderIntakeSettingsInput,
 } from '../core/order-intake';
+import {
+  TABLE_TEMPLATE_GRANULARITIES,
+  type ActiveTableTemplateIds,
+} from '../core/table-templates';
 
 type StoredPreferences = {
   lastDataDirectory?: string;
   lastSourceScreenshotDirectory?: string;
   automaticImportEnabled?: boolean;
+  activeTableTemplates?: Record<string, unknown>;
 };
 
 export class Preferences {
@@ -57,6 +62,49 @@ export class Preferences {
 
   public setAutomaticImportEnabled(automaticImportEnabled: boolean): void {
     this.saveOrderIntakeSettings({ automaticImportEnabled });
+  }
+
+  public getActiveTableTemplates(): ActiveTableTemplateIds {
+    const stored: unknown = this.read().activeTableTemplates;
+    if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return {};
+    const record = stored as Record<string, unknown>;
+    const result: ActiveTableTemplateIds = {};
+    for (const granularity of TABLE_TEMPLATE_GRANULARITIES) {
+      const value = nonEmptyString(record[granularity]);
+      if (value) result[granularity] = value;
+    }
+    return result;
+  }
+
+  public setActiveTableTemplate(
+    granularity: unknown,
+    templateId: unknown,
+  ): ActiveTableTemplateIds {
+    if (
+      typeof granularity !== 'string'
+      || !(TABLE_TEMPLATE_GRANULARITIES as readonly string[]).includes(granularity)
+    ) {
+      throw new Error('表格模板粒度无效');
+    }
+    let normalizedId: string | null = null;
+    if (templateId !== null) {
+      const candidate = nonEmptyString(templateId);
+      if (!candidate) throw new Error('表格模板标识无效');
+      normalizedId = candidate;
+    }
+    const current: Record<string, string> = {};
+    const stored: unknown = this.read().activeTableTemplates;
+    if (typeof stored === 'object' && stored !== null && !Array.isArray(stored)) {
+      const record = stored as Record<string, unknown>;
+      for (const key of TABLE_TEMPLATE_GRANULARITIES) {
+        const value = nonEmptyString(record[key]);
+        if (value) current[key] = value;
+      }
+    }
+    if (normalizedId === null) delete current[granularity];
+    else current[granularity] = normalizedId;
+    this.update({ activeTableTemplates: current });
+    return this.getActiveTableTemplates();
   }
 
   private read(): StoredPreferences {

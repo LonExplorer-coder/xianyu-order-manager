@@ -121,12 +121,14 @@ import {
   projectOrderTableProjectionRow,
   projectShipmentGroupTableCell,
   tableTemplateCustomFieldDefinitionIds,
+  TABLE_TEMPLATE_GRANULARITIES,
   type AvailableTableField,
   type CreateTableTemplateInput,
   type TableCellValue,
   type TableFieldReference,
   type TableTemplate,
   type TableTemplateColumn,
+  type TableTemplateGranularity,
   type UpdateTableTemplateInput,
 } from '../core/table-templates';
 import { CustomFieldInput } from './CustomFieldInput';
@@ -233,8 +235,13 @@ export function App({ api }: AppProps) {
   const [tableTemplates, setTableTemplates] = useState<TableTemplate[]>([]);
   const [tableTemplatesLoading, setTableTemplatesLoading] = useState(false);
   const [tableTemplatesError, setTableTemplatesError] = useState('');
-  const [activeTableTemplateId, setActiveTableTemplateId] = useState('');
-  const [activeTableTemplateDirty, setActiveTableTemplateDirty] = useState(false);
+  const [activeTableTemplateSlots, setActiveTableTemplateSlots] = useState<
+    Record<TableTemplateGranularity, { id: string; dirty: boolean }>
+  >({
+    order: { id: '', dirty: false },
+    order_item: { id: '', dirty: false },
+    shipment_group: { id: '', dirty: false },
+  });
   const [draftCustomFieldValues, setDraftCustomFieldValues] = useState<DraftCustomFieldValues>({
     orderValues: [],
     itemValues: [],
@@ -252,8 +259,17 @@ export function App({ api }: AppProps) {
   const readyDataDirectory = bootstrap?.kind === 'ready'
     ? bootstrap.dataDirectory
     : '';
-  const activeTableTemplate = tableTemplates.find(
-    (template) => template.id === activeTableTemplateId,
+  const activeOrderTableTemplate = tableTemplates.find(
+    (template) => template.id === activeTableTemplateSlots.order.id,
+  ) ?? null;
+  const activeOrderItemTableTemplate = tableTemplates.find(
+    (template) => template.id === activeTableTemplateSlots.order_item.id,
+  ) ?? null;
+  const activeShipmentGroupTableTemplate = tableTemplates.find(
+    (template): template is Extract<TableTemplate, { granularity: 'shipment_group' }> => (
+      template.id === activeTableTemplateSlots.shipment_group.id
+        && template.granularity === 'shipment_group'
+    ),
   ) ?? null;
   const orderProjectionDefinitionIdsKey = JSON.stringify(
     orderTemplatesCustomFieldDefinitionIds(tableTemplates),
@@ -263,10 +279,10 @@ export function App({ api }: AppProps) {
     [orderProjectionDefinitionIdsKey],
   );
   const orderItemProjectionDefinitionIds = useMemo(() => (
-    activeTableTemplate?.granularity === 'order_item'
-      ? tableTemplateCustomFieldDefinitionIds(activeTableTemplate.columns)
+    activeOrderItemTableTemplate
+      ? tableTemplateCustomFieldDefinitionIds(activeOrderItemTableTemplate.columns)
       : []
-  ), [activeTableTemplate]);
+  ), [activeOrderItemTableTemplate]);
   const shipmentGroupProjectionDefinitionIds = useMemo(() => (
     customFieldDefinitions
       .filter(({ granularity }) => granularity === 'shipment_group')
@@ -324,8 +340,11 @@ export function App({ api }: AppProps) {
     setCustomFieldDefinitionsError('');
     setTableTemplates([]);
     setTableTemplatesError('');
-    setActiveTableTemplateId('');
-    setActiveTableTemplateDirty(false);
+    setActiveTableTemplateSlots({
+      order: { id: '', dirty: false },
+      order_item: { id: '', dirty: false },
+      shipment_group: { id: '', dirty: false },
+    });
     setDraftCustomFieldValues({ orderValues: [], itemValues: [] });
     draftCustomFieldValuesContextKey.current = '';
     draftCustomFieldTouchedKeys.current.clear();
@@ -391,8 +410,40 @@ export function App({ api }: AppProps) {
     setTableTemplatesLoading(true);
     setTableTemplatesError('');
     void api.listTableTemplates()
-      .then((templates) => {
-        if (active) setTableTemplates(templates);
+      .then(async (templates) => {
+        if (!active) return;
+        setTableTemplates(templates);
+        const stored = await api.getActiveTableTemplates()
+          .catch(() => ({}) as Record<string, string>);
+        if (!active) return;
+        const restores = TABLE_TEMPLATE_GRANULARITIES.flatMap((granularity) => {
+          const storedId = stored[granularity];
+          const template = storedId
+            ? templates.find((candidate) => (
+              candidate.id === storedId && candidate.granularity === granularity
+            ))
+            : undefined;
+          return template ? [{ granularity, template }] : [];
+        });
+        if (restores.length === 0) return;
+        setActiveTableTemplateSlots((current) => {
+          const next = { ...current };
+          for (const { granularity, template } of restores) {
+            next[granularity] = { id: template.id, dirty: false };
+          }
+          return next;
+        });
+        for (const { granularity, template } of restores) {
+          if (granularity === 'order' && template.granularity === 'order') {
+            setOrderQuery(structuredClone(template.query));
+          } else if (granularity === 'order_item' && template.granularity === 'order_item') {
+            setOrderItemQuery(structuredClone(template.query));
+          } else if (
+            granularity === 'shipment_group' && template.granularity === 'shipment_group'
+          ) {
+            setShipmentGroupQuery(structuredClone(template.query));
+          }
+        }
       })
       .catch((error: unknown) => {
         if (active) setTableTemplatesError(errorMessage(error));
@@ -608,6 +659,38 @@ export function App({ api }: AppProps) {
     }
   }
 
+  function markTableTemplateActive(granularity: TableTemplateGranularity, id: string): void {
+    setActiveTableTemplateSlots((current) => ({
+      ...current,
+      [granularity]: { id, dirty: false },
+    }));
+  }
+
+  function markTableTemplateDirty(granularity: TableTemplateGranularity): void {
+    setActiveTableTemplateSlots((current) => (
+      current[granularity].id
+        ? { ...current, [granularity]: { ...current[granularity], dirty: true } }
+        : current
+    ));
+  }
+
+  function setTableTemplateDirty(
+    granularity: TableTemplateGranularity,
+    dirty: boolean,
+  ): void {
+    setActiveTableTemplateSlots((current) => ({
+      ...current,
+      [granularity]: { ...current[granularity], dirty },
+    }));
+  }
+
+  function persistActiveTableTemplate(
+    granularity: TableTemplateGranularity,
+    templateId: string | null,
+  ): void {
+    void api.setActiveTableTemplate(granularity, templateId).catch(() => undefined);
+  }
+
   async function updateTableTemplate(
     templateId: string,
     input: UpdateTableTemplateInput,
@@ -619,13 +702,16 @@ export function App({ api }: AppProps) {
       setTableTemplates((current) => current.map((template) => (
         template.id === updated.id ? updated : template
       )));
-      if (activeTableTemplateId === updated.id) {
+      if (activeTableTemplateSlots[updated.granularity].id === updated.id) {
         const currentQuery = updated.granularity === 'order'
           ? orderQuery
           : updated.granularity === 'order_item'
             ? orderItemQuery
             : shipmentGroupQuery;
-        setActiveTableTemplateDirty(!sameJsonValue(currentQuery, updated.query));
+        setTableTemplateDirty(
+          updated.granularity,
+          !sameJsonValue(currentQuery, updated.query),
+        );
       }
     } catch (error) {
       setTableTemplatesError(errorMessage(error));
@@ -640,7 +726,8 @@ export function App({ api }: AppProps) {
     setTableTemplatesError('');
     try {
       const template = tableTemplates.find(({ id }) => id === templateId);
-      const deletingActiveTemplate = activeTableTemplateId === templateId && template !== undefined;
+      const deletingActiveTemplate = template !== undefined
+        && activeTableTemplateSlots[template.granularity].id === templateId;
       let orderReset: {
         query: OrderWorkbenchQuery;
         result: OrderWorkbenchResult;
@@ -694,8 +781,7 @@ export function App({ api }: AppProps) {
           setShipmentGroupProjection(shipmentGroupReset.result);
           setActivePage('shipments');
         }
-        setActiveTableTemplateId('');
-        setActiveTableTemplateDirty(false);
+        markTableTemplateActive(template.granularity, '');
       }
     } catch (error) {
       setTableTemplatesError(errorMessage(error));
@@ -744,8 +830,8 @@ export function App({ api }: AppProps) {
         setShipmentGroupProjection(result);
         setActivePage('shipments');
       }
-      setActiveTableTemplateId(template.id);
-      setActiveTableTemplateDirty(false);
+      markTableTemplateActive(template.granularity, template.id);
+      persistActiveTableTemplate(template.granularity, template.id);
       if (template.granularity !== 'shipment_group') setActivePage('orders');
       setOperationError('');
     } catch (error) {
@@ -787,8 +873,8 @@ export function App({ api }: AppProps) {
         setShipmentGroupQuery({});
         setActivePage('shipments');
       }
-      setActiveTableTemplateId('');
-      setActiveTableTemplateDirty(false);
+      markTableTemplateActive(granularity, '');
+      persistActiveTableTemplate(granularity, null);
       if (granularity !== 'shipment_group') setActivePage('orders');
     } catch (error) {
       if (requestVersion === tableTemplateApplyVersion.current) {
@@ -805,26 +891,25 @@ export function App({ api }: AppProps) {
 
   function changeOrderQuery(query: OrderWorkbenchQuery) {
     setOrderQuery(query);
-    if (activeTableTemplate?.granularity === 'order') {
-      setActiveTableTemplateDirty(true);
-    }
+    markTableTemplateDirty('order');
   }
 
   function changeOrderItemQuery(query: OrderItemWorkbenchQuery) {
     setOrderItemQuery(query);
-    if (activeTableTemplate?.granularity === 'order_item') {
-      setActiveTableTemplateDirty(true);
-    }
+    markTableTemplateDirty('order_item');
   }
 
   function changeShipmentGroupQuery(query: ShipmentGroupWorkbenchQuery) {
     setShipmentGroupQuery(query);
-    if (activeTableTemplate?.granularity === 'shipment_group') {
-      setActiveTableTemplateDirty(true);
-    }
+    markTableTemplateDirty('shipment_group');
   }
 
-  async function saveActiveTableTemplateView() {
+  async function saveActiveTableTemplateView(granularity: TableTemplateGranularity) {
+    const activeTableTemplate = granularity === 'order'
+      ? activeOrderTableTemplate
+      : granularity === 'order_item'
+        ? activeOrderItemTableTemplate
+        : activeShipmentGroupTableTemplate;
     if (!activeTableTemplate) return;
     setOperationError('');
     try {
@@ -1318,10 +1403,8 @@ export function App({ api }: AppProps) {
         projection={shipmentGroupProjection}
         customFieldDefinitions={customFieldDefinitions}
         tableTemplates={tableTemplates}
-        activeTableTemplate={activeTableTemplate?.granularity === 'shipment_group'
-          ? activeTableTemplate
-          : null}
-        activeTableTemplateDirty={activeTableTemplateDirty}
+        activeTableTemplate={activeShipmentGroupTableTemplate}
+        activeTableTemplateDirty={activeTableTemplateSlots.shipment_group.dirty}
         query={shipmentGroupQuery}
         archives={shipmentGroupArchives}
         aftersalesCases={aftersalesCases}
@@ -1357,7 +1440,7 @@ export function App({ api }: AppProps) {
         onClearTableTemplate={() => void clearTableTemplate('shipment_group')}
         onManageTableTemplates={() => setActivePage('templates')}
         onQueryChange={changeShipmentGroupQuery}
-        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
+        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView('shipment_group')}
         onPreviewExport={(input) => api.previewShipmentGroupExport(input)}
         onExport={(input) => api.exportShipmentGroups(input)}
       />
@@ -1440,8 +1523,12 @@ export function App({ api }: AppProps) {
         customFieldDefinitions={customFieldDefinitions}
         customFieldValues={orderWorkbench?.customFieldValues ?? []}
         tableTemplates={tableTemplates}
-        activeTableTemplate={activeTableTemplate}
-        activeTableTemplateDirty={activeTableTemplateDirty}
+        activeTableTemplate={ordersWorkspaceView === 'orders'
+          ? activeOrderTableTemplate
+          : activeOrderItemTableTemplate}
+        activeTableTemplateDirty={ordersWorkspaceView === 'orders'
+          ? activeTableTemplateSlots.order.dirty
+          : activeTableTemplateSlots.order_item.dirty}
         view={ordersWorkspaceView}
         query={orderQuery}
         queryLoading={orderQueryLoading}
@@ -1466,7 +1553,9 @@ export function App({ api }: AppProps) {
         onApplyTableTemplate={applyTableTemplate}
         onClearTableTemplate={clearTableTemplate}
         onManageTableTemplates={() => setActivePage('templates')}
-        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView()}
+        onSaveActiveTableTemplate={() => void saveActiveTableTemplateView(
+          ordersWorkspaceView === 'orders' ? 'order' : 'order_item',
+        )}
         onUpdatePlatformTransactionStatus={updateOrderPlatformTransactionStatus}
         onPreviewExport={(input) => api.previewOrderExport(input)}
         onExport={(input) => api.exportOrders(input)}
@@ -2050,22 +2139,26 @@ function ShipmentGroupsWorkspace({
             </div>
             {loading && <span role="status">正在更新…</span>}
           </div>
-          <div className="shipment-groups-actions" aria-label="发货组调整操作">
-            <span>已选 {selectedGroups.length} 组</span>
-            <select
-              aria-label="发货组表格模板"
-              value={activeTableTemplate?.id ?? ''}
-              onChange={(event) => {
-                const template = shipmentGroupTemplates.find(({ id }) => id === event.target.value);
-                if (template) onApplyTableTemplate(template);
-                else onClearTableTemplate();
-              }}
-            >
-              <option value="">默认发货组字段</option>
-              {shipmentGroupTemplates.map((template) => (
-                <option key={template.id} value={template.id}>{template.name}</option>
-              ))}
-            </select>
+          <div className="workbench-template-bar" aria-label="当前表格模板">
+            <label>
+              <span>表格模板</span>
+              <select
+                aria-label="表格模板"
+                value={activeTableTemplate?.id ?? ''}
+                onChange={(event) => {
+                  const template = shipmentGroupTemplates.find(({ id }) => (
+                    id === event.target.value
+                  ));
+                  if (template) onApplyTableTemplate(template);
+                  else onClearTableTemplate();
+                }}
+              >
+                <option value="">默认发货组字段</option>
+                {shipmentGroupTemplates.map((template) => (
+                  <option key={template.id} value={template.id}>{template.name}</option>
+                ))}
+              </select>
+            </label>
             {activeTableTemplate && (
               <span className={`template-state${activeTableTemplateDirty ? ' is-dirty' : ''}`}>
                 {activeTableTemplateDirty ? '筛选或排序已修改' : '已应用保存配置'}
@@ -2083,6 +2176,9 @@ function ShipmentGroupsWorkspace({
             <button className="button button--quiet" type="button" onClick={onManageTableTemplates}>
               管理模板
             </button>
+          </div>
+          <div className="shipment-groups-actions" aria-label="发货组调整操作">
+            <span>已选 {selectedGroups.length} 组</span>
             <button
               className="button button--quiet"
               type="button"

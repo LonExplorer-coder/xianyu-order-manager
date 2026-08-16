@@ -33,6 +33,9 @@ export const TABLE_TEMPLATE_GRANULARITIES = [
 
 export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[number];
 
+/** 按粒度记住的当前表格模板标识；缺键表示该粒度使用默认视图。 */
+export type ActiveTableTemplateIds = Partial<Record<TableTemplateGranularity, string>>;
+
 export type OrderBuiltinTableFieldId =
   | 'system_order_number'
   | 'readable_order_number'

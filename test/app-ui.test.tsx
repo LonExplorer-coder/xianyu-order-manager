@@ -557,6 +557,8 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
     listTableTemplates: vi.fn().mockResolvedValue([]),
+    getActiveTableTemplates: vi.fn().mockResolvedValue({}),
+    setActiveTableTemplate: vi.fn().mockResolvedValue({}),
     createTableTemplate: vi.fn(),
     updateTableTemplate: vi.fn(),
     deleteTableTemplate: vi.fn().mockResolvedValue(undefined),
@@ -934,7 +936,7 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '发货组' }));
     await user.selectOptions(
-      await screen.findByRole('combobox', { name: '发货组表格模板' }),
+      await screen.findByRole('combobox', { name: '表格模板' }),
       groupTemplate.id,
     );
     const table = await screen.findByRole('table', { name: '开放发货组' });
@@ -9645,6 +9647,251 @@ describe('订单管理工作台', () => {
     await waitFor(() => expect(updateTableTemplate).toHaveBeenCalledOnce());
     expect(screen.getByText('已应用保存配置')).toBeVisible();
     expect(screen.queryByText('筛选或排序已修改')).not.toBeInTheDocument();
+  });
+
+  it('按粒度分别记忆模板选中，应用发货组模板不挤掉订单选中', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const orderTemplate: TableTemplate = {
+      id: 'template-order-active',
+      name: '待发货订单',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const groupTemplate: TableTemplate = {
+      id: 'template-group-active',
+      name: '按拣货区',
+      granularity: 'shipment_group',
+      columns: [{ field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' }],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryShipmentGroups: vi.fn().mockResolvedValue(singleShipmentGroupProjection()),
+      listTableTemplates: vi.fn().mockResolvedValue([orderTemplate, groupTemplate]),
+    });
+
+    render(<App api={api} />);
+    const orderSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: orderTemplate.name });
+    await user.selectOptions(orderSelect, orderTemplate.id);
+    expect(orderSelect).toHaveValue(orderTemplate.id);
+    expect(screen.getByText('已应用保存配置')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '发货组' }));
+    const groupSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    expect(groupSelect).toHaveValue('');
+    await user.selectOptions(groupSelect, groupTemplate.id);
+    expect(groupSelect).toHaveValue(groupTemplate.id);
+
+    await user.click(screen.getByRole('button', { name: '订单' }));
+    const restoredOrderSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    expect(restoredOrderSelect).toHaveValue(orderTemplate.id);
+    expect(screen.getByText('已应用保存配置')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '发货组' }));
+    expect(await screen.findByRole('combobox', { name: '表格模板' }))
+      .toHaveValue(groupTemplate.id);
+  });
+
+  it('订单与订单商品明细两个 tab 的模板选中互不挤占', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const orderTemplate: TableTemplate = {
+      id: 'template-order-tab',
+      name: '待发货订单',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const itemTemplate: TableTemplate = {
+      id: 'template-item-tab',
+      name: '商品明细',
+      granularity: 'order_item',
+      columns: [{ field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' }],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([orderTemplate, itemTemplate]),
+    });
+
+    render(<App api={api} />);
+    const orderSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: orderTemplate.name });
+    await user.selectOptions(orderSelect, orderTemplate.id);
+    expect(orderSelect).toHaveValue(orderTemplate.id);
+
+    await user.click(screen.getByRole('tab', { name: '订单商品明细' }));
+    const itemSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    expect(itemSelect).toHaveValue('');
+    await screen.findByRole('option', { name: itemTemplate.name });
+    await user.selectOptions(itemSelect, itemTemplate.id);
+    expect(itemSelect).toHaveValue(itemTemplate.id);
+    expect(screen.getByText('已应用保存配置')).toBeVisible();
+
+    await user.click(screen.getByRole('tab', { name: '订单' }));
+    const restoredOrderSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    expect(restoredOrderSelect).toHaveValue(orderTemplate.id);
+
+    await user.click(screen.getByRole('tab', { name: '订单商品明细' }));
+    expect(await screen.findByRole('combobox', { name: '表格模板' }))
+      .toHaveValue(itemTemplate.id);
+  });
+
+  it('重启后按持久化记录静默恢复模板选中与查询，失效记录被忽略', async () => {
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-order-restore',
+      name: '待发货订单',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const queryOrders = vi.fn().mockResolvedValue(workbenchResult([summary]));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      getActiveTableTemplates: vi.fn().mockResolvedValue({ order: template.id }),
+    });
+
+    render(<App api={api} />);
+    const select = await screen.findByRole('combobox', { name: '表格模板' });
+    await waitFor(() => expect(select).toHaveValue(template.id));
+    expect(screen.getByText('已应用保存配置')).toBeVisible();
+    await waitFor(() => expect(queryOrders).toHaveBeenLastCalledWith(
+      expect.objectContaining({ fulfillmentStatus: 'pending_shipment' }),
+      expect.anything(),
+    ));
+    expect(screen.getByRole('table', { name: '原始订单' })).toBeVisible();
+
+    cleanup();
+    const staleApi = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      getActiveTableTemplates: vi.fn().mockResolvedValue({ order: 'template-deleted' }),
+    });
+    render(<App api={staleApi} />);
+    const staleSelect = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    expect(staleSelect).toHaveValue('');
+    expect(screen.queryByText('已应用保存配置')).not.toBeInTheDocument();
+  });
+
+  it('选择默认视图时清除该粒度的持久化记录', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const template: TableTemplate = {
+      id: 'template-order-clear',
+      name: '待发货订单',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const setActiveTableTemplate = vi.fn().mockResolvedValue({});
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      listTableTemplates: vi.fn().mockResolvedValue([template]),
+      setActiveTableTemplate,
+    });
+
+    render(<App api={api} />);
+    const select = await screen.findByRole('combobox', { name: '表格模板' });
+    await screen.findByRole('option', { name: template.name });
+    await user.selectOptions(select, template.id);
+    await waitFor(() => expect(setActiveTableTemplate)
+      .toHaveBeenCalledWith('order', template.id));
+
+    await user.selectOptions(select, '');
+    await waitFor(() => expect(setActiveTableTemplate)
+      .toHaveBeenCalledWith('order', null));
+    expect(select).toHaveValue('');
+  });
+
+  it('发货组模板栏提供与订单一致的标签、状态片与保存入口', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const groupTemplate: TableTemplate = {
+      id: 'template-group-bar',
+      name: '按拣货区',
+      granularity: 'shipment_group',
+      columns: [{ field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' }],
+      query: {},
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryShipmentGroups: vi.fn().mockResolvedValue(singleShipmentGroupProjection()),
+      listTableTemplates: vi.fn().mockResolvedValue([groupTemplate]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const select = await screen.findByRole('combobox', { name: '表格模板' });
+    const bar = select.closest('.workbench-template-bar');
+    if (!bar) throw new Error('发货组模板栏未使用 workbench-template-bar 结构');
+    expect(within(bar as HTMLElement).getByText('表格模板')).toBeVisible();
+    expect(within(select).getByRole('option', { name: '默认发货组字段' })).toBeInTheDocument();
+    expect(within(bar as HTMLElement).getByRole('button', { name: '管理模板' })).toBeVisible();
+    expect(within(bar as HTMLElement).queryByText('已应用保存配置')).not.toBeInTheDocument();
+
+    await user.selectOptions(select, groupTemplate.id);
+    expect(within(bar as HTMLElement).getByText('已应用保存配置')).toBeVisible();
+
+    await user.type(screen.getByRole('searchbox', { name: '搜索发货组' }), '白模');
+    expect(await within(bar as HTMLElement).findByText('筛选或排序已修改')).toBeVisible();
+    expect(within(bar as HTMLElement).getByRole('button', { name: '保存当前筛选排序' }))
+      .toBeVisible();
   });
 
   it('在订单页应用模板失败时保留当前视图并显示原因', async () => {

@@ -86,6 +86,7 @@ import type {
   UpdateShipmentPackageLogisticsStatusInput,
 } from './shipment-records';
 import type {
+  ActiveTableTemplateIds,
   CreateTableTemplateInput,
   TableTemplate,
   TableTemplateGranularity,
@@ -267,6 +268,11 @@ export interface DesktopApi {
     input: UpdateTableTemplateInput,
   ): Promise<TableTemplate>;
   deleteTableTemplate(templateId: string): Promise<void>;
+  getActiveTableTemplates(): Promise<ActiveTableTemplateIds>;
+  setActiveTableTemplate(
+    granularity: TableTemplateGranularity,
+    templateId: string | null,
+  ): Promise<ActiveTableTemplateIds>;
   saveCustomFieldValues(
     input: SaveCustomFieldValuesInput,
   ): Promise<CustomFieldValueRecord[]>;

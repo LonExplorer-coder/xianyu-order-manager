@@ -154,6 +154,58 @@ describe('表格模板桌面接口', () => {
     expect(() => session.deleteTableTemplate('x'.repeat(201))).toThrow(/ID/);
     expect(session.listTableTemplates()).toEqual([]);
   });
+
+  it('按粒度持久化模板选中，删除模板时清除其偏好记录', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-template-active-'));
+    const preferences = new Preferences(join(testRoot, '启动配置'));
+    const first = createSession(preferences);
+    first.useDataDirectory(join(testRoot, '订单数据'));
+    const orderTemplate = first.createTableTemplate({
+      name: '待发货订单',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
+      query: { fulfillmentStatus: 'pending_shipment' },
+    });
+    const groupTemplate = first.createTableTemplate({
+      name: '按拣货区',
+      granularity: 'shipment_group',
+      columns: [{ field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' }],
+      query: {},
+    });
+
+    expect(first.getActiveTableTemplates()).toEqual({});
+    first.setActiveTableTemplate('order', orderTemplate.id);
+    first.setActiveTableTemplate('shipment_group', groupTemplate.id);
+    expect(first.getActiveTableTemplates()).toEqual({
+      order: orderTemplate.id,
+      shipment_group: groupTemplate.id,
+    });
+    first.close();
+    sessions.splice(sessions.indexOf(first), 1);
+
+    const reopened = createSession(preferences);
+    reopened.useDataDirectory(join(testRoot, '订单数据'));
+    expect(reopened.getActiveTableTemplates()).toEqual({
+      order: orderTemplate.id,
+      shipment_group: groupTemplate.id,
+    });
+
+    reopened.setActiveTableTemplate('order', null);
+    expect(reopened.getActiveTableTemplates()).toEqual({
+      shipment_group: groupTemplate.id,
+    });
+
+    reopened.setActiveTableTemplate('order', orderTemplate.id);
+    reopened.deleteTableTemplate(orderTemplate.id);
+    expect(reopened.getActiveTableTemplates()).toEqual({
+      shipment_group: groupTemplate.id,
+    });
+
+    expect(() => reopened.setActiveTableTemplate('unknown', 'template-x'))
+      .toThrow(/粒度/);
+    expect(() => reopened.setActiveTableTemplate('order', ''))
+      .toThrow(/标识/);
+  });
 });
 
 function createSession(preferences: Preferences): DesktopSession {

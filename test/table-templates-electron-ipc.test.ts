@@ -158,6 +158,30 @@ describe('表格模板 Electron IPC', () => {
     expect(await invoke('table-templates:list')).toEqual([]);
   });
 
+  it('模板选中记录通道按粒度读写并清除', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-template-active-ipc-'));
+    const session = new DesktopSession(
+      new Preferences(join(testRoot, '启动配置')),
+      new ControlledRecognizer(unusedRecognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(join(testRoot, '订单数据'));
+    registerIpcHandlers(session);
+
+    expect(await invoke('table-templates:get-active')).toEqual({});
+    await expect(invoke('table-templates:set-active', 'order', 'template-1'))
+      .resolves.toEqual({ order: 'template-1' });
+    await expect(invoke('table-templates:set-active', 'shipment_group', 'template-2'))
+      .resolves.toEqual({ order: 'template-1', shipment_group: 'template-2' });
+    await expect(invoke('table-templates:set-active', 'order', null))
+      .resolves.toEqual({ shipment_group: 'template-2' });
+    await expect(invoke('table-templates:set-active', 'unknown', 'template-1'))
+      .rejects.toThrow(/粒度/);
+    await expect(invoke('table-templates:set-active', 'order', ''))
+      .rejects.toThrow(/标识/);
+  });
+
   it('导出通道严格校验范围和模板，并把保存窗口取消视为正常结果', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-export-ipc-'));
     const session = new DesktopSession(
