@@ -1873,10 +1873,12 @@ describe('数据库升级', () => {
       .toEqual([
         {
           sourceTitle: '旧商品', sourceSpec: '旧规格', quantity: 1, standardProduct: null,
+          standardDisplayPreference: null,
         },
         {
           sourceTitle: '旧商品第二款', sourceSpec: '蓝色', quantity: 2,
           standardProduct: null,
+          standardDisplayPreference: null,
         },
       ]);
     const conflictingTemplate = migrated.find(({ id }) => (

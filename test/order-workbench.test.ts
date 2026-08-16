@@ -117,6 +117,7 @@ describe('订单工作台查询', () => {
         items: [{
           sourceTitle: '夏日海棠杯', sourceSpec: '红色 450ml', quantity: 2,
           standardProduct: null,
+          standardDisplayPreference: null,
         }],
       })],
       customFieldValues: [],

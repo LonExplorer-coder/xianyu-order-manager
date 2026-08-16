@@ -5,6 +5,10 @@ import type {
   CustomFieldSort,
   CustomFieldValue,
 } from './custom-fields';
+import {
+  displayedProductSpecification,
+  displayedProductTitle,
+} from './product-standardization';
 
 export type ShipmentGroupWorkbenchSortField =
   | 'recipient'
@@ -56,8 +60,8 @@ export type ShipmentGroupOrder = {
 };
 
 export type ShipmentGroupItem = {
-  sourceTitle: string;
-  sourceSpec: string;
+  title: string;
+  specification: string;
   quantity: number;
   subtotalCents: number;
   unitPricesCents: number[];
@@ -210,7 +214,7 @@ function shipmentGroupSearchText(group: OpenShipmentGroup): string {
       order.sellerAccount,
       order.buyerNickname,
     ]),
-    ...group.items.flatMap((item) => [item.sourceTitle, item.sourceSpec]),
+    ...group.items.flatMap((item) => [item.title, item.specification]),
   ].join('\n').normalize('NFKC').toLocaleLowerCase('zh-CN');
 }
 
@@ -454,9 +458,9 @@ function aggregateItems(orders: readonly OriginalOrder[]): ShipmentGroupItem[] {
   const summaries = new Map<string, ShipmentGroupItem>();
   for (const order of orders) {
     for (const item of order.items) {
-      const sourceTitle = item.sourceTitle.normalize('NFKC').trim();
-      const sourceSpec = item.sourceSpec.normalize('NFKC').trim();
-      const identity = `${sourceTitle.length}:${sourceTitle}${sourceSpec}`;
+      const title = displayedProductTitle(item).normalize('NFKC').trim();
+      const specification = displayedProductSpecification(item).normalize('NFKC').trim();
+      const identity = `${title.length}:${title}${specification}`;
       const existing = summaries.get(identity);
       if (existing) {
         existing.quantity += item.quantity;
@@ -469,8 +473,8 @@ function aggregateItems(orders: readonly OriginalOrder[]): ShipmentGroupItem[] {
         continue;
       }
       summaries.set(identity, {
-        sourceTitle,
-        sourceSpec,
+        title,
+        specification,
         quantity: item.quantity,
         subtotalCents: item.subtotalCents,
         unitPricesCents: [item.unitPriceCents],
@@ -479,8 +483,8 @@ function aggregateItems(orders: readonly OriginalOrder[]): ShipmentGroupItem[] {
     }
   }
   return [...summaries.values()].sort((left, right) => (
-    left.sourceTitle.localeCompare(right.sourceTitle, 'zh-CN') ||
-    left.sourceSpec.localeCompare(right.sourceSpec, 'zh-CN')
+    left.title.localeCompare(right.title, 'zh-CN') ||
+    left.specification.localeCompare(right.specification, 'zh-CN')
   ));
 }
 

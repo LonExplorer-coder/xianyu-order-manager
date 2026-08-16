@@ -266,6 +266,65 @@ describe('发货记录', () => {
     expect(application.queryShipmentGroups().groups).toEqual([]);
   });
 
+  it('发货快照冻结来源原文且不被标准商品显示偏好改写', async () => {
+    const application = await createApplication();
+    const product = application.createStandardProduct({
+      sku: 'SKU-SNAPSHOT-001',
+      name: '亚麻收纳袋标准款',
+      specification: '米白大号',
+    });
+    const summary = application.listOrders()
+      .find(({ orderNumber }) => orderNumber === 'XY-SHIPMENT-RECORD-0001')!;
+    const linked = application.updateOrderItemStandardization(
+      summary.id,
+      application.getOrder(summary.id).order.items[0].id,
+      { standardProductId: product.id, expectedRevision: summary.revision! },
+    );
+
+    const group = application.queryShipmentGroups().groups[0];
+    const remainingItems = group.orders.flatMap((order) => order.items.map((item) => ({
+      orderId: order.id,
+      orderItemId: item.id,
+      quantity: item.quantity,
+    })));
+    const result = application.confirmShipment({
+      groupId: group.id,
+      expectedRemainingItems: remainingItems,
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF1000000099',
+        items: remainingItems,
+      }],
+    });
+
+    expect(result.record.packages[0].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        orderNumber: 'XY-SHIPMENT-RECORD-0001',
+        sourceTitle: '亚麻收纳袋',
+        sourceSpec: '米白 大号',
+      }),
+    ]));
+
+    application.updateOrderItemStandardization(
+      summary.id,
+      linked.order.items[0].id,
+      {
+        standardProductId: product.id,
+        standardDisplayPreference: 'prefer_source',
+        expectedRevision: application.getOrder(summary.id).order.revision,
+      },
+    );
+    expect(application.queryShipmentRecords()).toEqual([result.record]);
+    expect(application.queryShipmentRecords()[0].packages[0].items)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          orderNumber: 'XY-SHIPMENT-RECORD-0001',
+          sourceTitle: '亚麻收纳袋',
+          sourceSpec: '米白 大号',
+        }),
+      ]));
+  });
+
   it('全部商品实际发出后同步订单履约状态', async () => {
     const application = await createApplication();
     const group = application.queryShipmentGroups().groups[0];

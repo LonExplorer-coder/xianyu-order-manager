@@ -179,6 +179,10 @@ import type {
   StandardProduct,
 } from '../core/product-standardization';
 import {
+  displayedProductSpecification,
+  displayedProductTitle,
+} from '../core/product-standardization';
+import {
   LOGISTICS_EXCEPTION_TYPE_OPTIONS,
   logisticsExceptionStageLabel,
   logisticsExceptionTypeLabel,
@@ -2393,11 +2397,11 @@ function ShipmentGroupsWorkspace({
                             && column.field.key === 'product_summary' ? (
                               <span className="order-product-summary">
                                 {group.items.map((item) => (
-                                  <span key={`${item.sourceTitle}\u0000${item.sourceSpec}`}>
-                                    <strong>{item.sourceTitle}</strong>
+                                  <span key={`${item.title}\u0000${item.specification}`}>
+                                    <strong>{item.title}</strong>
                                     <small>
-                                      {item.sourceSpec
-                                        ? `${item.sourceSpec} × ${item.quantity}`
+                                      {item.specification
+                                        ? `${item.specification} × ${item.quantity}`
                                         : `× ${item.quantity}`}
                                     </small>
                                   </span>
@@ -3192,9 +3196,9 @@ function ShipmentArchiveSection({
                     </span>
                   ))}
                   {currentGroup?.items.map((item) => (
-                    <span key={`remaining-${item.sourceTitle}\u0000${item.sourceSpec}`}>
-                      <strong>{item.sourceTitle}</strong>
-                      <small>{item.sourceSpec ? `${item.sourceSpec} · ` : ''}待发 × {item.quantity}</small>
+                    <span key={`remaining-${item.title}\u0000${item.specification}`}>
+                      <strong>{item.title}</strong>
+                      <small>{item.specification ? `${item.specification} · ` : ''}待发 × {item.quantity}</small>
                     </span>
                   ))}
                 </div>
@@ -10375,14 +10379,24 @@ function DetailWorkspace({
                 <div className="detail-item" key={item.id}>
                   <span className="item-index">{String(index + 1).padStart(2, '0')}</span>
                   <div>
-                    <strong>{item.sourceTitle}</strong>
-                    <small>{item.sourceSpec || '无规格'}</small>
+                    <strong>{displayedProductTitle(item)}</strong>
+                    <small>{displayedProductSpecification(item) || '无规格'}</small>
                     <small>数量来源：{draftItemQuantitySourceLabel(item)}</small>
                     {item.standardProduct && (
-                      <small>
-                        标准商品：{item.standardProduct.sku} · {item.standardProduct.name}
-                        {item.standardDisplayPreference === 'prefer_source' && '（优先展示来源原文）'}
-                      </small>
+                      item.standardDisplayPreference === 'prefer_source' ? (
+                        <small>
+                          标准商品：{item.standardProduct.sku} · {item.standardProduct.name}
+                          {item.standardProduct.specification
+                            ? ` · ${item.standardProduct.specification}`
+                            : ''}
+                        </small>
+                      ) : (
+                        <small>
+                          来源原文：{item.sourceTitle}
+                          {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}
+                          {`（${item.standardProduct.sku}）`}
+                        </small>
+                      )
                     )}
                   </div>
                   <span>{formatMoney(item.unitPriceCents)} × {item.quantity}</span>

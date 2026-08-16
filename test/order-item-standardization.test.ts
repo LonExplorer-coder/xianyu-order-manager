@@ -6,6 +6,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import type { RecognitionResult } from '../src/core/contracts';
+import {
+  createOrderTableProjectionPlan,
+  projectOrderTableCell,
+  projectOrderTableProjectionRow,
+} from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 import { removeVersion45ExtensionArtifacts } from './version31-fixture';
 
@@ -314,6 +319,67 @@ describe('订单商品单笔关联标准商品', () => {
     });
     expect(unchanged.order.revision).toBe(linked.order.revision);
     expect(application.getOrder(order.id).changeEvents).toHaveLength(eventCount);
+  });
+});
+
+describe('标准商品显示偏好在订单投影生效', () => {
+  it('订单总表商品摘要与动态商品列组跟随每条明细的显示偏好', async () => {
+    const { application, order } = await openSeededApplication('XY-ITEM-DISPLAY-0001');
+    const product = application.createStandardProduct({
+      sku: 'SKU-DISPLAY-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+    });
+    const item = order.items[0];
+    const linked = application.updateOrderItemStandardization(order.id, item.id, {
+      standardProductId: product.id,
+      expectedRevision: order.revision,
+    });
+
+    const preferStandardSummary = application.queryOrders({ buyerText: '测' }).orders
+      .find(({ id }) => id === order.id);
+    expect(preferStandardSummary?.items[0]).toMatchObject({
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      standardDisplayPreference: 'prefer_standard',
+      standardProduct: expect.objectContaining({ sku: 'SKU-DISPLAY-001' }),
+    });
+    expect(projectOrderTableCell(
+      preferStandardSummary!,
+      { kind: 'builtin', key: 'product_summary' },
+    )).toBe('十二分娃鞋 · 白色小号 ×1');
+
+    application.updateOrderItemStandardization(order.id, item.id, {
+      standardProductId: product.id,
+      standardDisplayPreference: 'prefer_source',
+      expectedRevision: linked.order.revision,
+    });
+    const preferSourceSummary = application.queryOrders({ buyerText: '测' }).orders
+      .find(({ id }) => id === order.id);
+    expect(preferSourceSummary?.items[0]).toMatchObject({
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      standardDisplayPreference: 'prefer_source',
+      standardProduct: expect.objectContaining({ sku: 'SKU-DISPLAY-001' }),
+    });
+    expect(projectOrderTableCell(
+      preferSourceSummary!,
+      { kind: 'builtin', key: 'product_summary' },
+    )).toBe('十二分娃鞋白胚 · 小号 ×1');
+
+    const plan = createOrderTableProjectionPlan([
+      { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+      {
+        kind: 'dynamic_product_group',
+        labels: { product: '商品', specification: '款式', quantity: '数量' },
+      },
+    ], [preferSourceSummary!]);
+    expect(projectOrderTableProjectionRow(plan, preferSourceSummary!)).toEqual([
+      'XY-ITEM-DISPLAY-0001',
+      '十二分娃鞋白胚',
+      '小号',
+      1,
+    ]);
   });
 });
 

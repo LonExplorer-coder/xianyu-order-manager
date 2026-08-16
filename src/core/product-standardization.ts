@@ -695,14 +695,18 @@ export const PRODUCT_SIMILARITY_THRESHOLD = 0.35;
 export function displayedProductTitle(item: {
   sourceTitle: string;
   standardProduct?: StandardProduct | null;
+  standardDisplayPreference?: StandardDisplayPreference | null;
 }): string {
+  if (item.standardDisplayPreference === 'prefer_source') return item.sourceTitle;
   return item.standardProduct?.name || item.sourceTitle;
 }
 
 export function displayedProductSpecification(item: {
   sourceSpec: string;
   standardProduct?: StandardProduct | null;
+  standardDisplayPreference?: StandardDisplayPreference | null;
 }): string {
+  if (item.standardDisplayPreference === 'prefer_source') return item.sourceSpec;
   return item.standardProduct?.specification || item.sourceSpec;
 }
 

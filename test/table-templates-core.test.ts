@@ -293,6 +293,48 @@ describe('表格模板核心契约', () => {
     ]);
   });
 
+  it('订单总表商品摘要与动态商品列组按每条明细的标准商品显示偏好取值', () => {
+    const product = {
+      id: 'product-cup-red',
+      sku: 'CUP-RED',
+      name: '海棠杯',
+      specification: '红色',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-07-30T01:00:00.000Z',
+      updatedAt: '2026-07-30T01:00:00.000Z',
+    };
+    const linkedItem = {
+      sourceTitle: '海棠杯（闲鱼专拍）',
+      sourceSpec: '红色 450ml',
+      quantity: 2,
+      standardProduct: product,
+    };
+    const preferStandard = orderSummaryForProjection('order-1', 'XY-001', [{
+      ...linkedItem,
+      standardDisplayPreference: 'prefer_standard' as const,
+    }]);
+    const preferSource = orderSummaryForProjection('order-2', 'XY-002', [{
+      ...linkedItem,
+      standardDisplayPreference: 'prefer_source' as const,
+    }]);
+    const legacyLinked = orderSummaryForProjection('order-3', 'XY-003', [linkedItem]);
+    const plan = createOrderTableProjectionPlan([
+      { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品摘要' },
+      {
+        kind: 'dynamic_product_group',
+        labels: { product: '商品', specification: '款式', quantity: '数量' },
+      },
+    ], [preferStandard, preferSource, legacyLinked]);
+
+    expect(projectOrderTableProjectionRow(plan, preferStandard))
+      .toEqual(['海棠杯 · 红色 ×2', '海棠杯', '红色', 2]);
+    expect(projectOrderTableProjectionRow(plan, preferSource))
+      .toEqual(['海棠杯（闲鱼专拍） · 红色 450ml ×2', '海棠杯（闲鱼专拍）', '红色 450ml', 2]);
+    expect(projectOrderTableProjectionRow(plan, legacyLinked))
+      .toEqual(['海棠杯 · 红色 ×2', '海棠杯', '红色', 2]);
+  });
+
   it('动态生成的表头与普通列冲突时给出可操作错误', () => {
     const order = orderSummaryForProjection('order-1', 'XY-001', [
       { sourceTitle: '海棠杯', sourceSpec: '红色', quantity: 2 },
@@ -735,6 +777,17 @@ describe('表格模板核心契约', () => {
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'standard_product_name' }))
       .toBe('标准海棠杯');
     expect(projectOrderItemTableCell(item, { kind: 'builtin', key: 'standard_product_spec' }))
+      .toBe('红色标准款');
+    const preferSourceItem = { ...item, standardDisplayPreference: 'prefer_source' as const };
+    expect(projectOrderItemTableCell(preferSourceItem, { kind: 'builtin', key: 'product_title' }))
+      .toBe('海棠杯');
+    expect(projectOrderItemTableCell(preferSourceItem, { kind: 'builtin', key: 'product_spec' }))
+      .toBe('红色');
+    expect(projectOrderItemTableCell(preferSourceItem, { kind: 'builtin', key: 'sku' }))
+      .toBe('CUP-RED');
+    expect(projectOrderItemTableCell(preferSourceItem, { kind: 'builtin', key: 'standard_product_name' }))
+      .toBe('标准海棠杯');
+    expect(projectOrderItemTableCell(preferSourceItem, { kind: 'builtin', key: 'standard_product_spec' }))
       .toBe('红色标准款');
     const quantitySourceLabels: Array<[QuantitySource, string]> = [
       ['manual', '人工修改'],

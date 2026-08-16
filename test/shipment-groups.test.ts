@@ -13,6 +13,7 @@ import type {
   OrderEditInput,
   OriginalOrder,
 } from '../src/core/contracts';
+import { projectShipmentGroupTableCell } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
 
 const openedApplications: LocalApplication[] = [];
@@ -183,14 +184,14 @@ describe('保守的合并发货组', () => {
       ],
       items: expect.arrayContaining([
         expect.objectContaining({
-          sourceTitle: '亚麻收纳袋',
-          sourceSpec: '米白 大号',
+          title: '亚麻收纳袋',
+          specification: '米白 大号',
           quantity: 3,
           subtotalCents: 3_000,
         }),
         expect.objectContaining({
-          sourceTitle: '标签贴',
-          sourceSpec: '透明',
+          title: '标签贴',
+          specification: '透明',
           quantity: 2,
           subtotalCents: 1_000,
         }),
@@ -359,5 +360,61 @@ describe('保守的合并发货组', () => {
       groups: [],
       attentionOrders: [],
     });
+  });
+
+  it('合并发货组与合并发货表的商品显示按成员明细的标准商品显示偏好投影', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-DISPLAY-PREF-0001' }),
+    ]);
+    const product = application.createStandardProduct({
+      sku: 'SKU-GROUP-DISPLAY-001',
+      name: '亚麻收纳袋标准款',
+      specification: '米白大号',
+    });
+    const summary = application.listOrders()
+      .find(({ orderNumber }) => orderNumber === 'XY-DISPLAY-PREF-0001')!;
+    const linked = application.updateOrderItemStandardization(
+      summary.id,
+      application.getOrder(summary.id).order.items[0].id,
+      {
+        standardProductId: product.id,
+        expectedRevision: summary.revision!,
+      },
+    );
+
+    const standardGroup = application.queryShipmentGroups().groups[0];
+    expect(standardGroup.items).toEqual([expect.objectContaining({
+      title: '亚麻收纳袋标准款',
+      specification: '米白大号',
+      quantity: 2,
+    })]);
+    expect(projectShipmentGroupTableCell(
+      standardGroup,
+      { kind: 'builtin', key: 'product_summary' },
+    )).toBe('亚麻收纳袋标准款 · 米白大号 ×2');
+    expect(standardGroup.orders[0].items[0]).toMatchObject({
+      sourceTitle: '亚麻收纳袋',
+      sourceSpec: '米白 大号',
+    });
+
+    application.updateOrderItemStandardization(
+      summary.id,
+      linked.order.items[0].id,
+      {
+        standardProductId: product.id,
+        standardDisplayPreference: 'prefer_source',
+        expectedRevision: linked.order.revision,
+      },
+    );
+    const sourceGroup = application.queryShipmentGroups().groups[0];
+    expect(sourceGroup.items).toEqual([expect.objectContaining({
+      title: '亚麻收纳袋',
+      specification: '米白 大号',
+      quantity: 2,
+    })]);
+    expect(projectShipmentGroupTableCell(
+      sourceGroup,
+      { kind: 'builtin', key: 'product_summary' },
+    )).toBe('亚麻收纳袋 · 米白 大号 ×2');
   });
 });

@@ -75,6 +75,71 @@ describe('发货组 Electron IPC', () => {
     });
   });
 
+  it('标准商品显示偏好经 IPC 在订单与发货组投影生效', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-display-preference-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '待发货订单.png');
+    await writeFile(sourcePath, Buffer.from('display-preference-ipc-source'));
+    const recognition = completeRecognition();
+    const seeder = new LocalApplication(new ControlledRecognizer(recognition));
+    seeder.openDataDirectory(dataDirectory);
+    const [draft] = (await seeder.submitRecognitionBatch([sourcePath])).drafts;
+    const order = seeder.confirmDraft(draft);
+    const product = seeder.createStandardProduct({
+      sku: 'SKU-IPC-DISPLAY-001',
+      name: '测试标准商品',
+      specification: '标准款 M',
+    });
+    const linked = seeder.updateOrderItemStandardization(order.id, order.items[0].id, {
+      standardProductId: product.id,
+      expectedRevision: order.revision,
+    });
+    seeder.close();
+
+    const session = new DesktopSession(
+      new Preferences(join(root, '启动配置')),
+      new ControlledRecognizer(recognition),
+      unusedOcrSettings,
+    );
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+    registerIpcHandlers(session);
+
+    const initialQuery = await invoke('orders:query', {}, []) as {
+      orders: Array<{ items: Array<Record<string, unknown>> }>;
+    };
+    expect(initialQuery.orders[0].items[0]).toMatchObject({
+      sourceTitle: '测试商品',
+      standardDisplayPreference: 'prefer_standard',
+      standardProduct: expect.objectContaining({ sku: 'SKU-IPC-DISPLAY-001' }),
+    });
+    await expect(invoke('shipment-groups:query')).resolves.toMatchObject({
+      groups: [{ items: [{ title: '测试标准商品', specification: '标准款 M' }] }],
+    });
+
+    await invoke(
+      'orders:update-item-standardization',
+      order.id,
+      order.items[0].id,
+      {
+        standardProductId: product.id,
+        standardDisplayPreference: 'prefer_source',
+        expectedRevision: linked.order.revision,
+      },
+    );
+
+    const updatedQuery = await invoke('orders:query', {}, []) as {
+      orders: Array<{ items: Array<Record<string, unknown>> }>;
+    };
+    expect(updatedQuery.orders[0].items[0]).toMatchObject({
+      sourceTitle: '测试商品',
+      standardDisplayPreference: 'prefer_source',
+    });
+    await expect(invoke('shipment-groups:query')).resolves.toMatchObject({
+      groups: [{ items: [{ title: '测试商品', specification: '标准款' }] }],
+    });
+  });
+
   it('通过受控通道传递拆分与重组命令', async () => {
     const splitShipmentGroup = vi.fn().mockReturnValue({ event: { operation: 'split' } });
     const mergeShipmentGroups = vi.fn().mockReturnValue({ event: { operation: 'merge' } });

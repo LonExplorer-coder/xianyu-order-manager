@@ -5878,6 +5878,7 @@ export class LocalApplication {
               'sourceTitle', ordered_items.source_title,
               'sourceSpec', ordered_items.source_spec,
               'quantity', ordered_items.quantity,
+              'standardDisplayPreference', ordered_items.standard_display_preference,
               'standardProduct', CASE
                 WHEN ordered_items.standard_product_id IS NULL THEN NULL
                 ELSE json_object(
@@ -5897,6 +5898,7 @@ export class LocalApplication {
                 order_items.source_spec,
                 order_items.quantity,
                 order_items.standard_product_id,
+                order_items.standard_display_preference,
                 standard_products.sku AS standard_sku,
                 standard_products.name AS standard_name,
                 standard_products.specification AS standard_specification,
@@ -8556,11 +8558,18 @@ function parseOrderSummaryItems(serialized: string): OrderSummary['items'] {
     typeof (item as Record<string, unknown>).sourceSpec === 'string' &&
     Number.isSafeInteger((item as Record<string, unknown>).quantity) &&
     ((item as Record<string, unknown>).quantity as number) > 0 &&
+    isStoredStandardDisplayPreference(
+      (item as Record<string, unknown>).standardDisplayPreference,
+    ) &&
     isStoredStandardProduct((item as Record<string, unknown>).standardProduct)
   ))) {
     throw new Error('数据库订单商品摘要格式错误');
   }
   return parsed as OrderSummary['items'];
+}
+
+function isStoredStandardDisplayPreference(value: unknown): boolean {
+  return value === null || value === 'prefer_standard' || value === 'prefer_source';
 }
 
 function isStoredStandardProduct(value: unknown): boolean {

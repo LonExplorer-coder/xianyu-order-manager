@@ -328,8 +328,8 @@ function singleShipmentGroupProjection(
         })),
       }],
       items: order.items.map((item) => ({
-        sourceTitle: item.sourceTitle,
-        sourceSpec: item.sourceSpec,
+        title: item.sourceTitle,
+        specification: item.sourceSpec,
         quantity: item.quantity,
         subtotalCents: item.subtotalCents,
         unitPricesCents: [item.unitPriceCents],
@@ -734,8 +734,8 @@ describe('订单管理工作台', () => {
           },
         ],
         items: [{
-          sourceTitle: '脱敏测试商品',
-          sourceSpec: '白色',
+          title: '脱敏测试商品',
+          specification: '白色',
           quantity: 3,
           subtotalCents: 2_400,
           unitPricesCents: [800],
@@ -6646,6 +6646,112 @@ describe('订单管理工作台', () => {
     );
     expect(await screen.findByText(/SKU-UI-LINK-001/u)).toBeVisible();
     expect(screen.queryByRole('dialog', { name: '关联标准商品' })).not.toBeInTheDocument();
+  });
+
+  it('订单详情主标题在优先展示标准商品信息时显示标准商品并标注来源原文', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-display-1',
+      sku: 'SKU-UI-DISPLAY-001',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const linkedDetails: OrderDetails = {
+      ...orderDetails,
+      order: {
+        ...confirmedOrder,
+        items: [{
+          ...confirmedOrder.items[0],
+          standardProduct: product,
+          standardizationSource: 'manual',
+          standardDisplayPreference: 'prefer_standard',
+        }],
+      },
+    };
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(linkedDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.click(
+      await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }),
+    );
+    expect(await screen.findByRole('heading', { name: '订单详情' })).toBeVisible();
+
+    const itemsHeading = await screen.findByRole('heading', { name: '订单商品明细' });
+    const itemsSection = itemsHeading.closest('section');
+    if (!itemsSection) throw new Error('缺少订单商品明细区域');
+    expect(within(itemsSection).getByText('十二分娃鞋').tagName).toBe('STRONG');
+    expect(within(itemsSection).getByText('白色小号')).toBeVisible();
+    expect(within(itemsSection).queryByText('脱敏测试商品', { selector: 'strong' }))
+      .not.toBeInTheDocument();
+    expect(within(itemsSection).getByText(/来源原文：脱敏测试商品 · 白色/u)).toBeVisible();
+    expect(within(itemsSection).getByText(/SKU-UI-DISPLAY-001/u)).toBeVisible();
+  });
+
+  it('订单详情主标题在优先展示订单来源原文时显示来源标题并标注标准商品', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-display-2',
+      sku: 'SKU-UI-DISPLAY-002',
+      name: '十二分娃鞋',
+      specification: '白色小号',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const linkedDetails: OrderDetails = {
+      ...orderDetails,
+      order: {
+        ...confirmedOrder,
+        items: [{
+          ...confirmedOrder.items[0],
+          standardProduct: product,
+          standardizationSource: 'manual',
+          standardDisplayPreference: 'prefer_source',
+        }],
+      },
+    };
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      getOrder: vi.fn().mockResolvedValue(linkedDetails),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+    });
+
+    render(<App api={api} />);
+    await user.click(
+      await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }),
+    );
+    expect(await screen.findByRole('heading', { name: '订单详情' })).toBeVisible();
+
+    const itemsHeading = await screen.findByRole('heading', { name: '订单商品明细' });
+    const itemsSection = itemsHeading.closest('section');
+    if (!itemsSection) throw new Error('缺少订单商品明细区域');
+    expect(within(itemsSection).getByText('脱敏测试商品').tagName).toBe('STRONG');
+    expect(within(itemsSection).getByText('白色', { selector: 'small' })).toBeVisible();
+    expect(within(itemsSection).queryByText('十二分娃鞋', { selector: 'strong' }))
+      .not.toBeInTheDocument();
+    expect(within(itemsSection).getByText(/标准商品：SKU-UI-DISPLAY-002 · 十二分娃鞋/u))
+      .toBeVisible();
   });
 
   it('人工新增商品选择标准商品一次性带入并确认同步商品总价', async () => {

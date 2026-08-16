@@ -738,7 +738,7 @@ export function projectShipmentGroupTableCell(
     case 'address': return group.addressOriginal;
     case 'member_order_numbers': return group.orders.map(({ orderNumber }) => orderNumber).join('；');
     case 'product_summary': return group.items.map((item) => (
-      `${item.sourceTitle}${item.sourceSpec ? ` · ${item.sourceSpec}` : ''} ×${item.quantity}`
+      `${item.title}${item.specification ? ` · ${item.specification}` : ''} ×${item.quantity}`
     )).join('；');
     default: return null;
   }

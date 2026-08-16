@@ -557,6 +557,64 @@ describe('默认脱敏的订单工作簿导出', () => {
     expect(archiveText).not.toContain('/comments');
   });
 
+  it('普通导出商品列跟随每条明细的标准商品显示偏好，明确命名字段输出真实值', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-EXPORT-PREF-001' }),
+    ]);
+    const product = application.createStandardProduct({
+      sku: 'CUP-PREF-001',
+      name: '标准海棠杯',
+      specification: '红色 450ml 标准款',
+    });
+    const orderId = application.queryOrders({ buyerText: '海棠' }).orders[0].id;
+    const linked = application.updateOrderItemStandardization(
+      orderId,
+      application.getOrder(orderId).order.items[0].id,
+      { standardProductId: product.id, expectedRevision: application.getOrder(orderId).order.revision },
+    );
+    const destinationPath = join(testRoot, '偏好导出.xlsx');
+    const exportInput = {
+      scope: { kind: 'current_result' as const, orderIds: [orderId] },
+      orderTemplateId: null,
+      includeOrderItems: true,
+      orderItemTemplateId: null,
+      masking: 'masked' as const,
+    };
+
+    await application.exportOrdersToWorkbook(exportInput, destinationPath);
+    const standardWorkbook = new ExcelJS.Workbook();
+    await standardWorkbook.xlsx.readFile(destinationPath);
+    const standardOrders = standardWorkbook.getWorksheet('订单总表');
+    const standardItems = standardWorkbook.getWorksheet('订单商品明细表');
+    if (!standardOrders || !standardItems) throw new Error('缺少导出工作表');
+    expect(cellByHeader(standardOrders, 2, '商品1').value).toBe('标准海棠杯');
+    expect(cellByHeader(standardOrders, 2, '款式或规格1').value).toBe('红色 450ml 标准款');
+    expect(cellByHeader(standardItems, 2, '原始商品标题').value).toBe('夏日海棠杯');
+    expect(cellByHeader(standardItems, 2, '原始款式／规格').value).toBe('红色 450ml');
+    expect(cellByHeader(standardItems, 2, 'SKU').value).toBe('CUP-PREF-001');
+    expect(cellByHeader(standardItems, 2, '标准商品名').value).toBe('标准海棠杯');
+    expect(cellByHeader(standardItems, 2, '标准规格').value).toBe('红色 450ml 标准款');
+
+    application.updateOrderItemStandardization(orderId, linked.order.items[0].id, {
+      standardProductId: product.id,
+      standardDisplayPreference: 'prefer_source',
+      expectedRevision: linked.order.revision,
+    });
+    await application.exportOrdersToWorkbook(exportInput, destinationPath);
+    const sourceWorkbook = new ExcelJS.Workbook();
+    await sourceWorkbook.xlsx.readFile(destinationPath);
+    const sourceOrders = sourceWorkbook.getWorksheet('订单总表');
+    const sourceItems = sourceWorkbook.getWorksheet('订单商品明细表');
+    if (!sourceOrders || !sourceItems) throw new Error('缺少导出工作表');
+    expect(cellByHeader(sourceOrders, 2, '商品1').value).toBe('夏日海棠杯');
+    expect(cellByHeader(sourceOrders, 2, '款式或规格1').value).toBe('红色 450ml');
+    expect(cellByHeader(sourceItems, 2, '原始商品标题').value).toBe('夏日海棠杯');
+    expect(cellByHeader(sourceItems, 2, '原始款式／规格').value).toBe('红色 450ml');
+    expect(cellByHeader(sourceItems, 2, 'SKU').value).toBe('CUP-PREF-001');
+    expect(cellByHeader(sourceItems, 2, '标准商品名').value).toBe('标准海棠杯');
+    expect(cellByHeader(sourceItems, 2, '标准规格').value).toBe('红色 450ml 标准款');
+  });
+
   it('人工修改后默认导出跟随当前视图，自定义模板仍可导出备注', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({

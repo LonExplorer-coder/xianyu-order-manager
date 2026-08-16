@@ -335,6 +335,7 @@ export type OrderSummary = {
   items: Array<Pick<OrderItem, 'sourceTitle' | 'sourceSpec' | 'quantity'> & {
     /** Present for persisted application projections; optional for lightweight consumers. */
     standardProduct?: StandardProduct | null;
+    standardDisplayPreference?: StandardDisplayPreference | null;
   }>;
   operations: OrderOperationsOverview;
 };

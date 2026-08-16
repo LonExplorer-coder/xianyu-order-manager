@@ -78,8 +78,8 @@ function group(input: {
       }],
     }],
     items: [{
-      sourceTitle: '白模鞋',
-      sourceSpec: '05M',
+      title: '白模鞋',
+      specification: '05M',
       quantity: 2,
       subtotalCents: input.amountCents,
       unitPricesCents: [input.amountCents / 2],
