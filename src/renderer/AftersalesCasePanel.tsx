@@ -9,6 +9,7 @@ import type {
 import type { DesktopApi } from '../core/desktop-api';
 import {
   aftersalesWorkflowFieldLabel,
+  aftersalesWorkflowStepCategoryLabel,
   projectAftersalesWorkflowSteps,
 } from '../core/aftersales-workflow-templates';
 import type { ShipmentRecord } from '../core/shipment-records';
@@ -102,8 +103,14 @@ export function AftersalesCasePanel({
                   <span aria-hidden="true">{step.state === 'completed' ? '✓' : index + 1}</span>
                   <div>
                     <strong>{step.name}</strong>
-                    <small>{step.required ? '必需' : '可选'}
-                      {step.state === 'current' ? ' · 当前建议' : ''}</small>
+                    <small>
+                      {step.kind === null || step.binding === null
+                        ? '需要检查 · 未绑定业务动作'
+                        : `${step.required ? '必需' : '可选'} · ${
+                          aftersalesWorkflowStepCategoryLabel(step.binding.category)
+                        }`}
+                      {step.state === 'current' ? ' · 当前建议' : ''}
+                    </small>
                     {step.state === 'current' && step.fields.length > 0 && (
                       <small>需核对：{step.fields.map(aftersalesWorkflowFieldLabel).join('、')}</small>
                     )}

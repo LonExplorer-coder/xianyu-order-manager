@@ -11,9 +11,14 @@ import type {
   Recognizer,
   RecognizerSource,
 } from '../src/core/contracts';
-import { projectAftersalesWorkflowSteps } from '../src/core/aftersales-workflow-templates';
+import {
+  AFTERSALES_WORKFLOW_STEP_BINDINGS,
+  AFTERSALES_WORKFLOW_STEP_KINDS,
+  aftersalesWorkflowStepCategoryLabel,
+  projectAftersalesWorkflowSteps,
+} from '../src/core/aftersales-workflow-templates';
 import { LocalApplication } from '../src/main/local-application';
-import { removeVersion38ExtensionArtifacts } from './version31-fixture';
+import { removeVersion38ExtensionArtifacts, removeVersion50ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
 const unusedRecognizer: Recognizer = {
@@ -891,7 +896,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 49 });
+        .toEqual({ version: 50 });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'
@@ -1024,5 +1029,291 @@ describe('售后流程模板', () => {
         handlingDirectionTimeline: changed.coordination.handlingDirectionTimeline,
       },
     });
+  });
+
+  it('十二种步骤 kind 完整绑定已定义领域动作并区分事实型与管理型', () => {
+    expect(AFTERSALES_WORKFLOW_STEP_BINDINGS).toEqual({
+      identify_issue: { category: 'management', actions: ['start_next_round'] },
+      choose_resolution: {
+        category: 'management',
+        actions: ['change_handling_direction', 'decide_outbound_logistics_exception'],
+      },
+      request_interception: {
+        category: 'fact',
+        actions: ['change_handling_direction', 'record_interception_result'],
+      },
+      register_return: {
+        category: 'fact',
+        actions: ['register_return', 'correct_return_logistics', 'update_return_logistics_status'],
+      },
+      receive_return: { category: 'fact', actions: ['receive_return'] },
+      inspect_return: { category: 'fact', actions: ['inspect_return', 'inspect_intercepted_return'] },
+      confirm_refund: {
+        category: 'fact',
+        actions: ['confirm_refund', 'adjust_refund_target', 'end_refund', 'cancel_refund_request'],
+      },
+      prepare_replacement: { category: 'fact', actions: ['create_replacement_shipment'] },
+      confirm_replacement_delivery: { category: 'fact', actions: [] },
+      resolve_logistics_exception: {
+        category: 'fact',
+        actions: [
+          'decide_outbound_logistics_exception',
+          'record_return_logistics_exception',
+          'progress_return_logistics_exception',
+          'decide_return_logistics_exception',
+          'open_carrier_claim',
+          'resolve_carrier_claim',
+          'confirm_carrier_compensation',
+        ],
+      },
+      record_resolution: { category: 'management', actions: [] },
+      complete: { category: 'management', actions: ['complete'] },
+    });
+    expect(Object.keys(AFTERSALES_WORKFLOW_STEP_BINDINGS).sort())
+      .toEqual([...AFTERSALES_WORKFLOW_STEP_KINDS].sort());
+    expect(aftersalesWorkflowStepCategoryLabel('fact')).toBe('事实型');
+    expect(aftersalesWorkflowStepCategoryLabel('management')).toBe('管理型');
+  });
+
+  it('绑定表覆盖除整案取消外的全部进度动作', () => {
+    for (const { actions } of Object.values(AFTERSALES_WORKFLOW_STEP_BINDINGS)) {
+      expect(new Set(actions).size).toBe(actions.length);
+    }
+    const boundActions = Object.values(AFTERSALES_WORKFLOW_STEP_BINDINGS)
+      .flatMap(({ actions }) => [...actions]);
+    expect([...new Set(boundActions)].sort()).toEqual([
+      'adjust_refund_target',
+      'cancel_refund_request',
+      'change_handling_direction',
+      'complete',
+      'confirm_carrier_compensation',
+      'confirm_refund',
+      'correct_return_logistics',
+      'create_replacement_shipment',
+      'decide_outbound_logistics_exception',
+      'decide_return_logistics_exception',
+      'end_refund',
+      'inspect_intercepted_return',
+      'inspect_return',
+      'open_carrier_claim',
+      'progress_return_logistics_exception',
+      'receive_return',
+      'record_interception_result',
+      'record_return_logistics_exception',
+      'register_return',
+      'resolve_carrier_claim',
+      'start_next_round',
+      'update_return_logistics_status',
+    ]);
+  });
+
+  it('模板步骤不能绑定系统未定义的业务动作', async () => {
+    const { application } = await openApplication();
+    const legacyStep = {
+      id: 'legacy-note',
+      name: '旧版自由备注',
+      required: true,
+      fields: ['reason'],
+      condition: null,
+    };
+    expect(() => application.createAftersalesWorkflowTemplate({
+      name: '未定义动作流程',
+      scenario: 'other',
+      steps: [{ ...legacyStep, kind: 'legacy_free_note' }],
+    })).toThrow('售后流程步骤必须绑定已定义的业务动作');
+    expect(() => application.createAftersalesWorkflowTemplate({
+      name: '未定义动作流程',
+      scenario: 'other',
+      steps: [{ ...legacyStep, kind: null }],
+    })).toThrow('售后流程步骤必须绑定已定义的业务动作');
+  });
+
+  it('需要检查的步骤不参与执行推进且投影携带绑定与分类', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const refundOnly = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'refund_only',
+    );
+    if (!refundOnly) throw new Error('缺少仅退款预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: refundOnly.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '绑定投影测试',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+
+    const steps = projectAftersalesWorkflowSteps({
+      scenario: 'refund_only',
+      steps: [
+        {
+          id: 'identify-issue',
+          kind: 'identify_issue',
+          name: '确认问题与退款申请',
+          required: true,
+          fields: [],
+          condition: null,
+        },
+        {
+          id: 'legacy-note',
+          kind: null,
+          name: '旧版自由备注',
+          required: true,
+          fields: ['reason'],
+          condition: null,
+        },
+        {
+          id: 'confirm-refund',
+          kind: 'confirm_refund',
+          name: '确认实际退款',
+          required: true,
+          fields: [],
+          condition: null,
+        },
+      ],
+    }, created);
+
+    expect(steps.find(({ id }) => id === 'identify-issue')).toMatchObject({
+      state: 'completed',
+      binding: { category: 'management', actions: ['start_next_round'] },
+    });
+    expect(steps.find(({ id }) => id === 'legacy-note')).toMatchObject({
+      kind: null,
+      state: 'upcoming',
+      binding: null,
+    });
+    expect(steps.find(({ id }) => id === 'confirm-refund')).toMatchObject({
+      state: 'current',
+      binding: {
+        category: 'fact',
+        actions: ['confirm_refund', 'adjust_refund_target', 'end_refund', 'cancel_refund_request'],
+      },
+    });
+  });
+
+  it('存量自定义模板跨 v50 迁移后未绑定步骤标记需要检查并可修复', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const custom = application.createAftersalesWorkflowTemplate({
+      name: '迁移前自定义流程',
+      scenario: 'other',
+      steps: [{
+        id: 'identify',
+        kind: 'identify_issue',
+        name: '确认问题',
+        required: true,
+        fields: ['items', 'reason'],
+        condition: null,
+      }],
+    });
+    application.close();
+    applications.splice(applications.indexOf(application), 1);
+
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      removeVersion50ExtensionArtifacts(legacy);
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 49 });
+      legacy.prepare(`
+        INSERT INTO aftersales_workflow_template_versions (
+          template_id, version, definition_json, created_at
+        ) VALUES (?, 2, ?, '2026-08-14T03:00:00.000Z')
+      `).run(custom.id, JSON.stringify({
+        name: '迁移前自定义流程',
+        scenario: 'other',
+        steps: [
+          {
+            id: 'identify',
+            kind: 'identify_issue',
+            name: '确认问题',
+            required: true,
+            fields: ['items', 'reason'],
+            condition: null,
+          },
+          {
+            id: 'legacy-note',
+            kind: 'legacy_free_note',
+            name: '旧版自由备注',
+            required: true,
+            fields: ['reason'],
+            condition: null,
+          },
+        ],
+      }));
+      legacy.prepare(`
+        UPDATE aftersales_workflow_templates
+        SET current_version = 2, updated_at = '2026-08-14T03:00:00.000Z'
+        WHERE id = ?
+      `).run(custom.id);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = new LocalApplication(unusedRecognizer);
+    applications.push(migrated);
+    migrated.openDataDirectory(dataDirectory);
+    const verified = new DatabaseSync(databasePath);
+    try {
+      expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 50 });
+      expect(verified.prepare(`
+        SELECT definition_json FROM aftersales_workflow_template_versions
+        WHERE template_id = ? AND version = 2
+      `).get(custom.id)).toMatchObject({
+        definition_json: expect.stringContaining('"kind":null'),
+      });
+      expect(() => verified.prepare(`
+        UPDATE aftersales_workflow_template_versions
+        SET definition_json = '{"name":"覆盖"}'
+      `).run()).toThrow(/immutable/u);
+    } finally {
+      verified.close();
+    }
+
+    const listed = migrated.listAftersalesWorkflowTemplates()
+      .find(({ id }) => id === custom.id);
+    expect(listed).toMatchObject({ version: 2 });
+    expect(listed?.steps.map(({ id, kind }) => ({ id, kind }))).toEqual([
+      { id: 'identify', kind: 'identify_issue' },
+      { id: 'legacy-note', kind: null },
+    ]);
+
+    const copied = migrated.copyAftersalesWorkflowTemplate({
+      sourceTemplateId: custom.id,
+      name: '复制需要检查的流程',
+    });
+    expect(copied.steps.some(({ kind }) => kind === null)).toBe(true);
+
+    const fixed = migrated.updateAftersalesWorkflowTemplate(custom.id, {
+      expectedVersion: 2,
+      name: '迁移前自定义流程',
+      scenario: 'other',
+      steps: [{
+        id: 'identify',
+        kind: 'identify_issue',
+        name: '确认问题',
+        required: true,
+        fields: ['items', 'reason'],
+        condition: null,
+      }, {
+        id: 'resolution',
+        kind: 'record_resolution',
+        name: '记录处理结果',
+        required: true,
+        fields: ['resolution_reason'],
+        condition: null,
+      }],
+    });
+    expect(fixed).toMatchObject({ version: 3 });
+    expect(fixed.steps.every(({ kind }) => kind !== null)).toBe(true);
+
+    const downgrade = new DatabaseSync(databasePath);
+    try {
+      expect(() => removeVersion50ExtensionArtifacts(downgrade))
+        .toThrow('v50 测试降级前必须先移除需要检查的流程步骤');
+    } finally {
+      downgrade.close();
+    }
   });
 });

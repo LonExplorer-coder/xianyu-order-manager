@@ -91,6 +91,13 @@ describe('售后流程模板 Electron IPC', () => {
     await expect(invoke('aftersales-workflows:create', {
       name: '不安全流程', scenario: 'other', steps: [], script: 'while(true){}',
     })).rejects.toThrow(/循环、脚本|未定义/u);
+    await expect(invoke('aftersales-workflows:create', {
+      name: '未定义动作流程', scenario: 'other',
+      steps: [{
+        id: 'legacy-note', kind: 'legacy_free_note', name: '旧版自由备注',
+        required: true, fields: ['reason'], condition: null,
+      }],
+    })).rejects.toThrow('售后流程步骤必须绑定已定义的业务动作');
     await expect(invoke('aftersales-workflows:update', presets[0].id, {
       expectedVersion: 1,
       name: '改写预置',

@@ -12180,7 +12180,18 @@ describe('订单管理工作台', () => {
         version: refundTemplate.version,
         name: refundTemplate.name,
         scenario: refundTemplate.scenario,
-        steps: refundTemplate.steps,
+        steps: [
+          refundTemplate.steps[0],
+          {
+            id: 'legacy-note',
+            kind: null,
+            name: '旧版自由备注',
+            required: true,
+            fields: ['reason'],
+            condition: null,
+          },
+          ...refundTemplate.steps.slice(1),
+        ],
         timeline: [{
           kind: 'selected', before: null,
           after: { templateId: refundTemplate.id, version: 1 },
@@ -12259,7 +12270,8 @@ describe('订单管理工作台', () => {
     const guide = within(caseRegion).getByRole('region', { name: '售后流程引导' });
     expect(guide).toHaveTextContent('仅退款');
     expect(guide).toHaveTextContent('确认问题与退款申请');
-    expect(guide).toHaveTextContent('确认实际退款必需 · 当前建议');
+    expect(guide).toHaveTextContent('旧版自由备注需要检查 · 未绑定业务动作');
+    expect(guide).toHaveTextContent('确认实际退款必需 · 事实型 · 当前建议');
     expect(guide).toHaveTextContent('需核对：发生时间、申请退款金额、处理说明');
     await user.click(within(guide).getByRole('button', { name: '调整后续流程' }));
     const dialog = screen.getByRole('dialog', { name: '调整后续售后流程' });

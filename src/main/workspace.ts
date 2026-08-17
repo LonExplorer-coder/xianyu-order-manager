@@ -13,7 +13,10 @@ import {
   shanghaiDateKey,
   systemOrderNumberForSequence,
 } from '../core/system-order-number';
-import { SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES } from '../core/aftersales-workflow-templates';
+import {
+  SYSTEM_AFTERSALES_WORKFLOW_TEMPLATES,
+  isBoundAftersalesWorkflowStepKind,
+} from '../core/aftersales-workflow-templates';
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
@@ -203,6 +206,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(47)) migrateToVersion47(database);
   if (!versions.has(48)) migrateToVersion48(database);
   if (!versions.has(49)) migrateToVersion49(database);
+  if (!versions.has(50)) migrateToVersion50(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6132,6 +6136,63 @@ function migrateToVersion49(database: DatabaseSync): void {
     database.exec('PRAGMA foreign_keys = ON;');
     throw error;
   }
+}
+
+// v50 一次性升级可执行售后流程模板：把存储步骤统一到「绑定已定义业务动作」的形态，
+// 无法绑定的存量步骤改写为 kind = null（需要检查），仅可见、不可执行。
+function migrateToVersion50(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec('DROP TRIGGER aftersales_workflow_template_versions_are_immutable_on_update;');
+    const rows = database.prepare(`
+      SELECT template_id, version, definition_json
+      FROM aftersales_workflow_template_versions
+    `).all() as Array<{ template_id: string; version: number; definition_json: string }>;
+    const update = database.prepare(`
+      UPDATE aftersales_workflow_template_versions
+      SET definition_json = ?
+      WHERE template_id = ? AND version = ?
+    `);
+    for (const row of rows) {
+      const rewritten = canonicalizeTemplateDefinitionJsonForV50(row.definition_json);
+      if (rewritten !== null) update.run(rewritten, row.template_id, row.version);
+    }
+    database.exec(`
+      CREATE TRIGGER aftersales_workflow_template_versions_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_workflow_template_versions
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales workflow template versions are immutable');
+      END;
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (50, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function canonicalizeTemplateDefinitionJsonForV50(definitionJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(definitionJson);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const steps = (parsed as { steps?: unknown }).steps;
+  if (!Array.isArray(steps)) return null;
+  let changed = false;
+  const canonicalSteps = steps.map((step) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return step;
+    const record = step as { kind?: unknown };
+    if (isBoundAftersalesWorkflowStepKind(record.kind)) return step;
+    changed = true;
+    return { ...record, kind: null };
+  });
+  if (!changed) return null;
+  return JSON.stringify({ ...(parsed as Record<string, unknown>), steps: canonicalSteps });
 }
 
 function createMissingSchemaObject(database: DatabaseSync, name: string, sql: string): void {

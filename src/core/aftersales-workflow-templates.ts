@@ -1,4 +1,8 @@
-import type { AftersalesCase, AftersalesWorkflow } from './aftersales-cases';
+import type {
+  AftersalesCase,
+  AftersalesWorkflow,
+  ProgressAftersalesCaseInput,
+} from './aftersales-cases';
 
 export type AftersalesWorkflowTemplateOrigin = 'system' | 'custom';
 
@@ -24,6 +28,17 @@ export type AftersalesWorkflowStepKind =
   | 'resolve_logistics_exception'
   | 'record_resolution'
   | 'complete';
+
+// 整案取消（cancel）属于处理单生命周期动作，不属于任何流程步骤。
+export type AftersalesWorkflowProgressActionKind =
+  Exclude<ProgressAftersalesCaseInput, { kind: 'cancel' }>['kind'];
+
+export type AftersalesWorkflowStepCategory = 'fact' | 'management';
+
+export type AftersalesWorkflowStepBinding = {
+  category: AftersalesWorkflowStepCategory;
+  actions: readonly AftersalesWorkflowProgressActionKind[];
+};
 
 export type AftersalesWorkflowField =
   | 'occurred_at'
@@ -55,7 +70,8 @@ export type AftersalesWorkflowStepCondition = {
 
 export type AftersalesWorkflowStep = {
   id: string;
-  kind: AftersalesWorkflowStepKind;
+  // null 表示「需要检查」：存量步骤无法绑定任何已定义业务动作，仅可见、不可执行。
+  kind: AftersalesWorkflowStepKind | null;
   name: string;
   required: boolean;
   fields: AftersalesWorkflowField[];
@@ -79,6 +95,7 @@ export type AftersalesWorkflowTemplate = {
 
 export type AftersalesWorkflowStepProjection = AftersalesWorkflowStep & {
   state: 'completed' | 'current' | 'upcoming';
+  binding: AftersalesWorkflowStepBinding | null;
 };
 
 export type StoredAftersalesWorkflowTemplateDefinition = {
@@ -137,6 +154,67 @@ export const AFTERSALES_WORKFLOW_CONDITION_FACTS = [
   'interception_requested',
   'logistics_exception_present',
 ] as const satisfies readonly AftersalesWorkflowConditionFact[];
+
+// 事实型步骤只能由真实业务事实满足；管理型步骤保存人与业务之间的处理确认。
+// 绑定表固定「步骤 kind → 已定义领域动作」的映射，模板只能调整顺序、必需性、
+// 字段要求与一层条件，不能创造系统未定义的业务动作。
+export const AFTERSALES_WORKFLOW_STEP_BINDINGS = {
+  identify_issue: {
+    category: 'management',
+    actions: ['start_next_round'],
+  },
+  choose_resolution: {
+    category: 'management',
+    actions: ['change_handling_direction', 'decide_outbound_logistics_exception'],
+  },
+  request_interception: {
+    category: 'fact',
+    actions: ['change_handling_direction', 'record_interception_result'],
+  },
+  register_return: {
+    category: 'fact',
+    actions: ['register_return', 'correct_return_logistics', 'update_return_logistics_status'],
+  },
+  receive_return: { category: 'fact', actions: ['receive_return'] },
+  inspect_return: {
+    category: 'fact',
+    actions: ['inspect_return', 'inspect_intercepted_return'],
+  },
+  confirm_refund: {
+    category: 'fact',
+    actions: ['confirm_refund', 'adjust_refund_target', 'end_refund', 'cancel_refund_request'],
+  },
+  prepare_replacement: { category: 'fact', actions: ['create_replacement_shipment'] },
+  // 补发签收由补发物流同步事实满足，没有对应的进度动作。
+  confirm_replacement_delivery: { category: 'fact', actions: [] },
+  resolve_logistics_exception: {
+    category: 'fact',
+    actions: [
+      'decide_outbound_logistics_exception',
+      'record_return_logistics_exception',
+      'progress_return_logistics_exception',
+      'decide_return_logistics_exception',
+      'open_carrier_claim',
+      'resolve_carrier_claim',
+      'confirm_carrier_compensation',
+    ],
+  },
+  // 记录处理结果由处理单状态推进满足，没有专属进度动作。
+  record_resolution: { category: 'management', actions: [] },
+  complete: { category: 'management', actions: ['complete'] },
+} as const satisfies Readonly<Record<AftersalesWorkflowStepKind, AftersalesWorkflowStepBinding>>;
+
+export function isBoundAftersalesWorkflowStepKind(
+  value: unknown,
+): value is AftersalesWorkflowStepKind {
+  return typeof value === 'string' && Object.hasOwn(AFTERSALES_WORKFLOW_STEP_BINDINGS, value);
+}
+
+export function aftersalesWorkflowStepCategoryLabel(
+  category: AftersalesWorkflowStepCategory,
+): string {
+  return category === 'fact' ? '事实型' : '管理型';
+}
 
 export function aftersalesWorkflowFieldLabel(value: AftersalesWorkflowField): string {
   return ({
@@ -364,7 +442,9 @@ export function parseStoredAftersalesWorkflowTemplateDefinition(
   } catch (error) {
     throw new Error('售后流程模板版本无法读取', { cause: error });
   }
-  return normalizeAftersalesWorkflowTemplateDefinition(parsed);
+  return normalizeAftersalesWorkflowTemplateDefinition(parsed, {
+    unboundStepsMarkedForReview: true,
+  });
 }
 
 export function normalizeCreateAftersalesWorkflowTemplateInput(
@@ -438,27 +518,32 @@ export function projectAftersalesWorkflowSteps(
     stepValue.condition === null
     || facts[stepValue.condition.fact] === stepValue.condition.equals
   ));
-  const completed = visible.map((stepValue) => (
-    stepCompleted(
-      stepValue.kind,
+  const completed = visible.map((stepValue) => {
+    const { kind } = stepValue;
+    if (kind === null) return false;
+    return stepCompleted(
+      kind,
       template.scenario,
       aftersalesCase,
       currentRound,
       currentReturns,
     )
-    && stepValue.fields.every((field) => workflowFieldSatisfied(
-      field,
-      stepValue.kind,
-      template.scenario,
-      aftersalesCase,
-      currentRound,
-      currentReturns,
-    ))
-  ));
+      && stepValue.fields.every((field) => workflowFieldSatisfied(
+        field,
+        kind,
+        template.scenario,
+        aftersalesCase,
+        currentRound,
+        currentReturns,
+      ));
+  });
+  // 需要检查的步骤不可执行：不判完成，也不成为当前待办。
   const currentIndex = completed.findIndex((value, index) => (
-    !value && visible[index]?.required
+    !value && visible[index]?.required && visible[index]?.kind !== null
   ));
-  const fallbackIndex = currentIndex < 0 ? completed.findIndex((value) => !value) : currentIndex;
+  const fallbackIndex = currentIndex < 0
+    ? completed.findIndex((value, index) => !value && visible[index]?.kind !== null)
+    : currentIndex;
   return visible.map((stepValue, index) => ({
     ...stepValue,
     state: completed[index]
@@ -466,6 +551,7 @@ export function projectAftersalesWorkflowSteps(
       : index === fallbackIndex
         ? 'current'
         : 'upcoming',
+    binding: stepValue.kind === null ? null : AFTERSALES_WORKFLOW_STEP_BINDINGS[stepValue.kind],
   }));
 }
 
@@ -653,6 +739,7 @@ function condition(fact: AftersalesWorkflowConditionFact): AftersalesWorkflowSte
 
 function normalizeAftersalesWorkflowTemplateDefinition(
   input: unknown,
+  options: { unboundStepsMarkedForReview?: boolean } = {},
 ): StoredAftersalesWorkflowTemplateDefinition {
   const record = objectValue(input, '售后流程模板内容无效');
   rejectUnknownKeys(record, ['name', 'scenario', 'steps']);
@@ -671,8 +758,12 @@ function normalizeAftersalesWorkflowTemplateDefinition(
       throw new Error('售后流程步骤标识必须唯一且只包含小写字母、数字和连字符');
     }
     stepIds.add(id);
-    if (!(AFTERSALES_WORKFLOW_STEP_KINDS as readonly unknown[]).includes(stepRecord.kind)) {
-      throw new Error('售后流程步骤类型无效');
+    // 存量数据里无法绑定已定义动作的步骤标记「需要检查」：仅可见、不可执行。
+    const kind = isBoundAftersalesWorkflowStepKind(stepRecord.kind)
+      ? stepRecord.kind
+      : null;
+    if (kind === null && !options.unboundStepsMarkedForReview) {
+      throw new Error('售后流程步骤必须绑定已定义的业务动作');
     }
     if (typeof stepRecord.required !== 'boolean') {
       throw new Error('售后流程步骤必填状态无效');
@@ -701,7 +792,7 @@ function normalizeAftersalesWorkflowTemplateDefinition(
     }
     return {
       id,
-      kind: stepRecord.kind as AftersalesWorkflowStepKind,
+      kind,
       name: boundedText(stepRecord.name, 100, '请填写 1 至 100 字的售后流程步骤名称'),
       required: stepRecord.required,
       fields,

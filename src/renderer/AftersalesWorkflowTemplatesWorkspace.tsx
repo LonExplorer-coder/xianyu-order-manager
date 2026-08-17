@@ -4,8 +4,10 @@ import type { DesktopApi } from '../core/desktop-api';
 import {
   AFTERSALES_WORKFLOW_CONDITION_FACTS,
   AFTERSALES_WORKFLOW_FIELDS,
+  AFTERSALES_WORKFLOW_STEP_BINDINGS,
   AFTERSALES_WORKFLOW_STEP_KINDS,
   aftersalesWorkflowFieldLabel,
+  aftersalesWorkflowStepCategoryLabel,
   type AftersalesWorkflowConditionFact,
   type AftersalesWorkflowScenario,
   type AftersalesWorkflowStep,
@@ -280,15 +282,24 @@ function WorkflowEditor({
                 />
                 <select
                   aria-label={`步骤 ${index + 1} 类型`}
-                  value={step.kind}
+                  value={step.kind ?? ''}
                   disabled={saving}
                   onChange={(event) => changeStep(index, {
                     ...step,
-                    kind: event.target.value as AftersalesWorkflowStepKind,
+                    kind: event.target.value === ''
+                      ? null
+                      : event.target.value as AftersalesWorkflowStepKind,
                   })}
                 >
+                  {step.kind === null && (
+                    <option value="">需要检查（未绑定业务动作）</option>
+                  )}
                   {AFTERSALES_WORKFLOW_STEP_KINDS.map((kind) => (
-                    <option key={kind} value={kind}>{stepKindLabel(kind)}</option>
+                    <option key={kind} value={kind}>
+                      {`${stepKindLabel(kind)}（${aftersalesWorkflowStepCategoryLabel(
+                        AFTERSALES_WORKFLOW_STEP_BINDINGS[kind].category,
+                      )}）`}
+                    </option>
                   ))}
                 </select>
                 <label className="compact-check">

@@ -1,6 +1,44 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v50 只规范化模板版本数据，没有结构产物；存在「需要检查」步骤时拒绝降级。
+export function removeVersion50ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 50',
+  ).get();
+  if (!applied) return;
+  const rows = database.prepare(`
+    SELECT template_id, version, definition_json
+    FROM aftersales_workflow_template_versions
+  `).all() as Array<{ template_id: string; version: number; definition_json: string }>;
+  for (const row of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.definition_json);
+    } catch {
+      continue;
+    }
+    const steps = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as { steps?: unknown }).steps
+      : null;
+    if (!Array.isArray(steps)) continue;
+    if (steps.some((step) => (
+      step
+      && typeof step === 'object'
+      && !Array.isArray(step)
+      && (step as { kind?: unknown }).kind === null
+    ))) {
+      throw new Error('v50 测试降级前必须先移除需要检查的流程步骤');
+    }
+  }
+  database.exec(`
+    BEGIN IMMEDIATE;
+    DELETE FROM schema_migrations WHERE version = 50;
+    COMMIT;
+  `);
+}
+
 export function removeVersion49ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion50ExtensionArtifacts(database);
   const hasAdjustmentTable = database.prepare(`
     SELECT 1 FROM sqlite_schema
     WHERE type = 'table' AND name = 'aftersales_refund_target_adjustment_events'
