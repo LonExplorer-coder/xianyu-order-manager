@@ -201,6 +201,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(45)) migrateToVersion45(database);
   if (!versions.has(46)) migrateToVersion46(database);
   if (!versions.has(47)) migrateToVersion47(database);
+  if (!versions.has(48)) migrateToVersion48(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5920,6 +5921,55 @@ function migrateToVersion47(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (47, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion48(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE product_identity_correction_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        correction_id TEXT NOT NULL,
+        mapping_id TEXT NOT NULL,
+        order_id TEXT NOT NULL
+          REFERENCES original_orders(id) ON DELETE RESTRICT,
+        order_item_id TEXT NOT NULL
+          REFERENCES order_items(id) ON DELETE RESTRICT,
+        before_standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        after_standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        before_standard_product_sku TEXT NOT NULL,
+        after_standard_product_sku TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (before_standard_product_id <> after_standard_product_id)
+      ) STRICT;
+
+      CREATE INDEX product_identity_correction_events_by_correction
+      ON product_identity_correction_events (correction_id, sequence);
+
+      CREATE INDEX product_identity_correction_events_by_mapping
+      ON product_identity_correction_events (mapping_id, sequence);
+
+      CREATE TRIGGER product_identity_correction_events_are_immutable_on_update
+      BEFORE UPDATE ON product_identity_correction_events
+      BEGIN SELECT RAISE(ABORT, 'product identity correction events are immutable'); END;
+
+      CREATE TRIGGER product_identity_correction_events_are_immutable_on_delete
+      BEFORE DELETE ON product_identity_correction_events
+      BEGIN SELECT RAISE(ABORT, 'product identity correction events are immutable'); END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (48, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

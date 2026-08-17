@@ -34,6 +34,7 @@ import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeCreateProductMappingInput,
   normalizeProductMappingConflictQueryInput,
+  normalizeProductMappingHistoryCorrectionInput,
   normalizeCorrectProductMappingInput,
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
@@ -274,6 +275,17 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       normalizeProductMappingReasonInput(input),
     );
   });
+  ipcMain.handle('products:preview-mapping-history', (_event, mappingId: unknown) => (
+    desktopSession.previewProductMappingHistoryCandidates(
+      parseWorkflowId(mappingId, '商品映射'),
+    )
+  ));
+  ipcMain.handle('products:relink-mapping-history', (_event, mappingId: unknown, input: unknown) => (
+    desktopSession.relinkProductMappingHistoryCandidates(
+      parseWorkflowId(mappingId, '商品映射'),
+      normalizeProductMappingHistoryCorrectionInput(input),
+    )
+  ));
   ipcMain.handle(
     'products:preview-draft-standardizations',
     (_event, draft: OrderDraft) => desktopSession.previewDraftProductStandardizations(draft),

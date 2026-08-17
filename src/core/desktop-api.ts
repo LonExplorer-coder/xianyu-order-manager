@@ -42,6 +42,9 @@ import type {
   OrderItemStandardizationBatchPreviewInput,
   OrderItemStandardizationBatchResult,
   ProductMappingEvent,
+  ProductMappingHistoryCandidatePreview,
+  ProductMappingHistoryCorrectionInput,
+  ProductMappingHistoryCorrectionResult,
   ProductMappingReasonInput,
   ProductMappingStats,
   ProductMappingView,
@@ -198,6 +201,13 @@ export interface DesktopApi {
     input: ProductMappingReasonInput,
   ): Promise<ProductMappingView>;
   deleteProductMapping(mappingId: string, input: ProductMappingReasonInput): Promise<void>;
+  previewProductMappingHistoryCandidates(
+    mappingId: string,
+  ): Promise<ProductMappingHistoryCandidatePreview>;
+  relinkProductMappingHistoryCandidates(
+    mappingId: string,
+    input: ProductMappingHistoryCorrectionInput,
+  ): Promise<ProductMappingHistoryCorrectionResult>;
   listOrders(): Promise<OrderSummary[]>;
   queryOrders(
     query: OrderWorkbenchQuery,

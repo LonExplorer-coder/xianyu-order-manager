@@ -84,6 +84,12 @@ const api: DesktopApi = {
   deleteProductMapping: (mappingId, input) => (
     ipcRenderer.invoke('products:delete-mapping', mappingId, input)
   ),
+  previewProductMappingHistoryCandidates: (mappingId) => (
+    ipcRenderer.invoke('products:preview-mapping-history', mappingId)
+  ),
+  relinkProductMappingHistoryCandidates: (mappingId, input) => (
+    ipcRenderer.invoke('products:relink-mapping-history', mappingId, input)
+  ),
   previewDraftProductStandardizations: (draft) => (
     ipcRenderer.invoke('products:preview-draft-standardizations', draft)
   ),

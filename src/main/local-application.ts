@@ -104,6 +104,7 @@ import {
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
   normalizeProductMappingConflictQueryInput,
+  normalizeProductMappingHistoryCorrectionInput,
   normalizeProductMappingReasonInput,
   normalizeProductText,
   normalizeProductStandardizationConfirmations,
@@ -129,6 +130,9 @@ import {
   type ProductMappingEvent,
   type ProductMappingEventSnapshot,
   type ProductMappingEventType,
+  type ProductMappingHistoryCandidateItem,
+  type ProductMappingHistoryCandidatePreview,
+  type ProductMappingHistoryCorrectionResult,
   type ProductMappingHitSummary,
   type ProductMappingMatch,
   type ProductMappingMatchContext,
@@ -4613,6 +4617,250 @@ export class LocalApplication {
         now,
       );
       workspace.database.prepare('DELETE FROM product_mappings WHERE id = ?').run(id);
+    });
+  }
+
+  /**
+   * 规格 4.5：查找映射的历史候选——原文命中该映射、但当前关联指向其他 SKU 的
+   * 活跃订单商品明细。映射变更本身不改写历史订单，批量更正必须先独立预览。
+   */
+  public previewProductMappingHistoryCandidates(
+    mappingId: string,
+  ): ProductMappingHistoryCandidatePreview {
+    const workspace = this.requireWorkspace();
+    const id = mappingId.trim();
+    if (!id || id.length > 200) throw new Error('商品映射标识无效');
+    const mapping = this.getProductMappingView(id);
+    const targetProduct = this.getStandardProduct(mapping.standardProductId);
+    const scopeCondition = mapping.scope === 'current_account'
+      ? 'orders.platform = ? AND orders.seller_account = ?'
+      : mapping.scope === 'current_platform'
+        ? 'orders.platform = ?'
+        : '1 = 1';
+    const scopeParams: string[] = [];
+    if (mapping.scope !== 'workspace') scopeParams.push(mapping.platform as string);
+    if (mapping.scope === 'current_account') {
+      scopeParams.push(mapping.sellerAccount as string);
+    }
+    const rows = workspace.database.prepare(`
+      SELECT
+        items.id AS item_id,
+        orders.id AS order_id,
+        orders.platform_order_number AS order_number,
+        orders.system_order_number AS system_order_number,
+        orders.revision AS order_revision,
+        orders.fulfillment_status AS fulfillment_status,
+        orders.platform AS order_platform,
+        orders.seller_account AS order_seller_account,
+        items.position AS position,
+        items.quantity AS quantity,
+        items.source_title AS source_title,
+        items.source_spec AS source_spec,
+        items.standardization_source AS standardization_source,
+        items.standard_product_id AS before_product_id,
+        before_products.sku AS before_sku,
+        EXISTS (
+          SELECT 1
+          FROM aftersales_case_items AS case_items
+          JOIN shipment_package_items AS shipment_items
+            ON shipment_items.id = case_items.shipment_package_item_id
+          WHERE shipment_items.order_id = orders.id
+        ) AS has_aftersales
+      FROM order_items AS items
+      JOIN original_orders AS orders ON orders.id = items.order_id
+      JOIN standard_products AS before_products
+        ON before_products.id = items.standard_product_id
+      WHERE orders.lifecycle_status = 'active'
+        AND items.standard_product_id IS NOT NULL
+        AND items.standard_product_id <> ?
+        AND ${scopeCondition}
+    `).all(targetProduct.id, ...scopeParams) as unknown as SqlRow[];
+    // 映射优先级：账号 > 平台 > 工作区。被更高优先级同原文有效映射接管的明细
+    // 不算命中该映射（CONTEXT.md「历史候选」），不进入候选清单。
+    const higherPriorityMappings = (workspace.database.prepare(`
+      SELECT scope, platform, seller_account
+      FROM product_mappings
+      WHERE source_title_key = ? AND source_spec_key = ?
+        AND status = 'active' AND id <> ?
+    `).all(mapping.sourceTitleKey, mapping.sourceSpecKey, id) as unknown as SqlRow[])
+      .filter((row) => asString(row.scope) !== 'workspace')
+      .filter((row) => (
+        mapping.scope === 'workspace' ||
+        (mapping.scope === 'current_platform' && asString(row.scope) === 'current_account')
+      ));
+    const items: ProductMappingHistoryCandidateItem[] = rows
+      .filter((row) => !higherPriorityMappings.some((shadow) => {
+        const platform = asString(shadow.platform);
+        if (asString(shadow.scope) === 'current_account') {
+          return platform === asString(row.order_platform) &&
+            asString(shadow.seller_account) === asString(row.order_seller_account);
+        }
+        return platform === asString(row.order_platform);
+      }))
+      .filter((row) => (
+        normalizeProductText(asString(row.source_title)) === mapping.sourceTitleKey &&
+        normalizeProductText(asString(row.source_spec)) === mapping.sourceSpecKey
+      ))
+      .map((row) => ({
+        itemId: asString(row.item_id),
+        orderId: asString(row.order_id),
+        orderNumber: asString(row.order_number),
+        systemOrderNumber: asString(row.system_order_number),
+        orderRevision: asNumber(row.order_revision),
+        position: asNumber(row.position),
+        quantity: asNumber(row.quantity),
+        beforeStandardProductId: asString(row.before_product_id),
+        beforeStandardProductSku: asString(row.before_sku),
+        standardizationSource: asProductStandardizationSource(row.standardization_source),
+        shippedOrDelivered: ['partially_shipped', 'shipped', 'delivered'].includes(
+          asString(row.fulfillment_status),
+        ),
+        hasAftersales: asNumber(row.has_aftersales) === 1,
+      }))
+      .sort((left, right) => (
+        left.orderId.localeCompare(right.orderId) || left.position - right.position
+      ));
+    const orderIds = new Set(items.map((item) => item.orderId));
+    const shippedOrderIds = new Set(
+      items.filter((item) => item.shippedOrDelivered).map((item) => item.orderId),
+    );
+    const aftersalesOrderIds = new Set(
+      items.filter((item) => item.hasAftersales).map((item) => item.orderId),
+    );
+    return {
+      mapping,
+      targetProduct,
+      items,
+      orderCount: orderIds.size,
+      itemCount: items.length,
+      totalQuantity: items.reduce((total, item) => total + item.quantity, 0),
+      shippedOrderCount: shippedOrderIds.size,
+      aftersalesOrderCount: aftersalesOrderIds.size,
+    };
+  }
+
+  /**
+   * 规格 4.6：带原因的批量商品身份更正。只改标准商品归属，不改来源原文、数量、
+   * 金额与发货、退款等业务事实；逐条写不可变商品身份更正事件。
+   */
+  public relinkProductMappingHistoryCandidates(
+    mappingId: string,
+    input: unknown,
+  ): ProductMappingHistoryCorrectionResult {
+    const workspace = this.requireWorkspace();
+    const id = mappingId.trim();
+    if (!id || id.length > 200) throw new Error('商品映射标识无效');
+    const normalized = normalizeProductMappingHistoryCorrectionInput(input);
+    const now = new Date().toISOString();
+    const correctionId = randomUUID();
+    return workspace.transaction(() => {
+      const preview = this.previewProductMappingHistoryCandidates(id);
+      const candidateById = new Map(preview.items.map((item) => [item.itemId, item] as const));
+      // 重放守卫：映射或订单在预览后变化时候选集合随之变化，整批拒绝。
+      if (normalized.itemIds.some((itemId) => !candidateById.has(itemId))) {
+        throw new Error('商品映射或订单已变化，请刷新预览后重试');
+      }
+      const selected = normalized.itemIds.map((itemId) => candidateById.get(itemId)!);
+      const revisionByOrderId = new Map(
+        selected.map((item) => [item.orderId, item.orderRevision] as const),
+      );
+      for (const { orderId, revision } of normalized.expectedOrderRevisions) {
+        if (revisionByOrderId.get(orderId) !== revision) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+      }
+      for (const orderId of revisionByOrderId.keys()) {
+        if (!normalized.expectedOrderRevisions.some((entry) => entry.orderId === orderId)) {
+          throw new Error('订单版本无效，请刷新后重试');
+        }
+      }
+      const changesByOrderId = new Map<string, OrderFieldChange[]>();
+      const insertCorrectionEvent = workspace.database.prepare(`
+        INSERT INTO product_identity_correction_events (
+          id, correction_id, mapping_id, order_id, order_item_id,
+          before_standard_product_id, after_standard_product_id,
+          before_standard_product_sku, after_standard_product_sku,
+          reason, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const item of selected) {
+        workspace.database.prepare(`
+          UPDATE order_items
+          SET standard_product_id = ?, standardization_source = 'manual'
+          WHERE id = ?
+        `).run(preview.targetProduct.id, item.itemId);
+        const orderChanges = changesByOrderId.get(item.orderId) ?? [];
+        changesByOrderId.set(item.orderId, orderChanges);
+        orderChanges.push({
+          path: `items[${item.position}].standardProductSku`,
+          before: item.beforeStandardProductSku,
+          after: preview.targetProduct.sku,
+        });
+        if (item.standardizationSource !== 'manual') {
+          orderChanges.push({
+            path: `items[${item.position}].standardizationSource`,
+            before: item.standardizationSource,
+            after: 'manual',
+          });
+        }
+        insertCorrectionEvent.run(
+          randomUUID(),
+          correctionId,
+          id,
+          item.orderId,
+          item.itemId,
+          item.beforeStandardProductId,
+          preview.targetProduct.id,
+          item.beforeStandardProductSku,
+          preview.targetProduct.sku,
+          normalized.reason,
+          now,
+          now,
+        );
+      }
+      for (const [orderId, orderChanges] of changesByOrderId) {
+        const expectedRevision = revisionByOrderId.get(orderId)!;
+        const updated = workspace.database.prepare(`
+          UPDATE original_orders
+          SET revision = revision + 1, updated_at = ?
+          WHERE id = ? AND revision = ?
+        `).run(now, orderId, expectedRevision);
+        if (updated.changes !== 1) {
+          throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+        const eventId = randomUUID();
+        workspace.database.prepare(`
+          INSERT INTO order_change_events (
+            id, order_id, source_snapshot_id, source,
+            base_revision, result_revision, created_at
+          ) VALUES (?, ?, NULL, 'manual_edit', ?, ?, ?)
+        `).run(eventId, orderId, expectedRevision, expectedRevision + 1, now);
+        const insertChange = workspace.database.prepare(`
+          INSERT INTO order_field_changes (
+            id, event_id, field_path, before_json, after_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const change of orderChanges) {
+          insertChange.run(
+            randomUUID(),
+            eventId,
+            change.path,
+            JSON.stringify(change.before),
+            JSON.stringify(change.after),
+          );
+        }
+      }
+      return {
+        correctionId,
+        appliedItemCount: selected.length,
+        orderCount: revisionByOrderId.size,
+        results: selected.map((item) => ({
+          itemId: item.itemId,
+          orderId: item.orderId,
+          beforeStandardProductSku: item.beforeStandardProductSku,
+          afterStandardProductSku: preview.targetProduct.sku,
+        })),
+      };
     });
   }
 

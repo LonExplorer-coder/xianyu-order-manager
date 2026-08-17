@@ -516,6 +516,17 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     correctProductMapping: vi.fn(),
     disableProductMapping: vi.fn(),
     deleteProductMapping: vi.fn(),
+    previewProductMappingHistoryCandidates: vi.fn().mockResolvedValue({
+      mapping: null,
+      targetProduct: null,
+      items: [],
+      orderCount: 0,
+      itemCount: 0,
+      totalQuantity: 0,
+      shippedOrderCount: 0,
+      aftersalesOrderCount: 0,
+    }),
+    relinkProductMappingHistoryCandidates: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
@@ -4530,6 +4541,140 @@ describe('订单管理工作台', () => {
       reason: '不再销售',
     }));
     expect(await within(section).findByText('已停用')).toBeVisible();
+  });
+
+  it('映射历史候选先预览影响再带原因批量更正商品身份', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-history',
+      sku: 'SKU-UI-HISTORY',
+      name: '娃鞋白模',
+      specification: '05M',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const existingMapping: ProductMappingView = {
+      id: 'mapping-ui-history-1',
+      sourceTitle: '古风娃鞋白模-闲鱼专拍',
+      sourceSpec: '05M',
+      sourceTitleKey: '古风娃鞋白模-闲鱼专拍',
+      sourceSpecKey: '05m',
+      standardProductId: product.id,
+      targetProductSku: product.sku,
+      targetProductName: product.name,
+      scope: 'current_account',
+      platform: 'xianyu',
+      sellerAccount: '映射账号甲',
+      status: 'active',
+      origin: 'confirmation',
+      lastUsedAt: null,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+      hitOrderCount: 0,
+    };
+    const preview = {
+      mapping: existingMapping,
+      targetProduct: product,
+      items: [
+        {
+          itemId: 'item-ui-history-1',
+          orderId: 'order-ui-history-1',
+          orderNumber: 'XY-UI-HISTORY-1',
+          systemOrderNumber: 'A0001',
+          orderRevision: 3,
+          position: 0,
+          quantity: 2,
+          beforeStandardProductId: 'product-ui-old',
+          beforeStandardProductSku: 'SKU-UI-OLD',
+          standardizationSource: 'mapping' as const,
+          shippedOrDelivered: true,
+          hasAftersales: false,
+        },
+        {
+          itemId: 'item-ui-history-2',
+          orderId: 'order-ui-history-1',
+          orderNumber: 'XY-UI-HISTORY-1',
+          systemOrderNumber: 'A0001',
+          orderRevision: 3,
+          position: 1,
+          quantity: 1,
+          beforeStandardProductId: 'product-ui-old',
+          beforeStandardProductSku: 'SKU-UI-OLD',
+          standardizationSource: 'manual' as const,
+          shippedOrDelivered: true,
+          hasAftersales: true,
+        },
+      ],
+      orderCount: 1,
+      itemCount: 2,
+      totalQuantity: 3,
+      shippedOrderCount: 1,
+      aftersalesOrderCount: 1,
+    };
+    const relinkProductMappingHistoryCandidates = vi.fn().mockResolvedValue({
+      correctionId: 'correction-ui-1',
+      appliedItemCount: 2,
+      orderCount: 1,
+      results: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+    });
+    Object.assign(api, {
+      listProductMappings: vi.fn().mockResolvedValue([existingMapping]),
+      listProductMappingEvents: vi.fn().mockResolvedValue([]),
+      getProductMappingStats: vi.fn().mockResolvedValue({
+        activeMappingCount: 1,
+        linkedOrderCount: 0,
+        linkedItemCount: 0,
+        linkedTotalQuantity: 0,
+      }),
+      previewProductMappingHistoryCandidates: vi.fn().mockResolvedValue(preview),
+      relinkProductMappingHistoryCandidates,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '标准商品' }));
+    await user.click(await screen.findByRole('button', { name: `编辑标准商品 ${product.sku}` }));
+    const section = await screen.findByRole('region', { name: '商品映射' });
+
+    await user.click(
+      within(section).getByRole('button', { name: '查看映射 古风娃鞋白模-闲鱼专拍 的历史候选' }),
+    );
+    const panel = await screen.findByRole('region', { name: '历史候选批量更正' });
+    expect(within(panel).getByText(/原关联 → 新关联：SKU-UI-OLD → SKU-UI-HISTORY/u))
+      .toBeVisible();
+    expect(within(panel).getByText(/订单数量 1/u)).toBeVisible();
+    expect(within(panel).getByText(/商品明细数量 2/u)).toBeVisible();
+    expect(within(panel).getByText(/商品总数量 3/u)).toBeVisible();
+    expect(within(panel).getByText(/已发货订单 1/u)).toBeVisible();
+    expect(within(panel).getByText(/存在售后订单 1/u)).toBeVisible();
+    expect(within(panel).getByText(/来源原文、数量、金额与发货、退款、补发等业务事实不变/u))
+      .toBeVisible();
+    expect(within(panel).getByText(/不调整未来库存与财务归类/u)).toBeVisible();
+    expect(within(panel).getByRole('checkbox', {
+      name: /更正订单 XY-UI-HISTORY-1 第 1 件商品 SKU-UI-OLD 为 SKU-UI-HISTORY/u,
+    })).toBeChecked();
+
+    await user.click(within(panel).getByRole('button', { name: '确认更正商品身份' }));
+    expect(await within(panel).findByText('商品身份更正必须填写原因')).toBeInTheDocument();
+
+    await user.type(within(panel).getByRole('textbox', { name: '商品身份更正原因' }), '历史关联维护错误');
+    await user.click(within(panel).getByRole('button', { name: '确认更正商品身份' }));
+    await waitFor(() => expect(relinkProductMappingHistoryCandidates)
+      .toHaveBeenCalledWith('mapping-ui-history-1', {
+        itemIds: ['item-ui-history-1', 'item-ui-history-2'],
+        reason: '历史关联维护错误',
+        expectedOrderRevisions: [{ orderId: 'order-ui-history-1', revision: 3 }],
+      }));
+    expect(await screen.findByText(/已更正 2 条商品明细的商品身份/u)).toBeInTheDocument();
   });
 
   it('从商品映射进入按原文筛选的关联订单商品明细', async () => {

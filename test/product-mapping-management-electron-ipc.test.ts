@@ -179,9 +179,67 @@ describe('商品映射管理 Electron IPC', () => {
     })).resolves.toBeUndefined();
     expect(deleteProductMapping).toHaveBeenCalledWith('mapping-ipc-1', { reason: '录入错误' });
     await expect(invoke('products:delete-mapping', 'mapping-ipc-1', {
-      reason: '删除',
+      reason: '录入错误',
       unexpected: true,
     })).rejects.toThrow('商品映射操作包含未知字段');
+  });
+
+  it('历史候选预览与批量更正只通过受控字段传递', async () => {
+    const preview = {
+      mapping: { id: 'mapping-ipc-history-1' },
+      targetProduct: { id: 'product-ipc-2', sku: 'SKU-IPC-002' },
+      items: [],
+      orderCount: 0,
+      itemCount: 0,
+      totalQuantity: 0,
+      shippedOrderCount: 0,
+      aftersalesOrderCount: 0,
+    };
+    const correctionResult = {
+      correctionId: 'correction-ipc-1',
+      appliedItemCount: 2,
+      orderCount: 1,
+      results: [],
+    };
+    const previewProductMappingHistoryCandidates = vi.fn().mockReturnValue(preview);
+    const relinkProductMappingHistoryCandidates = vi.fn().mockReturnValue(correctionResult);
+    registerIpcHandlers({
+      previewProductMappingHistoryCandidates,
+      relinkProductMappingHistoryCandidates,
+      onRecognitionBatchesChanged: vi.fn(),
+      onOrdersChanged: vi.fn(),
+    } as unknown as DesktopSession);
+
+    await expect(invoke('products:preview-mapping-history', ' mapping-ipc-history-1 '))
+      .resolves.toEqual(preview);
+    expect(previewProductMappingHistoryCandidates).toHaveBeenCalledWith('mapping-ipc-history-1');
+    await expect(invoke('products:preview-mapping-history', ''))
+      .rejects.toThrow(/格式无效/u);
+
+    await expect(invoke('products:relink-mapping-history', 'mapping-ipc-history-1', {
+      itemIds: [' item-1 ', 'item-2'],
+      reason: ' 统一更正为新 SKU ',
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+    })).resolves.toEqual(correctionResult);
+    expect(relinkProductMappingHistoryCandidates).toHaveBeenCalledWith(
+      'mapping-ipc-history-1',
+      {
+        itemIds: ['item-1', 'item-2'],
+        reason: '统一更正为新 SKU',
+        expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+      },
+    );
+    await expect(invoke('products:relink-mapping-history', 'mapping-ipc-history-1', {
+      itemIds: ['item-1'],
+      reason: '更正',
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+      unexpected: true,
+    })).rejects.toThrow('商品身份更正包含未知字段');
+    await expect(invoke('products:relink-mapping-history', 'mapping-ipc-history-1', {
+      itemIds: ['item-1'],
+      reason: ' ',
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+    })).rejects.toThrow('映射变更原因无效');
   });
 });
 

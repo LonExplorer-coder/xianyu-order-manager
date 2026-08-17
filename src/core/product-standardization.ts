@@ -1008,6 +1008,70 @@ export function normalizeProductMappingSearch(value: unknown): string | undefine
   return normalized;
 }
 
+/** 商品映射历史候选预览中的单条明细：原关联 SKU 与订单概况。 */
+export type ProductMappingHistoryCandidateItem = {
+  itemId: string;
+  orderId: string;
+  orderNumber: string;
+  systemOrderNumber: string;
+  orderRevision: number;
+  position: number;
+  quantity: number;
+  beforeStandardProductId: string;
+  beforeStandardProductSku: string;
+  standardizationSource: ProductStandardizationSource;
+  shippedOrDelivered: boolean;
+  hasAftersales: boolean;
+};
+
+/** 规格 4.5：批量更正前必须先预览的影响统计。 */
+export type ProductMappingHistoryCandidatePreview = {
+  mapping: ProductMappingView;
+  targetProduct: StandardProduct;
+  items: ProductMappingHistoryCandidateItem[];
+  orderCount: number;
+  itemCount: number;
+  totalQuantity: number;
+  shippedOrderCount: number;
+  aftersalesOrderCount: number;
+};
+
+export type ProductMappingHistoryCorrectionInput = {
+  itemIds: string[];
+  reason: string;
+  expectedOrderRevisions: Array<{ orderId: string; revision: number }>;
+};
+
+export type ProductMappingHistoryCorrectionItemResult = {
+  itemId: string;
+  orderId: string;
+  beforeStandardProductSku: string;
+  afterStandardProductSku: string;
+};
+
+export type ProductMappingHistoryCorrectionResult = {
+  correctionId: string;
+  appliedItemCount: number;
+  orderCount: number;
+  results: ProductMappingHistoryCorrectionItemResult[];
+};
+
+const HISTORY_CORRECTION_KEYS = new Set(['itemIds', 'reason', 'expectedOrderRevisions']);
+
+export function normalizeProductMappingHistoryCorrectionInput(
+  value: unknown,
+): ProductMappingHistoryCorrectionInput {
+  const record = requireMappingRecord(value, '商品身份更正', HISTORY_CORRECTION_KEYS);
+  return {
+    itemIds: normalizeBatchItemIds(record.itemIds),
+    reason: normalizeMappingChangeReason(record.reason),
+    expectedOrderRevisions: normalizeBatchExpectedOrderRevisions(
+      record.expectedOrderRevisions,
+    ),
+  };
+}
+
+
 function requireMappingRecord(
   value: unknown,
   label: string,

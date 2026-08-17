@@ -44,6 +44,9 @@ import type {
   OrderItemStandardizationBatchPreviewInput,
   OrderItemStandardizationBatchResult,
   ProductMappingEvent,
+  ProductMappingHistoryCandidatePreview,
+  ProductMappingHistoryCorrectionInput,
+  ProductMappingHistoryCorrectionResult,
   ProductMappingReasonInput,
   ProductMappingStats,
   ProductMappingView,
@@ -476,6 +479,19 @@ export class DesktopSession {
 
   public deleteProductMapping(mappingId: string, input: ProductMappingReasonInput): void {
     this.requireApplication().deleteProductMapping(mappingId, input);
+  }
+
+  public previewProductMappingHistoryCandidates(
+    mappingId: string,
+  ): ProductMappingHistoryCandidatePreview {
+    return this.requireApplication().previewProductMappingHistoryCandidates(mappingId);
+  }
+
+  public relinkProductMappingHistoryCandidates(
+    mappingId: string,
+    input: ProductMappingHistoryCorrectionInput,
+  ): ProductMappingHistoryCorrectionResult {
+    return this.requireApplication().relinkProductMappingHistoryCandidates(mappingId, input);
   }
 
   public previewDraftProductStandardizations(

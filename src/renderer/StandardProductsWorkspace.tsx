@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type { DesktopApi } from '../core/desktop-api';
 import type {
   ProductMappingEvent,
+  ProductMappingHistoryCandidatePreview,
   ProductMappingOrigin,
   ProductMappingScope,
   ProductMappingStats,
@@ -32,6 +33,12 @@ type MappingEditor =
   | { kind: 'correct'; mapping: ProductMappingView }
   | { kind: 'disable'; mapping: ProductMappingView }
   | { kind: 'delete'; mapping: ProductMappingView }
+  | null;
+
+/** 规格 4.5/4.6：历史候选批量更正，必须先独立预览再带原因确认。 */
+type HistoryCorrectionEditor =
+  | { kind: 'previewing'; mapping: ProductMappingView }
+  | { kind: 'ready'; mapping: ProductMappingView; preview: ProductMappingHistoryCandidatePreview }
   | null;
 
 type MappingForm = {
@@ -82,6 +89,11 @@ export function StandardProductsWorkspace({
     kind: 'success' | 'error';
     message: string;
   } | null>(null);
+  const [historyEditor, setHistoryEditor] = useState<HistoryCorrectionEditor>(null);
+  const [historySelectedIds, setHistorySelectedIds] = useState<Set<string>>(new Set());
+  const [historyReason, setHistoryReason] = useState('');
+  const [historySaving, setHistorySaving] = useState(false);
+  const [historyError, setHistoryError] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -222,6 +234,7 @@ export function StandardProductsWorkspace({
 
   function beginMappingEditor(editor: Exclude<MappingEditor, null>) {
     setMappingFeedback(null);
+    setHistoryEditor(null);
     setMappingEditor(editor);
     if (editor.kind === 'create') {
       setMappingForm(EMPTY_MAPPING_FORM);
@@ -286,6 +299,72 @@ export function StandardProductsWorkspace({
       setMappingFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setMappingSaving(false);
+    }
+  }
+
+  function beginHistoryCorrection(mapping: ProductMappingView) {
+    setMappingFeedback(null);
+    setMappingEditor(null);
+    setHistoryError('');
+    setHistoryReason('');
+    setHistorySaving(false);
+    setHistoryEditor({ kind: 'previewing', mapping });
+    void api.previewProductMappingHistoryCandidates(mapping.id)
+      .then((preview) => {
+        setHistoryEditor({ kind: 'ready', mapping, preview });
+        setHistorySelectedIds(new Set(preview.items.map((item) => item.itemId)));
+      })
+      .catch((error: unknown) => {
+        setHistoryEditor(null);
+        setMappingFeedback({ kind: 'error', message: errorMessage(error) });
+      });
+  }
+
+  function toggleHistoryCandidate(itemId: string, checked: boolean) {
+    setHistorySelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(itemId); else next.delete(itemId);
+      return next;
+    });
+  }
+
+  async function submitHistoryCorrection() {
+    if (historyEditor?.kind !== 'ready' || historySaving) return;
+    const reason = historyReason.trim();
+    if (!reason) {
+      setHistoryError('商品身份更正必须填写原因');
+      return;
+    }
+    const selectedItems = historyEditor.preview.items
+      .filter((item) => historySelectedIds.has(item.itemId));
+    if (selectedItems.length === 0) {
+      setHistoryError('请至少选择一条商品明细');
+      return;
+    }
+    const expectedOrderRevisions = [...new Map(
+      selectedItems.map((item) => [item.orderId, item.orderRevision] as const),
+    ).entries()].map(([orderId, revision]) => ({ orderId, revision }));
+    setHistorySaving(true);
+    setHistoryError('');
+    try {
+      const result = await api.relinkProductMappingHistoryCandidates(
+        historyEditor.mapping.id,
+        {
+          itemIds: selectedItems.map((item) => item.itemId),
+          reason,
+          expectedOrderRevisions,
+        },
+      );
+      setHistoryEditor(null);
+      setMappingFeedback({
+        kind: 'success',
+        message: `已更正 ${result.appliedItemCount} 条商品明细的商品身份；来源原文、数量与业务事实保持不变。`,
+      });
+      if (editing) await refreshMappings(editing.id);
+    } catch (error) {
+      setHistoryError(errorMessage(error));
+    } finally {
+      setHistorySaving(false);
     }
   }
 
@@ -617,6 +696,111 @@ export function StandardProductsWorkspace({
             </form>
           )}
 
+          {historyEditor && (
+            <section className="field-definition-card" aria-label="历史候选批量更正">
+              {historyEditor.kind === 'previewing' ? (
+                <span role="status">正在查找历史候选…</span>
+              ) : historyEditor.preview.items.length === 0 ? (
+                <div className="fields-empty">
+                  <strong>没有需要更正的历史候选</strong>
+                  <p>该映射的适用范围内，没有原文相同且当前关联到其他标准商品的订单商品明细。</p>
+                </div>
+              ) : (() => {
+                // 规格 4.5：确认前显示的影响统计对应勾选后实际会更正的批次。
+                const selectedItems = historyEditor.preview.items
+                  .filter((item) => historySelectedIds.has(item.itemId));
+                const selectedOrderIds = new Set(selectedItems.map((item) => item.orderId));
+                const selectedShippedOrderIds = new Set(selectedItems
+                  .filter((item) => item.shippedOrDelivered)
+                  .map((item) => item.orderId));
+                const selectedAftersalesOrderIds = new Set(selectedItems
+                  .filter((item) => item.hasAftersales)
+                  .map((item) => item.orderId));
+                const totalQuantity = selectedItems
+                  .reduce((total, item) => total + item.quantity, 0);
+                return (
+                <>
+                  <div>
+                    <strong>历史候选批量更正</strong>
+                    <span>
+                      “{historyEditor.preview.mapping.sourceTitle} / {historyEditor.preview.mapping.sourceSpec || '无规格'}”
+                      的历史订单商品
+                    </span>
+                  </div>
+                  <div className="field-definition-card__meta">
+                    <span>
+                      原关联 → 新关联：{[...new Set(selectedItems.map((item) => (
+                        item.beforeStandardProductSku
+                      )))].join('、') || '—'} → {historyEditor.preview.targetProduct.sku}
+                    </span>
+                    <span>
+                      订单数量 {selectedOrderIds.size}
+                      {' · '}商品明细数量 {selectedItems.length}
+                      {' · '}商品总数量 {totalQuantity}
+                    </span>
+                    <span>
+                      已发货订单 {selectedShippedOrderIds.size}
+                      {' · '}存在售后订单 {selectedAftersalesOrderIds.size}
+                    </span>
+                    <span>
+                      更正只改变商品身份归属；来源原文、数量、金额与发货、退款、补发等业务事实不变。
+                    </span>
+                    <span>本操作不调整未来库存与财务归类；如需归类更正，将来以独立的 SKU 归类更正记录处理。</span>
+                  </div>
+                  <div className="field-definition-list">
+                    {historyEditor.preview.items.map((item) => (
+                      <label className="fields-check-row" key={item.itemId}>
+                        <input
+                          type="checkbox"
+                          disabled={historySaving}
+                          checked={historySelectedIds.has(item.itemId)}
+                          onChange={(event) => toggleHistoryCandidate(item.itemId, event.target.checked)}
+                          aria-label={`更正订单 ${item.orderNumber} 第 ${item.position + 1} 件商品 ${item.beforeStandardProductSku} 为 ${historyEditor.preview.targetProduct.sku}`}
+                        />
+                        <span>
+                          订单 {item.orderNumber}：{item.beforeStandardProductSku} → {historyEditor.preview.targetProduct.sku}
+                          {' · '}数量 {item.quantity}
+                          {item.shippedOrDelivered ? ' · 已发货' : ''}
+                          {item.hasAftersales ? ' · 存在售后' : ''}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <label className="field">
+                    <span className="field-label">更正原因<i aria-hidden="true">*</i></span>
+                    <input
+                      required
+                      disabled={historySaving}
+                      value={historyReason}
+                      aria-label="商品身份更正原因"
+                      onChange={(event) => setHistoryReason(event.target.value)}
+                    />
+                  </label>
+                  {historyError && <p className="field-error" role="alert">{historyError}</p>}
+                  <div className="form-actions">
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={historySaving}
+                      onClick={() => setHistoryEditor(null)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      disabled={historySaving}
+                      onClick={() => void submitHistoryCorrection()}
+                    >
+                      {historySaving ? '正在更正…' : '确认更正商品身份'}
+                    </button>
+                  </div>
+                </>
+                );
+              })()}
+            </section>
+          )}
+
           {mappingFeedback && (
             <p
               className={`fields-feedback fields-feedback--${mappingFeedback.kind}`}
@@ -663,6 +847,15 @@ export function StandardProductsWorkspace({
                       })}
                     >
                       关联订单
+                    </button>
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={mappingSaving}
+                      aria-label={`查看映射 ${mapping.sourceTitle} 的历史候选`}
+                      onClick={() => beginHistoryCorrection(mapping)}
+                    >
+                      历史候选
                     </button>
                     {mapping.status === 'active' && (
                       <>
