@@ -13,6 +13,7 @@ const defaultOptions: OrderItemStandardizationBatchOptions = {
   standardDisplayPreference: 'prefer_standard',
   useDefaultOrderPrice: false,
   updateProductTotal: false,
+  createMappings: false,
 };
 
 function itemState(overrides: Partial<OrderItemStandardizationBatchItemState> = {}): OrderItemStandardizationBatchItemState {
@@ -24,6 +25,8 @@ function itemState(overrides: Partial<OrderItemStandardizationBatchItemState> = 
     unitPriceCents: 800,
     subtotalCents: 800,
     standardProductId: null,
+    currentAccountMappingProductId: null,
+    currentAccountMappingKey: 'account-key-item-1',
     ...overrides,
   };
 }
@@ -51,6 +54,7 @@ describe('订单商品批量关联预览与执行输入校验', () => {
         standardDisplayPreference: 'prefer_source',
         useDefaultOrderPrice: false,
         updateProductTotal: false,
+        createMappings: false,
       },
     })).toEqual({
       itemIds: ['item-1', 'item-2'],
@@ -59,6 +63,7 @@ describe('订单商品批量关联预览与执行输入校验', () => {
         standardDisplayPreference: 'prefer_source',
         useDefaultOrderPrice: false,
         updateProductTotal: false,
+        createMappings: false,
       },
     });
 
@@ -103,6 +108,11 @@ describe('订单商品批量关联预览与执行输入校验', () => {
     expect(() => normalizeOrderItemStandardizationBatchPreviewInput({
       itemIds: ['item-1'],
       standardProductId: 'product-1',
+      options: { ...defaultOptions, createMappings: 'yes' },
+    })).toThrow('批量关联选项无效');
+    expect(() => normalizeOrderItemStandardizationBatchPreviewInput({
+      itemIds: ['item-1'],
+      standardProductId: 'product-1',
       options: { ...defaultOptions, createMapping: false },
     })).toThrow('批量关联选项包含未知字段');
     expect(() => normalizeOrderItemStandardizationBatchPreviewInput({
@@ -112,6 +122,7 @@ describe('订单商品批量关联预览与执行输入校验', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: false,
         updateProductTotal: true,
+        createMappings: false,
       },
     })).toThrow('未使用标准商品默认单价时不能同步商品总价');
   });
@@ -126,11 +137,13 @@ describe('订单商品批量关联预览与执行输入校验', () => {
       ...preview,
       confirmedOverrideItemIds: ['item-2'],
       confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 3 }],
     })).toEqual({
       ...preview,
       confirmedOverrideItemIds: ['item-2'],
       confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 3 }],
     });
 
@@ -138,24 +151,57 @@ describe('订单商品批量关联预览与执行输入校验', () => {
       ...preview,
       confirmedOverrideItemIds: ['item-3'],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
     })).toThrow('批量关联覆盖确认超出了所选商品明细');
     expect(() => normalizeOrderItemStandardizationBatchApplyInput({
       ...preview,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: ['order-9'],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
     })).toThrow('批量关联金额差异确认超出了涉及订单');
     expect(() => normalizeOrderItemStandardizationBatchApplyInput({
       ...preview,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: ['item-3'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
+    })).toThrow('批量关联映射冲突确认超出了所选商品明细');
+    expect(() => normalizeOrderItemStandardizationBatchApplyInput({
+      ...preview,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: ['item-1'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
+    })).toThrow('未勾选建立商品映射时不能确认映射冲突');
+    expect(normalizeOrderItemStandardizationBatchApplyInput({
+      ...preview,
+      options: { ...defaultOptions, createMappings: true },
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: ['item-1'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
+    })).toEqual({
+      ...preview,
+      options: { ...defaultOptions, createMappings: true },
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: ['item-1'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 1 }],
+    });
+    expect(() => normalizeOrderItemStandardizationBatchApplyInput({
+      ...preview,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [],
     })).toThrow('订单版本无效，请刷新后重试');
     expect(() => normalizeOrderItemStandardizationBatchApplyInput({
       ...preview,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [
         { orderId: 'order-1', revision: 1 },
         { orderId: 'order-1', revision: 2 },
@@ -165,6 +211,7 @@ describe('订单商品批量关联预览与执行输入校验', () => {
       ...preview,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 0 }],
     })).toThrow('订单版本无效，请刷新后重试');
   });
@@ -240,6 +287,7 @@ describe('订单商品批量关联预览计算', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: true,
+        createMappings: false,
       },
     });
 
@@ -284,6 +332,7 @@ describe('订单商品批量关联预览计算', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: false,
+        createMappings: false,
       },
     });
 
@@ -300,6 +349,7 @@ describe('订单商品批量关联预览计算', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: false,
+        createMappings: false,
       },
     });
 
@@ -324,5 +374,69 @@ describe('订单商品批量关联预览计算', () => {
       product: { id: 'product-1', defaultOrderPriceCents: null },
       options: defaultOptions,
     })).toThrow('批量关联缺少订单数据');
+  });
+
+  it('未勾选建立映射时不统计映射计划也不产生映射冲突', () => {
+    const plan = planOrderItemStandardizationBatch({
+      items: [
+        itemState({ itemId: 'item-1', currentAccountMappingProductId: 'product-9' }),
+      ],
+      orders: [orderState({ orderId: 'order-1' })],
+      product: { id: 'product-1', defaultOrderPriceCents: null },
+      options: defaultOptions,
+    });
+
+    expect(plan).toMatchObject({
+      createMappingsRequested: false,
+      plannedMappingCreationCount: 0,
+      mappingConflictCount: 0,
+    });
+    expect(plan.items[0].blockReasons).toEqual([]);
+  });
+
+  it('勾选建立映射后同原文指向其他 SKU 的有效映射进入冲突清单', () => {
+    const plan = planOrderItemStandardizationBatch({
+      items: [
+        itemState({ itemId: 'item-1', currentAccountMappingKey: 'account-key-item-1' }),
+        itemState({ itemId: 'item-2', currentAccountMappingProductId: 'product-1', currentAccountMappingKey: 'account-key-item-2' }),
+        itemState({ itemId: 'item-3', currentAccountMappingProductId: 'product-9', currentAccountMappingKey: 'account-key-item-3' }),
+      ],
+      orders: [orderState({ orderId: 'order-1' })],
+      product: { id: 'product-1', defaultOrderPriceCents: null },
+      options: { ...defaultOptions, createMappings: true },
+    });
+
+    expect(plan).toMatchObject({
+      createMappingsRequested: true,
+      plannedMappingCreationCount: 1,
+      mappingConflictCount: 1,
+    });
+    expect(plan.items.map((item) => [item.itemId, item.blockReasons])).toEqual([
+      ['item-1', []],
+      ['item-2', []],
+      ['item-3', ['mapping_conflict']],
+    ]);
+  });
+
+  it('预计新增映射数按映射键去重且冲突明细按单笔例外不计入', () => {
+    const plan = planOrderItemStandardizationBatch({
+      items: [
+        itemState({ itemId: 'item-1', currentAccountMappingKey: 'account-key-同原文' }),
+        itemState({ itemId: 'item-2', currentAccountMappingKey: 'account-key-同原文' }),
+        itemState({
+          itemId: 'item-3',
+          currentAccountMappingProductId: 'product-9',
+          currentAccountMappingKey: 'account-key-冲突原文',
+        }),
+      ],
+      orders: [orderState({ orderId: 'order-1' })],
+      product: { id: 'product-1', defaultOrderPriceCents: null },
+      options: { ...defaultOptions, createMappings: true },
+    });
+
+    expect(plan).toMatchObject({
+      plannedMappingCreationCount: 1,
+      mappingConflictCount: 1,
+    });
   });
 });

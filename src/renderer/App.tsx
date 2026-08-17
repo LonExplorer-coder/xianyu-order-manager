@@ -176,6 +176,7 @@ import { OrderItemStandardizationBatchDialog } from './OrderItemStandardizationB
 import type {
   DraftItemProductStandardization,
   ProductMappingScope,
+  ProductMappingView,
   ProductStandardizationConfirmation,
   StandardProduct,
 } from '../core/product-standardization';
@@ -7767,6 +7768,8 @@ function ReviewWorkspace({
     { standardProductId: string | null; createMapping: boolean }
   >>({});
   const [standardizationError, setStandardizationError] = useState('');
+  const [standardizationConflictItemIds, setStandardizationConflictItemIds] =
+    useState<Set<string>>(new Set());
   const candidateAudit = useCandidateAdjudicationAudit(api, draft.id);
   const isOrderUpdate = review.kind === 'order_update';
   const updateChanges = isOrderUpdate
@@ -7833,6 +7836,8 @@ function ReviewWorkspace({
   const currentStandardizationChoices = standardizationRequestContext === productStandardizationContext
     ? standardizationChoices
     : {};
+  const hasUnresolvedMappingConflicts = standardizationRequestContext === productStandardizationContext
+    && standardizationConflictItemIds.size > 0;
   const currentProductByDraftItemId = useMemo(() => {
     if (review.kind !== 'order_update') return new Map<string, StandardProduct>();
     const persistedIds = matchOrderItemIds(review.currentOrder.items, draft.items);
@@ -7850,6 +7855,7 @@ function ReviewWorkspace({
     setStandardizationRequestPending(true);
     setStandardizationPreview([]);
     setStandardizationChoices({});
+    setStandardizationConflictItemIds(new Set());
     setStandardizationError('');
     void Promise.all([
       api.listStandardProducts(),
@@ -7980,6 +7986,11 @@ function ReviewWorkspace({
       event.preventDefault();
       return;
     }
+    // 规格 4.4：映射冲突必须先三选一，未处理的冲突不能带进确认入库。
+    if (hasUnresolvedMappingConflicts) {
+      event.preventDefault();
+      return;
+    }
     const confirmations = Object.entries(currentStandardizationChoices).map(([
       draftItemId,
       choice,
@@ -8016,7 +8027,10 @@ function ReviewWorkspace({
             className="button button--primary"
             type="submit"
             form="review-form"
-            disabled={cancelling || confirming || standardizationLoading || !isComplete}
+            disabled={
+              cancelling || confirming || standardizationLoading ||
+              !isComplete || hasUnresolvedMappingConflicts
+            }
           >
             <Icon name="check" />
             {confirming
@@ -8369,6 +8383,9 @@ function ReviewWorkspace({
                       数量来源：{draftItemQuantitySourceLabel(item)}
                     </div>
                     <ProductStandardizationEditor
+                      api={api}
+                      platform={draft.platform}
+                      sellerAccount={draft.sellerAccount}
                       item={item}
                       itemIndex={index}
                       products={standardProducts}
@@ -8386,6 +8403,14 @@ function ReviewWorkspace({
                         }
                         return { ...current, [item.id]: choice };
                       })}
+                      onMappingConflictChange={(itemId, hasConflict) => {
+                        setStandardizationConflictItemIds((current) => {
+                          if (current.has(itemId) === hasConflict) return current;
+                          const next = new Set(current);
+                          if (hasConflict) next.add(itemId); else next.delete(itemId);
+                          return next;
+                        });
+                      }}
                     />
                     {itemCustomFields.length > 0 && (
                       <div className="item-custom-fields">
@@ -8428,6 +8453,11 @@ function ReviewWorkspace({
                 请填写每件商品的全部必填自定义字段后再确认入库。
               </p>
             )}
+            {hasUnresolvedMappingConflicts && (
+              <p className="custom-field-required-note" role="status">
+                存在未处理的商品映射冲突，请逐条选择取消、更正映射目标或单笔例外后再确认入库。
+              </p>
+            )}
             {standardizationError && (
               <p className="custom-field-required-note" role="alert">
                 标准商品候选读取失败：{standardizationError}。仍可保留订单原始商品信息入库。
@@ -8455,6 +8485,9 @@ function productMappingScopeLabel(scope: ProductMappingScope | null | undefined)
 }
 
 function ProductStandardizationEditor({
+  api,
+  platform,
+  sellerAccount,
   item,
   itemIndex,
   products,
@@ -8463,7 +8496,11 @@ function ProductStandardizationEditor({
   choice,
   loading,
   onChoiceChange,
+  onMappingConflictChange,
 }: {
+  api: DesktopApi;
+  platform: string;
+  sellerAccount: string;
   item: DraftItem;
   itemIndex: number;
   products: readonly StandardProduct[];
@@ -8474,7 +8511,66 @@ function ProductStandardizationEditor({
   onChoiceChange: (
     choice: { standardProductId: string | null; createMapping: boolean } | undefined,
   ) => void;
+  onMappingConflictChange: (itemId: string, hasConflict: boolean) => void;
 }) {
+  // 规格 4.4：勾选建立映射时先查当前账号适用范围内的有效映射冲突，冲突则显式三选一。
+  const [mappingConflict, setMappingConflict] = useState<ProductMappingView | null>(null);
+  const [correctionReason, setCorrectionReason] = useState('');
+  const [correctionError, setCorrectionError] = useState('');
+  const [correcting, setCorrecting] = useState(false);
+  const createMappingProductId = choice?.createMapping ? choice.standardProductId : null;
+  useEffect(() => {
+    if (!createMappingProductId) {
+      setMappingConflict(null);
+      return undefined;
+    }
+    let active = true;
+    void api.findProductMappingConflict({
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      platform,
+      sellerAccount,
+    }).then((found) => {
+      if (!active) return;
+      setMappingConflict(
+        found && found.standardProductId !== createMappingProductId ? found : null,
+      );
+    }).catch(() => {
+      if (active) setMappingConflict(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [api, createMappingProductId, item.sourceTitle, item.sourceSpec, platform, sellerAccount]);
+  // 冲突状态上报给表单：未处理的冲突期间拦截「确认并入库」（规格 4.4 三选一）。
+  useEffect(() => {
+    onMappingConflictChange(item.id, mappingConflict !== null);
+  }, [item.id, mappingConflict]);
+
+  async function correctMappingTarget() {
+    if (!mappingConflict || !createMappingProductId || correcting) return;
+    const reason = correctionReason.trim();
+    if (!reason) {
+      setCorrectionError('更正商品映射必须填写原因');
+      return;
+    }
+    setCorrecting(true);
+    setCorrectionError('');
+    try {
+      await api.correctProductMapping(mappingConflict.id, {
+        standardProductId: createMappingProductId,
+        reason,
+      });
+      // 映射已更正指向所选 SKU，本次确认无需再重复建立映射。
+      onChoiceChange({ standardProductId: createMappingProductId, createMapping: false });
+      setMappingConflict(null);
+    } catch (error) {
+      setCorrectionError(errorMessage(error));
+    } finally {
+      setCorrecting(false);
+    }
+  }
+
   const automaticProduct = currentProduct ?? preview?.automaticProduct ?? null;
   const selectValue = choice
     ? choice.standardProductId ?? '__none__'
@@ -8545,6 +8641,58 @@ function ProductStandardizationEditor({
             <small>以后遇到“{item.sourceTitle} / {item.sourceSpec || '无规格'}”时自动关联。</small>
           </span>
         </label>
+      )}
+      {mappingConflict && choice?.standardProductId && (
+        <div
+          className="field-definition-card__meta"
+          role="group"
+          aria-label={`商品 ${itemIndex + 1} 商品映射冲突处理`}
+        >
+          <span>
+            当前平台与卖家账号范围内，“{mappingConflict.sourceTitle} / {mappingConflict.sourceSpec || '无规格'}”
+            已有指向 {mappingConflict.targetProductSku} 的有效商品映射，不能同时指向两个 SKU。
+          </span>
+          <span>请选择：取消（回到暂不关联）、更正映射目标，或仅本次关联（单笔例外）。</span>
+          <label className="field">
+            <span className="field-label">更正原因</span>
+            <input
+              type="text"
+              aria-label={`商品 ${itemIndex + 1} 映射更正原因`}
+              disabled={correcting}
+              value={correctionReason}
+              onChange={(event) => setCorrectionReason(event.target.value)}
+            />
+          </label>
+          {correctionError && <small className="field-error">{correctionError}</small>}
+          <div className="dialog-actions">
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={correcting}
+              onClick={() => onChoiceChange(automaticProduct
+                ? { standardProductId: null, createMapping: false }
+                : undefined)}
+            >
+              取消
+            </button>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={correcting}
+              onClick={() => void correctMappingTarget()}
+            >
+              {correcting ? '正在更正…' : `更正映射目标为所选 SKU`}
+            </button>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={correcting}
+              onClick={() => onChoiceChange({ ...choice, createMapping: false })}
+            >
+              仅本次关联（单笔例外）
+            </button>
+          </div>
+        </div>
       )}
       {!automaticProduct && preview && preview.candidates.length > 0 && (
         <div className="product-standardization-candidates">

@@ -79,11 +79,13 @@ describe('商品映射管理 Electron IPC', () => {
       status: 'disabled',
     });
     const deleteProductMapping = vi.fn();
+    const findProductMappingConflict = vi.fn().mockReturnValue(mappingView);
     registerIpcHandlers({
       listProductMappings,
       listProductMappingEvents,
       getProductMappingStats,
       createProductMapping,
+      findProductMappingConflict,
       correctProductMapping,
       disableProductMapping,
       deleteProductMapping,
@@ -127,6 +129,31 @@ describe('商品映射管理 Electron IPC', () => {
       scope: 'workspace',
       platform: 'xianyu',
     })).rejects.toThrow('工作区级映射不能包含平台或卖家账号');
+
+    await expect(invoke('products:find-mapping-conflict', {
+      sourceTitle: ' IPC 映射原文 ',
+      sourceSpec: ' 规格一 ',
+      platform: ' xianyu ',
+      sellerAccount: ' 映射账号甲 ',
+    })).resolves.toEqual(mappingView);
+    expect(findProductMappingConflict).toHaveBeenCalledWith({
+      sourceTitle: 'IPC 映射原文',
+      sourceSpec: '规格一',
+      platform: 'xianyu',
+      sellerAccount: '映射账号甲',
+    });
+    await expect(invoke('products:find-mapping-conflict', {
+      sourceTitle: 'IPC 映射原文',
+      sourceSpec: '规格一',
+      platform: 'xianyu',
+    })).rejects.toThrow('商品映射冲突查询必须提供平台与卖家账号');
+    await expect(invoke('products:find-mapping-conflict', {
+      sourceTitle: 'IPC 映射原文',
+      sourceSpec: '规格一',
+      platform: 'xianyu',
+      sellerAccount: '映射账号甲',
+      scope: 'workspace',
+    })).rejects.toThrow('商品映射冲突查询包含未知字段');
 
     await expect(invoke('products:correct-mapping', 'mapping-ipc-1', {
       standardProductId: ' product-ipc-2 ',

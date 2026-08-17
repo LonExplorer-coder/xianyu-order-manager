@@ -333,6 +333,66 @@ describe('商品映射三级适用范围', () => {
     }
   });
 
+  it('映射冲突时单笔例外只关联本次订单商品，不修改映射也不污染未来自动匹配', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-mapping-exception-'));
+    const dataDirectory = join(root, '数据');
+    const firstSource = join(root, '首次.png');
+    await writeFile(firstSource, Buffer.from('mapping-exception-first'));
+
+    const first = await openApplication(dataDirectory, recognition('XY-EXCEPTION-0001'));
+    const productA = first.createStandardProduct({
+      sku: 'SKU-EXCEPTION-A',
+      name: '例外商品甲',
+      specification: '规格',
+    });
+    const productB = first.createStandardProduct({
+      sku: 'SKU-EXCEPTION-B',
+      name: '例外商品乙',
+      specification: '规格',
+    });
+    const [firstDraft] = (await first.submitRecognitionBatch([firstSource])).drafts;
+    first.confirmDraft(firstDraft, undefined, {}, [{
+      draftItemId: firstDraft.items[0].id,
+      standardProductId: productA.id,
+      createMapping: true,
+    }]);
+    closeApplication(first);
+
+    // 同范围同原文已指向 SKU-A：不勾选建立映射即单笔例外，只关联到 SKU-B
+    const secondSource = join(root, '例外.png');
+    await writeFile(secondSource, Buffer.from('mapping-exception-second'));
+    const second = await openApplication(dataDirectory, recognition('XY-EXCEPTION-0002'));
+    const [secondDraft] = (await second.submitRecognitionBatch([secondSource])).drafts;
+    const before = second.listProductMappings(productA.id);
+    expect(before).toHaveLength(1);
+    expect(before[0].lastUsedAt).toBeNull();
+    const confirmed = second.confirmDraft(secondDraft, undefined, {}, [{
+      draftItemId: secondDraft.items[0].id,
+      standardProductId: productB.id,
+      createMapping: false,
+    }]);
+    expect(confirmed.items[0]).toMatchObject({
+      standardProduct: expect.objectContaining({ id: productB.id }),
+      standardizationSource: 'manual',
+    });
+    // 映射未新增、未更正、未触碰最近使用时间
+    expect(second.listProductMappings(productB.id)).toEqual([]);
+    expect(second.listProductMappings(productA.id)).toEqual(before);
+    closeApplication(second);
+
+    // 未来同原文识别仍命中旧映射
+    const thirdSource = join(root, '再次.png');
+    await writeFile(thirdSource, Buffer.from('mapping-exception-third'));
+    const third = await openApplication(dataDirectory, recognition('XY-EXCEPTION-0003'));
+    const [thirdDraft] = (await third.submitRecognitionBatch([thirdSource])).drafts;
+    expect(third.previewDraftProductStandardizations(thirdDraft)[0]).toMatchObject({
+      automaticProduct: expect.objectContaining({ id: productA.id }),
+      automaticSource: 'mapping',
+      automaticMappingScope: 'current_account',
+    });
+    closeApplication(third);
+  });
+
   it('映射全部落空时仍按唯一的标题规格完全一致自动关联', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-mapping-exact-fallback-'));
     const dataDirectory = join(root, '数据');

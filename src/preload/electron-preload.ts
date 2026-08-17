@@ -72,6 +72,9 @@ const api: DesktopApi = {
   createProductMapping: (productId, input) => (
     ipcRenderer.invoke('products:create-mapping', productId, input)
   ),
+  findProductMappingConflict: (input) => (
+    ipcRenderer.invoke('products:find-mapping-conflict', input)
+  ),
   correctProductMapping: (mappingId, input) => (
     ipcRenderer.invoke('products:correct-mapping', mappingId, input)
   ),

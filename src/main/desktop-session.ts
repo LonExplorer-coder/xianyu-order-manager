@@ -35,6 +35,7 @@ import {
 import { hasEquivalentOrderContent } from '../core/order-comparison';
 import type {
   CreateProductMappingInput,
+  ProductMappingConflictQueryInput,
   CreateStandardProductInput,
   CorrectProductMappingInput,
   DraftItemProductStandardization,
@@ -451,6 +452,12 @@ export class DesktopSession {
     input: CreateProductMappingInput,
   ): ProductMappingView {
     return this.requireApplication().createProductMapping(productId, input);
+  }
+
+  public findProductMappingConflict(
+    input: ProductMappingConflictQueryInput,
+  ): ProductMappingView | null {
+    return this.requireApplication().findProductMappingConflict(input);
   }
 
   public correctProductMapping(

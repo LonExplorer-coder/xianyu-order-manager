@@ -574,6 +574,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     updateOrderItemStandardization: vi.fn(),
     previewOrderItemStandardizationBatch: vi.fn(),
     applyOrderItemStandardizationBatch: vi.fn(),
+    findProductMappingConflict: vi.fn().mockResolvedValue(null),
     updateOrderPlatformTransactionStatus: vi.fn().mockResolvedValue([]),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
     createCustomFieldDefinition: vi.fn(),
@@ -4729,6 +4730,289 @@ describe('订单管理工作台', () => {
         createMapping: false,
       }],
     );
+  });
+
+  it('勾选建立映射遇到冲突时显式三选一，更正映射目标需填写原因', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-conflict',
+      sku: 'SKU-UI-CONFLICT',
+      name: '脱敏测试标准商品',
+      specification: '白色标准款',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const conflictingMapping = {
+      id: 'mapping-ui-conflict',
+      sourceTitle: draft.items[0].sourceTitle,
+      sourceSpec: draft.items[0].sourceSpec,
+      sourceTitleKey: '脱敏测试商品',
+      sourceSpecKey: '白色',
+      standardProductId: 'product-ui-other',
+      targetProductSku: 'SKU-UI-OTHER',
+      targetProductName: '其他标准商品',
+      scope: 'current_account' as const,
+      platform: 'xianyu',
+      sellerAccount: '测试闲鱼账号',
+      status: 'active' as const,
+      origin: 'manual' as const,
+      lastUsedAt: null,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+      hitOrderCount: 0,
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const findProductMappingConflict = vi.fn().mockResolvedValue(conflictingMapping);
+    const correctProductMapping = vi.fn().mockResolvedValue(conflictingMapping);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        automaticMappingScope: null,
+        candidates: [{
+          product,
+          reason: 'fuzzy',
+          score: 0.72,
+          mappingSuggested: false,
+        }],
+      }]),
+      confirmDraft,
+      findProductMappingConflict,
+      correctProductMapping,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', { name: /SKU-UI-CONFLICT.*相似候选/u }));
+    await user.click(screen.getByRole('checkbox', { name: /记住这组订单原文/u }));
+
+    const conflictPanel = await screen.findByRole('group', { name: '商品 1 商品映射冲突处理' });
+    expect(within(conflictPanel).getByText(/已有指向 SKU-UI-OTHER 的有效商品映射/u))
+      .toBeInTheDocument();
+    expect(findProductMappingConflict).toHaveBeenCalledWith({
+      sourceTitle: draft.items[0].sourceTitle,
+      sourceSpec: draft.items[0].sourceSpec,
+      platform: 'xianyu',
+      sellerAccount: '测试闲鱼账号',
+    });
+    expect(within(conflictPanel).getByRole('button', { name: '取消' })).toBeVisible();
+    expect(within(conflictPanel).getByRole('button', { name: '仅本次关联（单笔例外）' }))
+      .toBeVisible();
+    // 冲突未处理时拦截确认入库（规格 4.4 三选一）
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+    expect(screen.getByText(/存在未处理的商品映射冲突/u)).toBeInTheDocument();
+
+    await user.click(within(conflictPanel).getByRole('button', { name: '更正映射目标为所选 SKU' }));
+    expect(await within(conflictPanel).findByText('更正商品映射必须填写原因')).toBeInTheDocument();
+    expect(correctProductMapping).not.toHaveBeenCalled();
+
+    await user.type(
+      within(conflictPanel).getByRole('textbox', { name: '商品 1 映射更正原因' }),
+      '目标 SKU 选错',
+    );
+    await user.click(within(conflictPanel).getByRole('button', { name: '更正映射目标为所选 SKU' }));
+    await waitFor(() => expect(correctProductMapping).toHaveBeenCalledWith('mapping-ui-conflict', {
+      standardProductId: product.id,
+      reason: '目标 SKU 选错',
+    }));
+    // 更正后映射已指向所选 SKU，确认时不再重复建立映射
+    await waitFor(() => expect(
+      screen.getByRole('checkbox', { name: /记住这组订单原文/u }),
+    ).not.toBeChecked());
+    await waitFor(() => expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+    expect(confirmDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: draft.id }),
+      undefined,
+      [{
+        draftItemId: draft.items[0].id,
+        standardProductId: product.id,
+        createMapping: false,
+      }],
+    );
+  });
+
+  it('映射冲突时选择单笔例外：只关联本次订单商品，不建立也不更正映射', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-exception',
+      sku: 'SKU-UI-EXCEPTION',
+      name: '脱敏测试标准商品',
+      specification: '白色标准款',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const findProductMappingConflict = vi.fn().mockResolvedValue({
+      id: 'mapping-ui-exception',
+      sourceTitle: draft.items[0].sourceTitle,
+      sourceSpec: draft.items[0].sourceSpec,
+      sourceTitleKey: '脱敏测试商品',
+      sourceSpecKey: '白色',
+      standardProductId: 'product-ui-other',
+      targetProductSku: 'SKU-UI-OTHER',
+      targetProductName: '其他标准商品',
+      scope: 'current_account' as const,
+      platform: 'xianyu',
+      sellerAccount: '测试闲鱼账号',
+      status: 'active' as const,
+      origin: 'manual' as const,
+      lastUsedAt: null,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+      hitOrderCount: 0,
+    });
+    const correctProductMapping = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        automaticMappingScope: null,
+        candidates: [{
+          product,
+          reason: 'fuzzy',
+          score: 0.72,
+          mappingSuggested: false,
+        }],
+      }]),
+      confirmDraft,
+      findProductMappingConflict,
+      correctProductMapping,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', { name: /SKU-UI-EXCEPTION.*相似候选/u }));
+    await user.click(screen.getByRole('checkbox', { name: /记住这组订单原文/u }));
+
+    const conflictPanel = await screen.findByRole('group', { name: '商品 1 商品映射冲突处理' });
+    await user.click(within(conflictPanel).getByRole('button', { name: '仅本次关联（单笔例外）' }));
+
+    expect(screen.getByRole('checkbox', { name: /记住这组订单原文/u })).not.toBeChecked();
+    expect(correctProductMapping).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+    expect(confirmDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: draft.id }),
+      undefined,
+      [{
+        draftItemId: draft.items[0].id,
+        standardProductId: product.id,
+        createMapping: false,
+      }],
+    );
+  });
+
+  it('映射冲突时选择取消：放弃本次选择回到暂不关联，与单笔例外区分', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-cancel',
+      sku: 'SKU-UI-CANCEL',
+      name: '脱敏测试标准商品',
+      specification: '白色标准款',
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const confirmDraft = vi.fn().mockResolvedValue({
+      order: confirmedOrder,
+      resolution: 'new_order',
+    });
+    const findProductMappingConflict = vi.fn().mockResolvedValue({
+      id: 'mapping-ui-cancel',
+      sourceTitle: draft.items[0].sourceTitle,
+      sourceSpec: draft.items[0].sourceSpec,
+      sourceTitleKey: '脱敏测试商品',
+      sourceSpecKey: '白色',
+      standardProductId: 'product-ui-other',
+      targetProductSku: 'SKU-UI-OTHER',
+      targetProductName: '其他标准商品',
+      scope: 'current_account' as const,
+      platform: 'xianyu',
+      sellerAccount: '测试闲鱼账号',
+      status: 'active' as const,
+      origin: 'manual' as const,
+      lastUsedAt: null,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+      hitOrderCount: 0,
+    });
+    const correctProductMapping = vi.fn();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      selectSourceScreenshot: vi.fn().mockResolvedValue(draft),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+      previewDraftProductStandardizations: vi.fn().mockResolvedValue([{
+        draftItemId: draft.items[0].id,
+        sourceTitle: draft.items[0].sourceTitle,
+        sourceSpec: draft.items[0].sourceSpec,
+        automaticProduct: null,
+        automaticSource: null,
+        automaticMappingScope: null,
+        candidates: [{
+          product,
+          reason: 'fuzzy',
+          score: 0.72,
+          mappingSuggested: false,
+        }],
+      }]),
+      confirmDraft,
+      findProductMappingConflict,
+      correctProductMapping,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '上传订单截图' }));
+    await user.click(await screen.findByRole('button', { name: /SKU-UI-CANCEL.*相似候选/u }));
+    await user.click(screen.getByRole('checkbox', { name: /记住这组订单原文/u }));
+
+    const conflictPanel = await screen.findByRole('group', { name: '商品 1 商品映射冲突处理' });
+    expect(screen.getByRole('button', { name: '确认并入库' })).toBeDisabled();
+    await user.click(within(conflictPanel).getByRole('button', { name: '取消' }));
+
+    // 取消放弃本次选择：回到暂不关联，不再保留建立映射勾选。
+    expect(screen.getByRole('combobox', { name: '商品 1 标准商品' })).toHaveValue('__none__');
+    expect(screen.queryByRole('checkbox', { name: /记住这组订单原文/u })).not.toBeInTheDocument();
+    expect(correctProductMapping).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: '确认并入库' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '确认并入库' }));
+    // 取消后没有任何显式标准化选择，按无标准化确认入库。
+    expect(confirmDraft).toHaveBeenCalledWith(expect.objectContaining({ id: draft.id }));
   });
 
   it('自动关联命中映射时说明命中级别', async () => {
@@ -10681,6 +10965,7 @@ describe('订单管理工作台', () => {
       standardDisplayPreference: 'prefer_standard' as const,
       useDefaultOrderPrice: false,
       updateProductTotal: false,
+      createMappings: false,
     };
     const preview = {
       standardProduct: product,
@@ -10688,6 +10973,9 @@ describe('订单管理工作台', () => {
       priceSyncRequested: false,
       priceSyncAvailable: true,
       defaultOrderPriceCents: 1299,
+      createMappingsRequested: false,
+      plannedMappingCreationCount: 0,
+      mappingConflictCount: 0,
       orderCount: 1,
       itemCount: 2,
       totalQuantity: 4,
@@ -10755,6 +11043,7 @@ describe('订单管理工作台', () => {
       standardProduct: product,
       appliedItemCount: 2,
       blockedItemCount: 0,
+      createdMappingCount: 0,
       results: [
         {
           itemId: firstItem.id,
@@ -10817,6 +11106,9 @@ describe('订单管理工作台', () => {
     expect(
       within(dialog).getByRole('checkbox', { name: '使用标准商品默认单价' }),
     ).not.toBeChecked();
+    expect(
+      within(dialog).getByRole('checkbox', { name: '建立未来自动匹配的商品映射' }),
+    ).not.toBeChecked();
 
     await within(dialog).findByRole('option', { name: /SKU-BATCH-UI-001/u });
     await user.selectOptions(
@@ -10850,11 +11142,173 @@ describe('订单管理工作台', () => {
       options: batchOptions,
       confirmedOverrideItemIds: [secondItem.id],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: confirmedOrder.id, revision: confirmedOrder.revision }],
     }));
     expect(await within(dialog).findByText(/已关联 2 条商品明细/u)).toBeVisible();
     await user.click(within(dialog).getByRole('button', { name: '完成' }));
     expect(screen.queryByRole('dialog', { name: '批量关联标准商品' })).not.toBeInTheDocument();
+  });
+
+
+  it('批量关联勾选建立映射时映射冲突进入冲突清单，须逐条确认单笔例外', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const conflictItem = {
+      ...confirmedOrder.items[0],
+      id: 'item-batch-map-ui-1',
+      orderId: confirmedOrder.id,
+      systemOrderNumber: confirmedOrder.systemOrderNumber,
+      orderNumber: confirmedOrder.orderNumber,
+    };
+    const product = {
+      id: 'product-batch-map-ui',
+      sku: 'SKU-BATCH-MAP-UI',
+      name: '十二分娃鞋',
+      specification: '白色',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-16T10:00:00.000Z',
+      updatedAt: '2026-08-16T10:00:00.000Z',
+    };
+    const optionsWithMappings = {
+      standardDisplayPreference: 'prefer_standard' as const,
+      useDefaultOrderPrice: false,
+      updateProductTotal: false,
+      createMappings: true,
+    };
+    const preview = {
+      standardProduct: product,
+      options: optionsWithMappings,
+      priceSyncRequested: false,
+      priceSyncAvailable: false,
+      defaultOrderPriceCents: null,
+      createMappingsRequested: true,
+      plannedMappingCreationCount: 0,
+      mappingConflictCount: 1,
+      orderCount: 1,
+      itemCount: 1,
+      totalQuantity: 2,
+      unlinkedCount: 1,
+      sameProductCount: 0,
+      otherProductCount: 0,
+      shippedOrderCount: 0,
+      aftersalesOrderCount: 0,
+      priceAffectedItemCount: 0,
+      suggestedProductTotalOrderCount: 0,
+      items: [{
+        itemId: conflictItem.id,
+        orderId: confirmedOrder.id,
+        orderNumber: confirmedOrder.orderNumber,
+        systemOrderNumber: confirmedOrder.systemOrderNumber,
+        position: 0,
+        sourceTitle: conflictItem.sourceTitle,
+        sourceSpec: conflictItem.sourceSpec,
+        quantity: 2,
+        currentUnitPriceCents: 800,
+        plannedUnitPriceCents: 800,
+        currentSubtotalCents: 1600,
+        plannedSubtotalCents: 1600,
+        beforeStandardProductSku: null,
+        linkState: 'unlinked' as const,
+        blockReasons: ['mapping_conflict' as const],
+      }],
+      orders: [{
+        orderId: confirmedOrder.id,
+        orderNumber: confirmedOrder.orderNumber,
+        systemOrderNumber: confirmedOrder.systemOrderNumber,
+        revision: confirmedOrder.revision,
+        shippedOrDelivered: false,
+        hasAftersales: false,
+        productTotalCents: 1600,
+        shippingFeeCents: 0,
+        amountCents: 1600,
+        suggestedProductTotalCents: 1600,
+        productTotalChanges: false,
+        amountMismatch: false,
+      }],
+    };
+    const previewOrderItemStandardizationBatch = vi.fn().mockResolvedValue(preview);
+    const applyOrderItemStandardizationBatch = vi.fn()
+      .mockRejectedValueOnce(new Error('相同原文已有指向其他 SKU 的有效映射，须逐条确认单笔例外或先更正商品映射'))
+      .mockResolvedValue({
+        batchId: 'batch-map-ui-1',
+        standardProduct: product,
+        appliedItemCount: 1,
+        blockedItemCount: 0,
+        createdMappingCount: 0,
+        results: [{
+          itemId: conflictItem.id,
+          orderId: confirmedOrder.id,
+          applied: true,
+          blockReason: null,
+          beforeStandardProductSku: null,
+          afterStandardProductSku: product.sku,
+        }],
+      });
+    const queryOrderItems = vi.fn().mockResolvedValue({
+      items: [conflictItem],
+      customFieldValues: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems,
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+    });
+    Object.assign(api, {
+      previewOrderItemStandardizationBatch,
+      applyOrderItemStandardizationBatch,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('tab', { name: '订单商品明细' }));
+    const table = await screen.findByRole('table', { name: '订单商品明细' });
+    await user.click(
+      within(table).getByRole('checkbox', { name: '选择当前结果全部订单商品明细' }),
+    );
+    await user.click(screen.getByRole('button', { name: /统一关联到一个 SKU/u }));
+
+    const dialog = await screen.findByRole('dialog', { name: '批量关联标准商品' });
+    await within(dialog).findByRole('option', { name: /SKU-BATCH-MAP-UI/u });
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: '标准商品' }),
+      product.id,
+    );
+    await user.click(
+      within(dialog).getByRole('checkbox', { name: '建立未来自动匹配的商品映射' }),
+    );
+    await waitFor(() => expect(previewOrderItemStandardizationBatch).toHaveBeenLastCalledWith({
+      itemIds: [conflictItem.id],
+      standardProductId: product.id,
+      options: optionsWithMappings,
+    }));
+    expect(await within(dialog).findByText(/新增商品映射：是/u)).toBeInTheDocument();
+    expect(within(dialog).getByText(/相同原文已有指向其他 SKU 的有效映射/u)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: '确认批量关联' }));
+    expect(await within(dialog).findByText(/须逐条确认单笔例外或先更正商品映射/u))
+      .toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('checkbox', {
+      name: `订单商品 ${conflictItem.sourceTitle} 仅本次关联（单笔例外），不建立映射`,
+    }));
+    await user.click(within(dialog).getByRole('button', { name: '确认批量关联' }));
+    await waitFor(() => expect(applyOrderItemStandardizationBatch).toHaveBeenLastCalledWith({
+      itemIds: [conflictItem.id],
+      standardProductId: product.id,
+      options: optionsWithMappings,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [conflictItem.id],
+      expectedOrderRevisions: [{ orderId: confirmedOrder.id, revision: confirmedOrder.revision }],
+    }));
+    expect(await within(dialog).findByText(/已关联 1 条商品明细/u)).toBeVisible();
   });
 
 

@@ -103,6 +103,7 @@ import {
   normalizeCorrectProductMappingInput,
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
+  normalizeProductMappingConflictQueryInput,
   normalizeProductMappingReasonInput,
   normalizeProductText,
   normalizeProductStandardizationConfirmations,
@@ -2412,6 +2413,7 @@ export class LocalApplication {
             standardization.standardProductId,
             { platform: draft.platform, sellerAccount: draft.sellerAccount },
             now,
+            'confirmation',
           );
         }
       });
@@ -2661,6 +2663,7 @@ export class LocalApplication {
               standardization.standardProductId,
               { platform: existing.platform, sellerAccount: existing.sellerAccount },
               now,
+              'confirmation',
             );
           }
         }
@@ -2870,6 +2873,7 @@ export class LocalApplication {
             standardization.standardProductId,
             { platform: existing.platform, sellerAccount: existing.sellerAccount },
             now,
+            'confirmation',
           );
         }
       });
@@ -3457,6 +3461,9 @@ export class LocalApplication {
       priceSyncRequested: plan.priceSyncRequested,
       priceSyncAvailable: plan.priceSyncAvailable,
       defaultOrderPriceCents: plan.defaultOrderPriceCents,
+      createMappingsRequested: plan.createMappingsRequested,
+      plannedMappingCreationCount: plan.plannedMappingCreationCount,
+      mappingConflictCount: plan.mappingConflictCount,
       orderCount: plan.orderCount,
       itemCount: plan.itemCount,
       totalQuantity: plan.totalQuantity,
@@ -3548,8 +3555,20 @@ export class LocalApplication {
       });
       const confirmedOverrideItemIds = new Set(normalized.confirmedOverrideItemIds);
       const confirmedAmountMismatchOrderIds = new Set(normalized.confirmedAmountMismatchOrderIds);
+      const confirmedMappingConflictItemIds = new Set(normalized.confirmedMappingConflictItemIds);
+      // 规格第 6 节：映射冲突不能静默通过；未逐条确认单笔例外时整批拒绝，不产生任何留痕。
+      if (normalized.options.createMappings) {
+        const unconfirmedMappingConflicts = plan.items.filter((itemPlan) => (
+          itemPlan.blockReasons.includes('mapping_conflict') &&
+          !confirmedMappingConflictItemIds.has(itemPlan.itemId)
+        ));
+        if (unconfirmedMappingConflicts.length > 0) {
+          throw new Error('相同原文已有指向其他 SKU 的有效映射，须逐条确认单笔例外或先更正商品映射');
+        }
+      }
       const changesByOrderId = new Map<string, OrderFieldChange[]>();
       const appliedSubtotalDeltaByOrderId = new Map<string, number>();
+      let createdMappingCount = 0;
       const results: OrderItemStandardizationBatchItemResult[] = [];
       const eventRows: Array<{
         orderId: string;
@@ -3562,10 +3581,13 @@ export class LocalApplication {
 
       for (const itemPlan of plan.items) {
         const row = itemRowsById.get(itemPlan.itemId)!;
+        // 映射冲突已在执行前整批校验：确认单笔例外的明细不再此处阻断。
         const blockReason = itemPlan.blockReasons.find((reason) => (
           reason === 'linked_other_product'
             ? !confirmedOverrideItemIds.has(itemPlan.itemId)
-            : !confirmedAmountMismatchOrderIds.has(itemPlan.orderId)
+            : reason === 'amount_mismatch'
+              ? !confirmedAmountMismatchOrderIds.has(itemPlan.orderId)
+              : false
         )) ?? null;
         if (blockReason !== null) {
           results.push({
@@ -3646,6 +3668,23 @@ export class LocalApplication {
           (appliedSubtotalDeltaByOrderId.get(itemPlan.orderId) ?? 0) +
             itemPlan.plannedSubtotalCents - row.state.subtotalCents,
         );
+        // 勾选建立映射时按当前账号适用范围建映射；冲突明细经逐条确认后按
+        // 单笔例外处理：只关联本次订单商品，不建立也不修改商品映射（规格 4.4）。
+        if (normalized.options.createMappings) {
+          const existingMappingProductId = row.state.currentAccountMappingProductId;
+          const mappingConflictException = existingMappingProductId !== null &&
+            existingMappingProductId !== product.id;
+          if (!mappingConflictException) {
+            const created = this.insertProductMapping(
+              { sourceTitle: row.sourceTitle, sourceSpec: row.sourceSpec },
+              product.id,
+              { platform: row.orderPlatform, sellerAccount: row.orderSellerAccount },
+              now,
+              'manual',
+            );
+            if (created) createdMappingCount += 1;
+          }
+        }
         results.push({
           itemId: itemPlan.itemId,
           orderId: itemPlan.orderId,
@@ -3752,6 +3791,7 @@ export class LocalApplication {
         standardProduct: product,
         appliedItemCount: results.filter((result) => result.applied).length,
         blockedItemCount: results.filter((result) => !result.applied).length,
+        createdMappingCount,
         results,
       };
     });
@@ -3778,6 +3818,8 @@ export class LocalApplication {
         before_products.sku AS before_standard_product_sku,
         orders.system_order_number AS system_order_number,
         orders.platform_order_number AS order_number,
+        orders.platform AS order_platform,
+        orders.seller_account AS order_seller_account,
         orders.revision AS order_revision,
         orders.fulfillment_status AS fulfillment_status,
         orders.product_total_cents AS product_total_cents,
@@ -3803,12 +3845,37 @@ export class LocalApplication {
         AND items.id IN (SELECT value FROM json_each(?))
     `).all(JSON.stringify(itemIds)) as unknown as SqlRow[];
     const rowByItemId = new Map(rows.map((row) => [asString(row.item_id), row] as const));
+    // 当前账号适用范围的有效映射按 平台|卖家账号|规范化原文 索引，供建立映射前查冲突。
+    const accountMappingProductIdByKey = new Map<string, string>();
+    const mappingRows = workspace.database.prepare(`
+      SELECT platform, seller_account, source_title_key, source_spec_key, standard_product_id
+      FROM product_mappings
+      WHERE scope = 'current_account' AND status = 'active'
+    `).all() as unknown as SqlRow[];
+    for (const mappingRow of mappingRows) {
+      accountMappingProductIdByKey.set([
+        asString(mappingRow.platform),
+        asString(mappingRow.seller_account),
+        asString(mappingRow.source_title_key),
+        asString(mappingRow.source_spec_key),
+      ].join('\u001f'), asString(mappingRow.standard_product_id));
+    }
     const itemRowsById = new Map<string, OrderItemStandardizationBatchItemRow>();
     const orderRowsById = new Map<string, OrderItemStandardizationBatchOrderRow>();
     for (const itemId of itemIds) {
       const row = rowByItemId.get(itemId);
       if (!row) continue;
       const orderId = asString(row.order_id);
+      const orderPlatform = asString(row.order_platform);
+      const orderSellerAccount = asString(row.order_seller_account);
+      const sourceTitle = asString(row.source_title);
+      const sourceSpec = asString(row.source_spec);
+      const accountMappingKey = [
+        orderPlatform,
+        orderSellerAccount,
+        normalizeProductText(sourceTitle),
+        normalizeProductText(sourceSpec),
+      ].join('\u001f');
       itemRowsById.set(itemId, {
         state: {
           itemId,
@@ -3820,9 +3887,13 @@ export class LocalApplication {
           standardProductId: row.standard_product_id === null
             ? null
             : asString(row.standard_product_id),
+          currentAccountMappingProductId: accountMappingProductIdByKey.get(accountMappingKey) ?? null,
+          currentAccountMappingKey: accountMappingKey,
         },
-        sourceTitle: asString(row.source_title),
-        sourceSpec: asString(row.source_spec),
+        sourceTitle,
+        sourceSpec,
+        orderPlatform,
+        orderSellerAccount,
         standardizationSource: row.standardization_source === null
           ? null
           : asProductStandardizationSource(row.standardization_source),
@@ -4214,12 +4285,17 @@ export class LocalApplication {
     return new Map(entries);
   }
 
+  /**
+   * 按当前账号适用范围建立商品映射并留建立事件；同范围同原文已指向同一
+   * 标准商品时幂等跳过（返回 false），指向其他 SKU 时抛出冲突错误（规格 4.4）。
+   */
   private insertProductMapping(
     item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
     standardProductId: string,
     context: ProductMappingMatchContext,
     now: string,
-  ): void {
+    origin: ProductMappingOrigin,
+  ): boolean {
     const workspace = this.requireWorkspace();
     const sourceTitleKey = normalizeProductText(item.sourceTitle);
     const sourceSpecKey = normalizeProductText(item.sourceSpec);
@@ -4239,7 +4315,7 @@ export class LocalApplication {
       sourceSpecKey,
     ) as SqlRow | undefined;
     if (existing) {
-      if (asString(existing.standard_product_id) === standardProductId) return;
+      if (asString(existing.standard_product_id) === standardProductId) return false;
       throw new Error(productMappingConflictMessage('current_account'));
     }
     const mappingId = randomUUID();
@@ -4247,7 +4323,7 @@ export class LocalApplication {
       INSERT INTO product_mappings (
         id, source_title, source_spec, source_title_key, source_spec_key,
         standard_product_id, scope, platform, seller_account, origin, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'current_account', ?, ?, 'confirmation', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'current_account', ?, ?, ?, ?, ?)
     `).run(
       mappingId,
       item.sourceTitle,
@@ -4257,6 +4333,7 @@ export class LocalApplication {
       standardProductId,
       context.platform,
       context.sellerAccount,
+      origin,
       now,
       now,
     );
@@ -4274,10 +4351,28 @@ export class LocalApplication {
         sellerAccount: context.sellerAccount,
         status: 'active',
       },
-      'confirmation',
+      origin,
       '',
       now,
     );
+    return true;
+  }
+
+  /**
+   * 规格 4.4 映射冲突查询：校对确认等有订单上下文的入口在建立映射前，
+   * 查找当前账号适用范围内相同规范化原文的有效映射，供三选一处理。
+   */
+  public findProductMappingConflict(input: unknown): ProductMappingView | null {
+    const normalized = normalizeProductMappingConflictQueryInput(input);
+    const conflict = this.findActiveProductMappingConflict({
+      sourceTitleKey: normalizeProductText(normalized.sourceTitle),
+      sourceSpecKey: normalizeProductText(normalized.sourceSpec),
+      scope: 'current_account',
+      platform: normalized.platform,
+      sellerAccount: normalized.sellerAccount,
+      excludeMappingId: null,
+    });
+    return conflict ? this.getProductMappingView(conflict.id) : null;
   }
 
   public getProductMappingStats(productId: string): ProductMappingStats {
@@ -9046,6 +9141,8 @@ type OrderItemStandardizationBatchItemRow = {
   state: OrderItemStandardizationBatchItemState;
   sourceTitle: string;
   sourceSpec: string;
+  orderPlatform: string;
+  orderSellerAccount: string;
   standardizationSource: ProductStandardizationSource | null;
   standardDisplayPreference: StandardDisplayPreference | null;
   beforeStandardProductSku: string | null;

@@ -13,7 +13,9 @@ import { DialogShell, InlineError } from './DialogShell';
 /**
  * 订单商品明细批量关联对话框：多选明细统一关联到一个标准商品。
  * 确认前完整预览影响（规格第 6 节），逐条冲突必须显式确认覆盖或核对；
- * 本票据不提供「建立映射」勾选，成交金额与来源原文保持不变。
+ * 「建立未来自动匹配的商品映射」默认不勾选，勾选后按当前账号适用范围建映射，
+ * 相同原文已有指向其他 SKU 的有效映射时须逐条确认单笔例外；
+ * 成交金额与来源原文保持不变。
  */
 export function OrderItemStandardizationBatchDialog({
   api,
@@ -31,11 +33,15 @@ export function OrderItemStandardizationBatchDialog({
   const [preference, setPreference] = useState<StandardDisplayPreference>('prefer_standard');
   const [useDefaultOrderPrice, setUseDefaultOrderPrice] = useState(false);
   const [updateProductTotal, setUpdateProductTotal] = useState(false);
+  const [createMappings, setCreateMappings] = useState(false);
   const [preview, setPreview] = useState<OrderItemStandardizationBatchPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState('');
   const [confirmedOverrideItemIds, setConfirmedOverrideItemIds] = useState<Set<string>>(new Set());
   const [confirmedAmountMismatchOrderIds, setConfirmedAmountMismatchOrderIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [confirmedMappingConflictItemIds, setConfirmedMappingConflictItemIds] = useState<Set<string>>(
     new Set(),
   );
   const [applying, setApplying] = useState(false);
@@ -60,7 +66,8 @@ export function OrderItemStandardizationBatchDialog({
     standardDisplayPreference: preference,
     useDefaultOrderPrice,
     updateProductTotal,
-  }), [preference, useDefaultOrderPrice, updateProductTotal]);
+    createMappings,
+  }), [preference, useDefaultOrderPrice, updateProductTotal, createMappings]);
   useEffect(() => {
     if (!selectedProductId) {
       setPreview(null);
@@ -72,6 +79,7 @@ export function OrderItemStandardizationBatchDialog({
     setError('');
     setConfirmedOverrideItemIds(new Set());
     setConfirmedAmountMismatchOrderIds(new Set());
+    setConfirmedMappingConflictItemIds(new Set());
     void api.previewOrderItemStandardizationBatch({
       itemIds: items.map((item) => item.id),
       standardProductId: selectedProductId,
@@ -99,6 +107,9 @@ export function OrderItemStandardizationBatchDialog({
   const linkedOtherItems = preview?.items.filter((item) => (
     item.blockReasons.includes('linked_other_product')
   )) ?? [];
+  const mappingConflictItems = preview?.items.filter((item) => (
+    item.blockReasons.includes('mapping_conflict')
+  )) ?? [];
   const amountMismatchOrders = preview?.orders.filter((order) => order.amountMismatch) ?? [];
   const priceSyncUnavailable = Boolean(
     preview && preview.priceSyncRequested && !preview.priceSyncAvailable,
@@ -117,6 +128,7 @@ export function OrderItemStandardizationBatchDialog({
         options,
         confirmedOverrideItemIds: [...confirmedOverrideItemIds],
         confirmedAmountMismatchOrderIds: [...confirmedAmountMismatchOrderIds],
+        confirmedMappingConflictItemIds: [...confirmedMappingConflictItemIds],
         expectedOrderRevisions: preview.orders.map((order) => ({
           orderId: order.orderId,
           revision: order.revision,
@@ -147,6 +159,7 @@ export function OrderItemStandardizationBatchDialog({
         <p role="status">
           已关联 {result.appliedItemCount} 条商品明细
           {result.blockedItemCount > 0 ? `，阻断 ${result.blockedItemCount} 条` : ''}
+          {result.createdMappingCount > 0 ? `，新建 ${result.createdMappingCount} 条商品映射` : ''}
           。
         </p>
         {result.blockedItemCount > 0 && (
@@ -226,6 +239,17 @@ export function OrderItemStandardizationBatchDialog({
         <span>使用标准商品默认单价</span>
       </label>
 
+      <label className="fields-check-row">
+        <input
+          type="checkbox"
+          aria-label="建立未来自动匹配的商品映射"
+          checked={createMappings}
+          disabled={busy}
+          onChange={(event) => setCreateMappings(event.target.checked)}
+        />
+        <span>建立未来自动匹配的商品映射</span>
+      </label>
+
       {previewLoading && <p role="status">正在计算影响预览…</p>}
       {preview && (
         <div className="field-definition-card__meta">
@@ -259,6 +283,13 @@ export function OrderItemStandardizationBatchDialog({
           </span>
           <span>成交金额保持不变</span>
           <span>来源原文保持不变</span>
+          <span>
+            新增商品映射：
+            {preview.createMappingsRequested
+              ? `是（预计新增 ${preview.plannedMappingCreationCount} 条，按当前平台与卖家账号适用范围）`
+              : '否'}
+          </span>
+          <span>更正商品映射：否（本操作只新增映射，不更正既有映射）</span>
         </div>
       )}
       {preview && preview.priceSyncRequested && preview.priceSyncAvailable
@@ -325,6 +356,33 @@ export function OrderItemStandardizationBatchDialog({
           ))}
         </div>
       )}
+      {mappingConflictItems.length > 0 && (
+        <div className="field-definition-card__meta">
+          <span>相同原文已有指向其他 SKU 的有效映射，须逐条确认处理方式</span>
+          {mappingConflictItems.map((item) => (
+            <label className="fields-check-row" key={item.itemId}>
+              <input
+                type="checkbox"
+                aria-label={`订单商品 ${item.sourceTitle} 仅本次关联（单笔例外），不建立映射`}
+                checked={confirmedMappingConflictItemIds.has(item.itemId)}
+                disabled={busy}
+                onChange={(event) => {
+                  setConfirmedMappingConflictItemIds((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.add(item.itemId);
+                    else next.delete(item.itemId);
+                    return next;
+                  });
+                }}
+              />
+              <span>
+                {item.sourceTitle}：单笔例外只关联本次订单商品，不建立也不修改商品映射；
+                未确认时整批不执行
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
       {amountMismatchOrders.length > 0 && (
         <div className="field-definition-card__meta">
           <span>商品总价与成交金额存在差异，须逐条人工核对</span>
@@ -370,9 +428,12 @@ export function OrderItemStandardizationBatchDialog({
   );
 }
 
-function blockReasonLabel(reason: 'linked_other_product' | 'amount_mismatch' | null): string {
+function blockReasonLabel(
+  reason: 'linked_other_product' | 'amount_mismatch' | 'mapping_conflict' | null,
+): string {
   if (reason === 'linked_other_product') return '已关联其他 SKU，未确认覆盖';
   if (reason === 'amount_mismatch') return '商品总价与成交金额存在差异，未人工核对';
+  if (reason === 'mapping_conflict') return '相同原文已有指向其他 SKU 的有效映射，未确认单笔例外';
   return '未知原因';
 }
 

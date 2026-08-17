@@ -12,6 +12,7 @@ import type {
 import type {
   OrderItemStandardizationBatchOptions,
 } from '../src/core/product-standardization';
+import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import { LocalApplication } from '../src/main/local-application';
 import { removeVersion45ExtensionArtifacts } from './version31-fixture';
 
@@ -118,6 +119,7 @@ const preferStandard: OrderItemStandardizationBatchOptions = {
   standardDisplayPreference: 'prefer_standard',
   useDefaultOrderPrice: false,
   updateProductTotal: false,
+  createMappings: false,
 };
 
 function linkItem(
@@ -288,6 +290,7 @@ describe('订单商品批量关联预览', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: true,
+        createMappings: false,
       },
     });
 
@@ -373,6 +376,7 @@ describe('订单商品批量关联执行', () => {
       standardDisplayPreference: 'prefer_standard',
       useDefaultOrderPrice: true,
       updateProductTotal: true,
+      createMappings: false,
     };
     const preview = application.previewOrderItemStandardizationBatch({
       itemIds: [order1.items[0].id, order2.items[0].id],
@@ -386,6 +390,7 @@ describe('订单商品批量关联执行', () => {
       options,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [order1.id, order2.id],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: preview.orders.map((order) => ({
         orderId: order.orderId,
         revision: order.revision,
@@ -497,6 +502,7 @@ describe('订单商品批量关联执行', () => {
       ...applyInput,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
     });
     expect(blocked).toMatchObject({ appliedItemCount: 0, blockedItemCount: 1 });
     expect(blocked.results[0]).toMatchObject({
@@ -514,6 +520,7 @@ describe('订单商品批量关联执行', () => {
       ...applyInput,
       confirmedOverrideItemIds: [order.items[0].id],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
     });
     expect(applied).toMatchObject({ appliedItemCount: 1, blockedItemCount: 0 });
     const updated = application.getOrder(order.id);
@@ -548,6 +555,7 @@ describe('订单商品批量关联执行', () => {
       standardDisplayPreference: 'prefer_standard',
       useDefaultOrderPrice: true,
       updateProductTotal: true,
+      createMappings: false,
     };
     const applyInput = {
       itemIds: [order.items[0].id],
@@ -560,6 +568,7 @@ describe('订单商品批量关联执行', () => {
     const blocked = application.applyOrderItemStandardizationBatch({
       ...applyInput,
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
     });
     expect(blocked.results[0]).toMatchObject({
       applied: false,
@@ -573,6 +582,7 @@ describe('订单商品批量关联执行', () => {
     const applied = application.applyOrderItemStandardizationBatch({
       ...applyInput,
       confirmedAmountMismatchOrderIds: [order.id],
+      confirmedMappingConflictItemIds: [],
     });
     expect(applied.results[0]).toMatchObject({ applied: true, blockReason: null });
     expect(application.getOrder(order.id).order).toMatchObject({
@@ -600,6 +610,7 @@ describe('订单商品批量关联执行', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: false,
+        createMappings: false,
       },
     });
     expect(preview).toMatchObject({
@@ -615,9 +626,11 @@ describe('订单商品批量关联执行', () => {
         standardDisplayPreference: 'prefer_standard',
         useDefaultOrderPrice: true,
         updateProductTotal: false,
+        createMappings: false,
       },
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: order.id, revision: order.revision }],
     })).toThrow('标准商品未设置默认订单单价，无法同步商品单价');
     expect(application.getOrder(order.id).order.items[0].standardProduct).toBeNull();
@@ -642,6 +655,7 @@ describe('订单商品批量关联执行', () => {
       options: preferStandard,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: order.id, revision: order.revision + 1 }],
     })).toThrow('订单已在其他操作中更新，请刷新后重试');
     expect(() => application.applyOrderItemStandardizationBatch({
@@ -650,6 +664,7 @@ describe('订单商品批量关联执行', () => {
       options: preferStandard,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-not-involved', revision: 1 }],
     })).toThrow('订单版本无效，请刷新后重试');
     expect(application.getOrder(order.id).order.items[0].standardProduct).toBeNull();
@@ -682,6 +697,7 @@ describe('订单商品批量关联执行', () => {
       options: preferStandard,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: order.id, revision: linkedOrder.revision }],
     });
     expect(result).toMatchObject({ appliedItemCount: 1, blockedItemCount: 1 });
@@ -728,6 +744,255 @@ describe('订单商品批量关联执行', () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe('批量关联建立商品映射', () => {
+  it('勾选建立映射后按当前账号适用范围建映射并留建立事件，指向同一 SKU 时幂等', async () => {
+    const { application, orders } = await openSeededApplication([
+      orderSpec('XY-BATCH-MAP-1', [
+        { sourceTitle: '十二分娃鞋白胚', sourceSpec: '小号', unitPriceCents: 800, quantity: 1 },
+      ]),
+      orderSpec('XY-BATCH-MAP-2', [
+        { sourceTitle: '十二分娃鞋白胚', sourceSpec: '小号', unitPriceCents: 800, quantity: 1 },
+      ], '13900000031'),
+    ]);
+    const target = application.createStandardProduct({
+      sku: 'SKU-BATCH-MAP',
+      name: '十二分娃鞋',
+      specification: '白色',
+    });
+    const options: OrderItemStandardizationBatchOptions = {
+      ...preferStandard,
+      createMappings: true,
+    };
+    const itemIds = [orders[0].items[0].id, orders[1].items[0].id];
+
+    const preview = application.previewOrderItemStandardizationBatch({
+      itemIds,
+      standardProductId: target.id,
+      options,
+    });
+    expect(preview).toMatchObject({
+      createMappingsRequested: true,
+      // 两条同原文明细只建一条映射，预计数按映射键去重。
+      plannedMappingCreationCount: 1,
+      mappingConflictCount: 0,
+    });
+
+    const result = application.applyOrderItemStandardizationBatch({
+      itemIds,
+      standardProductId: target.id,
+      options,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
+      expectedOrderRevisions: preview.orders.map((order) => ({
+        orderId: order.orderId,
+        revision: order.revision,
+      })),
+    });
+    expect(result).toMatchObject({
+      appliedItemCount: 2,
+      blockedItemCount: 0,
+      createdMappingCount: 1,
+    });
+
+    const mappings = application.listProductMappings(target.id);
+    expect(mappings).toHaveLength(1);
+    expect(mappings[0]).toMatchObject({
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      scope: 'current_account',
+      platform: 'xianyu',
+      sellerAccount: '批量关联测试账号',
+      origin: 'manual',
+      status: 'active',
+      lastUsedAt: null,
+    });
+    expect(application.listProductMappingEvents(target.id)).toEqual([
+      expect.objectContaining({
+        mappingId: mappings[0].id,
+        eventType: 'created',
+        origin: 'manual',
+      }),
+    ]);
+
+    const secondPreview = application.previewOrderItemStandardizationBatch({
+      itemIds,
+      standardProductId: target.id,
+      options,
+    });
+    expect(secondPreview.plannedMappingCreationCount).toBe(0);
+    const second = application.applyOrderItemStandardizationBatch({
+      itemIds,
+      standardProductId: target.id,
+      options,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
+      expectedOrderRevisions: secondPreview.orders.map((order) => ({
+        orderId: order.orderId,
+        revision: order.revision,
+      })),
+    });
+    expect(second.createdMappingCount).toBe(0);
+    expect(application.listProductMappings(target.id)).toHaveLength(1);
+  });
+
+  it('未勾选建立映射时不创建商品映射', async () => {
+    const { application, orders } = await openSeededApplication([
+      orderSpec('XY-BATCH-NOMAP-1', [
+        { sourceTitle: '十二分娃鞋白胚', sourceSpec: '小号', unitPriceCents: 800, quantity: 1 },
+      ]),
+    ]);
+    const target = application.createStandardProduct({
+      sku: 'SKU-BATCH-NOMAP',
+      name: '十二分娃鞋',
+      specification: '白色',
+    });
+    const order = orders[0];
+
+    const preview = application.previewOrderItemStandardizationBatch({
+      itemIds: [order.items[0].id],
+      standardProductId: target.id,
+      options: preferStandard,
+    });
+    expect(preview).toMatchObject({
+      createMappingsRequested: false,
+      plannedMappingCreationCount: 0,
+      mappingConflictCount: 0,
+    });
+    const result = application.applyOrderItemStandardizationBatch({
+      itemIds: [order.items[0].id],
+      standardProductId: target.id,
+      options: preferStandard,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
+      expectedOrderRevisions: [{ orderId: order.id, revision: order.revision }],
+    });
+    expect(result.createdMappingCount).toBe(0);
+    expect(application.listProductMappings(target.id)).toEqual([]);
+  });
+
+  it('同原文已有指向其他 SKU 的有效映射时进入冲突清单，确认后按单笔例外关联且不污染未来自动匹配', async () => {
+    const { application, root, dataDirectory, orders } = await openSeededApplication([
+      orderSpec('XY-BATCH-EXC-1', [
+        { sourceTitle: '十二分娃鞋白胚', sourceSpec: '小号', unitPriceCents: 800, quantity: 1 },
+      ]),
+    ]);
+    const oldProduct = application.createStandardProduct({
+      sku: 'SKU-BATCH-EXC-OLD',
+      name: '十二分娃鞋',
+      specification: '黑色',
+    });
+    const target = application.createStandardProduct({
+      sku: 'SKU-BATCH-EXC-NEW',
+      name: '十二分娃鞋',
+      specification: '白色',
+    });
+    const existing = application.createProductMapping(oldProduct.id, {
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      scope: 'current_account',
+      platform: 'xianyu',
+      sellerAccount: '批量关联测试账号',
+    });
+    const order = orders[0];
+    const options: OrderItemStandardizationBatchOptions = {
+      ...preferStandard,
+      createMappings: true,
+    };
+
+    expect(application.findProductMappingConflict({
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      platform: 'xianyu',
+      sellerAccount: '批量关联测试账号',
+    })?.id).toBe(existing.id);
+    expect(application.findProductMappingConflict({
+      sourceTitle: '十二分娃鞋白胚',
+      sourceSpec: '小号',
+      platform: 'xianyu',
+      sellerAccount: '其他账号',
+    })).toBeNull();
+    expect(application.findProductMappingConflict({
+      sourceTitle: '亚麻收纳袋',
+      sourceSpec: '米白',
+      platform: 'xianyu',
+      sellerAccount: '批量关联测试账号',
+    })).toBeNull();
+
+    const preview = application.previewOrderItemStandardizationBatch({
+      itemIds: [order.items[0].id],
+      standardProductId: target.id,
+      options,
+    });
+    expect(preview).toMatchObject({
+      createMappingsRequested: true,
+      plannedMappingCreationCount: 0,
+      mappingConflictCount: 1,
+    });
+    expect(preview.items[0].blockReasons).toEqual(['mapping_conflict']);
+
+    expect(() => application.applyOrderItemStandardizationBatch({
+      itemIds: [order.items[0].id],
+      standardProductId: target.id,
+      options,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
+      expectedOrderRevisions: [{ orderId: order.id, revision: order.revision }],
+    })).toThrow('相同原文已有指向其他 SKU 的有效映射');
+    expect(application.getOrder(order.id).order.items[0].standardProduct).toBeNull();
+
+    // 单笔例外：逐条确认后仅本次关联，不建立也不修改商品映射
+    const result = application.applyOrderItemStandardizationBatch({
+      itemIds: [order.items[0].id],
+      standardProductId: target.id,
+      options,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [order.items[0].id],
+      expectedOrderRevisions: [{ orderId: order.id, revision: order.revision }],
+    });
+    expect(result).toMatchObject({
+      appliedItemCount: 1,
+      blockedItemCount: 0,
+      createdMappingCount: 0,
+    });
+    expect(application.getOrder(order.id).order.items[0]).toMatchObject({
+      standardProduct: expect.objectContaining({ id: target.id }),
+      standardizationSource: 'manual',
+    });
+    expect(application.listProductMappings(target.id)).toEqual([]);
+    const unchangedMappings = application.listProductMappings(oldProduct.id);
+    expect(unchangedMappings).toHaveLength(1);
+    expect(unchangedMappings[0]).toMatchObject({
+      id: existing.id,
+      standardProductId: oldProduct.id,
+      lastUsedAt: null,
+    });
+    application.close();
+    openedApplications.splice(openedApplications.indexOf(application), 1);
+
+    // 未来同原文识别仍命中旧映射：单笔例外不污染自动匹配
+    const followup = new LocalApplication(new ControlledRecognizer(recognition(
+      orderSpec('XY-BATCH-EXC-2', [
+        { sourceTitle: '十二分娃鞋白胚', sourceSpec: '小号', unitPriceCents: 800, quantity: 1 },
+      ], '13900000041'),
+    )));
+    openedApplications.push(followup);
+    followup.openDataDirectory(dataDirectory);
+    const followupSource = join(root, 'followup.png');
+    await writeFile(followupSource, Buffer.from('batch-mapping-exception-followup'));
+    const [followupDraft] = (await followup.submitRecognitionBatch([followupSource])).drafts;
+    expect(followup.previewDraftProductStandardizations(followupDraft)[0]).toMatchObject({
+      automaticProduct: expect.objectContaining({ id: oldProduct.id }),
+      automaticSource: 'mapping',
+      automaticMappingScope: 'current_account',
+    });
   });
 });
 

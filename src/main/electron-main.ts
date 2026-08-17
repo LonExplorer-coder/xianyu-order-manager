@@ -33,6 +33,7 @@ import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
   normalizeCreateProductMappingInput,
+  normalizeProductMappingConflictQueryInput,
   normalizeCorrectProductMappingInput,
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
@@ -248,6 +249,11 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.createProductMapping(
       parseWorkflowId(productId, '标准商品'),
       normalizeCreateProductMappingInput(input),
+    )
+  ));
+  ipcMain.handle('products:find-mapping-conflict', (_event, input: unknown) => (
+    desktopSession.findProductMappingConflict(
+      normalizeProductMappingConflictQueryInput(input),
     )
   ));
   ipcMain.handle('products:correct-mapping', (_event, mappingId: unknown, input: unknown) => (

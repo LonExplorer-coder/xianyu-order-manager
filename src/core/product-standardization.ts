@@ -110,6 +110,17 @@ export type ProductMappingReasonInput = {
   reason: string;
 };
 
+/**
+ * 映射冲突查询：校对确认等有订单上下文的入口在建立映射前，
+ * 按当前账号适用范围查找相同规范化原文的有效映射（规格 4.4）。
+ */
+export type ProductMappingConflictQueryInput = {
+  sourceTitle: string;
+  sourceSpec: string;
+  platform: string;
+  sellerAccount: string;
+};
+
 /** 命中投影所需的映射关联事实：source='mapping' 的订单商品明细。 */
 export type ProductMappingHitFact = {
   sourceTitle: string;
@@ -277,12 +288,15 @@ export type OrderItemStandardizationBatchLinkState =
 /** 批量关联中逐条阻断且必须显式确认的冲突原因。 */
 export type OrderItemStandardizationBatchBlockReason =
   | 'linked_other_product'
-  | 'amount_mismatch';
+  | 'amount_mismatch'
+  | 'mapping_conflict';
 
 export type OrderItemStandardizationBatchOptions = {
   standardDisplayPreference: StandardDisplayPreference;
   useDefaultOrderPrice: boolean;
   updateProductTotal: boolean;
+  /** 勾选后按当前账号适用范围为成功关联的明细建立商品映射（规格第 6 节默认不勾）。 */
+  createMappings: boolean;
 };
 
 export type OrderItemStandardizationBatchPreviewInput = {
@@ -295,6 +309,8 @@ export type OrderItemStandardizationBatchApplyInput =
   OrderItemStandardizationBatchPreviewInput & {
     confirmedOverrideItemIds: string[];
     confirmedAmountMismatchOrderIds: string[];
+    /** 映射冲突明细的逐条确认：确认后按单笔例外关联，不建立也不修改商品映射。 */
+    confirmedMappingConflictItemIds: string[];
     expectedOrderRevisions: Array<{ orderId: string; revision: number }>;
   };
 
@@ -307,6 +323,10 @@ export type OrderItemStandardizationBatchItemState = {
   unitPriceCents: number;
   subtotalCents: number;
   standardProductId: string | null;
+  /** 该明细所属订单的当前账号适用范围内、相同规范化原文的有效商品映射目标；无有效映射为 null。 */
+  currentAccountMappingProductId: string | null;
+  /** 该明细在当前账号适用范围内的映射键（平台|卖家账号|规范化标题|规范化规格）。 */
+  currentAccountMappingKey: string;
 };
 
 /** 批量关联预览计算所需的最小订单状态；金额一律整数分。 */
@@ -348,6 +368,9 @@ export type OrderItemStandardizationBatchPlan = {
   priceSyncRequested: boolean;
   priceSyncAvailable: boolean;
   defaultOrderPriceCents: number | null;
+  createMappingsRequested: boolean;
+  plannedMappingCreationCount: number;
+  mappingConflictCount: number;
   orderCount: number;
   itemCount: number;
   totalQuantity: number;
@@ -401,6 +424,9 @@ export type OrderItemStandardizationBatchPreview = {
   priceSyncRequested: boolean;
   priceSyncAvailable: boolean;
   defaultOrderPriceCents: number | null;
+  createMappingsRequested: boolean;
+  plannedMappingCreationCount: number;
+  mappingConflictCount: number;
   orderCount: number;
   itemCount: number;
   totalQuantity: number;
@@ -429,6 +455,7 @@ export type OrderItemStandardizationBatchResult = {
   standardProduct: StandardProduct;
   appliedItemCount: number;
   blockedItemCount: number;
+  createdMappingCount: number;
   results: OrderItemStandardizationBatchItemResult[];
 };
 
@@ -514,6 +541,15 @@ export function planOrderItemStandardizationBatch(input: {
     const blockReasons: OrderItemStandardizationBatchBlockReason[] = [];
     if (plan.linkState === 'other_product') blockReasons.push('linked_other_product');
     if (orderPlanById.get(plan.orderId)?.amountMismatch) blockReasons.push('amount_mismatch');
+    // 规格第 6 节：相同原文已有指向其他 SKU 的有效映射不能静默通过。
+    const mappingProductId = itemStateById.get(plan.itemId)?.currentAccountMappingProductId ?? null;
+    if (
+      options.createMappings &&
+      mappingProductId !== null &&
+      mappingProductId !== product.id
+    ) {
+      blockReasons.push('mapping_conflict');
+    }
     plan.blockReasons = blockReasons;
   }
 
@@ -521,6 +557,20 @@ export function planOrderItemStandardizationBatch(input: {
     priceSyncRequested: options.useDefaultOrderPrice,
     priceSyncAvailable,
     defaultOrderPriceCents: product.defaultOrderPriceCents,
+    createMappingsRequested: options.createMappings,
+    // 规格第 6 节：预计新增条数按映射键去重（同原文多条明细只建一条映射），
+    // 映射冲突明细按单笔例外处理后不建映射，不计入。
+    plannedMappingCreationCount: options.createMappings
+      ? new Set(items.flatMap((item, index) => (
+          item.currentAccountMappingProductId === null &&
+          !itemPlans[index].blockReasons.includes('mapping_conflict')
+            ? [item.currentAccountMappingKey]
+            : []
+        ))).size
+      : 0,
+    mappingConflictCount: itemPlans.filter(
+      (plan) => plan.blockReasons.includes('mapping_conflict'),
+    ).length,
     orderCount: orderPlans.length,
     itemCount: itemPlans.length,
     totalQuantity: items.reduce((total, item) => total + item.quantity, 0),
@@ -542,12 +592,14 @@ const BATCH_OPTION_KEYS = new Set([
   'standardDisplayPreference',
   'useDefaultOrderPrice',
   'updateProductTotal',
+  'createMappings',
 ]);
 const BATCH_PREVIEW_KEYS = new Set(['itemIds', 'standardProductId', 'options']);
 const BATCH_APPLY_KEYS = new Set([
   ...BATCH_PREVIEW_KEYS,
   'confirmedOverrideItemIds',
   'confirmedAmountMismatchOrderIds',
+  'confirmedMappingConflictItemIds',
   'expectedOrderRevisions',
 ]);
 
@@ -585,12 +637,24 @@ export function normalizeOrderItemStandardizationBatchApplyInput(
   if (confirmedAmountMismatchOrderIds.some((orderId) => !expectedOrderIds.has(orderId))) {
     throw new Error('批量关联金额差异确认超出了涉及订单');
   }
+  const options = normalizeBatchOptions(record.options);
+  const confirmedMappingConflictItemIds = normalizeBatchIdList(
+    record.confirmedMappingConflictItemIds,
+    '批量关联映射冲突确认无效',
+  );
+  if (confirmedMappingConflictItemIds.some((itemId) => !itemIds.includes(itemId))) {
+    throw new Error('批量关联映射冲突确认超出了所选商品明细');
+  }
+  if (!options.createMappings && confirmedMappingConflictItemIds.length > 0) {
+    throw new Error('未勾选建立商品映射时不能确认映射冲突');
+  }
   return {
     itemIds,
     standardProductId: normalizeBatchProductId(record.standardProductId),
-    options: normalizeBatchOptions(record.options),
+    options,
     confirmedOverrideItemIds,
     confirmedAmountMismatchOrderIds,
+    confirmedMappingConflictItemIds,
     expectedOrderRevisions,
   };
 }
@@ -663,7 +727,8 @@ function normalizeBatchOptions(value: unknown): OrderItemStandardizationBatchOpt
   }
   if (
     typeof record.useDefaultOrderPrice !== 'boolean' ||
-    typeof record.updateProductTotal !== 'boolean'
+    typeof record.updateProductTotal !== 'boolean' ||
+    typeof record.createMappings !== 'boolean'
   ) {
     throw new Error('批量关联选项无效');
   }
@@ -674,6 +739,7 @@ function normalizeBatchOptions(value: unknown): OrderItemStandardizationBatchOpt
     standardDisplayPreference: record.standardDisplayPreference,
     useDefaultOrderPrice: record.useDefaultOrderPrice,
     updateProductTotal: record.updateProductTotal,
+    createMappings: record.createMappings,
   };
 }
 
@@ -908,6 +974,30 @@ export function normalizeProductMappingReasonInput(
 ): ProductMappingReasonInput {
   const record = requireMappingRecord(value, '商品映射操作', new Set(['reason']));
   return { reason: normalizeMappingChangeReason(record.reason) };
+}
+
+const MAPPING_CONFLICT_QUERY_KEYS = new Set([
+  'sourceTitle',
+  'sourceSpec',
+  'platform',
+  'sellerAccount',
+]);
+
+export function normalizeProductMappingConflictQueryInput(
+  value: unknown,
+): ProductMappingConflictQueryInput {
+  const record = requireMappingRecord(value, '商品映射冲突查询', MAPPING_CONFLICT_QUERY_KEYS);
+  const platform = normalizeOptionalMappingText(record.platform);
+  const sellerAccount = normalizeOptionalMappingText(record.sellerAccount);
+  if (!platform || !sellerAccount) {
+    throw new Error('商品映射冲突查询必须提供平台与卖家账号');
+  }
+  return {
+    sourceTitle: requiredProductText(record.sourceTitle, '原始商品标题', 300),
+    sourceSpec: normalizeMappingSourceSpec(record.sourceSpec),
+    platform,
+    sellerAccount,
+  };
 }
 
 export function normalizeProductMappingSearch(value: unknown): string | undefined {

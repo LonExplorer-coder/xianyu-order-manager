@@ -32,6 +32,7 @@ const options = {
   standardDisplayPreference: 'prefer_standard',
   useDefaultOrderPrice: false,
   updateProductTotal: false,
+  createMappings: false,
 };
 
 describe('订单商品批量关联 Electron IPC', () => {
@@ -90,17 +91,38 @@ describe('订单商品批量关联 Electron IPC', () => {
     await expect(invoke('order-items:apply-standardization-batch', {
       itemIds: ['item-1'],
       standardProductId: 'product-1',
-      options,
+      options: { ...options, createMappings: true },
       confirmedOverrideItemIds: ['item-1'],
       confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: ['item-1'],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
     })).resolves.toEqual(applied);
-    expect(applyOrderItemStandardizationBatch).toHaveBeenCalledWith({
+    expect(applyOrderItemStandardizationBatch).toHaveBeenLastCalledWith({
+      itemIds: ['item-1'],
+      standardProductId: 'product-1',
+      options: { ...options, createMappings: true },
+      confirmedOverrideItemIds: ['item-1'],
+      confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: ['item-1'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+    });
+
+    await expect(invoke('order-items:apply-standardization-batch', {
       itemIds: ['item-1'],
       standardProductId: 'product-1',
       options,
       confirmedOverrideItemIds: ['item-1'],
       confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: [],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+    })).resolves.toEqual(applied);
+    expect(applyOrderItemStandardizationBatch).toHaveBeenLastCalledWith({
+      itemIds: ['item-1'],
+      standardProductId: 'product-1',
+      options,
+      confirmedOverrideItemIds: ['item-1'],
+      confirmedAmountMismatchOrderIds: ['order-1'],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
     });
 
@@ -110,6 +132,7 @@ describe('订单商品批量关联 Electron IPC', () => {
       options,
       confirmedOverrideItemIds: ['item-2'],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
     })).rejects.toThrow('批量关联覆盖确认超出了所选商品明细');
     await expect(invoke('order-items:apply-standardization-batch', {
@@ -118,6 +141,16 @@ describe('订单商品批量关联 Electron IPC', () => {
       options,
       confirmedOverrideItemIds: [],
       confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: ['item-1'],
+      expectedOrderRevisions: [{ orderId: 'order-1', revision: 2 }],
+    })).rejects.toThrow('未勾选建立商品映射时不能确认映射冲突');
+    await expect(invoke('order-items:apply-standardization-batch', {
+      itemIds: ['item-1'],
+      standardProductId: 'product-1',
+      options,
+      confirmedOverrideItemIds: [],
+      confirmedAmountMismatchOrderIds: [],
+      confirmedMappingConflictItemIds: [],
       expectedOrderRevisions: [{ orderId: 'order-1', revision: 0 }],
     })).rejects.toThrow('订单版本无效，请刷新后重试');
     await expect(invoke('order-items:apply-standardization-batch', {

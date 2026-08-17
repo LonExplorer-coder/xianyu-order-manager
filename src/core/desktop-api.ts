@@ -33,6 +33,7 @@ import type {
 import type { CandidateAdjudicationAuditView } from './candidate-adjudication-audit';
 import type {
   CreateProductMappingInput,
+  ProductMappingConflictQueryInput,
   CreateStandardProductInput,
   CorrectProductMappingInput,
   DraftItemProductStandardization,
@@ -185,6 +186,9 @@ export interface DesktopApi {
     productId: string,
     input: CreateProductMappingInput,
   ): Promise<ProductMappingView>;
+  findProductMappingConflict(
+    input: ProductMappingConflictQueryInput,
+  ): Promise<ProductMappingView | null>;
   correctProductMapping(
     mappingId: string,
     input: CorrectProductMappingInput,
