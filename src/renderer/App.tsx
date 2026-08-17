@@ -104,6 +104,7 @@ import type {
   AftersalesCase,
   ChangeAftersalesCaseWorkflowTemplateInput,
   ProgressAftersalesCaseInput,
+  RecordAftersalesWorkflowStepEventInput,
 } from '../core/aftersales-cases';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
@@ -2087,6 +2088,16 @@ function ShipmentGroupsWorkspace({
     ]);
   }
 
+  async function recordAftersalesWorkflowStepEvent(
+    input: RecordAftersalesWorkflowStepEventInput,
+  ) {
+    const updated = await api.recordAftersalesWorkflowStepEvent(input);
+    onAftersalesCasesChange([
+      updated,
+      ...aftersalesCases.filter(({ id }) => id !== updated.id),
+    ]);
+  }
+
   function toggleGroup(groupId: string) {
     setSelectedGroupIds((current) => (
       current.includes(groupId)
@@ -2557,6 +2568,7 @@ function ShipmentGroupsWorkspace({
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
           onProgressAftersales={progressAftersales}
+          onRecordStepEvent={recordAftersalesWorkflowStepEvent}
           onChangeAftersalesWorkflow={changeAftersalesWorkflow}
         />
       )}
@@ -2593,6 +2605,7 @@ function ShipmentGroupsWorkspace({
             setAftersalesUpdateTarget({ record, aftersalesCase });
           }}
           onProgressAftersales={progressAftersales}
+          onRecordStepEvent={recordAftersalesWorkflowStepEvent}
           onChangeAftersalesWorkflow={changeAftersalesWorkflow}
         />
       )}
@@ -3037,6 +3050,7 @@ function ShipmentArchiveSection({
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
+  onRecordStepEvent,
   onChangeAftersalesWorkflow,
 }: {
   api: DesktopApi;
@@ -3079,6 +3093,7 @@ function ShipmentArchiveSection({
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
   onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
+  onRecordStepEvent: (input: RecordAftersalesWorkflowStepEventInput) => Promise<void>;
   onChangeAftersalesWorkflow: (
     input: ChangeAftersalesCaseWorkflowTemplateInput,
   ) => Promise<void>;
@@ -3265,6 +3280,7 @@ function ShipmentArchiveSection({
                     onCreateAftersales={onCreateAftersales}
                     onUpdateAftersales={onUpdateAftersales}
                     onProgressAftersales={onProgressAftersales}
+                    onRecordStepEvent={onRecordStepEvent}
                     onChangeAftersalesWorkflow={onChangeAftersalesWorkflow}
                   />
                 </details>
@@ -3290,6 +3306,7 @@ function ShipmentRecordsSection({
   onCreateAftersales,
   onUpdateAftersales,
   onProgressAftersales,
+  onRecordStepEvent,
   onChangeAftersalesWorkflow,
   embedded = false,
 }: {
@@ -3325,6 +3342,7 @@ function ShipmentRecordsSection({
   onCreateAftersales: (record: ShipmentRecord) => void;
   onUpdateAftersales: (record: ShipmentRecord, aftersalesCase: AftersalesCase) => void;
   onProgressAftersales: (input: ProgressAftersalesCaseInput) => Promise<void>;
+  onRecordStepEvent: (input: RecordAftersalesWorkflowStepEventInput) => Promise<void>;
   onChangeAftersalesWorkflow: (
     input: ChangeAftersalesCaseWorkflowTemplateInput,
   ) => Promise<void>;
@@ -3610,6 +3628,7 @@ function ShipmentRecordsSection({
             focusedCaseId={focus?.recordId === record.id ? focus.aftersalesCaseId : undefined}
             onUpdate={(aftersalesCase) => onUpdateAftersales(record, aftersalesCase)}
             onProgress={onProgressAftersales}
+            onRecordStepEvent={onRecordStepEvent}
             onChangeWorkflow={onChangeAftersalesWorkflow}
           />
         </article>

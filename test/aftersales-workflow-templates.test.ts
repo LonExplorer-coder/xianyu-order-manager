@@ -452,25 +452,16 @@ describe('售后流程模板', () => {
       occurredAt: '2026-08-14T10:40:00+08:00',
       reason: '协商后改为直接补发',
     });
-    const replacementRound = changed.rounds.find((round) => (
-      round.workflow === 'direct_replacement' && round.replacementRequired
-    ));
-
     expect(changed).toMatchObject({
       workflow: 'direct_replacement',
       status: 'waiting_replacement',
+      rounds: [expect.objectContaining({ roundNumber: 1, workflow: 'legacy' })],
       refund: {
         pendingItemId: created.refund?.pendingItemId,
         status: 'pending',
       },
     });
-    expect(replacementRound).toMatchObject({
-      roundNumber: 2,
-      sourceShipmentRecordId: shipmentRecordId,
-      items: [{ sourceShipmentPackageItemId: shipmentPackageItemId, quantity: 1 }],
-      replacementShipment: null,
-    });
-    if (!replacementRound) throw new Error('切换后未建立待补发轮次');
+    const replacementRound = changed.rounds[0];
 
     const progressed = application.progressAftersalesCase({
       kind: 'create_replacement_shipment',
@@ -553,7 +544,7 @@ describe('售后流程模板', () => {
     });
   });
 
-  it('新流程指引只读当前轮次事实，不把上一轮退货误判为已完成', async () => {
+  it('切换到换货后既有退货事实直接满足对应步骤并可建立补发', async () => {
     const { application, shipmentRecordId, shipmentPackageItemId } =
       await openShippedApplication();
     const templates = application.listAftersalesWorkflowTemplates();
@@ -613,13 +604,15 @@ describe('售后流程模板', () => {
       expectedRevision: inspected.revision,
       workflowTemplateId: exchange.id,
       occurredAt: '2026-08-14T11:10:00+08:00',
-      reason: '协商后改为新一轮换货',
+      reason: '协商后改为换货',
     });
 
+    // 切换不从第一步重新开始：既有退货事实直接满足登记、收货与检查步骤。
     const steps = projectAftersalesWorkflowSteps(changed.workflowTemplate, changed);
-    expect(steps.find(({ kind }) => kind === 'register_return')?.state).toBe('current');
-    expect(steps.find(({ kind }) => kind === 'receive_return')).toBeUndefined();
-    expect(steps.find(({ kind }) => kind === 'inspect_return')).toBeUndefined();
+    expect(steps.find(({ kind }) => kind === 'register_return')?.state).toBe('completed');
+    expect(steps.find(({ kind }) => kind === 'receive_return')?.state).toBe('completed');
+    expect(steps.find(({ kind }) => kind === 'inspect_return')?.state).toBe('completed');
+    expect(steps.find(({ kind }) => kind === 'prepare_replacement')?.state).toBe('current');
   });
 
   it('自定义字段要求未满足时指引步骤不会误标为已完成', async () => {
@@ -777,21 +770,22 @@ describe('售后流程模板', () => {
       });
   });
 
-  it('运输中切换到拦截退回时真实建立指定包裹的拦截事项', async () => {
+  it('运输中切换到拦截退回后由显式动作申请拦截', async () => {
     const { application, shipmentRecordId, shipmentPackageItemId } =
       await openShippedApplication(false);
     const templates = application.listAftersalesWorkflowTemplates();
-    const other = templates.find(({ scenario }) => scenario === 'other');
+    const refundOnly = templates.find(({ scenario }) => scenario === 'refund_only');
     const interceptReturn = templates.find(({ scenario }) => scenario === 'intercept_return');
-    if (!other || !interceptReturn) throw new Error('缺少预置售后流程');
+    if (!refundOnly || !interceptReturn) throw new Error('缺少预置售后流程');
     const shipmentPackage = application.queryShipmentGroupArchives()[0]
       .records.find(({ id }) => id === shipmentRecordId)?.packages[0];
     if (!shipmentPackage) throw new Error('测试前置包裹不存在');
     const created = application.createAftersalesCase({
       shipmentRecordId,
-      workflowTemplateId: other.id,
+      workflowTemplateId: refundOnly.id,
       occurredAt: '2026-08-14T10:30:00+08:00',
-      reason: '运输中先记录一般问题',
+      reason: '运输中先登记退款申请',
+      requestedRefundCents: 500,
       items: [{ shipmentPackageItemId, quantity: 1 }],
     });
 
@@ -800,8 +794,6 @@ describe('售后流程模板', () => {
       expectedRevision: created.revision,
       workflowTemplateId: interceptReturn.id,
       handlingDirection: 'intercept',
-      interceptionPackageId: shipmentPackage.id,
-      requestedRefundCents: 500,
       occurredAt: '2026-08-14T10:40:00+08:00',
       reason: '协商后改为拦截原包裹并退款',
     });
@@ -809,16 +801,26 @@ describe('售后流程模板', () => {
     expect(changed).toMatchObject({
       workflow: 'return_refund',
       status: 'processing',
-      refund: { requestedAmountCents: 500, status: 'pending' },
       coordination: {
         handlingDirection: 'intercept',
-        interception: {
-          packageId: shipmentPackage.id,
-          status: 'requested',
-          timeline: [{ kind: 'requested' }],
-        },
+        interception: null,
       },
       workflowTemplate: { templateId: interceptReturn.id, version: 1 },
+    });
+
+    const withInterception = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: changed.id,
+      expectedRevision: changed.revision,
+      handlingDirection: 'intercept',
+      interceptionPackageId: shipmentPackage.id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '明确申请拦截指定包裹',
+    });
+    expect(withInterception.coordination.interception).toMatchObject({
+      packageId: shipmentPackage.id,
+      status: 'requested',
+      timeline: [expect.objectContaining({ kind: 'requested' })],
     });
   });
 
@@ -1713,5 +1715,305 @@ describe('售后流程模板', () => {
     expect(restored?.workflowTemplate.stepEvents).toEqual(
       withEvent.workflowTemplate.stepEvents,
     );
+  });
+
+  it('切换流程只保存选择事件，不再自动建立补发轮次或改写退款事实', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const templates = application.listAftersalesWorkflowTemplates();
+    const returnRefund = templates.find(({ scenario }) => scenario === 'return_refund');
+    const exchange = templates.find(({ scenario }) => scenario === 'exchange');
+    if (!returnRefund || !exchange) throw new Error('缺少退货换货预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '退货检查后改为换货',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-SWITCH-EXCHANGE',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '买家寄回原商品',
+    });
+    const returnRecord = registered.returns[0];
+    const received = application.progressAftersalesCase({
+      kind: 'receive_return',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: returnRecord.id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '仓库收到原退货',
+      items: returnRecord.items.map((item) => ({
+        returnRecordItemId: item.id,
+        receivedQuantity: item.quantity,
+      })),
+      discrepancies: [],
+    });
+    const inspected = application.progressAftersalesCase({
+      kind: 'inspect_return',
+      caseId: received.id,
+      expectedRevision: received.revision,
+      returnRecordId: returnRecord.id,
+      result: 'defective',
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      note: '检查完成',
+      items: returnRecord.items.map((item) => ({
+        returnRecordItemId: item.id,
+        acceptedQuantity: item.quantity,
+        result: 'resellable' as const,
+        note: '可再次销售',
+      })),
+      discrepancies: [],
+    });
+    expect(inspected.rounds).toHaveLength(1);
+
+    const changed = application.changeAftersalesCaseWorkflowTemplate({
+      caseId: inspected.id,
+      expectedRevision: inspected.revision,
+      workflowTemplateId: exchange.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T11:10:00+08:00',
+      reason: '协商后改为换货',
+    });
+
+    // 切换不制造新事实：不新建换货轮次，也不改写已有退款申请。
+    expect(changed.rounds).toHaveLength(1);
+    expect(changed.refund).toMatchObject({
+      status: 'pending',
+      requestedAmountCents: 1_000,
+      refundRecords: [],
+    });
+    // 已有事实直接满足新版本的对应步骤：登记、收货、检查都完成。
+    const steps = projectAftersalesWorkflowSteps(changed.workflowTemplate, changed);
+    expect(steps.find(({ kind }) => kind === 'register_return')?.state).toBe('completed');
+    expect(steps.find(({ kind }) => kind === 'receive_return')?.state).toBe('completed');
+    expect(steps.find(({ kind }) => kind === 'inspect_return')?.state).toBe('completed');
+
+    // 已完成退货检查的换货直接在原始轮次上建立补发：既有事实就是本轮事实。
+    const withReplacement = application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: changed.id,
+      expectedRevision: changed.revision,
+      roundId: changed.rounds[0].id,
+      occurredAt: '2026-08-14T11:20:00+08:00',
+      reason: '按换货流程建立补发',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-SWITCH-EXCHANGE',
+        items: changed.rounds[0].items.map((item) => ({
+          roundItemId: item.id,
+          quantity: item.quantity,
+        })),
+      }],
+    });
+    expect(withReplacement.rounds).toHaveLength(1);
+    expect(withReplacement.rounds[0].replacementShipment).toMatchObject({
+      packages: [{ trackingNumber: 'SF-SWITCH-EXCHANGE' }],
+    });
+    expect(projectAftersalesWorkflowSteps(withReplacement.workflowTemplate, withReplacement)
+      .find(({ kind }) => kind === 'prepare_replacement')?.state).toBe('completed');
+  });
+
+  it('切换到拦截退回只声明方向，拦截申请由显式动作建立', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication(false);
+    const templates = application.listAftersalesWorkflowTemplates();
+    const refundOnly = templates.find(({ scenario }) => scenario === 'refund_only');
+    const interceptReturn = templates.find(({ scenario }) => scenario === 'intercept_return');
+    if (!refundOnly || !interceptReturn) throw new Error('缺少预置售后流程');
+    const shipmentPackage = application.queryShipmentGroupArchives()[0]
+      .records.find(({ id }) => id === shipmentRecordId)?.packages[0];
+    if (!shipmentPackage) throw new Error('测试前置包裹不存在');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: refundOnly.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '运输中先登记退款申请',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+
+    const changed = application.changeAftersalesCaseWorkflowTemplate({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      workflowTemplateId: interceptReturn.id,
+      handlingDirection: 'intercept',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '改为拦截退回',
+    });
+
+    // 切换只声明处理方向，不自动创建拦截申请。
+    expect(changed.coordination.handlingDirection).toBe('intercept');
+    expect(changed.coordination.interception).toBeNull();
+
+    const withInterception = application.progressAftersalesCase({
+      kind: 'change_handling_direction',
+      caseId: changed.id,
+      expectedRevision: changed.revision,
+      handlingDirection: 'intercept',
+      interceptionPackageId: shipmentPackage.id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '明确申请拦截指定包裹',
+    });
+    expect(withInterception.coordination.interception).toMatchObject({
+      packageId: shipmentPackage.id,
+      status: 'requested',
+    });
+  });
+
+  it('已结束的售后处理单不能调整后续流程', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const templates = application.listAftersalesWorkflowTemplates();
+    const refundOnly = templates.find(({ scenario }) => scenario === 'refund_only');
+    const returnRefund = templates.find(({ scenario }) => scenario === 'return_refund');
+    if (!refundOnly || !returnRefund) throw new Error('缺少退款类预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: refundOnly.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '已结束不能切换',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const completed = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      actualRefundCents: 500,
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      note: '足额退款',
+    });
+    const ended = application.progressAftersalesCase({
+      kind: 'complete',
+      caseId: completed.id,
+      expectedRevision: completed.revision,
+      reason: '售后完结',
+    });
+
+    expect(() => application.changeAftersalesCaseWorkflowTemplate({
+      caseId: ended.id,
+      expectedRevision: ended.revision,
+      workflowTemplateId: returnRefund.id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '试图切换已完成的售后',
+    })).toThrow('已结束的售后处理单不能调整后续流程');
+
+    const cancelledCase = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: refundOnly.id,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      reason: '已取消不能切换',
+      requestedRefundCents: 300,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const cancelled = application.progressAftersalesCase({
+      kind: 'cancel',
+      caseId: cancelledCase.id,
+      expectedRevision: cancelledCase.revision,
+      reason: '买家撤回售后',
+    });
+    expect(() => application.changeAftersalesCaseWorkflowTemplate({
+      caseId: cancelled.id,
+      expectedRevision: cancelled.revision,
+      workflowTemplateId: returnRefund.id,
+      occurredAt: '2026-08-14T11:10:00+08:00',
+      reason: '试图切换已取消的售后',
+    })).toThrow('已结束的售后处理单不能调整后续流程');
+  });
+
+  it('没有退款申请的售后不能切换到退款类流程', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const templates = application.listAftersalesWorkflowTemplates();
+    const other = templates.find(({ scenario }) => scenario === 'other');
+    const refundOnly = templates.find(({ scenario }) => scenario === 'refund_only');
+    if (!other || !refundOnly) throw new Error('缺少预置售后流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: other.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '无退款申请的协商处理',
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+
+    expect(() => application.changeAftersalesCaseWorkflowTemplate({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      workflowTemplateId: refundOnly.id,
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '试图切换到仅退款',
+    })).toThrow('当前售后没有退款申请，不能切换到退款类流程');
+  });
+
+  it('切换到换货后未完成退货检查不能建立补发', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const templates = application.listAftersalesWorkflowTemplates();
+    const returnRefund = templates.find(({ scenario }) => scenario === 'return_refund');
+    const exchange = templates.find(({ scenario }) => scenario === 'exchange');
+    if (!returnRefund || !exchange) throw new Error('缺少退货换货预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '检查未完成即切换换货',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-EXCHANGE-UNINSPECTED',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '买家寄回原商品',
+    });
+    const received = application.progressAftersalesCase({
+      kind: 'receive_return',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: registered.returns[0].id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '仓库收到原退货',
+      items: registered.returns[0].items.map((item) => ({
+        returnRecordItemId: item.id,
+        receivedQuantity: item.quantity,
+      })),
+      discrepancies: [],
+    });
+    const changed = application.changeAftersalesCaseWorkflowTemplate({
+      caseId: received.id,
+      expectedRevision: received.revision,
+      workflowTemplateId: exchange.id,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      reason: '未检查先切换换货',
+    });
+
+    expect(() => application.progressAftersalesCase({
+      kind: 'create_replacement_shipment',
+      caseId: changed.id,
+      expectedRevision: changed.revision,
+      roundId: changed.rounds[0].id,
+      occurredAt: '2026-08-14T11:10:00+08:00',
+      reason: '试图跳过检查建立补发',
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-EXCHANGE-UNINSPECTED',
+        items: changed.rounds[0].items.map((item) => ({
+          roundItemId: item.id,
+          quantity: item.quantity,
+        })),
+      }],
+    })).toThrow('换货必须先完成本轮退货收货与检查');
   });
 });

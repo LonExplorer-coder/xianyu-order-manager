@@ -1942,6 +1942,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 2,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [],
@@ -2060,6 +2062,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [],
@@ -2181,6 +2185,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [],
@@ -2273,6 +2279,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-refund-ui-created',
@@ -2404,6 +2412,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-ui-interception',
@@ -2642,6 +2652,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'outbound-refund-ui-1',
@@ -2979,6 +2991,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-ui-refund-progress',
@@ -3190,6 +3204,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-ui-refund-partial',
@@ -3384,6 +3400,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [returnRecord],
@@ -3656,6 +3674,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-ui-return-progress',
@@ -4197,6 +4217,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [],
@@ -6876,6 +6898,8 @@ describe('订单管理工作台', () => {
         sourceSpec: confirmedOrder.items[0].sourceSpec,
         quantity: 1,
         sourceShippedQuantity: 2,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: null,
       returns: [],
@@ -12274,6 +12298,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'workflow-guide-refund',
@@ -12417,6 +12443,8 @@ describe('订单管理工作台', () => {
         sourceSpec: sourceItem.sourceSpec,
         quantity: 1,
         sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
       }],
       refund: {
         pendingItemId: 'pending-operation-order-ui',
@@ -12526,5 +12554,202 @@ describe('订单管理工作台', () => {
       name: `售后处理单 ${partialRefunded.id}`,
     });
     expect(updatedRegion).toHaveTextContent('部分完成 · 已退 ¥4.00 / ¥10.00');
+  });
+
+  it('管理型当前步骤可带原因跳过并留不可变事件', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const returnRefund = testWorkflowTemplates.find(({ scenario }) => scenario === 'return_refund')!;
+    const currentCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
+      id: 'aftersales-step-skip-ui',
+      shipmentRecordId: record.id,
+      workflow: 'return_refund',
+      workflowTemplate: {
+        templateId: returnRefund.id,
+        version: 1,
+        name: returnRefund.name,
+        scenario: 'return_refund',
+        steps: returnRefund.steps,
+        timeline: [{
+          kind: 'selected',
+          before: null,
+          after: { templateId: returnRefund.id, version: 1 },
+          reason: '测试选择流程',
+          occurredAt: '2026-08-14T10:30:00+08:00',
+          createdAt: '2026-08-14T02:30:00.000Z',
+        }],
+        stepEvents: [],
+      },
+      status: 'waiting_return',
+      revision: 1,
+      reason: '跳过入口测试',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      refund: {
+        pendingItemId: 'pending-step-skip-ui',
+        requestedAmountCents: 500,
+        status: 'pending',
+        refundRecords: [],
+        fulfillment: { kind: 'unfulfilled', refundedAmountCents: 0 },
+        createdAt: '2026-08-14T02:30:00.000Z',
+        latestEventAt: '2026-08-14T10:30:00+08:00',
+        timeline: [{
+          kind: 'created', requestedAmountCents: 500, beforeAmountCents: null,
+          actualAmountCents: null, reason: '跳过入口测试',
+          occurredAt: '2026-08-14T10:30:00+08:00',
+          createdAt: '2026-08-14T02:30:00.000Z',
+        }],
+      },
+      items: [{
+        id: 'aftersales-step-skip-item',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: null,
+        standardDisplayPreference: null,
+      }],
+      returns: [],
+      coordination: testAftersalesCoordination('buyer_return'),
+      timeline: [],
+      createdAt: '2026-08-14T02:30:00.000Z',
+      updatedAt: '2026-08-14T02:30:00.000Z',
+    };
+    // choose_resolution 在方向已选后由事实完成，改用事件后跳过：用方向未选状态。
+    const undecidedCase: AftersalesCase = {
+      ...currentCase,
+      coordination: testAftersalesCoordination(null),
+    };
+    const skippedCase: AftersalesCase = {
+      ...undecidedCase,
+      revision: 2,
+      workflowTemplate: {
+        ...undecidedCase.workflowTemplate,
+        stepEvents: [{
+          id: 'step-event-ui-skip',
+          stepId: 'choose-resolution',
+          kind: 'skipped',
+          reason: '电话确认无需书面结论',
+          remainingRisk: '缺少书面凭证',
+          workflowTemplateId: returnRefund.id,
+          workflowTemplateVersion: 1,
+          occurredAt: '2026-08-14T10:40:00+08:00',
+          createdAt: '2026-08-14T02:40:00.000Z',
+        }],
+      },
+    };
+    const recordAftersalesWorkflowStepEvent = vi.fn().mockResolvedValue(skippedCase);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([undecidedCase]),
+      recordAftersalesWorkflowStepEvent,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const caseRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${undecidedCase.id}`,
+    });
+    // 面板优先呈现当前唯一主步骤，并提供带原因跳过入口（规格 3.8）。
+    expect(caseRegion).toHaveTextContent('当前步骤：确认实物流转方向');
+    await user.click(within(caseRegion).getByRole('button', { name: '带原因跳过' }));
+    const skipDialog = screen.getByRole('dialog', { name: '跳过流程步骤' });
+    await user.type(within(skipDialog).getByRole('textbox', { name: '跳过原因' }), '电话确认无需书面结论');
+    await user.type(within(skipDialog).getByRole('textbox', { name: '剩余风险' }), '缺少书面凭证');
+    await user.click(within(skipDialog).getByRole('button', { name: '确认跳过' }));
+
+    await waitFor(() => expect(recordAftersalesWorkflowStepEvent).toHaveBeenCalledWith({
+      caseId: undecidedCase.id,
+      expectedRevision: 1,
+      stepId: 'choose-resolution',
+      kind: 'skipped',
+      reason: '电话确认无需书面结论',
+      remainingRisk: '缺少书面凭证',
+      occurredAt: expect.any(String) as string,
+    }));
+    const skippedRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${skippedCase.id}`,
+    });
+    expect(skippedRegion).toHaveTextContent('已跳过 · 电话确认无需书面结论');
+    expect(skippedRegion).toHaveTextContent('剩余风险：缺少书面凭证');
+  });
+
+  it('售后商品按标准商品显示偏好呈现', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const currentCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
+      id: 'aftersales-standard-display-ui',
+      shipmentRecordId: record.id,
+      workflow: 'general',
+      status: 'processing',
+      revision: 1,
+      reason: '标准商品显示测试',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      items: [{
+        id: 'aftersales-standard-display-item',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+        standardProduct: {
+          id: 'standard-product-ui-1',
+          sku: 'STD-UI-1',
+          name: '标准测试商品',
+          specification: '标准黑色',
+          defaultOrderPriceCents: 1_000,
+          revision: 1,
+          createdAt: '2026-08-14T00:00:00.000Z',
+          updatedAt: '2026-08-14T00:00:00.000Z',
+        },
+        standardDisplayPreference: 'prefer_standard',
+      }],
+      refund: null,
+      returns: [],
+      coordination: testAftersalesCoordination(),
+      timeline: [],
+      createdAt: '2026-08-14T02:30:00.000Z',
+      updatedAt: '2026-08-14T02:30:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([currentCase]),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const caseRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${currentCase.id}`,
+    });
+    expect(caseRegion).toHaveTextContent('标准测试商品 · 标准黑色');
+    expect(caseRegion).not.toHaveTextContent(sourceItem.sourceTitle);
   });
 });

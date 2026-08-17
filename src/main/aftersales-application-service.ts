@@ -30,6 +30,7 @@ import {
   AFTERSALES_WORKFLOW_STEP_BINDINGS,
   TERMINAL_CONTINUABLE_ACTIONS,
   aftersalesCancelRefundRequestReason,
+  aftersalesSwitchedOriginalRoundAvailable,
   projectAftersalesWorkflowSteps,
 } from '../core/aftersales-workflow-templates';
 import {
@@ -406,30 +407,12 @@ export class AftersalesApplicationService {
     if (target.scenario === 'intercept_return' && targetDirection !== 'intercept') {
       throw new Error('拦截退回流程必须明确选择申请拦截');
     }
-    const shouldRequestInterception = targetDirection === 'intercept'
-      && current.coordination.handlingDirection !== 'intercept';
-    if (shouldRequestInterception
-      && current.coordination.interception?.status === 'requested') {
-      throw new Error('已有待确认的拦截请求，请先登记结果');
-    }
-    const targetInterceptionPackageId = shouldRequestInterception
-      ? resolveInterceptionPackageId(
-        prepared.interceptionPackageId,
-        current.coordination.sourcePackages.map(({ packageId }) => packageId),
-      )
-      : null;
+    // 切换不制造退款申请：没有申请事实就不能切换到退款类流程，避免形成无法推进的死路。
     if ((target.workflow === 'refund_only' || target.workflow === 'return_refund')
-      && current.refund === null && prepared.requestedRefundCents === undefined) {
-      throw new Error('请先填写本次申请退款金额');
+      && current.refund === null) {
+      throw new Error('当前售后没有退款申请，不能切换到退款类流程');
     }
-    if (target.workflow !== 'refund_only' && target.workflow !== 'return_refund'
-      && prepared.requestedRefundCents !== undefined) {
-      throw new Error('当前售后流程不能登记申请退款金额');
-    }
-    const newRefundCents = current.refund === null
-      && (target.workflow === 'refund_only' || target.workflow === 'return_refund')
-      ? prepared.requestedRefundCents ?? null
-      : null;
+    // 切换只声明方向并保存选择事件；退款申请、拦截与轮次等事实由对应领域动作显式建立。
     const refundSettled = isSettledRefundStatus(current.refund?.status ?? null);
     const nextStatus = target.workflow === 'refund_only'
       ? refundSettled ? 'ready_to_complete' : 'waiting_refund'
@@ -512,49 +495,6 @@ export class AftersalesApplicationService {
           prepared.occurredAt,
           prepared.reason,
           now,
-        );
-      }
-      if (shouldRequestInterception && targetInterceptionPackageId) {
-        this.requestInterception(
-          current,
-          targetInterceptionPackageId,
-          prepared.occurredAt,
-          prepared.reason,
-          now,
-        );
-      }
-      if (target.workflow !== current.workflow
-        && (target.workflow === 'exchange' || target.workflow === 'direct_replacement')
-        && !this.hasReusableSceneRound(current, target.workflow)) {
-        this.createReplacementRound(
-          current,
-          target.workflow,
-          current.shipmentRecordId,
-          current.items.map((item) => ({
-            shipmentPackageItemId: item.shipmentPackageItemId,
-            quantity: item.quantity,
-          })),
-          prepared.occurredAt,
-          prepared.reason,
-          now,
-        );
-      }
-      if (newRefundCents !== null) {
-        const pendingItemId = randomUUID();
-        this.workspace.database.prepare(`
-          INSERT INTO pending_financial_items (
-            id, kind, aftersales_case_id, requested_amount_cents,
-            status, created_at, resolved_at
-          ) VALUES (?, 'aftersales_refund', ?, ?, 'pending', ?, NULL)
-        `).run(pendingItemId, current.id, newRefundCents, now);
-        this.workspace.database.prepare(`
-          INSERT INTO pending_financial_item_events (
-            id, pending_item_id, kind, requested_amount_cents,
-            actual_amount_cents, reason, occurred_at, created_at
-          ) VALUES (?, ?, 'created', ?, NULL, ?, ?, ?)
-        `).run(
-          randomUUID(), pendingItemId, newRefundCents,
-          prepared.reason, prepared.occurredAt, now,
         );
       }
     });
@@ -888,17 +828,23 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'create_replacement_shipment') {
       const round = current.rounds.find(({ id }) => id === prepared.roundId);
-      if (!round || round.workflow === 'legacy') {
+      // 切换到换货或直接补发后，第一轮补发直接沿用原始轮次：其退货事实就是本轮事实。
+      const switchedOriginalRound = round?.workflow === 'legacy'
+        && aftersalesSwitchedOriginalRoundAvailable(current);
+      if (!round || (round.workflow === 'legacy' && !switchedOriginalRound)) {
         throw new Error('当前售后没有可补发的处理轮次');
       }
-      if (!round.replacementRequired) throw new Error('当前处理轮次已不需要补发');
+      if (!round.replacementRequired && !switchedOriginalRound) {
+        throw new Error('当前处理轮次已不需要补发');
+      }
       if (round.replacementShipment) throw new Error('当前处理轮次已建立补发记录');
       assertOccurredAtNotBefore(
         prepared.occurredAt,
         round.occurredAt,
         '补发时间不能早于当前处理轮次开始时间',
       );
-      if (round.workflow === 'exchange') {
+      if (round.workflow === 'exchange'
+        || (switchedOriginalRound && current.workflow === 'exchange')) {
         const roundReturns = current.returns.filter(({ id }) => round.returnRecordIds.includes(id));
         if (roundReturns.length === 0 || roundReturns.some(({ status }) => status !== 'inspected')) {
           throw new Error('换货必须先完成本轮退货收货与检查');
@@ -1068,7 +1014,12 @@ export class AftersalesApplicationService {
       }
       const beforeDirection = current.coordination.handlingDirection;
       if (!beforeDirection) throw new Error('当前售后缺少处理方向');
-      if (beforeDirection === prepared.handlingDirection) {
+      // 方向不变时仅允许一种情况：拦截方向下显式申请尚未建立的拦截。
+      const explicitInterceptionRequest = prepared.handlingDirection === 'intercept'
+        && beforeDirection === 'intercept'
+        && current.coordination.interception === null
+        && prepared.interceptionPackageId !== undefined;
+      if (beforeDirection === prepared.handlingDirection && !explicitInterceptionRequest) {
         throw new Error('售后处理方向没有变化');
       }
       if (beforeDirection === 'replacement'
@@ -2347,10 +2298,23 @@ export class AftersalesApplicationService {
         shipment_items.order_number,
         shipment_items.source_title,
         shipment_items.source_spec,
-        shipment_items.quantity AS source_shipped_quantity
+        shipment_items.quantity AS source_shipped_quantity,
+        order_items.standard_display_preference,
+        standard_products.id AS standard_product_id,
+        standard_products.sku AS standard_product_sku,
+        standard_products.name AS standard_product_name,
+        standard_products.specification AS standard_product_specification,
+        standard_products.default_order_price_cents AS standard_product_price,
+        standard_products.revision AS standard_product_revision,
+        standard_products.created_at AS standard_product_created_at,
+        standard_products.updated_at AS standard_product_updated_at
       FROM aftersales_case_items AS case_items
       JOIN shipment_package_items AS shipment_items
         ON shipment_items.id = case_items.shipment_package_item_id
+      LEFT JOIN order_items AS order_items
+        ON order_items.id = shipment_items.source_order_item_id
+      LEFT JOIN standard_products AS standard_products
+        ON standard_products.id = order_items.standard_product_id
       WHERE case_items.case_id = ?
       ORDER BY shipment_items.order_number, shipment_items.position, case_items.id
     `).all(caseId) as unknown as SqlRow[];
@@ -2363,6 +2327,21 @@ export class AftersalesApplicationService {
       orderNumber: asString(itemRow.order_number),
       sourceTitle: asString(itemRow.source_title),
       sourceSpec: asString(itemRow.source_spec),
+      standardProduct: itemRow.standard_product_id === null ? null : {
+        id: asString(itemRow.standard_product_id),
+        sku: asString(itemRow.standard_product_sku),
+        name: asString(itemRow.standard_product_name),
+        specification: asString(itemRow.standard_product_specification),
+        defaultOrderPriceCents: itemRow.standard_product_price === null
+          ? null
+          : asNumber(itemRow.standard_product_price),
+        revision: asNumber(itemRow.standard_product_revision),
+        createdAt: asString(itemRow.standard_product_created_at),
+        updatedAt: asString(itemRow.standard_product_updated_at),
+      },
+      standardDisplayPreference: parseStandardDisplayPreferenceRow(
+        itemRow.standard_display_preference,
+      ),
       quantity: asNumber(itemRow.quantity),
       sourceShippedQuantity: asNumber(itemRow.source_shipped_quantity),
     }));
@@ -2606,16 +2585,15 @@ export class AftersalesApplicationService {
       const latestDecisionRequiresReplacement = mappedDecisionRow !== undefined
         && (asString(mappedDecisionRow.after_decision) === 'replacement'
           || asString(mappedDecisionRow.after_decision) === 'refund_and_replacement');
-      const replacementRequired = workflow !== 'legacy' && (
-        hasActiveReplacementPackage
-        || (replacementShipment === null && (
+      // 切换场景下原始轮次（legacy）挂上补发包裹后同样按补发轮次跟踪交付。
+      const replacementRequired = hasActiveReplacementPackage
+        || (workflow !== 'legacy' && replacementShipment === null && (
           latestDecisionRequiresReplacement
           || (mappedDecisionRow === undefined
             && (workflow === 'exchange'
               ? handlingDirection === 'buyer_return'
               : handlingDirection === 'replacement'))
-        ))
-      );
+        ));
       return {
         id: roundId,
         roundNumber: asNumber(row.round_number),
@@ -3631,20 +3609,23 @@ export class AftersalesApplicationService {
       input.reason,
       input.now,
     );
-    this.workspace.database.prepare(`
-      INSERT INTO aftersales_handling_direction_events (
-        id, case_id, kind, before_direction, after_direction,
-        occurred_at, reason, created_at
-      ) VALUES (?, ?, 'changed', ?, ?, ?, ?, ?)
-    `).run(
-      randomUUID(),
-      input.current.id,
-      input.beforeDirection,
-      input.afterDirection,
-      input.occurredAt,
-      input.reason,
-      input.now,
-    );
+    // 方向不变时（显式申请拦截）不重复记录方向事件；拦截申请事件本身就是这次操作的留痕。
+    if (input.beforeDirection !== input.afterDirection) {
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_handling_direction_events (
+          id, case_id, kind, before_direction, after_direction,
+          occurred_at, reason, created_at
+        ) VALUES (?, ?, 'changed', ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        input.current.id,
+        input.beforeDirection,
+        input.afterDirection,
+        input.occurredAt,
+        input.reason,
+        input.now,
+      );
+    }
     if (input.afterDirection === 'intercept') {
       this.requestInterception(
         input.current,
@@ -3853,22 +3834,6 @@ export class AftersalesApplicationService {
       insertItem.run(randomUUID(), roundId, item.shipmentPackageItemId, item.quantity);
     }
     return roundId;
-  }
-
-  private hasReusableSceneRound(
-    current: AftersalesCase,
-    workflow: 'exchange' | 'direct_replacement',
-  ): boolean {
-    return current.rounds.some((round) => {
-      if (round.workflow !== workflow || round.replacementShipment !== null) return false;
-      const mappedException = this.workspace.database.prepare(`
-        SELECT 1
-        FROM aftersales_outbound_exception_replacement_rounds
-        WHERE round_id = ?
-        LIMIT 1
-      `).get(round.id);
-      return mappedException === undefined;
-    });
   }
 
   private cancelPendingRefund(
@@ -4129,6 +4094,17 @@ function sourcePackageEvidence(
     packages.set(packageId, sourcePackage);
   }
   return [...packages.values()];
+}
+
+function parseStandardDisplayPreferenceRow(
+  value: string | number | null,
+): AftersalesCaseItem['standardDisplayPreference'] {
+  if (value === null) return null;
+  const parsed = asString(value);
+  if (parsed !== 'prefer_standard' && parsed !== 'prefer_source') {
+    throw new Error('数据库标准商品显示偏好无效');
+  }
+  return parsed;
 }
 
 function asString(value: string | number | null | undefined): string {

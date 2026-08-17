@@ -736,7 +736,9 @@ function workflowOperationBlockedReason(
     case 'create_replacement_shipment':
       return value.rounds.some((round) => (
         round.replacementRequired && round.replacementShipment === null
-      )) ? null : '当前没有待补发的处理轮次';
+      )) || aftersalesSwitchedOriginalRoundAvailable(value)
+        ? null
+        : '当前没有待补发的处理轮次';
     case 'start_next_round':
       return value.rounds.some(({ replacementShipment }) => replacementShipment !== null)
         ? null
@@ -790,6 +792,16 @@ export function aftersalesReturnReceiptBlockReason(
     return '退货商品已全部确认丢失';
   }
   return null;
+}
+
+// 切换到换货或直接补发后，原始轮次（legacy）的既有事实就是本轮事实；
+// 仅当尚无任何轮次建立补发时可直接在原始轮次上补发。
+export function aftersalesSwitchedOriginalRoundAvailable(value: AftersalesCase): boolean {
+  return (value.workflow === 'exchange' || value.workflow === 'direct_replacement')
+    && !value.rounds.some((round) => round.replacementShipment !== null)
+    && value.rounds.some((round) => (
+      round.workflow === 'legacy' && round.replacementShipment === null
+    ));
 }
 
 // 取消退款申请的领域规则：只有携带退款或明确选择直接补发时才允许，主进程与界面共用。
@@ -1058,9 +1070,11 @@ function currentWorkflowRound(
   const workflow = scenario === 'exchange'
     ? 'exchange'
     : scenario === 'direct_replacement' ? 'direct_replacement' : null;
-  const candidates = workflow
+  const workflowRounds = workflow
     ? value.rounds.filter((round) => round.workflow === workflow)
     : value.rounds;
+  // 切换到换货或直接补发后还没有专属轮次时，退回全部轮次：已有事实仍应满足新版本步骤。
+  const candidates = workflowRounds.length > 0 ? workflowRounds : value.rounds;
   return candidates.find((round) => (
     round.replacementRequired && !replacementRoundDelivered(round)
   )) ?? [...candidates].reverse().find(({ replacementRequired }) => (

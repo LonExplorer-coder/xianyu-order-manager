@@ -5861,6 +5861,20 @@ select:focus-visible {
   min-width: 0;
 }
 
+.aftersales-workflow-guide__current {
+  display: grid;
+  gap: 4px;
+  outline: 2px solid #e6bd2f;
+  background: #fff9dd;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.aftersales-workflow-guide__current > span {
+  display: flex;
+  gap: 8px;
+}
+
 .aftersales-workflow-guide > ol > li.is-completed {
   color: #61706b;
   background: #f0f5f1;

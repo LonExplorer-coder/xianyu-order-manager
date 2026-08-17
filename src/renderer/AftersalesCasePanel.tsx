@@ -5,7 +5,12 @@ import type {
   AftersalesCaseUpdatedEvent,
   ChangeAftersalesCaseWorkflowTemplateInput,
   ProgressAftersalesCaseInput,
+  RecordAftersalesWorkflowStepEventInput,
 } from '../core/aftersales-cases';
+import {
+  displayedProductSpecification,
+  displayedProductTitle,
+} from '../core/product-standardization';
 import type { DesktopApi } from '../core/desktop-api';
 import {
   aftersalesWorkflowFieldLabel,
@@ -32,6 +37,7 @@ import { shipmentLogisticsStatusLabel } from '../core/order-operations-projectio
 import {
   ChangeAftersalesWorkflowDialog,
   ProgressAftersalesCaseDialog,
+  RecordAftersalesWorkflowStepEventDialog,
 } from './AftersalesCaseDialogs';
 import {
   logisticsExceptionStageLabel,
@@ -46,6 +52,7 @@ export function AftersalesCasePanel({
   onUpdate,
   onProgress,
   onChangeWorkflow,
+  onRecordStepEvent,
 }: {
   api: DesktopApi;
   record: ShipmentRecord;
@@ -54,6 +61,7 @@ export function AftersalesCasePanel({
   onUpdate: (aftersalesCase: AftersalesCase) => void;
   onProgress: (input: ProgressAftersalesCaseInput) => Promise<void>;
   onChangeWorkflow: (input: ChangeAftersalesCaseWorkflowTemplateInput) => Promise<void>;
+  onRecordStepEvent: (input: RecordAftersalesWorkflowStepEventInput) => Promise<void>;
 }) {
   const [progressTarget, setProgressTarget] = useState<{
     aftersalesCase: AftersalesCase;
@@ -63,6 +71,11 @@ export function AftersalesCasePanel({
     roundId?: string;
   } | null>(null);
   const [workflowTarget, setWorkflowTarget] = useState<AftersalesCase | null>(null);
+  const [stepEventTarget, setStepEventTarget] = useState<{
+    aftersalesCase: AftersalesCase;
+    step: AftersalesWorkflowStepProjection;
+    kind: 'completed' | 'skipped';
+  } | null>(null);
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
@@ -159,6 +172,56 @@ export function AftersalesCasePanel({
                 </button>
               )}
             </header>
+            {(() => {
+              const currentStep = workflowSteps.find(({ state }) => state === 'current');
+              const partialSteps = workflowSteps.filter(({ state }) => state === 'partial');
+              if (!currentStep && partialSteps.length === 0) return null;
+              return (
+                <div className="aftersales-workflow-guide__current" aria-label="当前主步骤">
+                  {currentStep ? (
+                    <>
+                      <strong>当前步骤：{currentStep.name}</strong>
+                      {currentStep.fields.length > 0 && (
+                        <small>需核对：{currentStep.fields.map(aftersalesWorkflowFieldLabel).join('、')}</small>
+                      )}
+                      {currentStep.binding?.category === 'management' && (
+                        <span>
+                          <button
+                            className="button button--quiet"
+                            type="button"
+                            onClick={() => setStepEventTarget({
+                              aftersalesCase,
+                              step: currentStep,
+                              kind: 'completed',
+                            })}
+                          >
+                            标记完成
+                          </button>
+                          <button
+                            className="button button--quiet"
+                            type="button"
+                            onClick={() => setStepEventTarget({
+                              aftersalesCase,
+                              step: currentStep,
+                              kind: 'skipped',
+                            })}
+                          >
+                            带原因跳过
+                          </button>
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <strong>当前没有待执行步骤</strong>
+                  )}
+                  {partialSteps.map((step) => (
+                    <small key={`partial-${step.id}`}>
+                      部分完成 · {step.name} · {stepProgressLabel(step)}
+                    </small>
+                  ))}
+                </div>
+              );
+            })()}
             <ol>
               {workflowSteps.map((step, index) => (
                 <li className={`is-${step.state}`} key={step.id}>
@@ -185,14 +248,25 @@ export function AftersalesCasePanel({
                 </li>
               ))}
             </ol>
-            {aftersalesCase.workflowTemplate.timeline.length > 1 && (
+            {(aftersalesCase.workflowTemplate.timeline.length > 1
+              || aftersalesCase.workflowTemplate.stepEvents.length > 0) && (
               <details>
-                <summary>流程调整历史</summary>
+                <summary>流程版本与步骤历史</summary>
                 <ol>
                   {aftersalesCase.workflowTemplate.timeline.map((event, index) => (
                     <li key={`${event.kind}-${index}`}>
                       <strong>{event.kind === 'selected' ? '选择流程' : '调整后续流程'}</strong>
                       <span>{event.reason}</span>
+                      <small>{formatDateTime(event.occurredAt)}</small>
+                    </li>
+                  ))}
+                  {aftersalesCase.workflowTemplate.stepEvents.map((event) => (
+                    <li key={`step-event-${event.id}`}>
+                      <strong>{event.kind === 'skipped' ? '跳过流程步骤' : '完成流程步骤'}</strong>
+                      <span>
+                        {stepNameById(aftersalesCase, event.stepId)} · {event.reason}
+                        {event.remainingRisk !== null ? ` · 剩余风险：${event.remainingRisk}` : ''}
+                      </span>
                       <small>{formatDateTime(event.occurredAt)}</small>
                     </li>
                   ))}
@@ -202,13 +276,16 @@ export function AftersalesCasePanel({
           </section>
           <p>{aftersalesCase.reason}</p>
           <ul>
-            {aftersalesCase.items.map((item) => (
-              <li key={item.id}>
-                <span>{item.orderNumber} · {item.sourceTitle}
-                  {item.sourceSpec ? ` · ${item.sourceSpec}` : ''}</span>
-                <strong>× {item.quantity}</strong>
-              </li>
-            ))}
+            {aftersalesCase.items.map((item) => {
+              const specification = displayedProductSpecification(item);
+              return (
+                <li key={item.id}>
+                  <span>{item.orderNumber} · {displayedProductTitle(item)}
+                    {specification ? ` · ${specification}` : ''}</span>
+                  <strong>× {item.quantity}</strong>
+                </li>
+              );
+            })}
           </ul>
           <div
             className="shipment-record-card__coordination"
@@ -919,8 +996,22 @@ export function AftersalesCasePanel({
           onClose={() => setWorkflowTarget(null)}
         />
       )}
+      {stepEventTarget && (
+        <RecordAftersalesWorkflowStepEventDialog
+          aftersalesCase={stepEventTarget.aftersalesCase}
+          stepId={stepEventTarget.step.id}
+          stepName={stepNameById(stepEventTarget.aftersalesCase, stepEventTarget.step.id)}
+          kind={stepEventTarget.kind}
+          onRecorded={onRecordStepEvent}
+          onClose={() => setStepEventTarget(null)}
+        />
+      )}
     </div>
   );
+}
+
+function stepNameById(aftersalesCase: AftersalesCase, stepId: string): string {
+  return aftersalesCase.workflowTemplate.steps.find(({ id }) => id === stepId)?.name ?? stepId;
 }
 
 function stepProgressLabel(step: {

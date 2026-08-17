@@ -14,6 +14,7 @@ import type {
   AftersalesReturnDiscrepancy,
   AftersalesReturnLogisticsStatus,
   ProgressAftersalesCaseInput,
+  RecordAftersalesWorkflowStepEventInput,
   ReturnInspectionResult,
 } from '../core/aftersales-cases';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
@@ -319,8 +320,6 @@ export function ChangeAftersalesWorkflowDialog({
   const [handlingDirection, setHandlingDirection] = useState<AftersalesHandlingDirection | ''>(
     aftersalesCase.coordination.handlingDirection ?? '',
   );
-  const [interceptionPackageId, setInterceptionPackageId] = useState('');
-  const [requestedRefundYuan, setRequestedRefundYuan] = useState('');
   const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
@@ -341,9 +340,6 @@ export function ChangeAftersalesWorkflowDialog({
     return () => { active = false; };
   }, [api, aftersalesCase.workflowTemplate.templateId, aftersalesCase.workflowTemplate.version]);
   const selected = templates.find(({ id }) => id === templateId) ?? null;
-  const requestedRefundCents = yuanToCents(requestedRefundYuan);
-  const requiresRefund = selected?.workflow === 'refund_only'
-    || selected?.workflow === 'return_refund';
   const requiresDirection = selected?.workflow === 'return_refund';
   const templateDirections = selected?.scenario === 'intercept_return'
     ? aftersalesCase.coordination.availableDirections.filter((direction) => (
@@ -354,11 +350,9 @@ export function ChangeAftersalesWorkflowDialog({
     selected
     && reason.trim()
     && occurredAt
-    && (!requiresRefund || aftersalesCase.refund !== null || requestedRefundCents !== null)
     && (!requiresDirection || templateDirections.includes(
       handlingDirection as AftersalesHandlingDirection,
-    ))
-    && (handlingDirection !== 'intercept' || interceptionPackageId),
+    )),
   );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -377,13 +371,7 @@ export function ChangeAftersalesWorkflowDialog({
         occurredAt: normalizedOccurredAt,
         reason,
         ...(requiresDirection
-          ? {
-            handlingDirection: handlingDirection as AftersalesHandlingDirection,
-            ...(handlingDirection === 'intercept' ? { interceptionPackageId } : {}),
-          }
-          : {}),
-        ...(requiresRefund && aftersalesCase.refund === null
-          ? { requestedRefundCents: requestedRefundCents as number }
+          ? { handlingDirection: handlingDirection as AftersalesHandlingDirection }
           : {}),
       });
       onClose();
@@ -432,12 +420,6 @@ export function ChangeAftersalesWorkflowDialog({
             ))}
           </select>
         </label>
-        {requiresRefund && aftersalesCase.refund === null && (
-          <label>
-            <span>申请退款金额（元）</span>
-            <input type="number" min="0.01" step="0.01" value={requestedRefundYuan} onChange={(event) => setRequestedRefundYuan(event.target.value)} />
-          </label>
-        )}
         {requiresDirection && (
           <label>
             <span>售后处理方向</span>
@@ -445,19 +427,6 @@ export function ChangeAftersalesWorkflowDialog({
               <option value="">请明确选择处理方向</option>
               {templateDirections.map((direction) => (
                 <option key={direction} value={direction}>{aftersalesHandlingDirectionLabel(direction)}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        {requiresDirection && handlingDirection === 'intercept' && (
-          <label>
-            <span>本次拦截包裹</span>
-            <select value={interceptionPackageId} onChange={(event) => setInterceptionPackageId(event.target.value)}>
-              <option value="">请选择要拦截的包裹</option>
-              {aftersalesCase.coordination.sourcePackages.map((sourcePackage) => (
-                <option key={sourcePackage.packageId} value={sourcePackage.packageId}>
-                  {sourcePackage.shippingCarrier} {sourcePackage.trackingNumber}
-                </option>
               ))}
             </select>
           </label>
@@ -1941,4 +1910,103 @@ function yuanToCents(value: string): number | null {
   const [yuan, fraction = ''] = normalized.split('.');
   const cents = Number(yuan) * 100 + Number(fraction.padEnd(2, '0'));
   return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+}
+
+export function RecordAftersalesWorkflowStepEventDialog({
+  aftersalesCase,
+  stepId,
+  stepName,
+  kind,
+  onRecorded,
+  onClose,
+}: {
+  aftersalesCase: AftersalesCase;
+  stepId: string;
+  stepName: string;
+  kind: 'completed' | 'skipped';
+  onRecorded: (input: RecordAftersalesWorkflowStepEventInput) => Promise<void>;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  const descriptionId = useId();
+  const dialogRef = useDialogFocus();
+  const [occurredAt, setOccurredAt] = useState(currentShanghaiDateTimeLocal());
+  const [reason, setReason] = useState('');
+  const [remainingRisk, setRemainingRisk] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const skipped = kind === 'skipped';
+  const canSubmit = Boolean(reason.trim() && occurredAt && (!skipped || remainingRisk.trim()));
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    setError('');
+    try {
+      const localOccurredAt = occurredAt.length === 16 ? `${occurredAt}:00` : occurredAt;
+      const normalizedOccurredAt = normalizeShanghaiDateTime(localOccurredAt.replace('T', ' '));
+      if (!normalizedOccurredAt) throw new Error('请填写有效的步骤操作时间');
+      await onRecorded({
+        caseId: aftersalesCase.id,
+        expectedRevision: aftersalesCase.revision,
+        stepId,
+        kind,
+        reason,
+        ...(skipped ? { remainingRisk } : {}),
+        occurredAt: normalizedOccurredAt,
+      });
+      onClose();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="order-export-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !saving) onClose();
+      }}
+    >
+      <form className="shipment-package-action-dialog aftersales-case-dialog" onSubmit={(event) => void submit(event)}>
+        <header>
+          <span className="section-kicker">{skipped ? '保留剩余风险' : '人工处理结论'}</span>
+          <h2 id={headingId}>{skipped ? '跳过流程步骤' : '标记流程步骤完成'}</h2>
+          <p id={descriptionId}>{stepName}{skipped ? ' 将带原因跳过并记录剩余风险。' : ' 的人工结论将保存为不可变事件。'}</p>
+        </header>
+        <ReasonField
+          label={skipped ? '跳过原因' : '完成说明'}
+          value={reason}
+          saving={saving}
+          onChange={setReason}
+        />
+        {skipped && (
+          <ReasonField label="剩余风险" value={remainingRisk} saving={saving} onChange={setRemainingRisk} />
+        )}
+        <label>
+          <span>操作时间</span>
+          <input type="datetime-local" step={1} value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} />
+        </label>
+        {error && <p role="alert">{error}</p>}
+        <footer>
+          <button type="button" className="button button--quiet" onClick={onClose} disabled={saving}>
+            返回
+          </button>
+          <button type="submit" className="button button--primary" disabled={saving || !canSubmit}>
+            {skipped ? '确认跳过' : '确认完成'}
+          </button>
+        </footer>
+      </form>
+    </div>,
+    document.body,
+  );
 }

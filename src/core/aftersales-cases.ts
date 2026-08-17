@@ -25,6 +25,10 @@ import type {
   AftersalesWorkflowScenario,
   AftersalesWorkflowStep,
 } from './aftersales-workflow-templates';
+import type {
+  StandardDisplayPreference,
+  StandardProduct,
+} from './product-standardization';
 
 export type AftersalesStatus =
   | 'processing'
@@ -505,13 +509,12 @@ export type CreateAftersalesCaseInput = {
 
 export type NormalizedCreateAftersalesCaseInput = CreateAftersalesCaseInput;
 
+// 切换流程只声明方向与原因；退款申请、拦截与轮次等事实必须通过对应领域动作显式建立。
 export type ChangeAftersalesCaseWorkflowTemplateInput = {
   caseId: string;
   expectedRevision: number;
   workflowTemplateId: string;
   handlingDirection?: AftersalesHandlingDirection;
-  interceptionPackageId?: string;
-  requestedRefundCents?: number;
   occurredAt: string;
   reason: string;
 };
@@ -534,6 +537,9 @@ export type AftersalesCaseItem = AftersalesCaseItemInput & {
   sourceTitle: string;
   sourceSpec: string;
   sourceShippedQuantity: number;
+  // 售后区域按订单商品的标准商品显示偏好呈现（规格 3.8）。
+  standardProduct: StandardProduct | null;
+  standardDisplayPreference: StandardDisplayPreference | null;
 };
 
 export type AftersalesCaseSnapshot = {
@@ -754,24 +760,12 @@ export function normalizeChangeAftersalesCaseWorkflowTemplateInput(
   const record = asRecord(input, '调整售后流程参数无效');
   rejectUnknownKeys(
     record,
-    [
-      'caseId',
-      'expectedRevision',
-      'workflowTemplateId',
-      'handlingDirection',
-      'interceptionPackageId',
-      'requestedRefundCents',
-      'occurredAt',
-      'reason',
-    ],
+    ['caseId', 'expectedRevision', 'workflowTemplateId', 'handlingDirection', 'occurredAt', 'reason'],
     '调整售后流程参数',
   );
   if (!Number.isSafeInteger(record.expectedRevision) || Number(record.expectedRevision) < 1) {
     throw new Error('售后处理单版本无效');
   }
-  const requestedRefundCents = record.requestedRefundCents === undefined
-    ? undefined
-    : money(record.requestedRefundCents, false);
   return {
     caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
     expectedRevision: Number(record.expectedRevision),
@@ -787,16 +781,6 @@ export function normalizeChangeAftersalesCaseWorkflowTemplateInput(
           ? record.handlingDirection
           : invalidHandlingDirection(),
       }),
-    ...(record.interceptionPackageId === undefined
-      ? {}
-      : {
-        interceptionPackageId: boundedText(
-          record.interceptionPackageId,
-          200,
-          '拦截包裹标识无效',
-        ),
-      }),
-    ...(requestedRefundCents === undefined ? {} : { requestedRefundCents }),
     occurredAt: dateTime(record.occurredAt, '售后流程调整时间无效'),
     reason: boundedText(record.reason, 500, '请填写 1 至 500 字的流程调整原因'),
   };
