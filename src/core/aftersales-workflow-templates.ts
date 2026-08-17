@@ -116,6 +116,19 @@ export type AftersalesWorkflowStepProjection = AftersalesWorkflowStep & {
   stepEvent: AftersalesCaseStepEvent | null;
 };
 
+// 正常操作入口的类型：primary 是当前或部分完成步骤的绑定动作（按步骤顺序开放），
+// supplemental 是尚未轮到但真实事实可能已经发生的补录入口（仅事实型步骤）。
+export type AftersalesWorkflowOperation = {
+  action: AftersalesWorkflowProgressActionKind;
+  stepId: string;
+  blockedReason: string | null;
+};
+
+export type AftersalesWorkflowOperations = {
+  primary: AftersalesWorkflowOperation[];
+  supplemental: AftersalesWorkflowOperation[];
+};
+
 export type StoredAftersalesWorkflowTemplateDefinition = {
   name: string;
   scenario: AftersalesWorkflowScenario;
@@ -579,6 +592,221 @@ type ResolvedWorkflowStep = {
   actionable: boolean;
 };
 
+export type AftersalesWorkflowTemplateForOperations =
+  Pick<AftersalesCaseWorkflowTemplate, 'scenario' | 'steps' | 'stepEvents' | 'timeline'>;
+
+// 这些动作绑定在具体退货包裹或物流异常上，入口保留在对应事实区，不进入流程主按钮。
+const CONTEXTUAL_WORKFLOW_ACTIONS = new Set<AftersalesWorkflowProgressActionKind>([
+  'correct_return_logistics',
+  'update_return_logistics_status',
+  'record_return_logistics_exception',
+  'progress_return_logistics_exception',
+  'decide_return_logistics_exception',
+  'open_carrier_claim',
+  'resolve_carrier_claim',
+  'confirm_carrier_compensation',
+]);
+
+// 终态售后仍可继续记录的退货与物流事实；主进程继续推进白名单复用这一清单。
+export const TERMINAL_CONTINUABLE_ACTIONS = new Set<ProgressAftersalesCaseInput['kind']>([
+  'record_interception_result',
+  'inspect_intercepted_return',
+  'receive_return',
+  'inspect_return',
+  'correct_return_logistics',
+  'update_return_logistics_status',
+  ...CONTEXTUAL_WORKFLOW_ACTIONS,
+]);
+
+export function deriveAftersalesWorkflowOperations(
+  template: AftersalesWorkflowTemplateForOperations,
+  aftersalesCase: AftersalesCase,
+): AftersalesWorkflowOperations {
+  const projection = projectAftersalesWorkflowSteps(template, aftersalesCase);
+  const primary: AftersalesWorkflowOperation[] = [];
+  const supplemental: AftersalesWorkflowOperation[] = [];
+  const seen = new Set<AftersalesWorkflowProgressActionKind>();
+  for (const step of projection) {
+    if (step.kind === null || step.binding === null) continue;
+    const open = step.state === 'current' || step.state === 'partial';
+    // 管理型步骤按顺序开放；事实型步骤在未轮到时仍提供补录真实事实的入口。
+    if (!open && !(step.state === 'not_started' && step.binding.category === 'fact')) continue;
+    for (const action of step.binding.actions) {
+      if (seen.has(action) || CONTEXTUAL_WORKFLOW_ACTIONS.has(action)) continue;
+      seen.add(action);
+      const entry: AftersalesWorkflowOperation = {
+        action,
+        stepId: step.id,
+        blockedReason: workflowOperationBlockedReason(action, template, aftersalesCase),
+      };
+      (open ? primary : supplemental).push(entry);
+    }
+  }
+  return { primary, supplemental };
+}
+
+function workflowOperationBlockedReason(
+  action: AftersalesWorkflowProgressActionKind,
+  template: AftersalesWorkflowTemplateForOperations,
+  value: AftersalesCase,
+): string | null {
+  const refundFamily = action === 'confirm_refund'
+    || action === 'cancel_refund_request'
+    || action === 'adjust_refund_target'
+    || action === 'end_refund';
+  // 与主进程一致：其他处理场景只允许携带的退款事实走进度动作，其余走状态更新。
+  if (template.scenario === 'other' && !(refundFamily && value.refund !== null)) {
+    return '其他处理流程请使用状态更新操作';
+  }
+  if ((value.status === 'completed' || value.status === 'cancelled')
+    && !TERMINAL_CONTINUABLE_ACTIONS.has(action)) {
+    return '已经结束的售后处理单不能继续推进';
+  }
+  const currentRound = currentWorkflowRound(template.scenario, value);
+  const currentReturns = currentRound
+    ? value.returns.filter(({ id }) => currentRound.returnRecordIds.includes(id))
+    : [];
+  switch (action) {
+    case 'register_return':
+      return null;
+    case 'receive_return': {
+      if (currentReturns.length === 0) return '买家尚未寄回，需先登记退货物流';
+      const inTransit = currentReturns.filter(({ status }) => status === 'in_transit');
+      if (inTransit.length === 0) return '退货包裹均已收到';
+      const disputed = inTransit.find((returnRecord) => (
+        aftersalesReturnReceiptBlockReason(returnRecord) !== null
+      ));
+      return disputed === undefined ? null : aftersalesReturnReceiptBlockReason(disputed);
+    }
+    case 'inspect_return':
+      return currentReturns.some(({ status }) => (
+        status === 'received' || status === 'inspected'
+      )) || value.coordination.interceptedReturnInspection !== null
+        ? null
+        : '需先确认收到退货';
+    case 'inspect_intercepted_return': {
+      const interception = value.coordination.interception;
+      return interception?.status === 'succeeded'
+        && value.coordination.sourcePackages.some((sourcePackage) => (
+          sourcePackage.packageId === interception.packageId
+          && sourcePackage.logisticsStatus === 'returned'
+        ))
+        && value.coordination.interceptedReturnInspection === null
+        ? null
+        : '需先申请拦截并确认包裹退回';
+    }
+    case 'confirm_refund': {
+      const refund = value.refund;
+      if (!refund) return '当前流程没有退款申请';
+      if (refund.status === 'pending') return null;
+      return refund.status === 'confirmed'
+        ? '已完成足额退款'
+        : refund.status === 'cancelled'
+          ? '退款申请已取消'
+          : '退款已带原因结束';
+    }
+    case 'adjust_refund_target': {
+      const refund = value.refund;
+      if (!refund) return '当前流程没有退款申请';
+      return refund.status === 'pending' || refund.status === 'confirmed'
+        ? null
+        : '退款申请已结束';
+    }
+    case 'end_refund':
+      return value.refund?.status === 'pending'
+        && value.refund.fulfillment.kind === 'partial'
+        ? null
+        : '没有待补退的部分退款';
+    case 'cancel_refund_request': {
+      const refund = value.refund;
+      if (!refund) return '当前流程没有退款申请';
+      if (refund.status !== 'pending') return '没有待处理的退款申请';
+      if (refund.refundRecords.length > 0) {
+        return '已发生实际退款，请改用结束退款或调整退款目标金额';
+      }
+      return aftersalesCancelRefundRequestReason({
+        carried: value.workflowTemplate.timeline.at(-1)?.kind === 'changed'
+          && template.scenario !== 'refund_only'
+          && template.scenario !== 'return_refund',
+        confirmedDecisions: value.coordination.outboundExceptionHistory
+          .filter((exception) => exception.stage === 'confirmed')
+          .map(({ decision }) => decision),
+      });
+    }
+    case 'create_replacement_shipment':
+      return value.rounds.some((round) => (
+        round.replacementRequired && round.replacementShipment === null
+      )) ? null : '当前没有待补发的处理轮次';
+    case 'start_next_round':
+      return value.rounds.some(({ replacementShipment }) => replacementShipment !== null)
+        ? null
+        : '没有可开启新一轮的处理轮次';
+    case 'record_interception_result':
+      return value.coordination.interception?.status === 'requested'
+        ? null
+        : '当前没有申请中的拦截';
+    case 'decide_outbound_logistics_exception':
+      return value.coordination.outboundExceptionHistory.some(({ stage }) => (
+        stage === 'confirmed'
+      )) ? null : '没有已确认的正向物流异常';
+    case 'change_handling_direction':
+      return value.coordination.availableDirections.some((direction) => (
+        direction !== value.coordination.handlingDirection
+      )) ? null : '当前没有可转换的处理方向';
+    case 'complete':
+      return value.status === 'ready_to_complete' ? null : '需先完成当前流程的必需步骤';
+    default:
+      return null;
+  }
+}
+
+// 与主进程收货守卫一致的事实判断：签收争议未解决或确认丢失覆盖全部商品时不能确认收货。
+export function aftersalesReturnReceiptBlockReason(
+  returnRecord: AftersalesCase['returns'][number],
+): string | null {
+  if (returnRecord.logisticsExceptions.some((exception) => (
+    (exception.exceptionType === 'delivery_dispute' || exception.exceptionType === 'misdelivered')
+    && exception.stage !== 'recovered'
+    && exception.stage !== 'resolved'
+  ))) {
+    return '退货签收存在争议，需先解决争议或确认误投';
+  }
+  const lostByItem = new Map<string, number>();
+  for (const exception of returnRecord.logisticsExceptions) {
+    if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') continue;
+    if (exception.impact.scope === 'package') {
+      return '退货包裹已确认丢失，无可收商品';
+    }
+    for (const affected of exception.impact.items) {
+      lostByItem.set(
+        affected.sourceItemId,
+        (lostByItem.get(affected.sourceItemId) ?? 0) + affected.quantity,
+      );
+    }
+  }
+  if (returnRecord.items.length > 0 && returnRecord.items.every((item) => (
+    (lostByItem.get(item.id) ?? 0) >= item.quantity
+  ))) {
+    return '退货商品已全部确认丢失';
+  }
+  return null;
+}
+
+// 取消退款申请的领域规则：只有携带退款或明确选择直接补发时才允许，主进程与界面共用。
+export function aftersalesCancelRefundRequestReason(input: {
+  carried: boolean;
+  confirmedDecisions: readonly (string | null)[];
+}): string | null {
+  if (!input.carried
+    && (!input.confirmedDecisions.includes('replacement')
+      || input.confirmedDecisions.some((decision) => (
+        decision === 'refund_only' || decision === 'refund_and_replacement'
+      )))) {
+    return '只有明确选择直接补发时才能取消本次退款申请';
+  }
+  return null;
+}
+
 function resolveWorkflowStepState(input: {
   step: AftersalesWorkflowStep;
   scenario: AftersalesWorkflowScenario;
@@ -695,7 +923,7 @@ function workflowStepNotApplicableReason(
   quantities: ReturnQuantityFacts,
   receivableQuantity: number,
 ): string | null {
-  if (value.status === 'cancelled') return '售后处理已取消';
+  // 售后取消后真实事实仍可能晚到（如退款取消后退货到达），事实型步骤保持未开始供补录。
   if ((kind === 'receive_return' || kind === 'inspect_return')
     && quantities.expectedQuantity > 0
     && receivableQuantity === 0) {

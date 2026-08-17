@@ -574,10 +574,33 @@ describe('发货组 Electron IPC', () => {
         ],
       },
     });
-    const registered = await invoke('aftersales-cases:progress', {
-      kind: 'register_return',
+
+    // 先行退款是真实事实：即使退货尚未寄回也不受流程顺序阻止（规格 3.5）。
+    const earlyRefunded = await invoke('aftersales-cases:progress', {
+      kind: 'confirm_refund',
       caseId: changed.id,
       expectedRevision: changed.revision,
+      actualRefundCents: 300,
+      occurredAt: occurredAt(75),
+      note: '买家信用良好先行退 3 元',
+    }) as AftersalesCase;
+    expect(earlyRefunded.refund).toMatchObject({
+      status: 'pending',
+      fulfillment: { kind: 'partial', refundedAmountCents: 300, remainingAmountCents: 500 },
+    });
+    await expect(invoke('aftersales-cases:progress', {
+      kind: 'confirm_refund',
+      caseId: earlyRefunded.id,
+      expectedRevision: earlyRefunded.revision,
+      actualRefundCents: 100,
+      occurredAt: occurredAt(74),
+      note: '试图早于上一笔实际退款补退',
+    })).rejects.toThrow('补退时间不能早于上一笔实际退款');
+
+    const registered = await invoke('aftersales-cases:progress', {
+      kind: 'register_return',
+      caseId: earlyRefunded.id,
+      expectedRevision: earlyRefunded.revision,
       shippingCarrier: '中通快递',
       trackingNumber: 'ZT-AFTERSALES-COORDINATION-IPC',
       occurredAt: occurredAt(80),
@@ -648,11 +671,18 @@ describe('发货组 Electron IPC', () => {
             target: { aftersalesCaseId: decided.id },
           },
         },
-        risks: [expect.objectContaining({
-          packageRole: 'return',
-          exceptionType: 'lost',
-          affectedQuantity: 1,
-        })],
+        risks: [
+          expect.objectContaining({
+            packageRole: 'return',
+            exceptionType: 'lost',
+            affectedQuantity: 1,
+          }),
+          // 先行退款后原商品尚未收回，资金风险待办如实保留。
+          expect.objectContaining({
+            kind: 'refund_without_goods',
+            title: '退款后原商品未收回',
+          }),
+        ],
         facts: expect.arrayContaining([
           expect.objectContaining({ kind: 'outbound_logistics', value: 'delivered' }),
           expect.objectContaining({ kind: 'return_logistics', value: 'in_transit' }),

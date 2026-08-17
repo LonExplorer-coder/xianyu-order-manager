@@ -8038,9 +8038,9 @@ describe('售后处理单', () => {
       caseId: received.id,
       expectedRevision: received.revision,
       actualRefundCents: 1_000,
-      occurredAt: '2026-08-13T21:25:00+08:00',
-      note: '错误地跳过检查',
-    })).toThrow('请先完成退货检查');
+      occurredAt: '2026-08-13T20:45:00+08:00',
+      note: '试图补录早于退货寄出的退款',
+    })).toThrow('实际退款时间不能早于退货检查时间');
 
     const inspected = application.progressAftersalesCase({
       kind: 'inspect_return',

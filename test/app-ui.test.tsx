@@ -90,6 +90,29 @@ const testWorkflowTemplates: AftersalesWorkflowTemplate[] =
     versionCreatedAt: '2026-08-14T00:00:00.000Z',
   }));
 
+function presetWorkflowTemplateFixture(
+  scenario: (typeof testWorkflowTemplates)[number]['scenario'],
+): AftersalesCase['workflowTemplate'] {
+  const template = testWorkflowTemplates.find(({ scenario: key }) => key === scenario);
+  if (!template) throw new Error(`缺少预置流程 fixture：${scenario}`);
+  return {
+    templateId: template.id,
+    version: 1,
+    name: template.name,
+    scenario,
+    steps: template.steps,
+    timeline: [{
+      kind: 'selected',
+      before: null,
+      after: { templateId: template.id, version: 1 },
+      reason: '测试选择流程',
+      occurredAt: '2026-08-13T07:00:00.000Z',
+      createdAt: '2026-08-13T07:00:00.000Z',
+    }],
+    stepEvents: [],
+  };
+}
+
 const draft: OrderDraft = {
   id: 'draft-1',
   batchId: 'batch-1',
@@ -2021,6 +2044,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-replacement',
       shipmentRecordId: record.id,
       workflow: 'direct_replacement',
+      workflowTemplate: presetWorkflowTemplateFixture('direct_replacement'),
       status: 'waiting_replacement',
       revision: 1,
       reason: '缺少配件，直接补发',
@@ -2085,7 +2109,7 @@ describe('订单管理工作台', () => {
     const history = await screen.findByRole('region', { name: '发货记录' });
     expect(within(history).getByRole('region', { name: '售后实物流转汇总' }))
       .toHaveTextContent('累计发出 1 件 · 累计退回 0 件 · 买家当前持有 1 件');
-    await user.click(within(history).getByRole('button', { name: '建立第 1 轮补发' }));
+    await user.click(within(history).getByRole('button', { name: '建立本轮补发' }));
     const dialog = screen.getByRole('dialog', { name: '建立本轮补发记录' });
     await user.type(within(dialog).getByRole('textbox', { name: '补发承运方' }), '顺丰速运');
     await user.type(within(dialog).getByRole('textbox', { name: '补发运单号' }), 'SF-UI-REPLACEMENT');
@@ -2364,6 +2388,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-interception',
       shipmentRecordId: record.id,
       workflow: 'return_refund',
+      workflowTemplate: presetWorkflowTemplateFixture('return_refund'),
       status: 'processing',
       revision: 1,
       reason: '运输中商品破损，需协调售后',
@@ -2938,6 +2963,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-refund-progress',
       shipmentRecordId: record.id,
       workflow: 'refund_only',
+      workflowTemplate: presetWorkflowTemplateFixture('refund_only'),
       status: 'waiting_refund',
       revision: 1,
       reason: '商品瑕疵，买家申请部分退款',
@@ -3148,6 +3174,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-refund-partial',
       shipmentRecordId: record.id,
       workflow: 'refund_only',
+      workflowTemplate: presetWorkflowTemplateFixture('refund_only'),
       status: 'waiting_refund',
       revision: 2,
       reason: '商品瑕疵，买家申请退款',
@@ -3613,6 +3640,7 @@ describe('订单管理工作台', () => {
       id: 'aftersales-ui-return-progress',
       shipmentRecordId: record.id,
       workflow: 'return_refund',
+      workflowTemplate: presetWorkflowTemplateFixture('return_refund'),
       status: 'waiting_return',
       revision: 1,
       reason: '商品破损，需要退回退款',
@@ -3697,9 +3725,34 @@ describe('订单管理工作台', () => {
       createdAt: '2026-08-13T09:10:00.000Z',
       updatedAt: '2026-08-13T09:10:00.000Z',
     };
+    const roundFor = (returnRecordIds: string[]): AftersalesCase['rounds'] => [{
+      id: 'round-ui-return-progress',
+      roundNumber: 1,
+      workflow: 'legacy',
+      replacementRequired: false,
+      sourceShipmentRecordId: record.id,
+      items: pending.items.map((item) => ({
+        id: `round-item-${item.id}`,
+        sourceShipmentPackageItemId: item.shipmentPackageItemId,
+        packageId: item.packageId,
+        orderId: item.orderId,
+        orderItemId: item.orderItemId,
+        orderNumber: item.orderNumber,
+        sourceTitle: item.sourceTitle,
+        sourceSpec: item.sourceSpec,
+        quantity: item.quantity,
+      })),
+      returnRecordIds,
+      replacementShipment: null,
+      replacementOccurredAt: null,
+      occurredAt: pending.occurredAt,
+      reason: pending.reason,
+      createdAt: pending.createdAt,
+    }];
     const registered: AftersalesCase = {
       ...pending,
       revision: 2,
+      rounds: roundFor([returnRecord.id]),
       returns: [returnRecord],
     };
     const received: AftersalesCase = {
@@ -3763,6 +3816,7 @@ describe('订单管理工作台', () => {
       ...registered,
       id: 'aftersales-ui-cancelled-return-progress',
       status: 'cancelled',
+      rounds: roundFor([cancelledReturnRecord.id]),
       revision: 3,
       refund: {
         ...registered.refund!,
@@ -3787,6 +3841,7 @@ describe('订单管理工作台', () => {
       ...registered,
       id: 'aftersales-ui-carrier-claim',
       status: 'completed',
+      rounds: roundFor(['return-ui-carrier-claim']),
       revision: 5,
       returns: [{
         ...returnRecord,
@@ -3846,6 +3901,7 @@ describe('订单管理工作台', () => {
       ...registered,
       id: 'aftersales-ui-claim-refund-pending',
       status: 'waiting_return',
+      rounds: roundFor(['return-ui-claim-refund-pending']),
       revision: 4,
       returns: [{
         ...returnRecord,
@@ -12295,5 +12351,180 @@ describe('订单管理工作台', () => {
       occurredAt: '2026-08-14T10:40:00+08:00',
       reason: '协商后改为买家寄回再退款',
     }));
+  });
+
+  it('主操作按模板顺序开放，被阻止动作可见原因且先行退款可补录', async () => {
+    const user = userEvent.setup();
+    const group = singleShipmentGroupProjection().groups[0];
+    const archive = shipmentArchiveForGroup(group);
+    const record = archive.records[0];
+    const sourceItem = record.packages[0].items[0];
+    const reorderedSteps: AftersalesCase['workflowTemplate']['steps'] = [
+      {
+        id: 'identify', kind: 'identify_issue', name: '确认问题', required: true,
+        fields: ['items', 'reason', 'requested_refund_amount'], condition: null,
+      },
+      {
+        id: 'confirm-refund', kind: 'confirm_refund', name: '先行退款', required: true,
+        fields: ['requested_refund_amount', 'occurred_at'], condition: null,
+      },
+      {
+        id: 'register-return', kind: 'register_return', name: '登记退货物流', required: true,
+        fields: ['shipping_carrier', 'tracking_number'], condition: null,
+      },
+      {
+        id: 'receive-return', kind: 'receive_return', name: '确认收到退货', required: true,
+        fields: ['received_quantity'], condition: null,
+      },
+      {
+        id: 'complete', kind: 'complete', name: '完成售后', required: true,
+        fields: ['resolution_reason'], condition: null,
+      },
+    ];
+    const currentCase: AftersalesCase = {
+      ...emptyAftersalesRounds,
+      id: 'aftersales-operation-order-ui',
+      shipmentRecordId: record.id,
+      workflow: 'return_refund',
+      workflowTemplate: {
+        templateId: 'custom-aftersales-ui-reordered',
+        version: 1,
+        name: '先退款再收货的协商流程',
+        scenario: 'return_refund',
+        steps: reorderedSteps,
+        timeline: [{
+          kind: 'selected',
+          before: null,
+          after: { templateId: 'custom-aftersales-ui-reordered', version: 1 },
+          reason: '测试选择流程',
+          occurredAt: '2026-08-14T10:30:00+08:00',
+          createdAt: '2026-08-14T02:30:00.000Z',
+        }],
+        stepEvents: [],
+      },
+      status: 'waiting_return',
+      revision: 1,
+      reason: '自定义顺序与补录测试',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      items: [{
+        id: 'aftersales-operation-order-item',
+        shipmentPackageItemId: sourceItem.id,
+        packageId: record.packages[0].id,
+        orderId: sourceItem.orderId,
+        orderItemId: sourceItem.orderItemId,
+        orderNumber: sourceItem.orderNumber,
+        sourceTitle: sourceItem.sourceTitle,
+        sourceSpec: sourceItem.sourceSpec,
+        quantity: 1,
+        sourceShippedQuantity: sourceItem.quantity,
+      }],
+      refund: {
+        pendingItemId: 'pending-operation-order-ui',
+        requestedAmountCents: 1_000,
+        status: 'pending',
+        refundRecords: [],
+        fulfillment: { kind: 'unfulfilled', refundedAmountCents: 0 },
+        createdAt: '2026-08-14T02:30:00.000Z',
+        latestEventAt: '2026-08-14T10:30:00+08:00',
+        timeline: [{
+          kind: 'created', requestedAmountCents: 1_000, beforeAmountCents: null,
+          actualAmountCents: null, reason: '自定义顺序与补录测试',
+          occurredAt: '2026-08-14T10:30:00+08:00',
+          createdAt: '2026-08-14T02:30:00.000Z',
+        }],
+      },
+      returns: [],
+      coordination: testAftersalesCoordination('buyer_return'),
+      timeline: [{
+        kind: 'created',
+        resultRevision: 1,
+        status: 'waiting_return',
+        reason: '自定义顺序与补录测试',
+        occurredAt: '2026-08-14T10:30:00+08:00',
+        items: [{ shipmentPackageItemId: sourceItem.id, quantity: 1 }],
+        createdAt: '2026-08-14T02:30:00.000Z',
+      }],
+      createdAt: '2026-08-14T02:30:00.000Z',
+      updatedAt: '2026-08-14T02:30:00.000Z',
+    };
+    const partialRefunded: AftersalesCase = {
+      ...currentCase,
+      revision: 2,
+      refund: {
+        ...currentCase.refund!,
+        refundRecords: [{
+          id: 'financial-operation-order-ui',
+          kind: 'aftersales_refund',
+          amountCents: 400,
+          occurredAt: '2026-08-14T10:45:00+08:00',
+          note: '先行退回 4 元',
+          createdAt: '2026-08-14T02:45:00.000Z',
+        }],
+        fulfillment: {
+          kind: 'partial',
+          refundedAmountCents: 400,
+          remainingAmountCents: 600,
+        },
+      },
+    };
+    const progressAftersalesCase = vi.fn().mockResolvedValue(partialRefunded);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
+      queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
+      queryAftersalesCases: vi.fn().mockResolvedValue([currentCase]),
+      progressAftersalesCase,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+    const caseRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${currentCase.id}`,
+    });
+    const actions = within(caseRegion).getAllByRole('button');
+    // 主按钮按自定义顺序开放：先行退款在登记退货物流之前成为当前主操作。
+    expect(actions
+      .filter(({ textContent }) => textContent === '确认实际退款' || textContent === '登记退货物流')
+      .map(({ textContent }) => textContent))
+      .toEqual(['确认实际退款', '登记退货物流']);
+    // 补录区默认展开：未轮到的事实动作可访问。
+    expect(within(caseRegion).getByText(/补录已发生的真实事实（\d+）/u))
+      .toBeInTheDocument();
+    // 被事实阻止的动作不隐藏：按钮可见、禁用并解释原因。
+    const blockedReceive = within(caseRegion)
+      .getByRole('button', { name: '确认收到退货' });
+    expect(blockedReceive).toBeDisabled();
+    expect(caseRegion).toHaveTextContent('买家尚未寄回，需先登记退货物流');
+
+    // 主操作先行退款提交后补录事实生效，剩余金额进入主入口。
+    await user.click(within(caseRegion).getAllByRole('button', { name: '确认实际退款' })[0]);
+    const refundDialog = screen.getByRole('dialog', { name: '确认实际退款' });
+    fireEvent.change(within(refundDialog).getByLabelText('实际退款时间'), {
+      target: { value: '2026-08-14T10:45:00' },
+    });
+    fireEvent.change(within(refundDialog).getByRole('spinbutton', { name: '实际退款金额' }), {
+      target: { value: '4' },
+    });
+    await user.type(
+      within(refundDialog).getByRole('textbox', { name: '退款确认说明' }),
+      '先行退回 4 元',
+    );
+    await user.click(within(refundDialog).getByRole('button', { name: '确认退款' }));
+    await waitFor(() => expect(progressAftersalesCase).toHaveBeenCalledWith({
+      kind: 'confirm_refund',
+      caseId: currentCase.id,
+      expectedRevision: 1,
+      actualRefundCents: 400,
+      occurredAt: '2026-08-14T10:45:00+08:00',
+      note: '先行退回 4 元',
+    }));
+    const updatedRegion = await screen.findByRole('region', {
+      name: `售后处理单 ${partialRefunded.id}`,
+    });
+    expect(updatedRegion).toHaveTextContent('部分完成 · 已退 ¥4.00 / ¥10.00');
   });
 });

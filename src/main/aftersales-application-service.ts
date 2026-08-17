@@ -28,6 +28,8 @@ import {
 } from '../core/aftersales-cases';
 import {
   AFTERSALES_WORKFLOW_STEP_BINDINGS,
+  TERMINAL_CONTINUABLE_ACTIONS,
+  aftersalesCancelRefundRequestReason,
   projectAftersalesWorkflowSteps,
 } from '../core/aftersales-workflow-templates';
 import {
@@ -674,18 +676,7 @@ export class AftersalesApplicationService {
     if (current.revision !== prepared.expectedRevision) {
       throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
     }
-    const continuesClosedReturn = prepared.kind === 'record_interception_result'
-      || prepared.kind === 'inspect_intercepted_return'
-      || prepared.kind === 'receive_return'
-      || prepared.kind === 'inspect_return'
-      || prepared.kind === 'correct_return_logistics'
-      || prepared.kind === 'update_return_logistics_status'
-      || prepared.kind === 'record_return_logistics_exception'
-      || prepared.kind === 'progress_return_logistics_exception'
-      || prepared.kind === 'decide_return_logistics_exception'
-      || prepared.kind === 'open_carrier_claim'
-      || prepared.kind === 'resolve_carrier_claim'
-      || prepared.kind === 'confirm_carrier_compensation';
+    const continuesClosedReturn = TERMINAL_CONTINUABLE_ACTIONS.has(prepared.kind);
     if (
       (current.status === 'completed' || current.status === 'cancelled')
       && !continuesClosedReturn
@@ -701,13 +692,11 @@ export class AftersalesApplicationService {
       const confirmedDecisions = current.coordination.outboundExceptionHistory
         .filter((exception) => exception.stage === 'confirmed')
         .map(({ decision }) => decision);
-      if (!carriesRefundFromEarlierTemplate
-        && (!confirmedDecisions.includes('replacement')
-        || confirmedDecisions.some((decision) => (
-          decision === 'refund_only' || decision === 'refund_and_replacement'
-        )))) {
-        throw new Error('只有明确选择直接补发时才能取消本次退款申请');
-      }
+      const cancelReason = aftersalesCancelRefundRequestReason({
+        carried: carriesRefundFromEarlierTemplate,
+        confirmedDecisions,
+      });
+      if (cancelReason !== null) throw new Error(cancelReason);
       const latestDecisionAt = current.coordination.outboundExceptionHistory
         .flatMap(({ timeline }) => timeline)
         .reduce((latest, event) => (
@@ -1820,60 +1809,37 @@ export class AftersalesApplicationService {
     }
     if (prepared.kind === 'confirm_refund') {
       const refund = current.refund;
+      // 真实退款不受流程顺序阻止（规格 3.5 先行退款可补录）；这里只保留事实校验。
+      if (!refund) throw new Error('当前流程没有退款申请');
+      if (refund.status !== 'pending') {
+        throw new Error('当前没有待确认的退款申请');
+      }
       const explicitOnlyRefund = current.workflow === 'return_refund'
         && current.coordination.handlingDirection === 'only_refund';
-      const exceptionDecision = current.coordination.returnException?.decision ?? null;
-      const exceptionRefundSupported = exceptionDecision !== null;
       const outboundRefundExceptions = current.coordination.outboundExceptionHistory.filter(
         (exception) => exception.stage === 'confirmed'
           && (exception.decision === 'refund_only'
             || exception.decision === 'refund_and_replacement'),
       );
       const outboundRefundSupported = outboundRefundExceptions.length > 0;
-      const carriedRefundSupported = carriesRefundFromEarlierTemplate
-        && refund?.status === 'pending';
-      const returnDecisionSupported = explicitOnlyRefund || (
-        current.returns.length > 0
-        && !(current.coordination.returnException?.exceptionType === 'lost'
-          && current.coordination.returnException.stage === 'confirmed'
-          && exceptionDecision === null)
-        && current.returns.every((returnRecord) => (
-          returnRecord.status === 'inspected'
-          || returnRecord.carrierClaim !== null
-          || (returnRecord.status === 'in_transit'
-            && !hasUnresolvedConfirmedLoss(returnRecord))
-          || (returnRecord.id === current.coordination.returnException?.returnRecordId
-            && exceptionRefundSupported)
-        ))
-      );
-      if (
-        current.workflow === 'return_refund' &&
-        !returnDecisionSupported &&
-        !outboundRefundSupported
-      ) {
-        throw new Error('请先完成退货检查、确认丢件或建立承运索赔');
-      }
-      const refundStatusReady = current.status === 'waiting_refund'
-        || (current.status === 'waiting_replacement' && outboundRefundSupported)
-        || carriedRefundSupported
-        || (current.workflow === 'return_refund'
-          && (current.status === 'waiting_return' || current.status === 'waiting_inspection')
-          && returnDecisionSupported);
-      if (!refundStatusReady || refund?.status !== 'pending') {
-        throw new Error('当前售后尚不能确认实际退款');
-      }
+      const carriedRefundSupported = carriesRefundFromEarlierTemplate;
       const latestOutboundRefundAt = outboundRefundExceptions
         .flatMap(({ timeline }) => timeline.at(-1)?.occurredAt ?? [])
         .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
-      const earliestRefundAt = latestOutboundRefundAt
-        ?? (carriedRefundSupported ? refund?.latestEventAt : undefined)
+      const carriedAnchor = carriedRefundSupported ? refund.latestEventAt : undefined;
+      const evidenceAnchor = latestOutboundRefundAt
+        ?? carriedAnchor
         ?? (explicitOnlyRefund
         ? current.occurredAt
         : current.workflow === 'return_refund'
         ? current.coordination.returnException?.timeline.at(-1)?.occurredAt
           ?? latestReturnDecisionEvidenceAt(current.returns)
         : current.occurredAt);
-      if (!earliestRefundAt) throw new Error('退货记录缺少检查、丢件或索赔时间');
+      // 没有退货检查、丢件或索赔证据时，退款申请本身的事实时间就是最早锚点。
+      const earliestRefundAt = evidenceAnchor ?? refund.latestEventAt;
+      const anchoredOnRefundRequest = evidenceAnchor === undefined
+        || evidenceAnchor === null
+        || (carriedAnchor !== undefined && evidenceAnchor === carriedAnchor);
       const latestRecordAt = refund.refundRecords.at(-1)?.occurredAt ?? null;
       const refundNotBefore = latestRecordAt !== null
         && Date.parse(latestRecordAt) > Date.parse(earliestRefundAt)
@@ -1884,15 +1850,17 @@ export class AftersalesApplicationService {
         refundNotBefore,
         latestRecordAt !== null
           ? '补退时间不能早于上一笔实际退款'
-          : current.workflow === 'return_refund' && !explicitOnlyRefund
-          ? current.coordination.returnException?.timeline.length
-            ? '实际退款时间不能早于退货异常处理选择时间'
-            : current.returns.some(hasUnresolvedConfirmedLoss)
-            ? '实际退款时间不能早于退货丢件确认时间'
-            : current.returns.some(({ carrierClaim }) => carrierClaim !== null)
-              ? '实际退款时间不能早于承运索赔建立时间'
-              : '实际退款时间不能早于退货检查时间'
-          : '实际退款时间不能早于售后发生时间',
+          : anchoredOnRefundRequest
+            ? '实际退款时间不能早于退款申请时间'
+            : current.workflow === 'return_refund' && !explicitOnlyRefund
+              ? current.coordination.returnException?.timeline.length
+                ? '实际退款时间不能早于退货异常处理选择时间'
+                : current.returns.some(hasUnresolvedConfirmedLoss)
+                ? '实际退款时间不能早于退货丢件确认时间'
+                : current.returns.some(({ carrierClaim }) => carrierClaim !== null)
+                  ? '实际退款时间不能早于承运索赔建立时间'
+                  : '实际退款时间不能早于退货检查时间'
+              : '实际退款时间不能早于售后发生时间',
       );
       const refundedAfter = refund.fulfillment.refundedAmountCents
         + prepared.actualRefundCents;

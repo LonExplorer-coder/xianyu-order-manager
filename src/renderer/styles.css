@@ -5901,6 +5901,29 @@ select:focus-visible {
   background: #f6f7f8;
 }
 
+.aftersales-operation {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aftersales-operation__reason {
+  color: #8a6d1a;
+  font-size: 12px;
+}
+
+.aftersales-supplemental-facts {
+  border: 1px dashed #c7ccd4;
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+
+.aftersales-supplemental-facts > summary {
+  cursor: pointer;
+  color: #4f5965;
+  font-size: 12px;
+}
+
 @media (max-width: 900px) {
   .aftersales-workflows-workspace {
     padding: 24px;
