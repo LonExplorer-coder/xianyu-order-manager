@@ -1,0 +1,1492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>闲鱼订单管理系统 · 核心业务流全景图</title>
+<style>
+  :root {
+    --recognition: #6366f1;
+    --order: #2563eb;
+    --shipment: #0d9488;
+    --logistics: #d97706;
+    --aftersales: #e11d48;
+    --finance: #059669;
+    --product: #7c3aed;
+    --support: #0f766e;
+    --projection: #64748b;
+    --planning: #94a3b8;
+    --ink: #1e293b;
+    --muted: #64748b;
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --line: #e2e8f0;
+    --accent: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.65;
+  }
+
+  /* ===== 顶部导航 ===== */
+  .topbar {
+    position: sticky; top: 0; z-index: 60;
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+    color: #fff;
+  }
+  .topbar-inner {
+    max-width: 1320px; margin: 0 auto; padding: 12px 28px 0;
+    display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  }
+  .brand { display: flex; flex-direction: column; padding-bottom: 10px; }
+  .brand b { font-size: 15.5px; letter-spacing: 0.4px; }
+  .brand span { font-size: 11px; opacity: 0.6; }
+  .viewnav { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }
+  .viewnav a {
+    color: rgba(255,255,255,0.78); text-decoration: none; font-size: 13.5px; font-weight: 600;
+    padding: 8px 15px 11px; border-radius: 8px 8px 0 0; border-bottom: 2.5px solid transparent;
+  }
+  .viewnav a:hover { color: #fff; background: rgba(255,255,255,0.08); }
+  .viewnav a.active { color: #fff; border-bottom-color: #38bdf8; background: rgba(56,189,248,0.12); }
+
+  main { max-width: 1320px; margin: 0 auto; padding: 26px 28px 90px; }
+  .view { display: none; }
+  .view.show { display: block; animation: fadein .18s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .crumbs { font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+  .crumbs a { color: var(--accent); text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs .sep { margin: 0 6px; color: #cbd5e1; }
+
+  h2.view-title { font-size: 22px; margin: 0 0 4px; }
+  p.view-lead { color: var(--muted); font-size: 14px; margin: 4px 0 20px; max-width: 1000px; }
+
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; vertical-align: 2px; white-space: nowrap; }
+  .badge.done { background: #dcfce7; color: #15803d; }
+  .badge.partial { background: #fef3c7; color: #b45309; }
+  .badge.planned { background: #e2e8f0; color: #475569; }
+  .flow-tag { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; color: #fff; vertical-align: 2px; }
+
+  /* ===== 总览 ===== */
+  .hero {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 24px 26px 20px; margin-bottom: 18px;
+  }
+  .hero h1 { margin: 0 0 10px; font-size: 23px; }
+  .hero p { margin: 0; color: #334155; font-size: 14px; max-width: 1080px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  .stat {
+    background: #f8fafc; border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 14px; font-size: 12.5px; color: var(--muted);
+  }
+  .stat b { display: block; font-size: 19px; color: var(--ink); line-height: 1.2; }
+  .paths { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin: 0 0 20px; }
+  .path-card {
+    background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    border-radius: 10px; padding: 12px 16px; font-size: 13px;
+  }
+  .path-card b { display: block; margin-bottom: 3px; font-size: 13.5px; }
+  .path-card a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .path-card a:hover { text-decoration: underline; }
+
+  .flow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(390px, 1fr)); gap: 14px; }
+  a.flow-card {
+    display: block; background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 15px 17px; text-decoration: none; color: var(--ink);
+    border-top: 4px solid var(--c, var(--accent));
+    transition: box-shadow .15s ease, transform .15s ease;
+  }
+  a.flow-card:hover { box-shadow: 0 6px 18px rgba(15,23,42,0.10); transform: translateY(-2px); }
+  .flow-card h3 { margin: 0 0 4px; font-size: 15.5px; }
+  .flow-card .tagline { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 2px; margin: 6px 0 8px; }
+  .chain .st {
+    font-size: 11.5px; background: color-mix(in srgb, var(--c) 9%, white);
+    border: 1px solid color-mix(in srgb, var(--c) 30%, white);
+    color: color-mix(in srgb, var(--c) 82%, black);
+    border-radius: 6px; padding: 1px 7px; font-weight: 600; white-space: nowrap;
+  }
+  .chain .ar { color: var(--muted); font-size: 11px; }
+  .chain .pa { color: var(--aftersales); font-weight: 800; font-size: 12px; padding: 0 1px; }
+  .flow-card .go { font-size: 12.5px; font-weight: 700; color: var(--c); margin-top: 4px; }
+
+  .diagram-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 16px 10px; margin-bottom: 18px; }
+  .diagram-card h3 { margin: 0 0 2px; font-size: 16px; }
+  .diagram-card .sub { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+  .mini-notes { margin: 10px 2px 0; font-size: 12px; color: var(--muted); line-height: 2; }
+  .mini-notes b { color: #475569; }
+  .mini-notes .dot { margin: 0 8px; color: #cbd5e1; }
+  .diagram-wrap { overflow-x: auto; }
+  .diagram-wrap svg { display: block; width: 100%; height: auto; min-width: 860px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 10px; font-size: 12px; color: var(--muted); align-items: center; }
+  .legend .key { display: inline-flex; align-items: center; gap: 5px; }
+  .legend .sw { width: 13px; height: 13px; border-radius: 4px; display: inline-block; }
+
+  /* ===== 流详情 ===== */
+  .flow-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+  .flow-tabs a {
+    font-size: 12.5px; font-weight: 700; text-decoration: none; color: #fff;
+    padding: 4px 12px; border-radius: 999px; background: var(--c);
+    opacity: 0.55; transition: opacity .12s;
+  }
+  .flow-tabs a.active, .flow-tabs a:hover { opacity: 1; }
+  .flow-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .flow-head h2 { margin: 0; font-size: 22px; }
+  .flow-lead { color: var(--muted); font-size: 13.5px; margin: 2px 0 16px; max-width: 1040px; }
+  .flownav { display: flex; justify-content: space-between; gap: 10px; margin-top: 26px; }
+  .flownav a {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: none;
+  }
+  .flownav a:hover { border-color: var(--accent); color: var(--accent); }
+
+  table.sheet { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; font-size: 13px; }
+  table.sheet th, table.sheet td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; word-break: break-word; }
+  table.sheet th { background: #f8fafc; font-size: 12.5px; white-space: nowrap; }
+  table.sheet td code, ul.fields code, .evid code {
+    font-size: 11.5px; background: #f1f5f9; padding: 1px 5px; border-radius: 4px; color: #334155;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .rules { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .rules h3, .block-title { margin: 0 0 8px; font-size: 15px; }
+  .rules ul { margin: 0; padding-left: 18px; font-size: 13px; color: #334155; }
+  .rules li { margin: 5px 0; }
+  .entity-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .entity-chips a {
+    font-size: 12px; font-weight: 600; text-decoration: none; color: var(--ink);
+    background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
+  }
+  .entity-chips a:hover { border-color: var(--c); color: var(--c); }
+  .evid { font-size: 12.5px; color: var(--muted); }
+  .evid .adr {
+    display: inline-block; font-size: 11px; font-weight: 700; margin: 2px 3px 2px 0;
+    background: #eef2ff; color: #4338ca; border-radius: 5px; padding: 1px 7px;
+  }
+  .stack { display: grid; gap: 16px; }
+  .stack-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1020px) { .stack-2 { grid-template-columns: 1fr; } }
+
+  /* ===== 状态机 ===== */
+  .machine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 14px; }
+  .machine { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px; }
+  .machine h4 { margin: 0 0 2px; font-size: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .machine .note { font-size: 12px; color: var(--muted); margin: 2px 0 8px; }
+  .machine svg { display: block; width: 100%; height: auto; }
+  .proj-card { background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px; padding: 13px 16px; }
+  .proj-card h4 { margin: 0 0 4px; font-size: 14px; }
+  .proj-card p { margin: 0; font-size: 12.5px; color: #78350f; }
+
+  /* ===== 实体字典 ===== */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .toolbar input[type=search] {
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font-size: 13px; width: 230px; background: #fff;
+  }
+  .chip {
+    font-size: 12px; font-weight: 700; border: 1px solid var(--line); background: #fff; color: var(--ink);
+    border-radius: 999px; padding: 4px 12px; cursor: pointer;
+  }
+  .chip.on { background: var(--c, var(--accent)); border-color: var(--c, var(--accent)); color: #fff; }
+  table.entities tbody tr { cursor: pointer; transition: background .1s; }
+  table.entities tbody tr:hover { background: #eff6ff; }
+  .rel-list { margin: 6px 0 0; padding-left: 0; list-style: none; font-size: 13px; }
+  .rel-list li { margin: 4px 0; }
+  .rel-list a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .rel-list a:hover { text-decoration: underline; }
+  .rel-list .dir { color: var(--muted); font-size: 12px; }
+
+  /* ===== 沙盘 ===== */
+  .scenario-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .scenario-btn {
+    border: 1px solid var(--line); background: var(--card); border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--ink);
+  }
+  .scenario-btn:hover { border-color: var(--accent); }
+  .scenario-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .scenario-desc { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px 16px; font-size: 13.5px; margin-bottom: 12px; }
+  .scenario-desc b { color: #1d4ed8; }
+  .graph-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  .graph-toolbar label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  .graph-toolbar .hint { font-size: 12px; }
+  .zoombtn { border: 1px solid var(--line); background: #fff; border-radius: 7px; width: 30px; height: 28px; font-size: 14px; font-weight: 700; cursor: pointer; color: var(--ink); }
+  .zoombtn:hover { border-color: var(--accent); color: var(--accent); }
+  #graphOuter { overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; max-height: 780px; }
+  #graphSvg { display: block; }
+  .panes { display: grid; grid-template-columns: minmax(360px, 1.25fr) minmax(300px, 1fr); gap: 16px; margin-top: 16px; }
+  @media (max-width: 960px) { .panes { grid-template-columns: 1fr; } }
+  .pane { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .pane h4 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 700; }
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .timeline li { position: relative; padding: 0 0 13px 34px; font-size: 13px; }
+  .timeline li::before {
+    content: attr(data-n); position: absolute; left: 0; top: 1px;
+    width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
+    font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+  .timeline li::after { content: ""; position: absolute; left: 10.5px; top: 26px; bottom: -2px; width: 1.5px; background: var(--line); }
+  .timeline li:last-child::after { display: none; }
+  .timeline b { display: block; font-size: 13.5px; }
+  .timeline span { color: #475569; }
+  #nodeDetail .ph { color: var(--muted); font-size: 13px; }
+  #nodeDetail h5 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #nodeDetail .fields { margin: 8px 0 0; padding-left: 16px; font-size: 12.5px; color: #475569; }
+  #nodeDetail .fields li { margin: 2px 0; }
+  #nodeDetail .scen { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  table.outcomes { width: 100%; border-collapse: collapse; font-size: 12.5px; background: var(--card); border-radius: 12px; overflow: hidden; }
+  table.outcomes th, table.outcomes td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  table.outcomes th { background: #f8fafc; }
+
+  /* ===== 实现状态 ===== */
+  .section-gap { margin-top: 26px; }
+
+  footer { border-top: 1px solid var(--line); margin-top: 60px; padding: 18px 28px 40px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <b>闲鱼订单管理系统 · 业务流全景图</b>
+      <span>CONTEXT.md 领域词汇 × src 源码 × ADR 交叉梳理 · 2026-08-14 · 分支 codex/logistics-aftersales-coordination</span>
+    </div>
+    <nav class="viewnav" id="viewnav">
+      <a href="#/" data-view="home">总览</a>
+      <a href="#/relations" data-view="relations">串并行关系</a>
+      <a href="#/sandbox" data-view="sandbox">数据流沙盘</a>
+      <a href="#/entities" data-view="entities">实体字典</a>
+      <a href="#/states" data-view="states">状态机</a>
+      <a href="#/status" data-view="status">实现状态</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="view" id="view-home"></div>
+  <div class="view" id="view-flow"></div>
+  <div class="view" id="view-relations"></div>
+  <div class="view" id="view-sandbox"></div>
+  <div class="view" id="view-entities"></div>
+  <div class="view" id="view-entity"></div>
+  <div class="view" id="view-states"></div>
+  <div class="view" id="view-status"></div>
+</main>
+
+<footer>
+  本页面为静态自包含文件(无外部依赖,可离线打开,顶部导航与站内链接即「总-分」跳转)。实体与枚举以源码为准:src/core/contracts.ts、shipment-records.ts、aftersales-cases.ts、logistics-exceptions.ts、product-standardization.ts;持久化与不可变触发器见 src/main/workspace.ts;状态投影见 src/main/order-fulfillment-projection-service.ts 与 src/core/order-operations-projection.ts。
+</footer>
+
+<script>
+/* ================================================================
+ * 基础数据:流配色
+ * ================================================================ */
+const FLOW = {
+  recognition: { name: '识别流',     color: '#6366f1' },
+  order:       { name: '订单流',     color: '#2563eb' },
+  shipment:    { name: '发货流',     color: '#0d9488' },
+  logistics:   { name: '物流流',     color: '#d97706' },
+  aftersales:  { name: '售后流',     color: '#e11d48' },
+  finance:     { name: '资金流',     color: '#059669' },
+  product:     { name: '商品标准化', color: '#7c3aed' },
+  support:     { name: '表格支撑',   color: '#0f766e' },
+  planning:    { name: '规划中',     color: '#94a3b8' },
+  projection:  { name: '只读投影',   color: '#64748b' },
+};
+const BADGE = { done: '已实现', partial: '部分实现', planned: '仅规划' };
+
+/* ================================================================
+ * 实体图数据(33 实体 / 44 引用)
+ * ================================================================ */
+const NODES = [
+  { id:'shot', col:0, row:0, flow:'recognition', label:'来源截图', sub:'sha256 指纹 · 同图去重', storage:'source_screenshots',
+    desc:'一张包含完整订单详情的截图(普通或长截图),是识别结果的核对依据;同一订单可因重复上传关联多张截图。',
+    fields:['originalName / relativePath(私有目录)','mimeType','sha256(重复上传判定指纹)'] },
+  { id:'batch', col:0, row:1, flow:'recognition', label:'识别批次', sub:'一次 ≤50 张', storage:'recognition_batches + recognition_batch_items',
+    desc:'用户一次提交的截图集合;每张截图是批次条目,有独立状态机;解析结果分为新订单/同图重复/同单等价/订单更新四种。',
+    fields:['条目状态机 9 态','resolution: new_order / identical_image / equivalent_order / order_updated','失败可重试或转人工录入'] },
+  { id:'attempt', col:0, row:2, flow:'recognition', label:'识别尝试+识别原文', sub:'OCR 原始响应不可变', storage:'recognition_attempts + candidate_adjudication_runs/decisions',
+    desc:'针对一张截图的一次云端识别;识别原文(文字/位置/原始响应)是不可变机器证据,可能包含错误;有限候选交独立文本模型裁决,模型只返回候选编号,不生成内容。',
+    fields:['provider / model / requestId','rawResponse(触发器禁改)','reviewIssues / recognitionConflicts','候选裁决记录(不存原始响应与密钥)'] },
+  { id:'draft', col:0, row:3, flow:'recognition', label:'订单草稿/待确认项', sub:'awaiting_review → confirmed', storage:'order_drafts + draft_items',
+    desc:'由识别产生、尚未成为正式订单的候选数据;关键字段缺失/冲突/格式异常时成为待确认项,必须人工校对后才可入库。',
+    fields:['status: awaiting_review/confirmed/cancelled','reviewIssues(待确认项清单)','商品条目可挂标准化确认'] },
+  { id:'order', col:1, row:0, flow:'order', label:'原始订单', sub:'系统订单编号永久唯一', storage:'original_orders',
+    desc:'由平台+卖家账号+平台订单编号唯一标识的可追溯业务记录;系统订单编号=首次入库日期+当日序号,永不变化;编辑带乐观锁(revision)。',
+    fields:['systemOrderNumber(永久)','身份三元组唯一(含规范化索引)','revision 乐观锁','lifecycleStatus: active/trashed/deleted','金额三件套+交易时间(北京时间口径)'] },
+  { id:'item', col:1, row:1, flow:'order', label:'订单商品明细', sub:'数量来源四级', storage:'order_items',
+    desc:'订单内的商品条目,保留原始标题/规格并可关联标准商品与 SKU;截图未显示数量时默认 1 且标记系统推定。',
+    fields:['unitPriceCents / subtotalCents / quantity','quantitySource: manual/ocr/default_1/legacy_unknown','standardProduct + standardizationSource'] },
+  { id:'standard', col:1, row:2, flow:'product', label:'标准商品+商品映射', sub:'exact / mapping / manual', storage:'standard_products + product_mappings',
+    desc:'用户维护的规范商品身份(SKU+标准名+标准规格);映射规则把原始标题/规格别名关联到标准商品;草稿与订单商品按「精确匹配→映射规则→人工确认」确定归属,人工确认时可选择沉淀为映射规则。',
+    fields:['StandardProduct: sku/name/specification + revision','ProductMapping: sourceTitle+sourceSpec → 标准商品','候选来源: fuzzy 模糊相似度 / previous_manual_choice'] },
+  { id:'snapshot', col:1, row:3, flow:'order', label:'来源快照', sub:'识别原值+确认值 · 不可变', storage:'source_snapshots',
+    desc:'某次截图确认或订单更新提供的不可变证据,保存识别原值与人工确认值;修改当前值永不抹去快照。',
+    fields:['recognition(原始识别值)','confirmed(确认后的值)','触发器禁止 UPDATE/DELETE'] },
+  { id:'change', col:1, row:4, flow:'order', label:'订单修改记录', sub:'三类来源 · 字段级 diff', storage:'order_change_events + order_field_changes',
+    desc:'一次更新/人工修改/发货同步产生的不可变字段差异(修改前/修改后),只记录实际变化的最小字段集。',
+    fields:['source: source_update / manual_edit / shipment_sync','baseRevision → resultRevision(链式)','逐字段 before/after'] },
+  { id:'platform', col:1, row:5, flow:'order', label:'平台交易状态', sub:'人工维护 · 与履约独立', storage:'original_orders.platform_transaction_status(字段)',
+    desc:'平台侧交易状态,人工维护;已取消或已退款的订单仍可查询,但不进入待发货视图;它与履约状态互不覆盖。',
+    fields:['paid / cancelled / refunded / unknown'] },
+  { id:'fulfillment', col:1, row:6, flow:'order', label:'履约状态', sub:'只读投影 · 发货同步计算', storage:'original_orders.fulfillment_status(由包裹明细反算)',
+    desc:'依据包裹商品数量与包裹物流计算的只读投影:0 件发出=待发货;任一商品已发数量少于应发=部分发货;全部发出且所有相关包裹已签收=已收货,否则已发货。变化必须以 shipment_sync 事件落修改记录,不可人工覆盖;补发记录不计入口径。',
+    fields:['unknown / pending_shipment / partially_shipped / shipped / delivered','计算锚点: shipment_package_items(排除补发记录)'] },
+  { id:'opengroup', col:2, row:0, flow:'shipment', label:'开放合并发货组', sub:'匹配键=手机号+地址', storage:'无表(按订单当前值动态投影)',
+    desc:'按「规范化手机号+完整收货地址」动态形成的派生汇总;单笔订单也自成一组;部分发货后剩余数量留在组内;缺电话或地址的订单进「未自动成组」待处理。',
+    fields:['formation: automatic / manual','recipients[](姓名差异必须暴露)','items[](跨订单数量/金额聚合)'] },
+  { id:'adjust', col:2, row:1, flow:'shipment', label:'手工组调整', sub:'拆分/重组 · 非空原因', storage:'shipment_group_adjustment_events',
+    desc:'对开放组成员的显式拆分或重新组合;跨收货信息重组必须显式选定最终收货信息;覆盖自动成组但不改写订单,留下不可变调整记录。',
+    fields:['operation: split / merge','sourceGroupIds / targetGroupIds','reason(非空) + selectedRecipientOrderId'] },
+  { id:'archive', col:2, row:2, flow:'shipment', label:'发货组档案', sub:'部分发货/已全部发货', storage:'shipment_group_archives_v20',
+    desc:'第一次确认实际发出时建立的持续业务容器;固定本轮成员订单与收货信息快照;建档商品总量固定,剩余清单按固定成员计算;剩余归零后转全部发货但层级完整保留。',
+    fields:['status: partially_shipped / fully_shipped','建档总量 / 已发 / 剩余','memberOrders[](固定成员+收货快照)'] },
+  { id:'record', col:2, row:3, flow:'shipment', label:'发货记录', sub:'active/voided · 可多轮', storage:'shipment_records + shipment_record_void_events',
+    desc:'一次实际确认发出的持续业务记录,可含多个包裹;普通履约与售后补发都是发货记录(角色区分);未交寄可作废并退回数量,已交寄禁止作废。',
+    fields:['sourceRecordRole: initial / aftersales_replacement','status: active / voided(作废需原因)','关联发货快照与后续售后'] },
+  { id:'shipsnap', col:2, row:4, flow:'shipment', label:'发货快照', sub:'冻结本次发出内容', storage:'shipment_record_order_snapshots',
+    desc:'确认发出时冻结本次所选订单、商品、数量、金额与收件信息;之后订单变化只产生差异提醒(sourceDifferences),不静默改写快照。',
+    fields:['订单 revision 快照','商品/数量/金额','最终收货信息'] },
+  { id:'pkg', col:3, row:0, flow:'shipment', label:'包裹', sub:'承运方+运单号 · 实际交寄', storage:'shipment_packages + shipment_package_cancellation_events',
+    desc:'独立运输单元:承运方、运单号、物流状态、商品明细;实际交寄(记录揽收时间)后不可作废,只能撤销未交寄包裹。',
+    fields:['shippingCarrier / trackingNumber','carrierAcceptedAt(实际交寄)','status: active / cancelled'] },
+  { id:'pkgitem', col:3, row:1, flow:'shipment', label:'包裹商品明细', sub:'(包裹, 订单商品) 唯一', storage:'shipment_package_items',
+    desc:'包裹实际承载的订单商品与数量;一个包裹可含多订单的部分商品,同一订单商品可拆入不同包裹或记录;是售后可处理数量与履约投影的数量锚点。',
+    fields:['orderId + orderItemId + quantity','UNIQUE(package, source_order_item)','sourceTitle/Spec + 单价小计'] },
+  { id:'timeline', col:3, row:2, flow:'logistics', label:'物流时间线', sub:'不可变事件序列', storage:'shipment_package_logistics_status_events + logistics_change_events(更正)',
+    desc:'承运方/运单号/运输事实每次更新形成的不可变事件(状态变更/带原因更正),记录前后值、非空原因与时间;当前值用于列表,时间线用于解释。',
+    fields:['kind: status_changed / logistics_corrected','before / after + reason(非空)','occurredAt 不得早于上一事件'] },
+  { id:'transport', col:4, row:0, flow:'logistics', label:'正常运输事实', sub:'待承运→运输→签收/退回', storage:'shipment_packages.logistics_status(当前值)+事件表',
+    desc:'包裹最后可信的承运进展;丢件/错投/破损另记异常,不覆盖本事实;禁止已收件回退到收件前状态;确认发出新建正向包裹默认进入运输中;正向与退货共用该模型(方向区分)。',
+    fields:['awaiting_carrier / in_transit / delivered / returned','direction: outbound / return','带原因更正保留原值'] },
+  { id:'exception', col:4, row:1, flow:'logistics', label:'物流异常事项', sub:'5 类型 · 阶段状态机', storage:'logistics_exception_matters + logistics_exception_events',
+    desc:'正向或退货包裹在承运中的丢件/签收争议/破损/错投/其他异常;按受影响商品与数量记录;可被售后等上层业务引用但不改写正常事实。',
+    fields:['type: lost / delivery_dispute / damaged / misdelivered / other','stage: 待核实→调查中→已确认→已找回(仅丢件)/已解决','impact: 整包或按商品+数量'] },
+  { id:'claim', col:4, row:2, flow:'logistics', label:'承运索赔事项', sub:'申请→同意/拒赔→已赔付', storage:'carrier_claims + carrier_claim_events',
+    desc:'向承运方主张责任与赔付的独立事项;仅「已确认」异常可发起;可在订单、退款或售后结束后继续推进;结果不反向改写退款,实际赔付款另记资金事实。',
+    fields:['status: pending / approved / rejected / paid','申请金额;同意必填同意金额,拒赔禁填','direction: 正向 / 退货双向'] },
+  { id:'acase', col:5, row:0, flow:'aftersales', label:'售后处理单', sub:'5 方式 × 7 场景模板', storage:'aftersales_cases + case_events + workflow_template_events',
+    desc:'针对指定发货记录中商品与数量建立的售后事项;流程模板版本化,新建时固化当时版本;已完成的售后不能重开,同批货物新问题须另建新单。',
+    fields:['workflow: general/refund_only/return_refund/exchange/direct_replacement','status 9 态','挂靠 shipmentRecordId;模板版本快照'] },
+  { id:'aitem', col:5, row:1, flow:'aftersales', label:'售后商品明细', sub:'占用可处理数量', storage:'aftersales_case_items',
+    desc:'精确引用到包裹商品明细的问题商品与数量;可处理数量=已发数量−其他未完成售后占用,防止并行售后静默超量;已完成售后不再占用。',
+    fields:['shipmentPackageItemId + quantity','UNIQUE(case, package_item)','可处理数量为前端计算口径'] },
+  { id:'direction', col:5, row:2, flow:'aftersales', label:'处理方向+实物控制', sub:'投影推导可用方向', storage:'aftersales_handling_direction_events + 正向/退货异常决策事件表',
+    desc:'退货退款中用户选择的处理意图(继续等待/申请拦截/约定拒收/仅退款/补发/买家寄回),每次转换保留前后值与原因;实物控制(承运方/买家/卖家/已丢失/混合)由物流事实动态计算,不可人工覆盖。丢件等正向异常另有「正向异常处理选择」,退货异常有「退货异常处理选择」。',
+    fields:['direction 6 值; 可用方向由实物控制推导','实物控制 5 值(投影)','正向异常决策: 等待/追回/仅退款/补发/退款并补发','退货异常决策: 等待/先行退款/部分退款/拒退/协商'] },
+  { id:'intercept', col:5, row:3, flow:'aftersales', label:'拦截事项', sub:'申请/成功/失败分记', storage:'aftersales_interception_packages + interception_events + intercepted_return_inspection_events',
+    desc:'向承运方申请停止某一具体原正向包裹派送的协调事项;申请、成功、失败是分开的不可变事实;拦截成功不等于已退回,失败不自动转换方向;成功且包裹可信退回后可做「拦截退回检查」。',
+    fields:['status: requested / succeeded / failed','针对具体 packageId(不可挪用)','拦截退回检查结论 4 类'] },
+  { id:'retrecord', col:5, row:4, flow:'aftersales', label:'退货记录/退货包裹', sub:'登记→收到→检查', storage:'aftersales_return_records + items + events',
+    desc:'把指定商品数量退回的实物流转记录及其退货包裹(独立承运方/运单号);签收只表示收到,不等于可再销售;可挂退货方向物流异常与索赔;登记错误(填错单号)走更正记录,与真实承运异常分开。',
+    fields:['status: in_transit / received / inspected','计划退回 / 实际收到 / 检查通过 三层数量','同一运单默认唯一退货包裹(合装退货关联多商品)'] },
+  { id:'discrep', col:5, row:5, flow:'aftersales', label:'退货检查差异+结论', sub:'8 类差异 · 4 类结论', storage:'随退货记录条目与事件保存',
+    desc:'计划、实收、检查通过之间的差异(少件/空包/错货/多退/混装/损坏/配件缺失/无法识别),系统提示差异但不自动决定责任或退款;检查结论(可再次销售/瑕疵品/报废/其他)是未来库存处理的依据,当前不改库存。',
+    fields:['差异 8 类(归属于整包或单件商品)','结论: resellable / defective / scrapped / other','差异不跨订单复制(合装包裹)'] },
+  { id:'round', col:5, row:6, flow:'aftersales', label:'售后处理轮次', sub:'补发=新发货记录', storage:'aftersales_processing_rounds + round_items + round_returns + replacement_shipments/items',
+    desc:'同一处理单内一次从问题确认到退款/退货/补发结果的处理过程;每轮固定关联来源发货记录、问题商品、退货与补发;前一轮补发再出问题,以补发记录为来源开下一轮,不覆盖旧事实。',
+    fields:['roundNumber / workflow: exchange / direct_replacement','sourceShipmentRecordId(前轮补发可作来源)','replacementShipment 与补发记录一对一','实物流转汇总: 累计发出/退回/买家持有/当前轮'] },
+  { id:'refund', col:6, row:0, flow:'finance', label:'退款申请(待确认资金)', sub:'申请金额≠实际金额', storage:'pending_financial_items + item_events + refund_reopening_events',
+    desc:'售后单中记录申请退款金额的待确认资金事项;仅退款/退货退款方式可登记;申请、退货或售后状态都不会自动生成实际退款。',
+    fields:['requestedAmountCents','status: pending / confirmed / cancelled','每单一条(UNIQUE);可重开留痕'] },
+  { id:'finrecord', col:6, row:1, flow:'finance', label:'资金记录', sub:'实际退款 · 不可变', storage:'financial_records',
+    desc:'经人工确认的实际支出事实;当前 kind 仅为售后退款;确认时写记录并将申请置 confirmed;供后续财务模块读取。',
+    fields:['kind: aftersales_refund','actualAmountCents / occurredAt / note'] },
+  { id:'compensation', col:6, row:2, flow:'finance', label:'承运赔付记录', sub:'索赔 paid 后实际到账', storage:'carrier_compensation_records',
+    desc:'承运索赔推进到已赔付(paid)后登记的实际到账金额;与退款是两类独立资金事实,互不改写。',
+    fields:['amountCents / note','关联索赔事项'] },
+  { id:'projection', col:7, row:1, flow:'projection', label:'订单运营投影', sub:'待办>风险>事实>历史', storage:'无表(运行时只读计算)',
+    desc:'围绕一笔订单即时汇总发货记录、包裹、异常、售后、退货、退款与索赔的只读视图;固定呈现「当前待办(突出一项)→未解决风险→并列事实→折叠历史」;列表、详情、发货档案与导出使用同一口径。',
+    fields:['待办优先级: 明确期限>资金风险>实物失控风险>普通跟进','risks: 物流异常 / 未收到货退款 / 未退货先补发','facts / history(完整折叠)'] },
+];
+
+const EDGES = [
+  { id:'e1',  from:'shot',       to:'batch',      label:'属于批次' },
+  { id:'e2',  from:'batch',      to:'attempt',    label:'逐张识别' },
+  { id:'e3',  from:'attempt',    to:'draft',      label:'规则拆分+候选裁决' },
+  { id:'e4',  from:'draft',      to:'order',      label:'确认入库/订单更新' },
+  { id:'e5',  from:'order',      to:'item',       label:'1..n 明细' },
+  { id:'e6',  from:'item',       to:'standard',   label:'关联标准商品(exact/mapping/manual)' },
+  { id:'e7',  from:'order',      to:'snapshot',   label:'每次确认冻结' },
+  { id:'e8',  from:'snapshot',   to:'change',     label:'source_update' },
+  { id:'e9',  from:'order',      to:'change',     label:'manual_edit' },
+  { id:'e10', from:'order',      to:'platform',   label:'人工维护字段' },
+  { id:'e11', from:'pkgitem',    to:'fulfillment',label:'发货同步(数量汇总)', back:true, ch:0 },
+  { id:'e12', from:'adjust',     to:'opengroup',  label:'覆盖成组', back:true, ch:1 },
+  { id:'e13', from:'order',      to:'opengroup',  label:'具备发货资格→自动成组' },
+  { id:'e14', from:'opengroup',  to:'shipsnap',   label:'确认发出·冻结' },
+  { id:'e15', from:'opengroup',  to:'archive',    label:'首次确认建档' },
+  { id:'e16', from:'archive',    to:'record',     label:'容纳多轮记录' },
+  { id:'e17', from:'shipsnap',   to:'record',     label:'历史基准' },
+  { id:'e18', from:'record',     to:'pkg',        label:'1..n 包裹' },
+  { id:'e19', from:'pkg',        to:'pkgitem',    label:'承载明细' },
+  { id:'e20', from:'pkgitem',    to:'item',       label:'引用订单商品', back:true, ch:2 },
+  { id:'e21', from:'pkg',        to:'transport',  label:'正常进展更新' },
+  { id:'e22', from:'pkg',        to:'timeline',   label:'每次更新留痕' },
+  { id:'e23', from:'pkg',        to:'exception',  label:'正向异常' },
+  { id:'e24', from:'exception',  to:'claim',      label:'已确认后可索赔' },
+  { id:'e25', from:'record',     to:'acase',      label:'发起售后' },
+  { id:'e26', from:'acase',      to:'aitem',      label:'问题商品' },
+  { id:'e27', from:'aitem',      to:'pkgitem',    label:'来源=包裹明细', back:true, ch:3 },
+  { id:'e28', from:'acase',      to:'direction',  label:'退货退款必选' },
+  { id:'e29', from:'direction',  to:'intercept',  label:'intercept→申请拦截' },
+  { id:'e30', from:'intercept',  to:'pkg',        label:'针对原正向包裹', back:true, ch:4 },
+  { id:'e31', from:'acase',      to:'retrecord',  label:'登记退货' },
+  { id:'e32', from:'retrecord',  to:'discrep',    label:'检查差异+结论' },
+  { id:'e33', from:'retrecord',  to:'exception',  label:'退货方向异常', back:true, ch:5 },
+  { id:'e34', from:'retrecord',  to:'claim',      label:'退货索赔', back:true, ch:6 },
+  { id:'e35', from:'acase',      to:'refund',     label:'申请退款' },
+  { id:'e36', from:'refund',     to:'finrecord',  label:'确认实际金额' },
+  { id:'e37', from:'acase',      to:'round',      label:'逐轮推进' },
+  { id:'e38', from:'round',      to:'retrecord',  label:'关联退货' },
+  { id:'e39', from:'round',      to:'record',     label:'补发=新发货记录', back:true, ch:7 },
+  { id:'e40', from:'claim',      to:'compensation', label:'paid→实际到账' },
+  { id:'e41', from:'record',     to:'projection', label:'只读投影', thin:true },
+  { id:'e42', from:'acase',      to:'projection', label:'只读投影', thin:true },
+  { id:'e43', from:'exception',  to:'projection', label:'只读投影', thin:true },
+  { id:'e44', from:'finrecord',  to:'projection', label:'资金风险待办', thin:true },
+];
+
+const COL_TITLES = ['① 识别(截图→草稿)', '② 订单(入库与状态)', '③ 发货(组→档案→记录)', '④ 包裹(实物单元)', '⑤ 物流(运输与异常)', '⑥ 售后(处理单与轮次)', '⑦ 资金(退款与赔付)', '⑧ 投影(只读汇合)'];
+
+/* ================================================================
+ * 流详情数据(9 条业务流)
+ * ================================================================ */
+const FLOWS = [
+  {
+    id:'recognition', status:'done', title:'识别流', tagline:'从闲鱼订单详情截图建立可追溯的订单记录:OCR 证据不可变,字段由本机规则绑定,模型只做有限候选裁决。',
+    chain:['来源截图','识别批次(≤50张)','OCR 识别尝试','识别原文(不可变)','规则拆分+候选裁决','订单草稿','校对待确认项','入库判定','入库 / 订单更新 / 重复跳过'],
+    stages:[
+      ['上传截图','在订单工作台或批次页提交一张或多张截图(单批次上限 50 张);按 sha256 指纹去重,同图重复上传会被识别。','来源截图 · 识别批次','批次页 / 订单页上传入口'],
+      ['云端识别','调用阿里云百炼 OCR 产生识别尝试;识别原文(文字/位置/原始响应)作为不可变机器证据落库。','识别尝试 · 识别原文','自动(设置页配置服务商)'],
+      ['规则拆分与裁决','本机规则从原文枚举、定位并绑定字段;无法唯一选择的「有限候选」交独立文本模型裁决——模型只返回候选编号,字段值始终由本机绑定。','候选裁决记录','自动;模型与候选在设置页配置'],
+      ['形成草稿','拆分结果形成订单草稿;校验规则(订单号模式、收件人黑名单、行政区划、小计=商品总价、付款不早于下单)不通过时生成待确认项。','订单草稿 · 待确认项','—'],
+      ['校对确认','逐张校对:对比截图与识别值、处理冲突、补必填自定义字段、确认商品标准化归属;确认动作分「新订单入库」与「订单更新」。','订单草稿→confirmed','校对工作台(全屏)'],
+      ['入库','新订单分配系统订单编号并冻结来源快照;已有订单走人工比对新旧值后更新当前值;同图/同单等价跳过。','原始订单 · 来源快照 · 修改记录','校对工作台→批次页'],
+      ['失败兜底','识别失败进入等待重试(可自动重试)或转人工录入;发布门槛由私有金标案例在 CI 衡量(最少 30 例、其他字段准确率 95%)。','批次条目状态机','批次页重试/人工录入按钮'],
+    ],
+    rules:[
+      '自动入库是可选项:设置页开关(默认关闭);开启后仅「无任何待确认项」的草稿自动入库,自动失败自动回退人工确认。',
+      '订单身份 = 平台 + 卖家账号 + 平台订单编号 三元组唯一(含规范化唯一索引);解析结果四分:new_order / identical_image / equivalent_order / order_updated。',
+      '识别原文与候选裁决记录均不可变;裁决记录不保存服务商原始响应与任何 API Key。',
+      '截图与识别证据保存在 Git 忽略的本机私有目录;私有金标案例只保留匿名编号+指纹+聚合结论。',
+    ],
+    entities:['shot','batch','attempt','draft'],
+    files:['src/core/recognition-batches.ts','src/core/order-intake.ts','src/core/candidate-verification.ts','src/core/order-normalization.ts','src/adapters/recognition/*(百炼 OCR / 候选裁决适配器)','src/core/stage-one-acceptance.ts(金标门槛)'],
+    adrs:['0001 本地优先+云OCR','0004 系统凭证库存密钥','0005 物理裁剪第二输入','0006 原始 OCR 证据做确定性解析','0007 独立模型仅限有限候选裁决'],
+  },
+  {
+    id:'order', status:'done', title:'订单流', tagline:'原始订单是唯一可追溯主体:当前值可改、快照不可变;平台交易状态(人工)与履约状态(投影)双轨并行、互不覆盖。',
+    chain:['原始订单(系统订单编号)','订单商品明细(数量来源)','来源快照(不可变)','订单修改记录(source_update/manual_edit/shipment_sync)','平台交易状态 ∥ 履约状态 ∥ 订单运营投影'],
+    stages:[
+      ['入库成型','识别确认后成为原始订单:分配永久系统订单编号(入库日期+当日序号),商品明细带数量来源四级(人工/OCR/系统默认1/历史不明)。','原始订单 · 订单商品明细','校对工作台确认'],
+      ['证据与修改','每次确认冻结来源快照;人工修改、截图确认更新、发货同步都以最小字段集追加不可变修改记录;编辑带乐观锁,已发货订单编辑时弹出快照差异警告。','来源快照 · 修改记录','订单详情「编辑订单」/详情保存'],
+      ['双轨状态','平台交易状态人工维护(已付款/已取消/已退款/未知,取消退款不进待发货);履约状态由包裹事实只读投影,变化只能经发货同步。','平台交易状态 · 履约状态','详情页状态 chip 与「交易状态」按钮'],
+      ['运营投影','围绕订单即时汇总发货/包裹/物流/售后/资金事实:当前待办(突出一项)>未解决风险>并列事实>完整历史;同一口径驱动列表、详情、发货档案与导出概况四字段。','订单运营投影','订单详情「订单当前处理」'],
+      ['生命周期','订单可在正常/回收站/永久删除之间流转;回收站订单不参与日常视图,删除不抹去既有证据链。','生命周期状态','订单列表操作'],
+    ],
+    rules:[
+      '履约状态五值:未知/待发货/部分发货/已发货/已收货;任何人工操作都必须修改对应发货、包裹或售后事实,不能直接覆盖该投影。',
+      '退货、退款、换货、补发属于售后概况,不是整单履约状态;售后全程不改变订单的履约投影。',
+      '修改当前值永不抹去来源快照;订单更新必须先展示新旧对比再显式确认。',
+      '同一套运营投影口径同时供列表、详情、发货档案和可配置导出列使用,不另存汇总副本。',
+    ],
+    entities:['order','item','snapshot','change','platform','fulfillment','projection'],
+    files:['src/core/contracts.ts','src/core/order-workbench.ts','src/core/order-edit.ts','src/core/order-comparison.ts','src/main/order-fulfillment-projection-service.ts','src/core/order-operations-projection.ts'],
+    adrs:['0017 从发货事实投影履约','0018 仅从业务事实投影','0019 永久系统订单编号'],
+  },
+  {
+    id:'shipment', status:'done', title:'发货流', tagline:'以「开放合并发货组→确认发出→发货组档案→发货记录→包裹」为主线:快照冻结、数量守恒、档案跨记录保留。',
+    chain:['开放合并发货组(匹配键=手机号+地址)','手工拆分/重组(需原因+最终收货信息)','确认实际发出','发货快照(冻结)','发货组档案(部分/全部发货)','发货记录(可作废)','包裹(实际交寄)','包裹商品明细'],
+    stages:[
+      ['自动成组','规范化手机号+完整地址相同的订单自动同组;单笔订单也自成一组;缺电话/地址进「未自动成组」并给出原因;同键下姓名不同仍可同组但必须暴露差异。','开放合并发货组','发货工作台'],
+      ['手工调整','对开放组拆分或重新组合:一次拆分只能拆出同收货信息订单;跨收货信息重组必须显式选定最终收货信息;必须留非空原因。','手工组调整','组调整对话框'],
+      ['确认发出','填写每个包裹的承运方/运单号并把商品数量分配到包裹(可多包裹);冻结发货快照;首次确认建立发货组档案;实时校验超分配/空包裹。','发货快照 · 档案 · 发货记录 · 包裹','确认发货对话框'],
+      ['部分发货','一次只发部分商品时:已发数量成发货记录,剩余数量留在开放组继续发;档案显示「已发 X/共 Y 件、剩余 Z 件」;多轮记录归属同一档案。','档案状态/记录×N','档案「继续发货」'],
+      ['交寄与撤销','包裹记录实际交寄(揽收时间)后不可作废;未交寄包裹可撤销、未交寄记录可作废并退回数量到开放组,全程留因。','包裹状态 · 作废/撤销事件','记录卡片按钮组'],
+      ['补发挂接','售后补发生成新发货记录(role=aftersales_replacement),关联售后轮次;原记录不变;补发记录不计入原始订单履约口径。','发货记录(补发)','售后面板'],
+    ],
+    rules:[
+      '数量守恒:实际发出数量不得超过当前剩余待发数量与建档商品总量;包裹商品明细按(包裹,订单商品)唯一。',
+      '档案建档总量按固定成员订单中的唯一商品计算,归并重叠档案不重复累加;剩余清单不因成员事后修改收货信息而拆散。',
+      '确认发出后,成员订单变化只产生差异提醒(sourceDifferences),不静默改写快照。',
+      '「发货情况」只回答本轮商品是否全部发出,不代表签收、履约结束或售后完成(与后续状态分离)。',
+    ],
+    entities:['opengroup','adjust','archive','record','shipsnap','pkg','pkgitem'],
+    files:['src/core/shipment-groups.ts','src/core/shipment-group-adjustments.ts','src/core/shipment-records.ts','src/core/shipment-archive-storage.ts','src/main/local-application.ts(确认发货服务)'],
+    adrs:['0002 合并发货为派生视图','0009 手工物流驱动履约转换','0010 开放组不可变手工调整','0011 数量分配到包裹','0012 档案跨记录保留','0013 发货进度与后段状态分离','0014 重叠档案归并'],
+  },
+  {
+    id:'logistics', status:'done', title:'物流流', tagline:'正常运输事实与物流异常并列保存,互不覆盖;异常按阶段推进,确认后才能向承运方索赔;正向与退货共用一套模型。',
+    chain:['正常运输事实(待承运→运输中→已签收/已退回)','物流时间线(不可变) ∥ 带原因更正','∥ 物流异常事项(5 类型·阶段状态机)','已确认 → 承运索赔(申请→同意/拒赔→赔付)'],
+    stages:[
+      ['正常进展','包裹按待承运方接收→运输中→已签收/已退回推进;确认发出的正向包裹默认运输中;每次更新追加时间线事件。','正常运输事实 · 物流时间线','包裹「更新状态」'],
+      ['带原因更正','发现承运方/运单号/运输事实登记错误时,以非空原因追加更正事件;当前投影读更正后可信值,原值保留;不能借更正删除异常历史。','物流时间线(更正事件)','包裹「更正物流」'],
+      ['登记异常','包裹发生丢件/签收争议/破损/错投/其他异常时建立异常事项:方向(正向/退货)、来源包裹、类型、受影响商品与数量;不覆盖正常事实。','物流异常事项','包裹「登记或推进物流异常」'],
+      ['推进阶段','待核实→调查中→已确认→已找回(仅丢件)/已解决;确认丢件需五要件(揽收证据/无签收/承运确认/时间/类型);每步留不可变事件。','异常阶段状态机','异常对话框'],
+      ['承运索赔','仅「已确认」异常可发起索赔:登记申请金额→同意(必填同意金额)或拒赔→已赔付并登记实际到账;可在订单/退款/售后结束后继续;不反向改写退款。','承运索赔 · 承运赔付记录','包裹/退货「建立承运索赔」'],
+    ],
+    rules:[
+      '正常运输事实只回答承运进展,不回答异常类型、处理阶段、责任或业务结果;物流状态与履约状态、售后状态分别保存。',
+      '禁止已收件回退到收件前状态;有揽收证据不能改回待承运;事件时间不得早于上一事件。',
+      '退货包裹同样可挂异常与索赔(direction=return);退货「物流登记错误」(填错单号)与真实承运异常分开处理。',
+      '运营投影把未解决异常列为实物失控风险,把未决索赔列为资金风险。',
+    ],
+    entities:['transport','timeline','exception','claim','pkg'],
+    files:['src/core/logistics-exceptions.ts(状态机+索赔)','src/core/shipment-records.ts(包裹与时间线)','src/main/logistics-exception-service.ts'],
+    adrs:['0015 不可变事件追踪包裹物流','0021 退货物流/退款/索赔分离','0022 异常事实跨流共享','0023 正常运输与异常分离'],
+  },
+  {
+    id:'aftersales', status:'done', title:'售后流', tagline:'统一承载仅退款/退货退款/换货/直接补发/拦截退回/丢件处理:方向由实物控制推导,退款、退货、补发、索赔四线并行,补发即新发货记录并可多轮。',
+    chain:['售后处理单(5 方式 × 7 场景模板)','售后商品(占用可处理数量)','处理方向+实物控制(投影)','拦截事项','退货包裹: 登记→收到→检查','差异 8 类 + 结论 4 类','退款(资金流) ∥ 补发=新发货记录(轮次)'],
+    stages:[
+      ['发起售后','从发货记录建立处理单:选处理方式(一般/仅退款/退货退款/换货/直接补发)与发生时间、原因;仅退款/退货退款登记申请退款金额;问题商品精确到包裹明细并受可处理数量约束。','售后处理单 · 售后商品明细','记录卡片「建立售后处理单」'],
+      ['选择方向','退货退款必须先选处理方向(继续等待/申请拦截/约定拒收/仅退款/补发/买家寄回);可用方向由实物控制投影推导;每次转换留痕。','处理方向 · 拦截事项(如申请)','创建对话框/推进对话框'],
+      ['退货实物流','登记退货包裹(独立承运方/单号)→确认收到(逐商品实收数量)→检查(通过数量+差异 8 类+结论 4 类);合装退货差异只归属对应订单。','退货记录/退货包裹 · 检查差异','推进对话框三步'],
+      ['正向异常决策','丢件/错投/破损确认后,记录买家侧处理选择:继续等待/追回或重派/仅退款/直接补发/退款并补发;选择补发不会暗中取消退款。','正向异常处理选择','推进对话框'],
+      ['退款','确认实际退款金额写入资金记录(申请与实际分别保留);详见资金流。','退款申请 · 资金记录','推进对话框「确认实际退款」'],
+      ['补发与轮次','建立处理轮次→补发=新发货记录+新包裹(关联轮次);补发再出问题时以补发记录为来源开下一轮;实物流转汇总只读投影(累计发出/退回/买家持有/当前轮)。','处理轮次 · 补发发货记录','面板「建立第 N 轮补发」'],
+      ['完成','满足场景模板必完成步骤后可完成;已完成售后不能重开;结案后的晚到物流、索赔事实仍可追加但不重开流程。','售后状态=已完成','推进对话框「完成售后」'],
+    ],
+    templates:[
+      ['仅退款','refund_only','确认问题与退款申请 → 确认实际退款(条件:已申请退款) → 完成售后'],
+      ['退货退款','return_refund','确认问题商品与退款申请 → 确认实物流转方向 → 登记退货物流 → 确认收到退货(条件:已登记退货) → 检查退回商品(条件:已登记退货) → 确认实际退款(条件:已申请退款) → 完成售后'],
+      ['换货','exchange','确认换货商品 → 登记退货物流 → 确认收到退货(条件) → 检查退回商品(条件) → 建立换货补发 → 确认换货补发签收(条件:需补发) → 完成售后'],
+      ['直接补发','direct_replacement','确认补发商品 → 建立补发记录 → 确认补发签收(条件:需补发) → 完成售后'],
+      ['拦截退回','intercept_return','确认问题商品 → 申请拦截指定包裹 → 根据拦截结果确认后续处理(条件:已申请拦截) → 检查实际退回商品 → 完成售后'],
+      ['丢件处理','lost_handling','确认受影响商品 → 核实物流异常 → 选择买家侧处理(条件:存在物流异常) → 按选择确认退款(条件:已申请退款) → 按选择建立补发(条件:需补发) → 完成售后'],
+      ['其他处理','general','确认问题商品 → 记录处理结果 → 完成售后'],
+    ],
+    rules:[
+      '场景→处理方式映射:拦截退回场景走退货退款方式;丢件处理与其他处理走一般方式;模板版本化,新建处理单固化当时版本,模板后续变更不回写历史。',
+      '售后商品只能引用有效发货记录中未撤销包裹的商品;已作废记录/已撤销包裹不能建售后;换货必须先买家退回再补发。',
+      '拦截:申请/成功/失败分记;成功且包裹可信退回后才能做拦截退回检查(需精确覆盖本售后商品数量);需要重新发出时另建补发轮次,不伪造买家退货。',
+      '售后状态 9 态(处理中/等待退回/等待检查/等待退款/等待补发/部分完成/可完成/已完成/已取消);方向→状态投影:买家寄回→等待退回、仅退款→等待退款、补发→等待补发。',
+    ],
+    entities:['acase','aitem','direction','intercept','retrecord','discrep','round'],
+    files:['src/core/aftersales-cases.ts','src/core/aftersales-coordination.ts','src/core/aftersales-workflow-templates.ts','src/main/aftersales-application-service.ts'],
+    adrs:['0016 数量级售后:当前状态+事件','0020 退款退货事实分开记录','0024 在途售后按实物流协调','0025 补发=新发货+不可变轮次','0026 外向异常显式决策协调','0027 跨流操作从源事件投影'],
+  },
+  {
+    id:'finance', status:'partial', title:'资金流(部分实现)', tagline:'申请金额与实际金额两段落账、互不混同:待确认资金事项→确认→资金记录;当前仅售后退款与承运赔付两类事实,通用台账未建。',
+    chain:['退款申请(待确认资金事项)','人工确认','资金记录(实际金额·不可变)','∥ 承运索赔 paid → 承运赔付记录'],
+    stages:[
+      ['登记申请','售后单内登记申请退款金额,形成待确认资金事项(pending);仅退款/退货退款方式可登记;每单一条。','退款申请','创建/推进售后对话框'],
+      ['确认实际','人工确认实际退款金额(可不同于申请,如部分退款),写入资金记录并把申请置 confirmed;确认动作才产生资金事实。','资金记录','推进对话框「确认实际退款」'],
+      ['承运赔付','索赔推进到已赔付后登记实际到账金额;与退款并列、互不改写。','承运赔付记录','索赔对话框「确认赔付」'],
+      ['风险投影','未决退款与待审/已批索赔在运营投影中列为资金风险待办。','订单运营投影','订单详情/发货档案'],
+    ],
+    rules:[
+      '申请金额与实际确认金额分别保留;申请、退货或售后状态都不能自动生成实际退款。',
+      '资金记录当前 kind 仅 aftersales_refund;承运赔付独立记账;两者均作为「供后续财务模块读取」的预留接口。',
+      '规划:订单收入、运费、采购支出等通用台账(spec 002 §11)尚未实现。',
+    ],
+    entities:['refund','finrecord','compensation'],
+    files:['src/core/aftersales-cases.ts(退款事项)','src/main/workspace.ts(financial_records / carrier_compensation_records / pending_financial_items)'],
+    adrs:['0020 退款退货事实分开记录','0021 退货物流/退款/索赔分离'],
+  },
+  {
+    id:'product', status:'done', title:'商品标准化流', tagline:'维护标准商品身份(SKU+标准名+规格)与映射规则;草稿与订单商品按「精确匹配→映射规则→人工确认」确定归属,确认可沉淀为映射规则。',
+    chain:['标准商品库(SKU/名称/规格)','商品映射(原始标题+规格 → 标准商品)','草稿商品条目: 自动匹配(exact/mapping) + 模糊/历史候选','人工确认(可同时沉淀映射)','订单商品明细关联标准商品'],
+    stages:[
+      ['维护标准商品','创建/编辑标准商品(SKU、标准名、标准规格),编辑带乐观锁。','标准商品','标准商品工作区'],
+      ['建立映射','把截图原始标题+规格别名关联到标准商品,形成映射规则;映射可被后续同款商品自动复用。','商品映射','确认时勾选「创建映射」'],
+      ['自动匹配','草稿商品条目按精确匹配(exact)或映射规则(mapping)自动给出标准商品;无法自动时给出候选:模糊相似度(fuzzy)或此前的人工选择(previous_manual_choice)。','草稿条目标准化状态','校对工作区'],
+      ['人工确认','校对时逐条确认标准商品归属;来源记为 manual;可勾选同时创建映射规则。','订单商品明细(standardProduct+来源)','校对工作区/订单详情'],
+      ['下游消费','标准商品/SKU 参与订单商品明细表、表格模板字段与导出;为未来的库存与采购按 SKU 汇总预留口径。','订单商品明细 · 表格模板','订单商品明细工作台'],
+    ],
+    rules:[
+      '标准化来源三值 exact / mapping / manual;自动来源只可能是前两种。',
+      '映射规则按(原始标题键+规格键)索引,标准商品被映射引用时删除受限制(RESTRICT)。',
+      '标准化不改变原始标题/规格的保留值——两者并存,原始值永远是证据。',
+    ],
+    entities:['standard','item'],
+    files:['src/core/product-standardization.ts','src/renderer/StandardProductsWorkspace.tsx','src/main/workspace.ts(standard_products / product_mappings)'],
+    adrs:[],
+  },
+  {
+    id:'support', status:'done', title:'表格与导出支撑流', taglane:'', tagline:'横切所有业务流:字段库→表格模板→总表/明细表→导出;同一模板同时驱动列表列与导出列。',
+    chain:['字段库(内置+自定义 7 类型)','表格模板(订单/商品明细/发货组 三粒度)','订单总表 / 订单商品明细表(动态商品列组)','导出 XLSX(默认脱敏)'],
+    stages:[
+      ['定义字段','自定义字段七种类型(文本/数字/金额/日期时间/单选/多选/勾选),按粒度归属(订单级/商品级),支持必填与默认值;必填无默认值会阻止自动入库。','字段库','字段库工作区'],
+      ['配置模板','模板保存字段选择/改名/顺序/筛选/排序;可「用当前筛选和排序更新模板草稿」;粒度三种:订单总表/订单商品明细/发货组。','表格模板','表格模板工作区/订单表模板栏'],
+      ['列表呈现','订单总表按模板列出;商品明细表以(系统单号,平台单号,商品序号)定位行;动态商品列组按最大商品数自动展开编号列。','订单总表 · 明细表','订单工作台二级 Tab'],
+      ['导出','选择模板与可选附表明细表,实时预览真实数据 sheet;导出脱敏默认开启(遮蔽收件人/手机号/地址/买家昵称),可对本次导出显式关闭;不改变系统内数据。','导出文件','导出对话框'],
+    ],
+    rules:[
+      '运营概况四字段(发货概况/物流概况/售后概况/当前待办)只有模板显式选择才出现在列表与导出。',
+      '字段值与内置订单事实分开保存;订单级必填字段在确认、更新、详情保存时强制补齐。',
+      '自定义字段带默认值时应用于既有及后续记录;用户清空的旧值不会在订单更新时被默认值复活。',
+    ],
+    entities:['item','projection'],
+    files:['src/core/custom-fields.ts','src/core/table-templates.ts','src/core/order-export.ts','src/main/order-export-workbook.ts'],
+    adrs:[],
+  },
+  {
+    id:'planning', status:'planned', title:'规划中的流:履约计划 / 进货(采购) / 库存', tagline:'领域语言先行、代码未实现:预售与团购发货资格控制、采购需求→订单→在途→缺口、库存台账;已预留退货检查结论与资金事实两个衔接点。',
+    chain:['履约计划(预售/团购资格) — 规划','有效预售需求 / 条件性团购需求 — 规划','采购需求 → 采购订单 → 采购在途 → 采购缺口 — 规划','库存流: 检查结论 → 可售/瑕疵/报废台账 — 规划'],
+    stages:[
+      ['履约计划','按预售或团购条件控制订单何时具备发货资格;普通现货订单不需要。规划于 spec 002 §12,Issue #63–67。','(规划)','—'],
+      ['采购流','有效预售需求/已成团需求/库存不足或人工判断产生采购需求,分批转采购订单;采购在途覆盖未来需求但不增库存;缺口=有效需求+安全余量−现货−在途。','(规划)','—'],
+      ['库存流','货物实际收到并检查后按可再销售/瑕疵/报废影响库存;当前仅有退货检查结论枚举,UI 明示「不直接改动库存」。','(规划·衔接点已留)','售后面板检查结论'],
+      ['通用财务','订单收入/运费/赔付/采购支出的资金台账;当前仅退款+赔付两类资金事实落库。','(规划·衔接点已留)','—'],
+    ],
+    rules:[
+      '当前版本 src 中以上模块零代码;仅存在于 CONTEXT.md、docs/specs/002 §10–13 与 Issue #51/#53/#63–67。',
+      '注意区分:src/core/fulfillment-status.ts 是订单发货状态投影,与「履约计划」无关。',
+      'docs/adr 全部 28 篇均关于已实现架构,无采购/库存/财务类 ADR。',
+    ],
+    entities:[],
+    files:['docs/specs/002-fulfillment-aftersales-and-business-extension-framework.md §10–13','CONTEXT.md「履约计划、库存、采购与财务」'],
+    adrs:[],
+  },
+];
+
+/* ================================================================
+ * 状态机数据
+ * ================================================================ */
+const PROJECTIONS = [
+  { title:'履约状态(只读投影)', body:'0 件发出=待发货;任一商品已发数量少于应发=部分发货;全部发出且所有相关包裹已签收=已收货,否则已发货;无发货事实=未知。补发记录不计入口径;变化经「发货同步」落修改记录。' },
+  { title:'实物控制关系(只读投影)', body:'按原正向包裹的正常运输事实与已确认丢件推导:已签收=买家持有、已退回=卖家持有、已确认丢件=已丢失、其余=承运方控制;多包裹混合时为「混合」。不可人工覆盖。' },
+  { title:'售后可处理数量(计算口径)', body:'某包裹商品的已发数量,扣除其他未完成售后处理单已占用数量;已完成/已取消售后不再占用。用于阻止并行售后静默超量,不代表退货入库或买家持有。' },
+  { title:'运营待办优先级', body:'当前待办按「明确期限 > 资金风险 > 实物失控风险 > 普通跟进」排序,同级按时间;只突出一项主待办并保留其余数量与定位入口;由最新有效事实计算,不作为新状态保存。' },
+];
+
+const MACHINES = [
+  { id:'m_batch', flow:'recognition', title:'识别批次条目状态', note:'每张截图独立推进;已处理集合与活跃集合分离。',
+    nodes:[['waiting_recognition',0,0],['recognizing',1,0],['validating',2,0],['awaiting_confirmation',3,0],['imported',4,0],['waiting_retry',1,1],['failed',2,1],['duplicate_skipped',3,1],['cancelled',4,1]],
+    links:[['waiting_recognition','recognizing'],['recognizing','validating'],['validating','awaiting_confirmation'],['awaiting_confirmation','imported'],['recognizing','waiting_retry','识别失败'],['waiting_retry','recognizing','重试'],['validating','failed','校验失败'],['awaiting_confirmation','duplicate_skipped','同图/同单'],['awaiting_confirmation','cancelled','人工取消']] },
+  { id:'m_draft', flow:'recognition', title:'订单草稿状态', note:'校对确认或取消后终态。',
+    nodes:[['awaiting_review',0,0],['confirmed',1,0],['cancelled',1,1]],
+    links:[['awaiting_review','confirmed','确认入库'],['awaiting_review','cancelled','放弃']] },
+  { id:'m_platform', flow:'order', title:'平台交易状态(人工维护)', note:'无自动转移:由用户按平台实际情况修改;与履约状态独立保存。',
+    nodes:[['paid',0,0],['cancelled',1,0],['refunded',2,0],['unknown',3,0]],
+    links:[] },
+  { id:'m_lifecycle', flow:'order', title:'生命周期状态', note:'正常→回收站→永久删除,单向;回收站订单不参与日常视图。',
+    nodes:[['active(正常)',0,0],['trashed(回收站)',1,0],['deleted(永久删除)',2,0]],
+    links:[['active(正常)','trashed(回收站)'],['trashed(回收站)','deleted(永久删除)']] },
+  { id:'m_transport', flow:'logistics', title:'正常运输事实(物流状态)', note:'禁止已收件回退到收件前状态;有揽收证据不能改回待承运;确认发出的正向包裹默认进入运输中。',
+    nodes:[['awaiting_carrier 待承运',0,0],['in_transit 运输中',1,0],['delivered 已签收',2,0],['returned 已退回',2,1]],
+    links:[['awaiting_carrier 待承运','in_transit 运输中'],['in_transit 运输中','delivered 已签收'],['in_transit 运输中','returned 已退回']] },
+  { id:'m_exception', flow:'logistics', title:'物流异常处理阶段', note:'仅丢件(lost)可进入「已找回」;未解决=非找回且非解决;缺少旧版证据不能猜测阶段。',
+    nodes:[['pending_verification 待核实',0,0],['investigating 调查中',1,0],['confirmed 已确认',2,0],['recovered 已找回',3,0],['resolved 已解决',3,1]],
+    links:[['pending_verification 待核实','investigating 调查中'],['pending_verification 待核实','confirmed 已确认'],['pending_verification 待核实','resolved 已解决'],['investigating 调查中','confirmed 已确认'],['investigating 调查中','resolved 已解决'],['confirmed 已确认','recovered 已找回','仅丢件'],['confirmed 已确认','resolved 已解决'],['recovered 已找回','resolved 已解决']] },
+  { id:'m_claim', flow:'logistics', title:'承运索赔状态', note:'同意必填同意金额;拒赔禁填;已赔付后登记实际到账金额(资金事实)。',
+    nodes:[['pending 申请中',0,0],['approved 已同意',1,0],['rejected 已拒赔',1,1],['paid 已赔付',2,0]],
+    links:[['pending 申请中','approved 已同意'],['pending 申请中','rejected 已拒赔'],['approved 已同意','paid 已赔付']] },
+  { id:'m_intercept', flow:'aftersales', title:'拦截事项状态', note:'申请/成功/失败分记;成功≠已退回;失败不自动转换售后方向。',
+    nodes:[['requested 已申请',0,0],['succeeded 拦截成功',1,0],['failed 拦截失败',1,1]],
+    links:[['requested 已申请','succeeded 拦截成功'],['requested 已申请','failed 拦截失败']] },
+  { id:'m_return', flow:'aftersales', title:'退货记录状态', note:'签收只表示收到,不等于可再销售;检查结论另存。',
+    nodes:[['in_transit 退货在途',0,0],['received 已收到',1,0],['inspected 已检查',2,0]],
+    links:[['in_transit 退货在途','received 已收到'],['received 已收到','inspected 已检查']] },
+  { id:'m_refundp', flow:'finance', title:'退款申请(待确认资金事项)', note:'确认才生成实际资金记录;取消与重开均留不可变事件。',
+    nodes:[['pending 待确认',0,0],['confirmed 已确认',1,0],['cancelled 已取消',1,1]],
+    links:[['pending 待确认','confirmed 已确认','写入资金记录'],['pending 待确认','cancelled 已取消']] },
+  { id:'m_archive', flow:'shipment', title:'发货组档案状态', note:'剩余待发数量归零→已全部发货(需记录时间);档案层级永久保留。',
+    nodes:[['partially_shipped 部分发货',0,0],['fully_shipped 已全部发货',1,0]],
+    links:[['partially_shipped 部分发货','fully_shipped 已全部发货']] },
+  { id:'m_record', flow:'shipment', title:'发货记录 / 包裹', note:'作废仅限相关包裹均未实际交寄;撤销仅限未交寄包裹;均已交寄的记录不可作废。',
+    nodes:[['active(记录/包裹)',0,0],['voided 已作废(记录)',1,0],['cancelled 已撤销(包裹)',1,1]],
+    links:[['active(记录/包裹)','voided 已作废(记录)','未交寄'],['active(记录/包裹)','cancelled 已撤销(包裹)','未交寄']] },
+  { id:'m_acase', flow:'aftersales', title:'售后处理单状态(9 态)', note:'方向→状态投影:买家寄回→等待退回、仅退款→等待退款、补发→等待补发,其余处理中;完成由场景模板必完成步骤约束;已完成后不能重开。',
+    nodes:[['processing 处理中',0,0],['waiting_return 等待退回',1,0],['waiting_inspection 等待检查',2,0],['waiting_refund 等待退款',2,1],['waiting_replacement 等待补发',2,2],['partially_completed 部分完成',3,0],['ready_to_complete 可完成',3,1],['completed 已完成',4,0],['cancelled 已取消',4,1]],
+    links:[['processing 处理中','waiting_return 等待退回'],['waiting_return 等待退回','waiting_inspection 等待检查'],['waiting_inspection 等待检查','waiting_refund 等待退款'],['waiting_refund 等待退款','ready_to_complete 可完成'],['processing 处理中','waiting_replacement 等待补发'],['waiting_replacement 等待补发','ready_to_complete 可完成'],['ready_to_complete 可完成','completed 已完成'],['processing 处理中','partially_completed 部分完成'],['processing 处理中','cancelled 已取消','用户取消']] },
+  { id:'m_qty', flow:'order', title:'数量来源(可信度优先级)', note:'新数据按 人工 > OCR > 系统默认1 确定;无法回溯的既有数量标为历史来源不明,不猜测。',
+    nodes:[['manual 人工修改',0,0],['ocr OCR 识别',1,0],['default_1 系统默认 1',2,0],['legacy_unknown 历史不明',3,0]],
+    links:[] },
+];
+
+/* ================================================================
+ * 场景数据(含订单视角结果)
+ * ================================================================ */
+const SCENARIOS = [
+  {
+    id:'s0', name:'全景总览',
+    desc:'全部实体与引用关系。列方向即数据流方向:识别 → 订单 → 发货 → 包裹 → 物流 → 售后 → 资金 → 投影;细虚线为只读投影引用;下方回环通道为「回写/引用上游」(如履约状态由包裹数量反算、补发产生新发货记录)。可用上方流筛选按钮只看某条流。',
+    nodes: NODES.map(n => n.id), edges: EDGES.map(e => e.id), steps: [], outcomes: []
+  },
+  {
+    id:'s1', name:'S1 现货单·正常发货(最短路径)',
+    desc:'一笔现货订单从截图到签收的完整主干:<b>上传截图 → OCR → 校对入库(系统订单编号、确认标准商品) → 自动成组(单成员) → 确认发出(快照+档案+记录+包裹) → 物流签收 → 履约状态=已收货</b>。全程无售后、无异常。',
+    nodes:['shot','batch','attempt','draft','order','item','standard','snapshot','platform','fulfillment','opengroup','shipsnap','archive','record','pkg','pkgitem','transport','timeline','projection'],
+    edges:['e1','e2','e3','e4','e5','e6','e7','e10','e11','e13','e14','e15','e16','e17','e18','e19','e20','e21','e22','e41'],
+    steps:[
+      { t:'上传来源截图', d:'创建识别批次(1 项 waiting_recognition);截图按 sha256 入库,同图重复上传会被识别去重。' },
+      { t:'云端 OCR 识别', d:'产生识别尝试与不可变「识别原文」;本机规则拆分字段,有限候选交独立模型裁决;校验规则全部通过 → 无待确认项(开启自动入库时可直接自动入库,默认需人工确认)。' },
+      { t:'校对确认入库', d:'原始订单获得系统订单编号(入库日期+当日序号,永久);来源快照冻结识别原值与确认值;商品明细确认标准商品归属(精确/映射/人工);平台交易状态=已付款。' },
+      { t:'自动成组', d:'规范化手机号+完整地址匹配键 → 单成员开放发货组。' },
+      { t:'确认实际发出', d:'冻结发货快照 → 建立发货组档案(建档总量=商品数) → 发货记录+包裹(承运方+运单号, 实际交寄) → 包裹商品明细(全部数量) → 默认物流状态=运输中 → 履约状态经发货同步变为已发货(追加 shipment_sync 修改记录)。' },
+      { t:'更新物流:已签收', d:'正常运输事实 运输中→已签收,时间线留痕;履约状态自动投影为已收货。' },
+      { t:'运营投影归零', d:'订单运营投影:无待办、无风险,事实概览=已签收。' },
+    ],
+    outcomes:[['订单A','已付款','已收货','已签收','无','无待办']],
+  },
+  {
+    id:'s2', name:'S2 两单合并发货·分两次发完',
+    desc:'订单A(商品×2)与订单B(商品×1)收货信息相同 → <b>自动同一开放发货组</b>(姓名不同仍可同组但暴露差异);库存不足先发 2 件 → <b>档案=部分发货,剩余数量留在开放组</b>;第二轮补齐后档案=已全部发货。展示「一次订单、多轮发货记录」与逐单履约状态差异。',
+    nodes:['order','item','snapshot','opengroup','adjust','shipsnap','archive','record','pkg','pkgitem','fulfillment','transport','timeline','projection'],
+    edges:['e13','e14','e15','e16','e17','e18','e19','e20','e11','e21','e22','e12','e41'],
+    steps:[
+      { t:'两单入库', d:'订单A、订单B 各自从识别入库;两单手机号+地址一致 → 自动并入同一开放发货组(组内姓名差异被暴露)。' },
+      { t:'第一轮确认发出(2/3 件)', d:'发货快照冻结本轮内容 → 建立发货组档案(建档总量=A2+B1=3) → 发货记录①+包裹①(装 A×1+B×1)。' },
+      { t:'逐单履约分叉', d:'订单A=部分发货(1/2),订单B=已发货;剩余 A×1 继续留在开放组;档案状态=部分发货(进度: 已发2/共3)。' },
+      { t:'第二轮继续发货(1/3 件)', d:'同一档案下新增发货记录②+包裹②(A×1);数量守恒校验:累计发出不得超过建档总量。' },
+      { t:'收口', d:'档案剩余归零 → 已全部发货;订单A=已发货→已收货;两轮记录、两个包裹的时间线独立保存;成员订单事后改收货信息只产生差异提醒,不改快照。' },
+    ],
+    outcomes:[
+      ['订单A','已付款','已收货(两轮后)','两包裹均已签收','无','无待办'],
+      ['订单B','已付款','已收货','包裹①已签收','无','无待办'],
+      ['发货组档案','—','已全部发货(2/3→3/3)','—','—','层级与两轮记录完整保留'],
+    ],
+  },
+  {
+    id:'s3', name:'S3 已签收退货退款·少件差异·部分退款',
+    desc:'订单A 已签收(2 件)后买家退货退款:实物控制=买家 → 方向=买家寄回 → 退货包裹(计划 2 实收 1)→ 检查差异(少件)+结论(瑕疵品)→ <b>申请金额与实际退款金额分别落账</b>。注意:售后全程<b>不改变</b>订单履约状态(仍=已收货)。',
+    nodes:['order','item','record','pkg','pkgitem','transport','acase','aitem','direction','retrecord','discrep','refund','finrecord','projection'],
+    edges:['e25','e26','e27','e28','e31','e32','e35','e36','e42'],
+    steps:[
+      { t:'建立售后处理单', d:'从发货记录发起;方式=退货退款(7 步场景模板);售后商品=包裹明细中的 2 件(占用可处理数量)。' },
+      { t:'选择处理方向', d:'实物控制投影=买家持有 → 可选方向含买家寄回;选择 buyer_return → 售后状态=等待退回;每次转换留痕。' },
+      { t:'登记退货物流', d:'创建退货包裹(独立承运方+运单号, 同一运单默认唯一);状态 in_transit;若途中破损可另挂退货方向物流异常+退货异常处理选择(先行退款等),与登记错误(更正单号)分开。' },
+      { t:'确认收到(计划2 实收1)', d:'退货包裹 received;实收数量逐商品登记。' },
+      { t:'检查+差异', d:'检查通过 0 件;差异=少件×1(归属于该商品, 合装包裹不把差异复制到其他订单);结论=瑕疵品——作为未来库存处理依据,当前不改库存。' },
+      { t:'退款两段落账', d:'退款申请(pending, 申请金额)→ 人工确认实际退款(部分退款)→ 资金记录(实际金额, 不可变)+申请置 confirmed。' },
+      { t:'完成售后', d:'售后状态=已完成;已完成的售后不能重开,同一批货再出新问题须另建新单;承运索赔如有需要可在结案后继续推进;运营投影待办清零。' },
+    ],
+    outcomes:[
+      ['订单A','已付款(可人工改已退款)','已收货(售后不改变履约投影)','原包裹已签收;退货包裹已收到','已完成(退货退款)','申请¥X / 实退¥Y 落资金记录'],
+    ],
+  },
+  {
+    id:'s4', name:'S4 在途丢件·索赔∥退款∥补发 三线并行',
+    desc:'包裹运输中丢件:物流异常(待核实→调查中→已确认)后,<b>责任链(承运索赔→赔付)、资金链(退款申请→实际退款)、补发链(轮次→新发货记录→新包裹)</b> 三线并行推进互不阻塞;正常运输事实保持「运输中」不被覆盖;履约投影口径排除补发记录。',
+    nodes:['order','item','record','pkg','pkgitem','transport','timeline','exception','claim','compensation','acase','aitem','direction','refund','finrecord','round','projection'],
+    edges:['e21','e22','e23','e24','e40','e25','e26','e27','e28','e35','e36','e37','e39','e18','e41','e42','e43','e44'],
+    steps:[
+      { t:'登记物流异常', d:'包裹(运输中)→ 异常类型=丢件, 阶段=待核实;正常运输事实保持运输中,不被异常覆盖。' },
+      { t:'推进:调查中→已确认', d:'确认丢件五要件:有揽收证据、无实物签收、承运确认丢失、时间不早于揽收、类型=丢件;每步阶段推进都追加不可变异常事件。' },
+      { t:'责任线:承运索赔', d:'已确认后建立索赔 pending(申请金额)→ approved(同意金额必填)→ paid + 实际赔付记录(独立资金事实);索赔可在退款/售后结束后继续。' },
+      { t:'售后线:丢件处理场景', d:'建立售后处理单(场景=丢件处理→一般方式);正向异常处理选择=退款并补发——选择补发不会暗中取消退款。' },
+      { t:'资金线:退款', d:'退款申请(pending)→ 确认实际退款 → 资金记录;索赔结果不反向改写已发生的退款。' },
+      { t:'补发线:新发货记录', d:'建立处理轮次① → 补发=新发货记录(role=aftersales_replacement, 关联本售后单与轮次)→ 新包裹 → 运输中→已签收(独立时间线)。' },
+      { t:'投影汇合', d:'运营投影:资金风险(未决索赔)优先于普通跟进被突出;履约状态按原始商品数量口径计算,补发记录不参与。' },
+    ],
+    outcomes:[
+      ['订单A','已付款','已发货(按原商品口径)','原包裹:运输中(事实)+丢件异常已确认;补发包裹:已签收','处理中(丢件处理)','实退¥X 落资金记录;索赔已赔付¥Z 待收/已收'],
+    ],
+  },
+  {
+    id:'s5', name:'S5 多轮换货·补发再出问题',
+    desc:'换货场景展示「轮次」机制:轮① 退货→检查(可再次销售)→补发(新发货记录①);<b>补发包裹再次损坏 → 以补发记录为来源开轮②</b>(不重开旧事实)→ 再补发。售后实物流转汇总:累计发出 3 / 累计退回 2 / 买家当前持有 1 / 当前轮次 2。',
+    nodes:['order','item','record','pkg','pkgitem','transport','timeline','acase','aitem','direction','retrecord','discrep','round','projection'],
+    edges:['e25','e26','e27','e28','e31','e32','e37','e38','e39','e18','e21','e42'],
+    steps:[
+      { t:'建立换货售后', d:'方式=换货(场景模板 7 步);轮①来源=原发货记录;售后商品占用可处理数量。' },
+      { t:'轮① 退货+检查', d:'登记退货包裹 → 收到 → 检查结论=可再次销售 → 换货必须先买家退回,再可建补发。' },
+      { t:'轮① 补发', d:'补发=新发货记录①+新包裹①(关联轮①);原发货记录不变。' },
+      { t:'补发再出问题 → 轮②', d:'以补发记录①为来源,同一售后单内新增轮②(不覆盖轮①事实);退货→检查(瑕疵)→补发=发货记录②+包裹②。' },
+      { t:'实物流转汇总(只读)', d:'累计发出=原始1+补发2=3;累计退回=2;买家当前持有=1;当前轮次=2;每轮包裹物流时间线独立。' },
+    ],
+    outcomes:[
+      ['订单A','已付款','已发货(履约口径不变)','原包裹+补发包裹①② 各自独立时间线','处理中(第 2 轮)','无退款;索赔可另行推进'],
+    ],
+  },
+];
+
+/* ================================================================
+ * 界面导航对照 & 实现状态
+ * ================================================================ */
+const UI_MAP = [
+  ['原始订单','orders','订单总表(查询/筛选/排序/模板栏/导出)与订单商品明细二级 Tab;进入订单详情(运营投影/发货包裹/售后/自定义字段/来源与修改记录/编辑)。','订单流 · 商品标准化 · 表格支撑'],
+  ['发货组','shipments','发货工作台:开放组/未自动成组/组调整/确认发货;档案 Tab(部分/全部);发货记录卡片与包裹按钮组(更新状态/异常/更正/索赔/撤销);内嵌售后面板。','发货流 · 物流流 · 售后流'],
+  ['售后流程模板','aftersales_workflows','查看 7 个系统模板、复制为自定义模板并编辑步骤;模板版本化保存。','售后流'],
+  ['标准商品','products','标准商品库的创建与编辑(SKU/标准名/标准规格,乐观锁)。','商品标准化流'],
+  ['识别批次','batches','上传截图、逐张状态(等待/识别/校对/已导入/失败/重复)、失败重试与人工录入;进入全屏校对工作台。','识别流'],
+  ['字段库','fields','自定义字段创建:七种类型、粒度归属(订单级/商品级)、必填与默认值。','表格支撑流'],
+  ['表格模板','templates','按粒度管理模板:字段选择/改名/顺序/筛选/排序;内置明细默认模板只读可复制。','表格支撑流'],
+  ['设置','settings','OCR 服务商、候选裁决模型、自动入库开关(默认关)、数据目录更换。','识别流 · 全局'],
+];
+
+const STATUS_ROWS = [
+  ['识别流(截图→草稿→入库,含候选裁决/自动入库开关)','done','src/core/recognition-batches.ts、order-intake.ts、candidate-verification.ts;发布门槛由 stage-one 金标案例在 CI 衡量。'],
+  ['商品标准化流(标准商品/映射/候选确认)','done','src/core/product-standardization.ts;表 standard_products / product_mappings;工作区 StandardProductsWorkspace。'],
+  ['订单流(双轨状态/快照/修改记录/运营投影)','done','src/core/order-workbench.ts、order-edit.ts;src/main/order-fulfillment-projection-service.ts;ADR 0017–0019。'],
+  ['发货流(组/调整/档案/记录/包裹/数量守恒)','done','src/core/shipment-groups.ts、shipment-records.ts、shipment-archive-storage.ts;ADR 0009–0014。'],
+  ['物流流(正常事实/时间线/异常/更正/索赔)','done','src/core/logistics-exceptions.ts;表 logistics_exception_matters / carrier_claims 等;ADR 0015、0021–0023;正向与退货双向。'],
+  ['售后流(处理单/方向/拦截/退货/差异/轮次/补发)','done','src/core/aftersales-cases.ts、aftersales-coordination.ts、aftersales-workflow-templates.ts(7 系统模板+版本化);ADR 0016、0024–0027。'],
+  ['售后流程模板工作区(查看/复制/自定义)','done','AftersalesWorkflowTemplatesWorkspace;表 aftersales_workflow_templates / template_versions。'],
+  ['承运索赔 + 实际赔付','done','carrier_claims / carrier_claim_events / carrier_compensation_records;ADR 0021。'],
+  ['待确认资金事项(退款申请)','partial','机制完整但 kind 仅 aftersales_refund(pending_financial_items);订单/运费/采购等类型未落地。'],
+  ['资金记录','partial','两类事实:实际退款(financial_records)+承运赔付;无通用财务台账界面;spec 002 §11 为预留章节。'],
+  ['库存处理结果','partial','仅退货检查结论枚举 resellable/defective/scrapped/other;UI 明示「不直接改动库存」;库存模块本体零代码。'],
+  ['履约计划(预售/团购发货资格)','planned','spec 002 §12;Issue #63–67;src 零命中;与 fulfillment-status(发货投影)无关。'],
+  ['有效预售需求 / 条件性团购需求','planned','spec 002 §12.3–§12.5;Issue #51。'],
+  ['采购流(需求→订单→在途→缺口)','planned','spec 002 §13;src 零命中。'],
+  ['库存流(入库/可售/瑕疵/报废台账)','planned','spec 002 §10 为预留章节;检查结论枚举为衔接点。'],
+];
+
+/* ================================================================
+ * 工具函数
+ * ================================================================ */
+const nodeById = id => NODES.find(n => n.id === id);
+const flowById = id => FLOWS.find(f => f.id === id);
+const esc = s => String(s);
+function h(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+function chainHtml(chain) {
+  return chain.map((s, i) => {
+    if (s.startsWith('∥')) return '<span class="pa" title="并行分支">∥</span><span class="st">' + s.slice(1) + '</span>';
+    return (i ? '<span class="ar">→</span>' : '') + '<span class="st">' + s + '</span>';
+  }).join('');
+}
+function badgeHtml(status) { return '<span class="badge ' + status + '">' + BADGE[status] + '</span>'; }
+function flowTagHtml(flow) { return '<span class="flow-tag" style="background:' + FLOW[flow].color + '">' + FLOW[flow].name + '</span>'; }
+
+/* ================================================================
+ * 视图:总览
+ * ================================================================ */
+function renderHome() {
+  const el = document.getElementById('view-home');
+  const implemented = FLOWS.filter(f => f.status === 'done').length;
+  const machines = MACHINES.length + PROJECTIONS.length;
+  el.innerHTML =
+    '<div class="hero">' +
+      '<h1>一张图看懂:闲鱼订单如何在这个系统里流转</h1>' +
+      '<p>本页以「一笔订单的数据从哪里来、到哪里去」为主线,把系统拆成 9 条业务流:截图识别建立订单,按收货信息合并发货,物流正常进展与异常并列推进,售后把退款、退货、补发、索赔组织成可多轮的处理单,所有事实最终汇成只读的订单运营投影。先在总览把握全貌,再从卡片进入每条流的详情;沙盘可按 5 个典型场景逐实体追踪数据走向。</p>' +
+      '<div class="stats">' +
+        '<div class="stat"><b>' + implemented + ' / ' + FLOWS.length + '</b>业务流已实现(含 2 条部分实现)</div>' +
+        '<div class="stat"><b>' + NODES.length + '</b>核心实体(标注落库位置)</div>' +
+        '<div class="stat"><b>' + EDGES.length + '</b>条数据引用关系</div>' +
+        '<div class="stat"><b>' + machines + '</b>个状态机/只读投影</div>' +
+        '<div class="stat"><b>6</b>个可交互数据流场景</div>' +
+        '<div class="stat"><b>8</b>个界面工作区</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="paths">' +
+      '<div class="path-card"><b>我想快速理解业务</b>看下方速览图与业务流卡片 → <a href="#/relations">串并行关系</a> → <a href="#/sandbox">沙盘 S1–S3</a> 由浅入深。</div>' +
+      '<div class="path-card" style="border-left-color:var(--aftersales)"><b>我想处理具体售后问题</b><a href="#/flow/aftersales">售后流详情</a>(7 场景模板步骤) → <a href="#/sandbox">沙盘 S3–S5</a>(退货差异/丢件三线并行/多轮换货)。</div>' +
+      '<div class="path-card" style="border-left-color:var(--product)"><b>我想查实现与数据结构</b><a href="#/entities">实体字典</a>(含落库表) → <a href="#/states">状态机</a> → <a href="#/status">实现状态与界面对照</a>。</div>' +
+    '</div>' +
+    '<div class="diagram-card"><h3>一图速览:主干串行 · 三处并行 · 一处循环</h3><div class="sub">点击「串并行关系」查看带详解的完整版。</div><div class="diagram-wrap" id="miniPipeline"></div>' +
+      '<p class="mini-notes"><b>关键约束:</b>截图校对后才入库(自动入库可在设置中开启,默认人工)' + '<span class="dot">·</span>履约状态由包裹事实反算,不可人工覆盖<span class="dot">·</span>数量守恒:发出 ≤ 剩余待发 ≤ 建档总量<span class="dot">·</span>申请金额与实际金额分别落账<span class="dot">·</span>待办优先级:期限 > 资金风险 > 实物风险 > 普通跟进</p>' +
+      '<div class="legend">' +
+        '<span class="key"><span class="sw" style="background:var(--recognition)"></span>识别</span>' +
+        '<span class="key"><span class="sw" style="background:var(--order)"></span>订单</span>' +
+        '<span class="key"><span class="sw" style="background:var(--shipment)"></span>发货</span>' +
+        '<span class="key"><span class="sw" style="background:var(--logistics)"></span>物流</span>' +
+        '<span class="key"><span class="sw" style="background:var(--aftersales)"></span>售后</span>' +
+        '<span class="key"><span class="sw" style="background:var(--finance)"></span>资金</span>' +
+        '<span class="key"><span class="sw" style="background:var(--projection)"></span>投影</span>' +
+        '<span class="key"><span class="sw" style="background:var(--planning)"></span>规划</span>' +
+        '<span class="key">∥ 并行 · ↺ 循环 · 汇合=只读投影</span>' +
+      '</div>' +
+    '</div>' +
+    '<h2 class="view-title" style="font-size:18px;margin:26px 0 12px">九条业务流(点击进入详情)</h2>' +
+    '<div class="flow-grid" id="homeFlowGrid"></div>';
+
+  const grid = el.querySelector('#homeFlowGrid');
+  FLOWS.forEach(f => {
+    const card = document.createElement('a');
+    card.className = 'flow-card';
+    card.href = '#/flow/' + f.id;
+    card.style.setProperty('--c', FLOW[f.id].color);
+    card.innerHTML =
+      '<h3>' + f.title + ' ' + badgeHtml(f.status) + '</h3>' +
+      '<p class="tagline">' + f.tagline + '</p>' +
+      '<div class="chain">' + chainHtml(f.chain, null) + '</div>' +
+      '<div class="go">进入流详情 →</div>';
+    grid.appendChild(card);
+  });
+  drawMiniPipeline();
+}
+
+function drawMiniPipeline() {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const mount = document.getElementById('miniPipeline');
+  if (!mount || mount.childNodes.length) return;
+  const W = 1120, H = 214;
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  function e(tag, attrs, text) { const x = document.createElementNS(svgNS, tag); for (const k in attrs) x.setAttribute(k, attrs[k]); if (text != null) x.textContent = text; return x; }
+  svg.appendChild((function(){ const d = e('defs', {}); d.innerHTML = '<marker id="mA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>'; return d; })());
+  const stages = [
+    ['截图识别', 'recognition'], ['订单入库', 'order'], ['合并发货', 'shipment'], ['包裹交寄', 'shipment'],
+    ['在途物流', 'logistics'], ['售后处理', 'aftersales'], ['退款/赔付', 'finance'], ['运营投影', 'projection'],
+  ];
+  const bw = 106, gap = 26, x0 = 24, y0 = 56;
+  stages.forEach((s, i) => {
+    const x = x0 + i * (bw + gap);
+    svg.appendChild(e('rect', { x, y: y0, width: bw, height: 40, rx: 9, fill: '#fff', stroke: FLOW[s[1]].color, 'stroke-width': 2 }));
+    svg.appendChild(e('text', { x: x + bw / 2, y: y0 + 25, 'text-anchor': 'middle', 'font-size': 13, 'font-weight': 700, fill: '#1e293b' }, s[0]));
+    if (i < stages.length - 1) svg.appendChild(e('line', { x1: x + bw, y1: y0 + 20, x2: x + bw + gap, y2: y0 + 20, stroke: '#475569', 'stroke-width': 2, 'marker-end': 'url(#mA)' }));
+  });
+  function halo(attrs) {
+    const a = Object.assign({ 'paint-order': 'stroke', stroke: '#ffffff', 'stroke-width': 3.5, 'font-size': 10.5, 'font-weight': 700, fill: '#e11d48' }, attrs || {});
+    return a;
+  }
+  function par(x, w, label) {
+    svg.appendChild(e('line', { x1: x, y1: y0 + 58, x2: x + w, y2: y0 + 58, stroke: '#e11d48', 'stroke-width': 2, 'stroke-dasharray': '5 4' }));
+    svg.appendChild(e('text', halo({ x: x + w / 2, y: y0 + 78, 'text-anchor': 'middle' }), label));
+  }
+  par(x0 + 1 * (bw + gap) - 44, bw + 88, '∥ 双轨状态:交易状态(人工) ∥ 履约投影');
+  par(x0 + 4 * (bw + gap) - 44, bw + 88, '∥ 正常更新 ∥ 物流异常 ∥ 售后');
+  par(x0 + 5 * (bw + gap) - 44, bw + 88, '∥ 资金 ∥ 实物 ∥ 补发 ∥ 索赔');
+  const loop = e('path', { d: 'M ' + (x0 + 6 * (bw + gap) + bw / 2) + ' ' + (y0 - 6) + ' C ' + (x0 + 6 * (bw + gap) + bw / 2) + ' 14, ' + (x0 + 4 * (bw + gap) + bw / 2) + ' 14, ' + (x0 + 4 * (bw + gap) + bw / 2) + ' ' + (y0 - 6), fill: 'none', stroke: '#0d9488', 'stroke-width': 2, 'stroke-dasharray': '5 4', 'marker-end': 'url(#mA)' });
+  svg.appendChild(loop);
+  svg.appendChild(e('text', halo({ x: x0 + 5 * (bw + gap) + bw / 2 + 8, y: 26, fill: '#0d9488' }), '↺ 补发=新发货记录·回到在途,可再开新轮次'));
+  svg.appendChild(e('line', { x1: x0 + 7 * (bw + gap) + bw / 2, y1: y0 + 40, x2: x0 + 7 * (bw + gap) + bw / 2, y2: y0 + 130, stroke: '#94a3b8', 'stroke-width': 0 }));
+  const planY = 160;
+  svg.appendChild(e('text', { x: x0, y: planY, 'font-size': 12, 'font-weight': 800, fill: '#64748b' }, '规划轨道(未实现):'));
+  ['履约计划·预售/团购资格', '采购需求→订单→在途→缺口', '库存台账(检查结论衔接点已留)', '通用财务台账'].forEach((t, i) => {
+    const x = 190 + i * 225;
+    svg.appendChild(e('rect', { x, y: planY - 16, width: 208, height: 30, rx: 8, fill: '#f8fafc', stroke: '#cbd5e1', 'stroke-dasharray': '5 4' }));
+    svg.appendChild(e('text', { x: x + 104, y: planY + 4, 'text-anchor': 'middle', 'font-size': 11, fill: '#64748b' }, t));
+  });
+  svg.appendChild(e('text', halo({ x: x0, y: 202, 'font-weight': 600, fill: '#94a3b8', 'font-size': 10.5 }), '详细并行/循环/汇合解释见「串并行关系」页;逐实体数据走向见「数据流沙盘」。'));
+  mount.appendChild(svg);
+}
+
+/* ================================================================
+ * 视图:流详情
+ * ================================================================ */
+function renderFlow(flowId) {
+  const f = flowById(flowId);
+  const el = document.getElementById('view-flow');
+  if (!f) { location.hash = '#/'; return; }
+  const idx = FLOWS.indexOf(f);
+  const prev = FLOWS[(idx - 1 + FLOWS.length) % FLOWS.length];
+  const next = FLOWS[(idx + 1) % FLOWS.length];
+  const c = FLOW[f.id].color;
+  let html =
+    '<div class="crumbs"><a href="#/">总览</a><span class="sep">/</span>业务流详情</div>' +
+    '<div class="flow-tabs">' + FLOWS.map(x => '<a href="#/flow/' + x.id + '" class="' + (x.id === f.id ? 'active' : '') + '" style="--c:' + FLOW[x.id].color + '">' + x.title.replace('(部分实现)', '').replace('规划中的流:履约计划 / 进货(采购) / 库存', '规划:计划/采购/库存') + '</a>').join('') + '</div>' +
+    '<div class="flow-head"><h2 style="color:' + c + '">' + f.title + '</h2>' + badgeHtml(f.status) + '</div>' +
+    '<p class="flow-lead">' + f.tagline + '</p>' +
+    '<div class="diagram-card" style="border-top:4px solid ' + c + '"><h3>阶段链</h3><div class="sub">→ 串行;∥ 并行分支</div>' +
+      '<div class="chain" style="--c:' + c + ';font-size:13px">' + chainHtml(f.chain, c) + '</div>' +
+    '</div>' +
+    '<div class="stack">' +
+      '<div><h3 class="block-title" style="margin-bottom:8px">阶段明细</h3>' +
+      '<table class="sheet"><thead><tr><th style="width:110px">阶段</th><th>发生什么</th><th style="width:200px">产生/引用实体</th><th style="width:180px">界面入口</th></tr></thead><tbody>' +
+        f.stages.map(s => '<tr><td><b>' + s[0] + '</b></td><td>' + s[1] + '</td><td style="font-size:12px;color:var(--muted)">' + s[2] + '</td><td style="font-size:12px;color:var(--muted)">' + s[3] + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  if (f.templates) {
+    html += '<div><h3 class="block-title" style="margin-bottom:8px">7 个系统售后流程模板(版本化;新建处理单固化当时版本)</h3>' +
+      '<table class="sheet"><thead><tr><th style="width:90px">场景</th><th style="width:130px">底层处理方式</th><th>模板步骤(必完成;括号为显示条件)</th></tr></thead><tbody>' +
+      f.templates.map(t => '<tr><td><b>' + t[0] + '</b></td><td><code>' + t[1] + '</code></td><td>' + t[2] + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  }
+  html += '<div class="rules"><h3>关键规则与不变式</h3><ul>' + f.rules.map(r => '<li>' + r + '</li>').join('') + '</ul></div>';
+  if (f.entities.length) {
+    html += '<div><h3 class="block-title" style="margin-bottom:8px">涉及实体(点击查字典)</h3><div class="entity-chips" style="--c:' + c + '">' +
+      f.entities.map(id => { const n = nodeById(id); return '<a href="#/entity/' + id + '" style="--c:' + c + '">' + n.label + '</a>'; }).join('') + '</div></div>';
+  }
+  html += '<div class="stack-2">' +
+    '<div class="rules" style="background:#f8fafc"><h3>核心代码</h3><ul style="margin:0;padding-left:16px">' + f.files.map(x => '<li style="margin:3px 0"><code>' + x + '</code></li>').join('') + '</ul></div>' +
+    '<div class="rules" style="background:#f8fafc"><h3>相关 ADR / 规格</h3>' +
+      (f.adrs.length ? f.adrs.map(a => '<span class="adr">' + a + '</span>').join('') : '<span style="font-size:12.5px;color:var(--muted)">无专属 ADR;见 CONTEXT.md 词条与 spec 002。</span>') +
+    '</div>' +
+  '</div>' +
+  '<div class="flownav"><a href="#/flow/' + prev.id + '">← ' + prev.title + '</a><a href="#/">返回总览</a><a href="#/flow/' + next.id + '">' + next.title + ' →</a></div>' +
+  '</div>';
+  el.innerHTML = html;
+}
+
+/* ================================================================
+ * 视图:串并行关系
+ * ================================================================ */
+function renderRelations() {
+  const el = document.getElementById('view-relations');
+  el.innerHTML =
+    '<h2 class="view-title">业务流之间的串并行关系</h2>' +
+    '<p class="view-lead">纵向主干为串行链;标注 ∥ 的位置表示各业务流在此阶段并行推进、互不阻塞;↺ 为循环(补发回到在途);底部为只读投影的汇合点;右侧灰色虚线为规划中的轨道(当前版本未实现)。悬停方块可看要点。</p>' +
+    '<div class="diagram-card"><div class="diagram-wrap" id="relSvg"></div>' +
+    '<div class="legend">' +
+      '<span class="key"><span class="sw" style="background:var(--recognition)"></span>识别</span><span class="key"><span class="sw" style="background:var(--order)"></span>订单</span><span class="key"><span class="sw" style="background:var(--shipment)"></span>发货</span><span class="key"><span class="sw" style="background:var(--logistics)"></span>物流</span><span class="key"><span class="sw" style="background:var(--aftersales)"></span>售后</span><span class="key"><span class="sw" style="background:var(--finance)"></span>资金</span><span class="key"><span class="sw" style="background:var(--projection)"></span>投影/支撑</span><span class="key"><span class="sw" style="background:var(--planning)"></span>规划</span>' +
+    '</div></div>' +
+    '<div class="stack-2" style="margin-top:16px">' +
+      relCard('串行主干', '#1e293b', '截图 → OCR → 草稿 → 入库 → 开放发货组 → 确认发出(快照+档案+记录+包裹) → 交寄。每一步都以前一步的既成事实为输入:没有订单就没有组,没有确认发出就没有包裹与物流。') +
+      relCard('P1 ∥ 双轨状态并行', '#2563eb', '订单入库后:平台交易状态由人工维护,履约状态由包裹事实自动投影——两者独立保存、互不覆盖。已取消/已退款订单不再进入待发货视图,但不影响履约投影的计算与查询。') +
+      relCard('P2 ∥ 在途三线并行', '#d97706', '包裹交寄后:正常运输事实更新、物流异常登记与推进、售后发起三条线可同时进行。核心约束:异常不覆盖正常事实,任何一条线的末态不遮蔽其他活动事实。') +
+      relCard('P3 ∥ 售后四线并行', '#e11d48', '售后处理单内:资金线(申请→实际退款)、实物线(拦截/退货→收到→检查)、补发线(轮次→新发货记录)、索赔线(共享异常事实)互不阻塞。选择补发不会暗中取消退款;索赔结果不反向改写退款。') +
+      relCard('↺ 补发循环', '#0d9488', '补发生成新的发货记录与包裹,重新进入在途物流;补发包裹再出问题时,以补发记录为来源在同一售后单内开启下一轮处理——循环而不重写历史。') +
+      relCard('▼ 汇合:只读投影', '#64748b', '订单运营投影把全部流的事实按统一口径汇总为「当前待办>未解决风险>并列事实>完整历史」;履约状态、实物控制、可处理数量也是投影——它们不产生新状态,由最新有效事实随时重算。') +
+      relCard('横切支撑', '#0f766e', '字段库、表格模板与导出不参与业务流转,但对所有流的呈现层横切生效;同一模板同时驱动列表列与导出列。') +
+      relCard('规划轨道(未实现)', '#94a3b8', '履约计划(预售/团购资格)控制订单何时进入发货流;采购流按需求缺口生成建议;库存台账消费退货检查结论。三者与主干之间已预留衔接点但当前零代码。') +
+    '</div>';
+  drawRelationSvg();
+}
+function relCard(title, color, body) {
+  return '<div class="rules" style="border-left:4px solid ' + color + '"><h3 style="color:' + color + ';font-size:14px">' + title + '</h3><p style="margin:0;font-size:13px;color:#334155">' + body + '</p></div>';
+}
+function drawRelationSvg() {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const mount = document.getElementById('relSvg');
+  if (!mount || mount.childNodes.length) return;
+  const W = 1160, H = 1210;
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  function e(tag, attrs, text) { const x = document.createElementNS(svgNS, tag); for (const k in attrs) x.setAttribute(k, attrs[k]); if (text != null) x.textContent = text; return x; }
+  function box(x, y, w, hh, color, title, sub, dashed) {
+    const g = e('g', {});
+    g.appendChild(e('rect', { x, y, width: w, height: hh, rx: 9, fill: '#fff', stroke: color, 'stroke-width': 2, 'stroke-dasharray': dashed ? '6 4' : 'none' }));
+    g.appendChild(e('title', {}, title + (sub ? ' — ' + sub : '')));
+    g.appendChild(e('text', { x: x + w / 2, y: sub ? y + hh / 2 - 4 : y + hh / 2 + 4.5, 'text-anchor': 'middle', 'font-size': 13.5, 'font-weight': 700, fill: '#1e293b' }, title));
+    if (sub) g.appendChild(e('text', { x: x + w / 2, y: y + hh / 2 + 13, 'text-anchor': 'middle', 'font-size': 10.5, fill: '#64748b' }, sub));
+    return g;
+  }
+  function arrow(x1, y1, x2, y2, dashed) {
+    return e('line', { x1, y1, x2, y2, stroke: '#475569', 'stroke-width': 2, 'stroke-dasharray': dashed ? '5 4' : 'none', 'marker-end': 'url(#mR)' });
+  }
+  function note(x, y, text, color, anchor, bold) {
+    return e('text', { x, y, 'font-size': color ? 12.5 : 12, 'font-weight': bold ? 800 : 600, fill: color || '#e11d48', 'text-anchor': anchor || 'start' }, text);
+  }
+  const defs = e('defs', {});
+  defs.innerHTML = '<marker id="mR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>';
+  svg.appendChild(defs);
+  const cx = 300, bw = 250, bx = cx - bw / 2;
+  svg.appendChild(box(bx, 30, bw, 42, FLOW.recognition.color, '来源截图', 'sha256 指纹 · 同图去重'));
+  svg.appendChild(arrow(cx, 72, cx, 96));
+  svg.appendChild(box(bx, 98, bw, 42, FLOW.recognition.color, '识别批次 → OCR 识别尝试', '识别原文不可变 · 有限候选裁决'));
+  svg.appendChild(arrow(cx, 140, cx, 164));
+  svg.appendChild(box(bx, 166, bw, 42, FLOW.recognition.color, '订单草稿 · 校对待确认项', '无待确认项才可自动入库(默认人工)'));
+  svg.appendChild(arrow(cx, 208, cx, 232));
+  svg.appendChild(box(bx, 234, bw, 46, FLOW.order.color, '原始订单入库', '系统订单编号永久 · 来源快照 · 修改记录'));
+  svg.appendChild(note(cx, 300, '∥ 双轨并行 · 互不覆盖'));
+  svg.appendChild(box(60, 312, 210, 40, FLOW.order.color, '平台交易状态(人工维护)', '已付款/已取消/已退款/未知'));
+  svg.appendChild(box(330, 312, 220, 40, FLOW.order.color, '履约状态(发货事实投影)', '待发货→部分→已发→已收货'));
+  svg.appendChild(arrow(200, 280, 165, 310, true));
+  svg.appendChild(arrow(400, 280, 440, 310, true));
+  svg.appendChild(arrow(165, 352, 250, 386, true));
+  svg.appendChild(arrow(440, 352, 350, 386, true));
+  svg.appendChild(box(bx, 388, bw, 42, FLOW.shipment.color, '开放合并发货组', '匹配键=手机号+地址 · 可拆分/重组'));
+  svg.appendChild(arrow(cx, 430, cx, 454));
+  svg.appendChild(box(bx - 40, 456, bw + 80, 46, FLOW.shipment.color, '确认实际发出 ⇒ 发货快照 + 发货组档案 + 发货记录 + 包裹', '实际交寄 · 剩余数量留在开放组 · 数量守恒'));
+  svg.appendChild(note(cx, 522, '∥ 在途阶段三线并行(正常事实不被异常覆盖)'));
+  svg.appendChild(arrow(cx, 502, 150, 536, true));
+  svg.appendChild(arrow(cx, 502, 430, 536, true));
+  svg.appendChild(arrow(cx, 502, 700, 536, true));
+  svg.appendChild(box(40, 538, 220, 46, FLOW.logistics.color, '正常运输事实 + 时间线', '待承运→运输中→已签收/已退回'));
+  svg.appendChild(box(330, 538, 200, 46, FLOW.logistics.color, '物流异常事项', '丢件/破损/错投/签收争议'));
+  svg.appendChild(box(600, 538, 220, 46, FLOW.aftersales.color, '售后处理单', '5 处理方式 × 7 场景模板'));
+  svg.appendChild(arrow(150, 584, 150, 612));
+  svg.appendChild(box(40, 614, 220, 40, FLOW.order.color, '履约状态联动(shipped→delivered)', '发货同步事件落修改记录', true));
+  svg.appendChild(arrow(430, 584, 430, 612));
+  svg.appendChild(box(330, 614, 200, 40, FLOW.logistics.color, '异常阶段: 待核实→调查→已确认', '已确认后可发起承运索赔'));
+  svg.appendChild(arrow(430, 654, 430, 682));
+  svg.appendChild(box(330, 684, 200, 46, FLOW.finance.color, '承运索赔 → 实际赔付记录', '申请→同意/拒赔→已赔付(paid)'));
+  svg.appendChild(note(735, 612, '∥ 售后内四线并行 · 互不阻塞'));
+  svg.appendChild(arrow(710, 584, 710, 620, true));
+  const subX = 640, subW = 260;
+  svg.appendChild(box(subX, 622, subW, 38, FLOW.finance.color, '资金线: 退款申请 → 实际退款(资金记录)', '申请金额 ≠ 实际金额'));
+  svg.appendChild(box(subX, 668, subW, 38, FLOW.aftersales.color, '实物线: 拦截 / 退货包裹 → 收到 → 检查', '差异 8 类 · 结论可售/瑕疵/报废'));
+  svg.appendChild(box(subX, 714, subW, 38, FLOW.shipment.color, '补发线: 处理轮次 → 补发=新发货记录', '关联售后单与轮次'));
+  svg.appendChild(box(subX, 760, subW, 38, FLOW.logistics.color, '索赔线: 与售后共享异常事实', '正向/退货双向索赔'));
+  svg.appendChild(e('path', { d: 'M 630 733 C 560 733 560 561 636 561', fill: 'none', stroke: '#0d9488', 'stroke-width': 2, 'stroke-dasharray': '5 4', 'marker-end': 'url(#mR)' }));
+  svg.appendChild(note(545, 640, '↺ 补发包裹回到在途,', '#0d9488', 'end'));
+  svg.appendChild(note(545, 655, '可再发起新售后轮次', '#0d9488', 'end'));
+  svg.appendChild(note(cx, 850, '▼ 汇合:所有业务流的事实按统一口径只读投影', '#475569', 'middle'));
+  svg.appendChild(arrow(150, 654, 260, 880, true));
+  svg.appendChild(arrow(430, 730, 320, 880, true));
+  svg.appendChild(arrow(770, 798, 390, 880, true));
+  svg.appendChild(box(150, 882, 420, 48, FLOW.projection.color, '订单运营投影(列表/详情/导出同一口径)', '当前待办(突出一项) > 未解决风险 > 并列事实 > 完整历史'));
+  svg.appendChild(arrow(360, 930, 360, 958, true));
+  svg.appendChild(box(150, 960, 420, 40, FLOW.support.color, '横切支撑: 字段库 · 表格模板 · 导出脱敏 · 标准商品', '', true));
+  svg.appendChild(note(900, 60, '规划轨道(当前版本未实现)', '#64748b', 'start', true));
+  const px = 830, pw = 300;
+  svg.appendChild(box(px, 76, pw, 42, FLOW.planning.color, '履约计划: 预售 / 团购发货资格', 'spec 002 §12 · Issue #63–67', true));
+  svg.appendChild(arrow(px + 80, 118, px + 80, 142, true));
+  svg.appendChild(box(px, 144, pw, 46, FLOW.planning.color, '采购流: 采购需求→采购订单→在途→缺口', 'spec 002 §13 · 未实现', true));
+  svg.appendChild(arrow(px + 80, 190, px + 80, 214, true));
+  svg.appendChild(box(px, 216, pw, 46, FLOW.planning.color, '库存流: 检查结论→可售/瑕疵/报废台账', '当前仅检查结论枚举(衔接点)', true));
+  svg.appendChild(arrow(px + 80, 262, px + 80, 286, true));
+  svg.appendChild(box(px, 288, pw, 42, FLOW.planning.color, '通用财务台账: 收入/运费/采购支出', '当前仅退款+赔付两类资金事实', true));
+  svg.appendChild(e('line', { x1: px, y1: 239, x2: 555, y2: 452, stroke: '#cbd5e1', 'stroke-width': 1.5, 'stroke-dasharray': '4 4' }));
+  svg.appendChild(note(700, 350, '(未来)预售资格控制发货', '#94a3b8', 'start', false));
+  svg.appendChild(e('line', { x1: px, y1: 309, x2: 262, y2: 316, stroke: '#cbd5e1', 'stroke-width': 1.5, 'stroke-dasharray': '4 4' }));
+  svg.appendChild(note(560, 306, '(未来)退货检查结论入库', '#94a3b8', 'start', false));
+  mount.appendChild(svg);
+}
+
+/* ================================================================
+ * 视图:数据流沙盘
+ * ================================================================ */
+const COL_W = 190, GAP = 26, NODE_W = 182, NODE_H = 60, ROW_H = 86, TOP = 66, LEFT = 26;
+const CH_BASE = 700, CH_STEP = 17;
+const colX = c => LEFT + c * (COL_W + GAP);
+const rowY = r => TOP + r * ROW_H;
+let activeScenario = SCENARIOS[0];
+let flowFilter = null;
+let graphScale = 1;
+
+function setupSandboxView() {
+  const el = document.getElementById('view-sandbox');
+  if (el.dataset.built) { refreshSandbox(); return; }
+  el.dataset.built = '1';
+  el.innerHTML =
+    '<h2 class="view-title">订单数据流沙盘</h2>' +
+    '<p class="view-lead">每个方块是一个真实落库的业务实体,箭头是数据引用或推导关系。选择场景高亮该场景经过的实体;点击方块看实体详情;流筛选可在全景模式下只看某条流;缩放按钮调整图大小。</p>' +
+    '<div class="scenario-bar" id="scenarioBar"></div>' +
+    '<div class="scenario-desc" id="scenarioDesc"></div>' +
+    '<div class="graph-toolbar">' +
+      '<label><input type="checkbox" id="dimToggle" checked> 淡化未参与实体</label>' +
+      '<span style="color:#cbd5e1">|</span>' +
+      '<span>流筛选:</span><span id="flowChips" style="display:inline-flex;gap:6px;flex-wrap:wrap"></span>' +
+      '<span style="color:#cbd5e1">|</span>' +
+      '<button class="zoombtn" id="zoomOut" title="缩小">−</button><button class="zoombtn" id="zoomIn" title="放大">+</button><button class="zoombtn" id="zoomFit" title="适配宽度" style="width:auto;padding:0 10px;font-size:12px">适配宽度</button>' +
+      '<span class="hint">图可横向滚动;悬停箭头看关系名。</span>' +
+    '</div>' +
+    '<div id="graphOuter"><svg id="graphSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>' +
+    '<div class="panes">' +
+      '<div class="pane"><h4>场景事件时间线(每步产生的不可变事实)</h4><ol class="timeline" id="timeline"></ol></div>' +
+      '<div class="pane"><h4>实体详情(点击图中方块)</h4><div id="nodeDetail"><p class="ph">点击图中任意实体方块,这里会显示它的领域定义、关键字段、落库位置,以及它在哪些场景中出现。</p></div></div>' +
+    '</div>' +
+    '<div class="pane section-gap" id="outcomesPane" style="display:none"><h4>场景结果:各订单/对象的最终状态</h4><div id="outcomes"></div></div>';
+  const bar = document.getElementById('scenarioBar');
+  SCENARIOS.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'scenario-btn' + (s.id === activeScenario.id ? ' active' : '');
+    b.textContent = s.name;
+    b.onclick = () => {
+      activeScenario = s; flowFilter = null;
+      document.querySelectorAll('.scenario-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      refreshSandbox();
+    };
+    bar.appendChild(b);
+  });
+  const chips = document.getElementById('flowChips');
+  ['all'].concat(Object.keys(FLOW)).forEach(k => {
+    const c = document.createElement('button');
+    c.className = 'chip';
+    c.textContent = k === 'all' ? '全部' : FLOW[k].name;
+    if (k !== 'all') c.style.setProperty('--c', FLOW[k].color);
+    c.onclick = () => { flowFilter = (k === 'all' || flowFilter === k) ? null : k; refreshSandbox(); };
+    chips.appendChild(c);
+  });
+  document.getElementById('dimToggle').addEventListener('change', refreshSandbox);
+  document.getElementById('zoomIn').onclick = () => { graphScale = Math.min(1.6, graphScale + 0.15); applyZoom(); };
+  document.getElementById('zoomOut').onclick = () => { graphScale = Math.max(0.5, graphScale - 0.15); applyZoom(); };
+  document.getElementById('zoomFit').onclick = () => {
+    const outer = document.getElementById('graphOuter');
+    graphScale = Math.max(0.5, Math.min(1.6, (outer.clientWidth - 4) / graphNatW));
+    applyZoom();
+  };
+  buildGraph();
+  refreshSandbox();
+}
+let graphNatW = 0;
+function applyZoom() {
+  const svg = document.getElementById('graphSvg');
+  if (!svg) return;
+  svg.setAttribute('width', Math.round(graphNatW * graphScale));
+  svg.setAttribute('height', Math.round(svg.__natH * graphScale));
+}
+function buildGraph() {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('graphSvg');
+  const maxRow = Math.max.apply(null, NODES.map(n => n.row));
+  const maxCh = Math.max.apply(null, EDGES.filter(e => e.back).map(e => e.ch)) || 0;
+  const H = Math.max(rowY(maxRow) + NODE_H + 60, CH_BASE + (maxCh + 1) * CH_STEP + 24);
+  graphNatW = LEFT + 8 * (COL_W + GAP);
+  svg.__natH = H;
+  svg.setAttribute('viewBox', '0 0 ' + graphNatW + ' ' + H);
+  applyZoom();
+  function e(tag, attrs, text) { const x = document.createElementNS(svgNS, tag); for (const k in attrs) x.setAttribute(k, attrs[k]); if (text != null) x.textContent = text; return x; }
+  const defs = e('defs', {});
+  for (const k in FLOW) defs.innerHTML += '<marker id="gA-' + k + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="' + FLOW[k].color + '"/></marker>';
+  svg.appendChild(defs);
+  COL_TITLES.forEach((t, i) => {
+    svg.appendChild(e('text', { x: colX(i) + NODE_W / 2, y: 34, 'text-anchor': 'middle', 'font-size': 12.5, 'font-weight': 800, fill: '#334155' }, t));
+  });
+  COL_TITLES.forEach((t, i) => {
+    svg.insertBefore(e('rect', { x: colX(i) - 6, y: 46, width: NODE_W + 12, height: H - 58, rx: 10, fill: i % 2 ? '#f8fafc' : '#f1f5f9', 'fill-opacity': 0.6 }), defs.nextSibling);
+  });
+  svg.appendChild(e('text', { x: 20, y: CH_BASE - 8, 'font-size': 11, fill: '#94a3b8' }, '↓ 回写 / 引用上游(履约反算 · 补发新记录 · 售后引用包裹)'));
+  EDGES.forEach(ed => {
+    const a = nodeById(ed.from), b = nodeById(ed.to);
+    const color = FLOW[a.flow].color;
+    const g = e('g', { 'data-edge': ed.id });
+    let d = '';
+    if (ed.back) {
+      const y1 = rowY(a.row) + NODE_H / 2, y2 = rowY(b.row) + NODE_H / 2;
+      const ch = CH_BASE + ed.ch * CH_STEP;
+      d = 'M ' + colX(a.col) + ' ' + y1 + ' L ' + (colX(a.col) - 16) + ' ' + y1 + ' L ' + (colX(a.col) - 16) + ' ' + ch + ' L ' + (colX(b.col) + NODE_W + 16) + ' ' + ch + ' L ' + (colX(b.col) + NODE_W + 16) + ' ' + y2 + ' L ' + (colX(b.col) + NODE_W) + ' ' + y2;
+    } else if (a.col === b.col) {
+      const right = b.row > a.row;
+      const x1 = right ? colX(a.col) + NODE_W : colX(a.col);
+      const x2 = right ? colX(b.col) + NODE_W : colX(b.col);
+      const y1 = rowY(a.row) + NODE_H / 2, y2 = rowY(b.row) + NODE_H / 2;
+      const bend = right ? x1 + 24 : x1 - 24;
+      d = 'M ' + x1 + ' ' + y1 + ' C ' + bend + ' ' + y1 + ' ' + bend + ' ' + y2 + ' ' + x2 + ' ' + y2;
+    } else {
+      const x1 = colX(a.col) + NODE_W, y1 = rowY(a.row) + NODE_H / 2;
+      const x2 = colX(b.col), y2 = rowY(b.row) + NODE_H / 2;
+      const dx = Math.max(36, (x2 - x1) / 2);
+      d = 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + dx) + ' ' + y1 + ' ' + (x2 - dx) + ' ' + y2 + ' ' + x2 + ' ' + y2;
+    }
+    const p = e('path', { d, fill: 'none', stroke: color, 'stroke-width': ed.thin ? 1.2 : 1.8, 'stroke-dasharray': ed.thin ? '3 4' : 'none', 'stroke-opacity': 0.55, 'marker-end': 'url(#gA-' + a.flow + ')' });
+    p.appendChild(e('title', {}, ed.from + ' → ' + ed.to + ': ' + ed.label));
+    g.appendChild(p);
+    svg.appendChild(g);
+  });
+  NODES.forEach(n => {
+    const g = e('g', { 'data-node': n.id, style: 'cursor:pointer' });
+    g.appendChild(e('rect', { x: colX(n.col), y: rowY(n.row), width: NODE_W, height: NODE_H, rx: 9, fill: '#fff', stroke: FLOW[n.flow].color, 'stroke-width': 2 }));
+    g.appendChild(e('rect', { x: colX(n.col), y: rowY(n.row), width: 6, height: NODE_H, rx: 3, fill: FLOW[n.flow].color }));
+    g.appendChild(e('text', { x: colX(n.col) + 14, y: rowY(n.row) + 24, 'font-size': 12.5, 'font-weight': 800, fill: '#1e293b' }, n.label));
+    splitSub(n.sub).forEach((s, i) => {
+      g.appendChild(e('text', { x: colX(n.col) + 14, y: rowY(n.row) + 40 + i * 13, 'font-size': 9.8, fill: '#64748b' }, s));
+    });
+    g.appendChild(e('title', {}, n.label + ' — ' + n.desc));
+    g.addEventListener('click', () => showNodeInSandbox(n.id));
+    svg.appendChild(g);
+  });
+}
+function splitSub(sub) {
+  if (!sub) return [];
+  if (sub.length <= 24) return [sub];
+  const parts = sub.split(' · ');
+  if (parts.length > 1) {
+    const lines = []; let cur = '';
+    parts.forEach(p => { if ((cur + (cur ? ' · ' : '') + p).length > 24) { if (cur) lines.push(cur); cur = p; } else cur = cur ? cur + ' · ' + p : p; });
+    if (cur) lines.push(cur);
+    return lines.slice(0, 2);
+  }
+  return [sub.slice(0, 22) + '…', sub.slice(22, 44)].filter(s => s && s !== '…');
+}
+function refreshSandbox() {
+  const s = activeScenario;
+  const dimOn = document.getElementById('dimToggle').checked && s.id !== 's0';
+  document.getElementById('scenarioDesc').innerHTML = '<b>' + s.name + '</b> — ' + s.desc + (s.steps.length ? '' : ' <span style="color:#64748b">(选择具体场景查看时间线)</span>');
+  document.querySelectorAll('#flowChips .chip').forEach(c => {
+    const label = c.textContent;
+    const key = Object.keys(FLOW).find(k => FLOW[k].name === label);
+    c.classList.toggle('on', flowFilter ? key === flowFilter : label === '全部');
+  });
+  document.querySelectorAll('#graphSvg g[data-node]').forEach(g => {
+    let on = true;
+    if (flowFilter) on = nodeById(g.dataset.node).flow === flowFilter;
+    else if (dimOn) on = s.nodes.indexOf(g.dataset.node) >= 0;
+    g.style.opacity = on ? 1 : 0.13;
+  });
+  document.querySelectorAll('#graphSvg g[data-edge]').forEach(g => {
+    let on = true;
+    if (flowFilter) { const ed = EDGES.find(x => x.id === g.dataset.edge); on = nodeById(ed.from).flow === flowFilter; }
+    else if (dimOn) on = s.edges.indexOf(g.dataset.edge) >= 0;
+    g.style.opacity = on ? 1 : 0.05;
+  });
+  const ol = document.getElementById('timeline');
+  ol.innerHTML = '';
+  if (!s.steps.length) {
+    ol.innerHTML = '<li data-n="i" style="list-style:none"><span>全景模式不提供逐步时间线;请选择上方 S1–S5 具体场景,或用流筛选拆解视图。</span></li>';
+  } else {
+    s.steps.forEach((st, i) => {
+      const li = document.createElement('li');
+      li.dataset.n = i + 1;
+      li.innerHTML = '<b>' + st.t + '</b><span>' + st.d + '</span>';
+      ol.appendChild(li);
+    });
+  }
+  const op = document.getElementById('outcomesPane');
+  const oc = document.getElementById('outcomes');
+  if (s.outcomes && s.outcomes.length) {
+    op.style.display = '';
+    oc.innerHTML = '<table class="outcomes"><thead><tr><th>对象</th><th>平台交易状态</th><th>履约状态</th><th>物流</th><th>售后</th><th>资金/结论</th></tr></thead><tbody>' +
+      s.outcomes.map(r => '<tr>' + r.map(c2 => '<td>' + c2 + '</td>').join('') + '</tr>').join('') + '</tbody></table>';
+  } else { op.style.display = 'none'; }
+}
+function showNodeInSandbox(id) {
+  const n = nodeById(id);
+  const inScen = SCENARIOS.filter(s => s.nodes.indexOf(id) >= 0).map(s => s.name).join('、') || '—';
+  document.getElementById('nodeDetail').innerHTML =
+    '<h5>' + n.label + flowTagHtml(n.flow) + badgeHtml('done') + '</h5>' +
+    '<p style="font-size:13px;color:#334155;margin:6px 0">' + n.desc + '</p>' +
+    '<p style="font-size:12px;color:var(--muted);margin:4px 0">落库:<code>' + n.storage + '</code></p>' +
+    '<ul class="fields">' + n.fields.map(x => '<li><code>' + x + '</code></li>').join('') + '</ul>' +
+    '<div class="scen">出现在场景:' + inScen + '<br><a href="#/entity/' + id + '" style="color:var(--accent);font-weight:600">在实体字典中查看完整关系 →</a></div>';
+}
+
+/* ================================================================
+ * 视图:实体字典
+ * ================================================================ */
+let entitySearch = '';
+let entityFlowFilter = null;
+function renderEntities() {
+  const el = document.getElementById('view-entities');
+  el.innerHTML =
+    '<h2 class="view-title">实体字典(' + NODES.length + ' 个)</h2>' +
+    '<p class="view-lead">系统全部核心实体:领域定义、关键字段、落库位置。点击行进入实体详情(含全部出入引用关系)。落库列为「—」的表示动态投影,不占独立表。</p>' +
+    '<div class="toolbar">' +
+      '<input type="search" id="entitySearch" placeholder="搜索实体名/字段/表名…" value="' + entitySearch + '">' +
+      '<button class="chip' + (!entityFlowFilter ? ' on' : '') + '" data-f="">全部</button>' +
+      Object.keys(FLOW).filter(k => NODES.some(n => n.flow === k)).map(k =>
+        '<button class="chip' + (entityFlowFilter === k ? ' on' : '') + '" data-f="' + k + '" style="--c:' + FLOW[k].color + '">' + FLOW[k].name + '</button>').join('') +
+      '<span style="font-size:12px;color:var(--muted)" id="entityCount"></span>' +
+    '</div>' +
+    '<table class="sheet entities"><thead><tr><th style="width:170px">实体</th><th style="width:96px">业务流</th><th>一句话说明</th><th style="width:230px">落库</th></tr></thead><tbody id="entityRows"></tbody></table>';
+  const searchEl = el.querySelector('#entitySearch');
+  const onSearch = ev => { entitySearch = ev.target.value; paintEntityRows(); };
+  searchEl.addEventListener('input', onSearch);
+  searchEl.addEventListener('change', onSearch);
+  searchEl.addEventListener('search', onSearch);
+  el.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { entityFlowFilter = c.dataset.f || null; renderEntities(); }));
+  paintEntityRows();
+}
+function paintEntityRows() {
+  const tb = document.getElementById('entityRows');
+  if (!tb) return;
+  const kw = entitySearch.trim().toLowerCase();
+  const list = NODES.filter(n =>
+    (!entityFlowFilter || n.flow === entityFlowFilter) &&
+    (!kw || (n.label + n.desc + n.storage + n.fields.join(',')).toLowerCase().indexOf(kw) >= 0));
+  document.getElementById('entityCount').textContent = list.length + ' / ' + NODES.length + ' 个实体';
+  tb.innerHTML = list.map(n =>
+    '<tr data-id="' + n.id + '"><td><b style="color:' + FLOW[n.flow].color + '">' + n.label + '</b><div style="font-size:11px;color:var(--muted)">' + n.sub + '</div></td>' +
+    '<td>' + flowTagHtml(n.flow) + '</td><td style="font-size:12.5px;color:#334155">' + n.desc.split('。')[0] + '。</td>' +
+    '<td><code>' + n.storage + '</code></td></tr>').join('');
+  tb.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => { location.hash = '#/entity/' + tr.dataset.id; }));
+}
+function renderEntity(id) {
+  const n = nodeById(id);
+  const el = document.getElementById('view-entity');
+  if (!n) { location.hash = '#/entities'; return; }
+  const incoming = EDGES.filter(e => e.to === id);
+  const outgoing = EDGES.filter(e => e.from === id);
+  const inScen = SCENARIOS.filter(s => s.nodes.indexOf(id) >= 0).map(s => s.name);
+  const flowOfNode = FLOWS.find(f => f.entities.indexOf(id) >= 0);
+  el.innerHTML =
+    '<div class="crumbs"><a href="#/">总览</a><span class="sep">/</span><a href="#/entities">实体字典</a><span class="sep">/</span>' + n.label + '</div>' +
+    '<div class="flow-head"><h2 style="color:' + FLOW[n.flow].color + '">' + n.label + '</h2>' + flowTagHtml(n.flow) + '</div>' +
+    '<p class="flow-lead">' + n.desc + '</p>' +
+    '<div class="stack-2">' +
+      '<div class="rules"><h3>关键字段与规则</h3><ul>' + n.fields.map(f => '<li><code>' + f + '</code></li>').join('') + '</ul>' +
+        '<p style="font-size:12.5px;color:var(--muted);margin:10px 0 0">落库:<code>' + n.storage + '</code></p></div>' +
+      '<div class="rules"><h3>数据关系(' + (incoming.length + outgoing.length) + ' 条)</h3>' +
+        '<ul class="rel-list">' +
+        incoming.map(e => '<li>← <a href="#/entity/' + e.from + '">' + nodeById(e.from).label + '</a> <span class="dir">' + e.label + '</span></li>').join('') +
+        outgoing.map(e => '<li>→ <a href="#/entity/' + e.to + '">' + nodeById(e.to).label + '</a> <span class="dir">' + e.label + '</span></li>').join('') +
+        '</ul></div>' +
+    '</div>' +
+    '<div class="rules section-gap"><h3>参与场景与所属流</h3>' +
+      '<p style="font-size:13px;margin:0 0 6px">所属业务流:' + (flowOfNode ? '<a href="#/flow/' + flowOfNode.id + '" style="color:' + FLOW[n.flow].color + ';font-weight:700">' + flowOfNode.title + '</a>' : '—') + '</p>' +
+      '<div class="entity-chips" style="--c:' + FLOW[n.flow].color + '">' +
+        (inScen.length ? inScen.map(s => '<a href="#/sandbox" style="--c:' + FLOW[n.flow].color + '">' + s + '</a>').join('') : '<span style="font-size:12.5px;color:var(--muted)">仅在全景视图中出现</span>') +
+      '</div></div>';
+}
+
+/* ================================================================
+ * 视图:状态机
+ * ================================================================ */
+function renderStates() {
+  const el = document.getElementById('view-states');
+  el.innerHTML =
+    '<h2 class="view-title">状态机与只读投影一览</h2>' +
+    '<p class="view-lead">上半部分是 4 个「只读投影」——它们不是可转移的状态,而是由最新事实随时重算的规则;下半部分是 ' + MACHINES.length + ' 个真实状态机的取值与合法转移。人工不可覆盖的投影用黄色卡片区分。</p>' +
+    '<div class="machine-grid" style="margin-bottom:18px">' +
+      PROJECTIONS.map(p => '<div class="proj-card"><h4>' + p.title + '</h4><p>' + p.body + '</p></div>').join('') +
+    '</div>' +
+    '<div class="machine-grid" id="machineGrid"></div>';
+  const grid = document.getElementById('machineGrid');
+  MACHINES.forEach(m => {
+    const d = document.createElement('div');
+    d.className = 'machine';
+    d.innerHTML = '<h4>' + m.title + ' ' + flowTagHtml(m.flow) + '</h4><p class="note">' + m.note + '</p>';
+    d.appendChild(drawMachine(m));
+    grid.appendChild(d);
+  });
+}
+function drawMachine(m) {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const rows = Math.max.apply(null, m.nodes.map(n => n[2])) + 1;
+  const cols = Math.max.apply(null, m.nodes.map(n => n[1])) + 1;
+  const CW = 158, CH = 40, GX = 24, GY = 20;
+  const W = cols * CW + (cols - 1) * GX + 8, H = rows * CH + (rows - 1) * GY + 10;
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  function e(tag, attrs, text) { const x = document.createElementNS(svgNS, tag); for (const k in attrs) x.setAttribute(k, attrs[k]); if (text != null) x.textContent = text; return x; }
+  const color = FLOW[m.flow].color;
+  const pos = {};
+  m.nodes.forEach(n => { pos[n[0]] = { x: 4 + n[1] * (CW + GX), y: 5 + n[2] * (CH + GY) }; });
+  svg.appendChild((function(){ const d = e('defs', {}); d.innerHTML = '<marker id="sA-' + m.id + '" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>'; return d; })());
+  m.links.forEach(l => {
+    const a = pos[l[0]], b = pos[l[1]];
+    let x1 = a.x + CW, y1 = a.y + CH / 2, x2 = b.x, y2 = b.y + CH / 2;
+    let d;
+    if (Math.abs(a.y - b.y) < 4) { d = 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2; }
+    else {
+      const midX = (x1 + x2) / 2;
+      if (b.x + CW * 0.5 === a.x + CW * 0.5 || Math.abs(a.x - b.x) < 8) { x1 = a.x + CW / 2; x2 = b.x + CW / 2; y1 = a.y + CH; y2 = b.y; d = 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2; }
+      else { d = 'M ' + x1 + ' ' + y1 + ' C ' + midX + ' ' + y1 + ' ' + midX + ' ' + y2 + ' ' + x2 + ' ' + y2; }
+    }
+    const p = e('path', { d, fill: 'none', stroke: '#64748b', 'stroke-width': 1.6, 'marker-end': 'url(#sA-' + m.id + ')' });
+    p.appendChild(e('title', {}, l[0] + ' → ' + l[1] + (l[2] ? '(' + l[2] + ')' : '')));
+    svg.appendChild(p);
+    if (l[2]) svg.appendChild(e('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 5, 'text-anchor': 'middle', 'font-size': 9, fill: '#94a3b8' }, l[2]));
+  });
+  m.nodes.forEach(n => {
+    const p = pos[n[0]];
+    const isEnd = !m.links.some(l => l[0] === n[0]);
+    svg.appendChild(e('rect', { x: p.x, y: p.y, width: CW, height: CH, rx: 8, fill: isEnd ? '#f8fafc' : '#fff', stroke: color, 'stroke-width': 1.8, 'stroke-dasharray': isEnd ? '4 3' : 'none' }));
+    svg.appendChild(e('text', { x: p.x + CW / 2, y: p.y + CH / 2 + 4, 'text-anchor': 'middle', 'font-size': 10.5, 'font-weight': 700, fill: '#1e293b' }, n[0]));
+    svg.appendChild(e('title', {}, n[0] + (isEnd ? '(终态)' : '')));
+  });
+  return svg;
+}
+
+/* ================================================================
+ * 视图:实现状态
+ * ================================================================ */
+function renderStatus() {
+  const el = document.getElementById('view-status');
+  el.innerHTML =
+    '<h2 class="view-title">实现状态对照:领域概念 → 代码现状</h2>' +
+    '<p class="view-lead">CONTEXT.md「履约计划、库存、采购与财务」章节是领域语言先行;本页区分已落地与仅规划的部分,避免把规划当现状。</p>' +
+    '<table class="sheet"><thead><tr><th style="width:250px">概念 / 业务流</th><th style="width:100px">实现程度</th><th>证据与说明</th></tr></thead><tbody>' +
+      STATUS_ROWS.map(r => '<tr><td><b>' + r[0] + '</b></td><td>' + badgeHtml(r[1]) + '</td><td style="font-size:12.5px">' + r[2] + '</td></tr>').join('') +
+    '</tbody></table>' +
+    '<h2 class="view-title section-gap" style="font-size:18px">界面导航对照(8 个顶层工作区)</h2>' +
+    '<p class="view-lead">业务流在界面上的落点:侧边栏 8 个视图分别承载哪些流的哪些操作。</p>' +
+    '<table class="sheet"><thead><tr><th style="width:110px">侧边栏视图</th><th style="width:130px">路由值</th><th>承担的操作</th><th style="width:220px">覆盖业务流</th></tr></thead><tbody>' +
+      UI_MAP.map(r => '<tr><td><b>' + r[0] + '</b></td><td><code>' + r[1] + '</code></td><td style="font-size:12.5px">' + r[2] + '</td><td style="font-size:12.5px;color:var(--muted)">' + r[3] + '</td></tr>').join('') +
+    '</tbody></table>' +
+    '<div class="rules section-gap"><h3>规划路线图摘要(spec 002 §10–13 · Issue #51/#53/#63–67)</h3><ul>' +
+      '<li>库存预留(§10):退货检查结论(可售/瑕疵/报废)是唯一已留衔接点,UI 文案明示「不直接改动库存」。</li>' +
+      '<li>财务预留(§11):实际退款与承运赔付两类资金事实已落库并「供后续财务模块读取」;订单收入/运费/采购支出台账未建。</li>' +
+      '<li>履约计划(§12):预售计划控制发货资格、预售退款减少有效需求、团购未成团仅预测——均为规划。</li>' +
+      '<li>采购(§13):缺口=有效需求+安全余量−可分配现货−采购在途;缺口只生成建议,不直接创建采购订单——均为规划。</li>' +
+    '</ul></div>';
+}
+
+/* ================================================================
+ * 路由
+ * ================================================================ */
+const VIEWS = ['home', 'flow', 'relations', 'sandbox', 'entities', 'entity', 'states', 'status'];
+const NAV_MAP = { home: 'home', relations: 'relations', sandbox: 'sandbox', entities: 'entities', entity: 'entities', states: 'states', status: 'status', flow: 'home' };
+function route() {
+  const hash = location.hash || '#/';
+  const parts = hash.replace(/^#\//, '').split('/');
+  let view = parts[0] || 'home';
+  if (VIEWS.indexOf(view) < 0) view = 'home';
+  VIEWS.forEach(v => document.getElementById('view-' + v).classList.toggle('show', v === view));
+  document.querySelectorAll('#viewnav a').forEach(a => a.classList.toggle('active', a.dataset.view === (NAV_MAP[view] || view)));
+  if (view === 'home') renderHome();
+  else if (view === 'flow') renderFlow(parts[1]);
+  else if (view === 'relations') renderRelations();
+  else if (view === 'sandbox') setupSandboxView();
+  else if (view === 'entities') renderEntities();
+  else if (view === 'entity') renderEntity(parts[1]);
+  else if (view === 'states') renderStates();
+  else if (view === 'status') renderStatus();
+  window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>
