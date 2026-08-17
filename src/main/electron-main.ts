@@ -387,6 +387,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('aftersales-cases:progress', (_event, input: unknown) => (
     desktopSession.progressAftersalesCase(input)
   ));
+  ipcMain.handle('aftersales-cases:record-step-event', (_event, input: unknown) => (
+    desktopSession.recordAftersalesWorkflowStepEvent(input)
+  ));
   ipcMain.handle('fulfillment-plans:query', (_event, input: unknown) => (
     desktopSession.queryFulfillmentPlans(input)
   ));

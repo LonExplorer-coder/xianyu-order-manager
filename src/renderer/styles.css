@@ -5881,6 +5881,26 @@ select:focus-visible {
   color: #1e2937;
 }
 
+.aftersales-workflow-guide > ol > li.is-partial {
+  outline: 1px dashed #e6bd2f;
+  background: #fffdf3;
+}
+
+.aftersales-workflow-guide > ol > li.is-partial > span {
+  background: #fae9a8;
+  color: #6b5510;
+}
+
+.aftersales-workflow-guide > ol > li.is-skipped {
+  color: #6c6f75;
+  background: #f2f3f5;
+}
+
+.aftersales-workflow-guide > ol > li.is-not_applicable {
+  color: #8a8f98;
+  background: #f6f7f8;
+}
+
 @media (max-width: 900px) {
   .aftersales-workflows-workspace {
     padding: 24px;

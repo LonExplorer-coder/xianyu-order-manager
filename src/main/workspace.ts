@@ -207,6 +207,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(48)) migrateToVersion48(database);
   if (!versions.has(49)) migrateToVersion49(database);
   if (!versions.has(50)) migrateToVersion50(database);
+  if (!versions.has(51)) migrateToVersion51(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6193,6 +6194,59 @@ function canonicalizeTemplateDefinitionJsonForV50(definitionJson: string): strin
   });
   if (!changed) return null;
   return JSON.stringify({ ...(parsed as Record<string, unknown>), steps: canonicalSteps });
+}
+
+// v51 一次性升级可执行售后流程：为管理型步骤的人工完成或带原因跳过建立不可变事件表。
+// 既有处理单没有这类事件，全部从空历史开始，业务事实不受影响。
+function migrateToVersion51(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE aftersales_case_step_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        case_id TEXT NOT NULL REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        step_id TEXT NOT NULL CHECK (length(trim(step_id)) BETWEEN 1 AND 64),
+        kind TEXT NOT NULL CHECK (kind IN ('completed', 'skipped')),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        remaining_risk TEXT CHECK (
+          remaining_risk IS NULL OR length(trim(remaining_risk)) BETWEEN 1 AND 500
+        ),
+        workflow_template_id TEXT NOT NULL,
+        workflow_template_version INTEGER NOT NULL CHECK (workflow_template_version >= 1),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (kind = 'completed' AND remaining_risk IS NULL)
+          OR (kind = 'skipped' AND remaining_risk IS NOT NULL)
+        ),
+        FOREIGN KEY (workflow_template_id, workflow_template_version)
+          REFERENCES aftersales_workflow_template_versions(template_id, version)
+          ON DELETE RESTRICT
+      ) STRICT;
+
+      CREATE INDEX aftersales_case_step_events_by_case
+      ON aftersales_case_step_events (case_id, sequence);
+
+      CREATE TRIGGER aftersales_case_step_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_case_step_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case step events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_case_step_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_case_step_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales case step events are immutable');
+      END;
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (51, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
 }
 
 function createMissingSchemaObject(database: DatabaseSync, name: string, sql: string): void {

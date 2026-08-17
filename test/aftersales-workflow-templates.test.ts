@@ -770,8 +770,11 @@ describe('售后流程模板', () => {
     if (!current) throw new Error('补发售后投影不存在');
 
     expect(projectAftersalesWorkflowSteps(current.workflowTemplate, current)
-      .find(({ kind }) => kind === 'confirm_replacement_delivery')?.state)
-      .toBe('current');
+      .find(({ kind }) => kind === 'confirm_replacement_delivery'))
+      .toMatchObject({
+        state: 'partial',
+        progress: { kind: 'quantity', doneQuantity: 1, totalQuantity: 2 },
+      });
   });
 
   it('运输中切换到拦截退回时真实建立指定包裹的拦截事项', async () => {
@@ -896,7 +899,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 50 });
+        .toEqual({ version: 51 });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'
@@ -1146,6 +1149,7 @@ describe('售后流程模板', () => {
 
     const steps = projectAftersalesWorkflowSteps({
       scenario: 'refund_only',
+      stepEvents: [],
       steps: [
         {
           id: 'identify-issue',
@@ -1180,7 +1184,7 @@ describe('售后流程模板', () => {
     });
     expect(steps.find(({ id }) => id === 'legacy-note')).toMatchObject({
       kind: null,
-      state: 'upcoming',
+      state: 'not_started',
       binding: null,
     });
     expect(steps.find(({ id }) => id === 'confirm-refund')).toMatchObject({
@@ -1256,7 +1260,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 50 });
+        .toEqual({ version: 51 });
       expect(verified.prepare(`
         SELECT definition_json FROM aftersales_workflow_template_versions
         WHERE template_id = ? AND version = 2
@@ -1315,5 +1319,399 @@ describe('售后流程模板', () => {
     } finally {
       downgrade.close();
     }
+  });
+
+  it('部分退款与部分收到退货按金额和数量投影为部分完成', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const returnRefund = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'return_refund',
+    );
+    if (!returnRefund) throw new Error('缺少退货退款预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '两件商品寄回后先退一部分',
+      requestedRefundCents: 1_000,
+      items: [{ shipmentPackageItemId, quantity: 2 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '中通快递',
+      trackingNumber: 'ZT-PARTIAL-RECEIVE',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '买家寄回两件',
+    });
+    const returnRecord = registered.returns[0];
+    const partiallyReceived = application.progressAftersalesCase({
+      kind: 'receive_return',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: returnRecord.id,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '包裹破损只收到一件',
+      items: returnRecord.items.map((item) => ({
+        returnRecordItemId: item.id,
+        receivedQuantity: item.quantity - 1,
+      })),
+      discrepancies: [],
+    });
+    const inspected = application.progressAftersalesCase({
+      kind: 'inspect_return',
+      caseId: partiallyReceived.id,
+      expectedRevision: partiallyReceived.revision,
+      returnRecordId: returnRecord.id,
+      result: 'defective',
+      occurredAt: '2026-08-14T10:55:00+08:00',
+      note: '收到的一件存在破损',
+      items: returnRecord.items.map((item) => ({
+        returnRecordItemId: item.id,
+        acceptedQuantity: 0,
+        result: 'defective' as const,
+        note: '破损不能再次销售',
+      })),
+      discrepancies: [],
+    });
+    const partiallyRefunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: inspected.id,
+      expectedRevision: inspected.revision,
+      actualRefundCents: 400,
+      occurredAt: '2026-08-14T11:00:00+08:00',
+      note: '先退 4 元',
+    });
+
+    const steps = projectAftersalesWorkflowSteps(
+      partiallyRefunded.workflowTemplate,
+      partiallyRefunded,
+    );
+    expect(steps.find(({ kind }) => kind === 'receive_return')).toMatchObject({
+      state: 'partial',
+      progress: { kind: 'quantity', doneQuantity: 1, totalQuantity: 2 },
+    });
+    expect(steps.find(({ kind }) => kind === 'confirm_refund')).toMatchObject({
+      state: 'partial',
+      progress: { kind: 'amount', refundedCents: 400, targetCents: 1_000 },
+    });
+    expect(steps.find(({ kind }) => kind === 'inspect_return')?.state).toBe('completed');
+  });
+
+  it('退货包裹确认丢失后收货与检查步骤自动投影不再适用', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const returnRefund = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'return_refund',
+    );
+    if (!returnRefund) throw new Error('缺少退货退款预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '买家寄回后包裹丢失',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const registered = application.progressAftersalesCase({
+      kind: 'register_return',
+      caseId: created.id,
+      expectedRevision: created.revision,
+      shippingCarrier: '顺丰速运',
+      trackingNumber: 'SF-LOST-RETURN',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+      reason: '买家寄回原商品',
+    });
+    const accepted = application.progressAftersalesCase({
+      kind: 'update_return_logistics_status',
+      caseId: registered.id,
+      expectedRevision: registered.revision,
+      returnRecordId: registered.returns[0].id,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-14T10:45:00+08:00',
+      reason: '已核对承运方揽收证据',
+    });
+    const withLoss = application.progressAftersalesCase({
+      kind: 'record_return_logistics_exception',
+      caseId: accepted.id,
+      expectedRevision: accepted.revision,
+      returnRecordId: accepted.returns[0].id,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: { scope: 'package' },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-14T10:50:00+08:00',
+      reason: '承运方确认整个退货包裹丢失',
+    });
+
+    const steps = projectAftersalesWorkflowSteps(withLoss.workflowTemplate, withLoss);
+    expect(steps.find(({ kind }) => kind === 'receive_return')).toMatchObject({
+      state: 'not_applicable',
+      notApplicableReason: expect.stringContaining('退货包裹已确认丢失'),
+    });
+    expect(steps.find(({ kind }) => kind === 'inspect_return')?.state).toBe('not_applicable');
+    expect(steps.find(({ kind }) => kind === 'confirm_refund')?.state).toBe('current');
+  });
+
+  it('事实型流程步骤不能人工登记完成或跳过', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const returnRefund = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'return_refund',
+    );
+    if (!returnRefund) throw new Error('缺少退货退款预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: returnRefund.id,
+      handlingDirection: 'buyer_return',
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '事实步骤不可伪完成',
+      requestedRefundCents: 500,
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const receiveStep = created.workflowTemplate.steps.find(
+      ({ kind }) => kind === 'receive_return',
+    );
+    if (!receiveStep) throw new Error('缺少收货步骤');
+
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: receiveStep.id,
+      kind: 'completed',
+      reason: '试图手工勾选完成',
+      occurredAt: '2026-08-14T10:40:00+08:00',
+    })).toThrow('事实型流程步骤只能由真实业务事实满足');
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: receiveStep.id,
+      kind: 'skipped',
+      reason: '试图跳过收货',
+      remainingRisk: '商品去向不明',
+      occurredAt: '2026-08-14T10:41:00+08:00',
+    })).toThrow('事实型流程步骤只能由真实业务事实满足');
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: 'not-a-step',
+      kind: 'completed',
+      reason: '步骤不存在',
+      occurredAt: '2026-08-14T10:42:00+08:00',
+    })).toThrow('售后流程步骤不存在');
+  });
+
+  it('管理型步骤可明确完成或带原因跳过并留不可变事件', async () => {
+    const { application, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const custom = application.createAftersalesWorkflowTemplate({
+      name: '带管理确认的其他处理',
+      scenario: 'other',
+      steps: [
+        {
+          id: 'identify',
+          kind: 'identify_issue',
+          name: '确认问题',
+          required: true,
+          fields: ['items', 'reason'],
+          condition: null,
+        },
+        {
+          id: 'buyer-note',
+          kind: 'record_resolution',
+          name: '保存买家沟通凭证',
+          required: true,
+          fields: ['resolution_reason'],
+          condition: null,
+        },
+        {
+          id: 'complete',
+          kind: 'complete',
+          name: '完成售后',
+          required: true,
+          fields: ['resolution_reason'],
+          condition: null,
+        },
+      ],
+    });
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: custom.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '管理型步骤留痕测试',
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision + 1,
+      stepId: 'buyer-note',
+      kind: 'skipped',
+      reason: '版本过期',
+      remainingRisk: '无',
+      occurredAt: '2026-08-14T10:31:00+08:00',
+    })).toThrow('售后处理单已在其他操作中更新，请刷新后重试');
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: 'buyer-note',
+      kind: 'skipped',
+      reason: '电话确认无需书面凭证',
+      occurredAt: '2026-08-14T10:31:00+08:00',
+    })).toThrow('请填写 1 至 500 字的剩余风险说明');
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: 'identify',
+      kind: 'completed',
+      reason: '重复完成已满足步骤',
+      occurredAt: '2026-08-14T10:32:00+08:00',
+    })).toThrow('该流程步骤已由业务事实满足');
+
+    const skipped = application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: 'buyer-note',
+      kind: 'skipped',
+      reason: '电话确认无需书面凭证',
+      remainingRisk: '缺少书面沟通凭证',
+      occurredAt: '2026-08-14T10:33:00+08:00',
+    });
+    expect(skipped.revision).toBe(created.revision + 1);
+    expect(skipped.workflowTemplate.stepEvents).toEqual([{
+      id: expect.any(String) as string,
+      stepId: 'buyer-note',
+      kind: 'skipped',
+      reason: '电话确认无需书面凭证',
+      remainingRisk: '缺少书面沟通凭证',
+      workflowTemplateId: custom.id,
+      workflowTemplateVersion: 1,
+      occurredAt: '2026-08-14T10:33:00+08:00',
+      createdAt: '2026-08-14T02:10:00.000Z',
+    }]);
+    const steps = projectAftersalesWorkflowSteps(skipped.workflowTemplate, skipped);
+    expect(steps.find(({ id }) => id === 'buyer-note')).toMatchObject({
+      state: 'skipped',
+      stepEvent: { kind: 'skipped', remainingRisk: '缺少书面沟通凭证' },
+    });
+    expect(steps.find(({ id }) => id === 'complete')?.state).toBe('current');
+
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: skipped.id,
+      expectedRevision: skipped.revision,
+      stepId: 'buyer-note',
+      kind: 'completed',
+      reason: '重复登记',
+      occurredAt: '2026-08-14T10:34:00+08:00',
+    })).toThrow('该流程步骤已登记完成或跳过');
+
+    const secondCase = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: custom.id,
+      occurredAt: '2026-08-14T10:35:00+08:00',
+      reason: '管理型完成测试',
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const completedStep = application.recordAftersalesWorkflowStepEvent({
+      caseId: secondCase.id,
+      expectedRevision: secondCase.revision,
+      stepId: 'buyer-note',
+      kind: 'completed',
+      reason: '买家聊天记录已存档',
+      occurredAt: '2026-08-14T10:36:00+08:00',
+    });
+    expect(projectAftersalesWorkflowSteps(
+      completedStep.workflowTemplate,
+      completedStep,
+    ).find(({ id }) => id === 'buyer-note')).toMatchObject({
+      state: 'completed',
+      stepEvent: { kind: 'completed', remainingRisk: null },
+    });
+
+    const cancelled = application.updateAftersalesCase({
+      caseId: completedStep.id,
+      expectedRevision: completedStep.revision,
+      status: 'cancelled',
+      reason: '后续不再处理',
+      items: completedStep.items.map(({ shipmentPackageItemId, quantity }) => ({
+        shipmentPackageItemId,
+        quantity,
+      })),
+      changeReason: '后续不再处理',
+    });
+    expect(() => application.recordAftersalesWorkflowStepEvent({
+      caseId: cancelled.id,
+      expectedRevision: cancelled.revision,
+      stepId: 'complete',
+      kind: 'completed',
+      reason: '结束后不能再登记',
+      occurredAt: '2026-08-14T10:37:00+08:00',
+    })).toThrow('已经结束的售后处理单不能登记流程步骤');
+  });
+
+  it('v51 流程步骤事件表随迁移建立且事件不可变', async () => {
+    const { application, dataDirectory, shipmentRecordId, shipmentPackageItemId } =
+      await openShippedApplication();
+    const other = application.listAftersalesWorkflowTemplates().find(
+      ({ scenario }) => scenario === 'other',
+    );
+    if (!other) throw new Error('缺少其他处理预置流程');
+    const created = application.createAftersalesCase({
+      shipmentRecordId,
+      workflowTemplateId: other.id,
+      occurredAt: '2026-08-14T10:30:00+08:00',
+      reason: '步骤事件迁移测试',
+      items: [{ shipmentPackageItemId, quantity: 1 }],
+    });
+    const withEvent = application.recordAftersalesWorkflowStepEvent({
+      caseId: created.id,
+      expectedRevision: created.revision,
+      stepId: 'record-resolution',
+      kind: 'completed',
+      reason: '处理结论已记录',
+      occurredAt: '2026-08-14T10:31:00+08:00',
+    });
+    application.close();
+    applications.splice(applications.indexOf(application), 1);
+
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 51 });
+      expect(legacy.prepare(`
+        SELECT step_id, kind, reason, remaining_risk, workflow_template_id,
+          workflow_template_version, occurred_at
+        FROM aftersales_case_step_events WHERE case_id = ?
+      `).all(created.id)).toEqual([{
+        step_id: 'record-resolution',
+        kind: 'completed',
+        reason: '处理结论已记录',
+        remaining_risk: null,
+        workflow_template_id: other.id,
+        workflow_template_version: 1,
+        occurred_at: '2026-08-14T10:31:00+08:00',
+      }]);
+      expect(() => legacy.prepare(`
+        UPDATE aftersales_case_step_events SET reason = '覆盖'
+      `).run()).toThrow(/immutable/u);
+      expect(() => legacy.prepare(`
+        DELETE FROM aftersales_case_step_events
+      `).run()).toThrow(/immutable/u);
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = new LocalApplication(unusedRecognizer);
+    applications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+    const restored = reopened.queryAftersalesCases({ shipmentRecordId })
+      .find(({ id }) => id === created.id);
+    expect(restored?.workflowTemplate.stepEvents).toEqual(
+      withEvent.workflowTemplate.stepEvents,
+    );
   });
 });

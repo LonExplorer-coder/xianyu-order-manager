@@ -1,5 +1,7 @@
 import type {
   AftersalesCase,
+  AftersalesCaseStepEvent,
+  AftersalesCaseWorkflowTemplate,
   AftersalesWorkflow,
   ProgressAftersalesCaseInput,
 } from './aftersales-cases';
@@ -93,9 +95,25 @@ export type AftersalesWorkflowTemplate = {
   versionCreatedAt: string;
 };
 
+// 六态由流程定义和真实事实共同计算，不落库存储。
+export type AftersalesWorkflowStepState =
+  | 'not_started'
+  | 'current'
+  | 'partial'
+  | 'completed'
+  | 'skipped'
+  | 'not_applicable';
+
+export type AftersalesWorkflowStepProgress =
+  | { kind: 'amount'; refundedCents: number; targetCents: number }
+  | { kind: 'quantity'; doneQuantity: number; totalQuantity: number };
+
 export type AftersalesWorkflowStepProjection = AftersalesWorkflowStep & {
-  state: 'completed' | 'current' | 'upcoming';
+  state: AftersalesWorkflowStepState;
   binding: AftersalesWorkflowStepBinding | null;
+  progress: AftersalesWorkflowStepProgress | null;
+  notApplicableReason: string | null;
+  stepEvent: AftersalesCaseStepEvent | null;
 };
 
 export type StoredAftersalesWorkflowTemplateDefinition = {
@@ -497,7 +515,7 @@ export function isAftersalesWorkflowScenario(
 }
 
 export function projectAftersalesWorkflowSteps(
-  template: Pick<AftersalesWorkflowTemplate, 'scenario' | 'steps'>,
+  template: Pick<AftersalesCaseWorkflowTemplate, 'scenario' | 'steps' | 'stepEvents'>,
   aftersalesCase: AftersalesCase,
 ): AftersalesWorkflowStepProjection[] {
   const currentRound = currentWorkflowRound(template.scenario, aftersalesCase);
@@ -518,41 +536,231 @@ export function projectAftersalesWorkflowSteps(
     stepValue.condition === null
     || facts[stepValue.condition.fact] === stepValue.condition.equals
   ));
-  const completed = visible.map((stepValue) => {
-    const { kind } = stepValue;
-    if (kind === null) return false;
-    return stepCompleted(
+  const quantities = returnQuantityFacts(currentReturns);
+  const receivableQuantity = Math.max(quantities.expectedQuantity - quantities.lostQuantity, 0);
+  const eventByStepId = new Map(template.stepEvents.map((event) => [event.stepId, event]));
+  const resolved = visible.map((stepValue) => resolveWorkflowStepState({
+    step: stepValue,
+    scenario: template.scenario,
+    aftersalesCase,
+    currentRound,
+    currentReturns,
+    quantities,
+    receivableQuantity,
+    stepEvent: eventByStepId.get(stepValue.id) ?? null,
+  }));
+  // 当前待办指向第一个仍可执行的步骤：需要检查、部分完成、已跳过、不再适用或已完成的步骤都不占位。
+  const actionableIndexes = resolved.flatMap((entry, index) => (
+    entry.actionable ? [index] : []
+  ));
+  const currentIndex = actionableIndexes.find((index) => visible[index]?.required)
+    ?? actionableIndexes[0]
+    ?? -1;
+  return resolved.map((entry, index) => ({
+    ...entry.step,
+    state: entry.state === 'pending'
+      ? index === currentIndex ? 'current' : 'not_started'
+      : entry.state,
+    binding: entry.step.kind === null
+      ? null
+      : AFTERSALES_WORKFLOW_STEP_BINDINGS[entry.step.kind],
+    progress: entry.progress,
+    notApplicableReason: entry.notApplicableReason,
+    stepEvent: entry.stepEvent,
+  }));
+}
+
+type ResolvedWorkflowStep = {
+  step: AftersalesWorkflowStep;
+  state: AftersalesWorkflowStepState | 'pending';
+  progress: AftersalesWorkflowStepProgress | null;
+  notApplicableReason: string | null;
+  stepEvent: AftersalesCaseStepEvent | null;
+  actionable: boolean;
+};
+
+function resolveWorkflowStepState(input: {
+  step: AftersalesWorkflowStep;
+  scenario: AftersalesWorkflowScenario;
+  aftersalesCase: AftersalesCase;
+  currentRound: AftersalesCase['rounds'][number] | null;
+  currentReturns: AftersalesCase['returns'];
+  quantities: ReturnQuantityFacts;
+  receivableQuantity: number;
+  stepEvent: AftersalesCaseStepEvent | null;
+}): ResolvedWorkflowStep {
+  const { step, scenario, aftersalesCase, currentRound, currentReturns } = input;
+  const { kind } = step;
+  const base = { step, progress: null, notApplicableReason: null };
+  if (kind === null) {
+    // 需要检查的步骤不可执行：不判完成，也不成为当前待办。
+    return { ...base, state: 'pending', stepEvent: null, actionable: false };
+  }
+  const binding = AFTERSALES_WORKFLOW_STEP_BINDINGS[kind];
+  const stepEvent = binding.category === 'management' ? input.stepEvent : null;
+  const completedByFacts = stepCompleted(
+    kind,
+    scenario,
+    aftersalesCase,
+    currentRound,
+    currentReturns,
+    input.quantities,
+    input.receivableQuantity,
+  )
+    && step.fields.every((field) => workflowFieldSatisfied(
+      field,
       kind,
-      template.scenario,
+      scenario,
       aftersalesCase,
       currentRound,
       currentReturns,
-    )
-      && stepValue.fields.every((field) => workflowFieldSatisfied(
-        field,
-        kind,
-        template.scenario,
-        aftersalesCase,
-        currentRound,
-        currentReturns,
-      ));
-  });
-  // 需要检查的步骤不可执行：不判完成，也不成为当前待办。
-  const currentIndex = completed.findIndex((value, index) => (
-    !value && visible[index]?.required && visible[index]?.kind !== null
-  ));
-  const fallbackIndex = currentIndex < 0
-    ? completed.findIndex((value, index) => !value && visible[index]?.kind !== null)
-    : currentIndex;
-  return visible.map((stepValue, index) => ({
-    ...stepValue,
-    state: completed[index]
-      ? 'completed'
-      : index === fallbackIndex
-        ? 'current'
-        : 'upcoming',
-    binding: stepValue.kind === null ? null : AFTERSALES_WORKFLOW_STEP_BINDINGS[stepValue.kind],
-  }));
+    ));
+  if (completedByFacts) {
+    return { ...base, state: 'completed', stepEvent, actionable: false };
+  }
+  if (stepEvent !== null) {
+    return {
+      ...base,
+      state: stepEvent.kind === 'skipped' ? 'skipped' : 'completed',
+      stepEvent,
+      actionable: false,
+    };
+  }
+  const notApplicableReason = workflowStepNotApplicableReason(
+    kind,
+    aftersalesCase,
+    input.quantities,
+    input.receivableQuantity,
+  );
+  if (notApplicableReason !== null) {
+    return {
+      ...base,
+      state: 'not_applicable',
+      notApplicableReason,
+      stepEvent,
+      actionable: false,
+    };
+  }
+  const progress = workflowStepProgress(
+    kind,
+    aftersalesCase,
+    currentRound,
+    input.quantities,
+    input.receivableQuantity,
+  );
+  if (progress !== null) {
+    return { ...base, state: 'partial', progress, stepEvent, actionable: false };
+  }
+  return { ...base, state: 'pending', stepEvent, actionable: true };
+}
+
+type ReturnQuantityFacts = {
+  expectedQuantity: number;
+  receivedQuantity: number;
+  inspectedQuantity: number;
+  lostQuantity: number;
+};
+
+function returnQuantityFacts(currentReturns: AftersalesCase['returns']): ReturnQuantityFacts {
+  let expectedQuantity = 0;
+  let receivedQuantity = 0;
+  let inspectedQuantity = 0;
+  let lostQuantity = 0;
+  for (const record of currentReturns) {
+    let recordLostQuantity = 0;
+    let wholePackageLost = false;
+    for (const exception of record.logisticsExceptions) {
+      if (exception.exceptionType !== 'lost' || exception.stage !== 'confirmed') continue;
+      if (exception.impact.scope === 'package') {
+        wholePackageLost = true;
+        break;
+      }
+      for (const affected of exception.impact.items) recordLostQuantity += affected.quantity;
+    }
+    for (const item of record.items) {
+      expectedQuantity += item.quantity;
+      receivedQuantity += item.receivedQuantity;
+      if (item.inspectionResult !== null) inspectedQuantity += item.quantity;
+    }
+    lostQuantity += wholePackageLost
+      ? record.items.reduce((sum, item) => sum + item.quantity, 0)
+      : recordLostQuantity;
+  }
+  return { expectedQuantity, receivedQuantity, inspectedQuantity, lostQuantity };
+}
+
+function workflowStepNotApplicableReason(
+  kind: AftersalesWorkflowStepKind,
+  value: AftersalesCase,
+  quantities: ReturnQuantityFacts,
+  receivableQuantity: number,
+): string | null {
+  if (value.status === 'cancelled') return '售后处理已取消';
+  if ((kind === 'receive_return' || kind === 'inspect_return')
+    && quantities.expectedQuantity > 0
+    && receivableQuantity === 0) {
+    return '退货包裹已确认丢失，无法收到或检查';
+  }
+  // 退款申请取消且没有实际退款时步骤回到未完成（规格 3.6），只有带原因结束才不再适用。
+  if (kind === 'confirm_refund' && value.refund?.status === 'ended') {
+    return '退款已带原因结束，未再补退';
+  }
+  return null;
+}
+
+function workflowStepProgress(
+  kind: AftersalesWorkflowStepKind,
+  value: AftersalesCase,
+  currentRound: AftersalesCase['rounds'][number] | null,
+  quantities: ReturnQuantityFacts,
+  receivableQuantity: number,
+): AftersalesWorkflowStepProgress | null {
+  if (kind === 'confirm_refund'
+    && value.refund?.status === 'pending'
+    && value.refund.fulfillment.kind === 'partial') {
+    return {
+      kind: 'amount',
+      refundedCents: value.refund.fulfillment.refundedAmountCents,
+      targetCents: value.refund.requestedAmountCents,
+    };
+  }
+  if (kind === 'receive_return'
+    && quantities.receivedQuantity > 0
+    && quantities.receivedQuantity < receivableQuantity) {
+    return {
+      kind: 'quantity',
+      doneQuantity: quantities.receivedQuantity,
+      totalQuantity: quantities.expectedQuantity,
+    };
+  }
+  if (kind === 'inspect_return'
+    && quantities.inspectedQuantity > 0
+    && quantities.inspectedQuantity < quantities.receivedQuantity) {
+    return {
+      kind: 'quantity',
+      doneQuantity: quantities.inspectedQuantity,
+      totalQuantity: quantities.receivedQuantity,
+    };
+  }
+  if (kind === 'confirm_replacement_delivery') {
+    const activePackages = currentRound?.replacementShipment?.packages.filter(({ status }) => (
+      status === 'active'
+    )) ?? [];
+    let totalQuantity = 0;
+    let deliveredQuantity = 0;
+    for (const shipmentPackage of activePackages) {
+      const packageQuantity = shipmentPackage.items.reduce(
+        (sum, item) => sum + item.quantity,
+        0,
+      );
+      totalQuantity += packageQuantity;
+      if (shipmentPackage.logisticsStatus === 'delivered') deliveredQuantity += packageQuantity;
+    }
+    if (deliveredQuantity > 0 && deliveredQuantity < totalQuantity) {
+      return { kind: 'quantity', doneQuantity: deliveredQuantity, totalQuantity };
+    }
+  }
+  return null;
 }
 
 function stepCompleted(
@@ -561,6 +769,8 @@ function stepCompleted(
   value: AftersalesCase,
   currentRound: AftersalesCase['rounds'][number] | null,
   currentReturns: AftersalesCase['returns'],
+  quantities: ReturnQuantityFacts,
+  receivableQuantity: number,
 ): boolean {
   if (kind === 'identify_issue') return true;
   if (kind === 'choose_resolution') {
@@ -572,10 +782,18 @@ function stepCompleted(
   }
   if (kind === 'request_interception') return value.coordination.interception !== null;
   if (kind === 'register_return') return currentReturns.length > 0;
+  // 收货完成按真实数量判定：部分收到只投影部分完成，不能凭包裹状态误判完成。
   if (kind === 'receive_return') {
-    return currentReturns.some(({ status }) => status === 'received' || status === 'inspected');
+    return currentReturns.length > 0
+      && quantities.receivedQuantity > 0
+      && quantities.receivedQuantity >= receivableQuantity;
   }
-  if (kind === 'inspect_return') return currentReturns.some(({ status }) => status === 'inspected');
+  // 拦截退回商品的检查由拦截检查事实满足；寄回商品的检查要求全部退货记录都已检查。
+  if (kind === 'inspect_return') {
+    return value.coordination.interceptedReturnInspection !== null
+      || (currentReturns.length > 0
+        && currentReturns.every(({ status }) => status === 'inspected'));
+  }
   if (kind === 'confirm_refund') return value.refund?.status === 'confirmed';
   if (kind === 'prepare_replacement') {
     return currentRound?.replacementShipment !== null && currentRound !== null;

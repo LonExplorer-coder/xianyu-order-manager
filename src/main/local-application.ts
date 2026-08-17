@@ -6013,6 +6013,10 @@ export class LocalApplication {
     return this.aftersalesService().query(input);
   }
 
+  public recordAftersalesWorkflowStepEvent(input: unknown): AftersalesCase {
+    return this.aftersalesService().recordStepEvent(input);
+  }
+
   public updateAftersalesCase(input: unknown): AftersalesCase {
     return this.aftersalesService().update(input);
   }

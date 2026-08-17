@@ -153,6 +153,9 @@ const api: DesktopApi = {
   ),
   updateAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:update', input),
   progressAftersalesCase: (input) => ipcRenderer.invoke('aftersales-cases:progress', input),
+  recordAftersalesWorkflowStepEvent: (input) => (
+    ipcRenderer.invoke('aftersales-cases:record-step-event', input)
+  ),
   queryFulfillmentPlans: (query) => ipcRenderer.invoke('fulfillment-plans:query', query),
   createFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:create', input),
   addFulfillmentPlanOrders: (input) => (

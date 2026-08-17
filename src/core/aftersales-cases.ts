@@ -593,6 +593,29 @@ export type AftersalesCaseWorkflowTemplateEvent = {
   createdAt: string;
 };
 
+// 管理型流程步骤的人工完成或带原因跳过留痕；事实型步骤只能由业务事实满足，不产生这类事件。
+export type AftersalesCaseStepEvent = {
+  id: string;
+  stepId: string;
+  kind: 'completed' | 'skipped';
+  reason: string;
+  remainingRisk: string | null;
+  workflowTemplateId: string;
+  workflowTemplateVersion: number;
+  occurredAt: string;
+  createdAt: string;
+};
+
+export type RecordAftersalesWorkflowStepEventInput = {
+  caseId: string;
+  expectedRevision: number;
+  stepId: string;
+  kind: 'completed' | 'skipped';
+  reason: string;
+  remainingRisk?: string;
+  occurredAt: string;
+};
+
 export type AftersalesCaseWorkflowTemplate = {
   templateId: string;
   version: number;
@@ -600,6 +623,7 @@ export type AftersalesCaseWorkflowTemplate = {
   scenario: AftersalesWorkflowScenario;
   steps: AftersalesWorkflowStep[];
   timeline: AftersalesCaseWorkflowTemplateEvent[];
+  stepEvents: AftersalesCaseStepEvent[];
 };
 
 export type AftersalesProcessingRoundItem = {
@@ -811,6 +835,46 @@ export function normalizeAftersalesCaseQuery(input: unknown): AftersalesCaseQuer
     shipmentRecordId: record.shipmentRecordId === undefined
       ? undefined
       : boundedText(record.shipmentRecordId, 200, '发货记录筛选无效'),
+  };
+}
+
+export function normalizeRecordAftersalesWorkflowStepEventInput(
+  input: unknown,
+): RecordAftersalesWorkflowStepEventInput {
+  const record = asRecord(input, '登记流程步骤事件参数无效');
+  rejectUnknownKeys(
+    record,
+    [
+      'caseId', 'expectedRevision', 'stepId', 'kind',
+      'reason', 'remainingRisk', 'occurredAt',
+    ],
+    '登记流程步骤事件参数',
+  );
+  if (record.kind !== 'completed' && record.kind !== 'skipped') {
+    throw new Error('流程步骤事件类型无效');
+  }
+  if (record.kind === 'skipped' && record.remainingRisk === undefined) {
+    throw new Error('请填写 1 至 500 字的剩余风险说明');
+  }
+  if (record.kind === 'completed' && record.remainingRisk !== undefined) {
+    throw new Error('完成流程步骤不需要登记剩余风险');
+  }
+  return {
+    kind: record.kind,
+    caseId: boundedText(record.caseId, 200, '售后处理单标识无效'),
+    expectedRevision: revision(record.expectedRevision),
+    stepId: boundedText(record.stepId, 64, '售后流程步骤标识无效'),
+    reason: boundedText(record.reason, 500, '请填写 1 至 500 字的流程步骤说明'),
+    ...(record.remainingRisk === undefined
+      ? {}
+      : {
+        remainingRisk: boundedText(
+          record.remainingRisk,
+          500,
+          '请填写 1 至 500 字的剩余风险说明',
+        ),
+      }),
+    occurredAt: dateTime(record.occurredAt, '流程步骤事件时间无效'),
   };
 }
 

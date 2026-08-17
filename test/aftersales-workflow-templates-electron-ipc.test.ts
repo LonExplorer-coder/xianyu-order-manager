@@ -127,6 +127,23 @@ describe('售后流程模板 Electron IPC', () => {
       occurredAt: '2026-08-14T10:00:00+08:00',
       reason: '  ',
     })).rejects.toThrow('请填写 1 至 500 字的结束退款原因');
+    await expect(invoke('aftersales-cases:record-step-event', {
+      caseId: 'case-1',
+      expectedRevision: 1,
+      stepId: 'identify',
+      kind: 'completed',
+      reason: '留痕',
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      extra: 1,
+    })).rejects.toThrow('登记流程步骤事件参数包含未知字段：extra');
+    await expect(invoke('aftersales-cases:record-step-event', {
+      caseId: 'case-1',
+      expectedRevision: 1,
+      stepId: 'identify',
+      kind: 'skipped',
+      reason: '跳过管理确认',
+      occurredAt: '2026-08-14T10:00:00+08:00',
+    })).rejects.toThrow('请填写 1 至 500 字的剩余风险说明');
   });
 });
 

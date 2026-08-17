@@ -654,6 +654,12 @@ export class DesktopSession {
     return result;
   }
 
+  public recordAftersalesWorkflowStepEvent(input: unknown): AftersalesCase {
+    const result = this.requireApplication().recordAftersalesWorkflowStepEvent(input);
+    this.refreshOrders();
+    return result;
+  }
+
   public queryFulfillmentPlans(input?: unknown): FulfillmentPlanView[] {
     return this.requireApplication().queryFulfillmentPlans(input);
   }

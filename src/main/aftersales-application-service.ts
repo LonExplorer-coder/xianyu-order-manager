@@ -8,6 +8,7 @@ import {
   normalizeAftersalesCaseQuery,
   normalizeCreateAftersalesCaseInput,
   normalizeProgressAftersalesCaseInput,
+  normalizeRecordAftersalesWorkflowStepEventInput,
   normalizeUpdateAftersalesCaseInput,
   isSettledRefundStatus,
   projectAftersalesRefundFulfillment,
@@ -16,6 +17,7 @@ import {
   type AftersalesCaseItem,
   type AftersalesCaseItemInput,
   type AftersalesCaseSnapshot,
+  type AftersalesCaseStepEvent,
   type AftersalesCaseWorkflowTemplate,
   type AftersalesCaseWorkflowTemplateEvent,
   type AftersalesFulfillmentSummary,
@@ -24,6 +26,10 @@ import {
   type AftersalesReturnDiscrepancy,
   type AftersalesReturnRecord,
 } from '../core/aftersales-cases';
+import {
+  AFTERSALES_WORKFLOW_STEP_BINDINGS,
+  projectAftersalesWorkflowSteps,
+} from '../core/aftersales-workflow-templates';
 import {
   coordinateAftersales,
   isAftersalesHandlingDirection,
@@ -265,6 +271,101 @@ export class AftersalesApplicationService {
       ORDER BY occurred_at DESC, created_at DESC, id DESC
     `).all(...values) as unknown as SqlRow[];
     return rows.map((row) => this.get(asString(row.id)));
+  }
+
+  // 管理型步骤的人工完成或带原因跳过留痕；事实型步骤一律拒绝，真实事实只能通过领域动作补录。
+  public recordStepEvent(input: unknown): AftersalesCase {
+    const prepared = normalizeRecordAftersalesWorkflowStepEventInput(input);
+    const current = this.get(prepared.caseId);
+    if (current.status === 'completed' || current.status === 'cancelled') {
+      throw new Error('已经结束的售后处理单不能登记流程步骤');
+    }
+    if (current.revision !== prepared.expectedRevision) {
+      throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
+    }
+    const step = current.workflowTemplate.steps.find(({ id }) => id === prepared.stepId);
+    if (!step) throw new Error('售后流程步骤不存在');
+    if (step.kind === null) {
+      throw new Error('需要检查的流程步骤未绑定业务动作，请先修正模板');
+    }
+    if (AFTERSALES_WORKFLOW_STEP_BINDINGS[step.kind].category !== 'management') {
+      throw new Error('事实型流程步骤只能由真实业务事实满足');
+    }
+    if (current.workflowTemplate.stepEvents.some(({ stepId }) => stepId === prepared.stepId)) {
+      throw new Error('该流程步骤已登记完成或跳过');
+    }
+    const projection = projectAftersalesWorkflowSteps(current.workflowTemplate, current)
+      .find(({ id }) => id === prepared.stepId);
+    if (!projection) {
+      throw new Error('该流程步骤在当前流程条件下不可用');
+    }
+    if (projection.state === 'completed') {
+      throw new Error('该流程步骤已由业务事实满足');
+    }
+    if (projection.state !== 'current' && projection.state !== 'not_started') {
+      throw new Error('该流程步骤当前不能登记完成或跳过');
+    }
+    const latestTemplateEvent = current.workflowTemplate.timeline.at(-1);
+    if (latestTemplateEvent) {
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        latestTemplateEvent.occurredAt,
+        '流程步骤事件时间不能早于上一次流程选择',
+      );
+    }
+    const now = new Date().toISOString();
+    const snapshot: AftersalesCaseSnapshot = {
+      status: current.status,
+      reason: current.reason,
+      items: current.items.map(({ shipmentPackageItemId, quantity }) => ({
+        shipmentPackageItemId,
+        quantity,
+      })),
+    };
+    this.workspace.transaction(() => {
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_case_step_events (
+          id, case_id, step_id, kind, reason, remaining_risk,
+          workflow_template_id, workflow_template_version, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        current.id,
+        prepared.stepId,
+        prepared.kind,
+        prepared.reason,
+        prepared.remainingRisk ?? null,
+        current.workflowTemplate.templateId,
+        current.workflowTemplate.version,
+        prepared.occurredAt,
+        now,
+      );
+      const updated = this.workspace.database.prepare(`
+        UPDATE aftersales_cases
+        SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(now, current.id, current.revision);
+      if (updated.changes !== 1) {
+        throw new Error('售后处理单已在其他操作中更新，请刷新后重试');
+      }
+      // 步骤事件不改变案件快照，但版本递增必须在处理单事件链上留痕，保持版本一一对应。
+      this.workspace.database.prepare(`
+        INSERT INTO aftersales_case_events (
+          id, case_id, kind, base_revision, result_revision,
+          before_snapshot_json, after_snapshot_json, change_reason, created_at
+        ) VALUES (?, ?, 'updated', ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        current.id,
+        current.revision,
+        current.revision + 1,
+        JSON.stringify(snapshot),
+        JSON.stringify(snapshot),
+        prepared.reason,
+        now,
+      );
+    });
+    return this.get(current.id);
   }
 
   public changeWorkflowTemplate(input: unknown): AftersalesCase {
@@ -2441,6 +2542,29 @@ export class AftersalesApplicationService {
       current.after.templateId,
       current.after.version,
     );
+    const stepEventRows = this.workspace.database.prepare(`
+      SELECT *
+      FROM aftersales_case_step_events
+      WHERE case_id = ?
+      ORDER BY sequence
+    `).all(caseId) as unknown as SqlRow[];
+    const stepEvents = stepEventRows.map((row): AftersalesCaseStepEvent => {
+      const kind = asString(row.kind);
+      if (kind !== 'completed' && kind !== 'skipped') {
+        throw new Error('数据库售后流程步骤事件无效');
+      }
+      return {
+        id: asString(row.id),
+        stepId: asString(row.step_id),
+        kind,
+        reason: asString(row.reason),
+        remainingRisk: row.remaining_risk === null ? null : asString(row.remaining_risk),
+        workflowTemplateId: asString(row.workflow_template_id),
+        workflowTemplateVersion: asNumber(row.workflow_template_version),
+        occurredAt: asString(row.occurred_at),
+        createdAt: asString(row.created_at),
+      };
+    });
     return {
       templateId: template.id,
       version: template.version,
@@ -2448,6 +2572,7 @@ export class AftersalesApplicationService {
       scenario: template.scenario,
       steps: template.steps,
       timeline,
+      stepEvents,
     };
   }
 

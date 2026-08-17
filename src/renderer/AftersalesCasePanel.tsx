@@ -11,6 +11,7 @@ import {
   aftersalesWorkflowFieldLabel,
   aftersalesWorkflowStepCategoryLabel,
   projectAftersalesWorkflowSteps,
+  type AftersalesWorkflowStepProjection,
 } from '../core/aftersales-workflow-templates';
 import type { ShipmentRecord } from '../core/shipment-records';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
@@ -110,6 +111,11 @@ export function AftersalesCasePanel({
                           aftersalesWorkflowStepCategoryLabel(step.binding.category)
                         }`}
                       {step.state === 'current' ? ' · 当前建议' : ''}
+                      {step.state === 'partial' ? ` · 部分完成 · ${stepProgressLabel(step)}` : ''}
+                      {step.state === 'skipped' && step.stepEvent
+                        ? ` · 已跳过 · ${step.stepEvent.reason}` : ''}
+                      {step.state === 'not_applicable' && step.notApplicableReason
+                        ? ` · 不再适用 · ${step.notApplicableReason}` : ''}
                     </small>
                     {step.state === 'current' && step.fields.length > 0 && (
                       <small>需核对：{step.fields.map(aftersalesWorkflowFieldLabel).join('、')}</small>
@@ -942,6 +948,17 @@ export function AftersalesCasePanel({
       )}
     </div>
   );
+}
+
+function stepProgressLabel(step: {
+  progress: AftersalesWorkflowStepProjection['progress'];
+}): string {
+  const progress = step.progress;
+  if (!progress) return '';
+  if (progress.kind === 'amount') {
+    return `已退 ${formatMoney(progress.refundedCents)} / ${formatMoney(progress.targetCents)}`;
+  }
+  return `已完成 ${progress.doneQuantity} / ${progress.totalQuantity} 件`;
 }
 
 function primaryProgressAction(

@@ -114,6 +114,7 @@ import type {
   ChangeAftersalesCaseWorkflowTemplateInput,
   CreateAftersalesCaseInput,
   ProgressAftersalesCaseInput,
+  RecordAftersalesWorkflowStepEventInput,
   UpdateAftersalesCaseInput,
 } from './aftersales-cases';
 import type {
@@ -269,6 +270,9 @@ export interface DesktopApi {
   ): Promise<AftersalesCase>;
   updateAftersalesCase(input: UpdateAftersalesCaseInput): Promise<AftersalesCase>;
   progressAftersalesCase(input: ProgressAftersalesCaseInput): Promise<AftersalesCase>;
+  recordAftersalesWorkflowStepEvent(
+    input: RecordAftersalesWorkflowStepEventInput,
+  ): Promise<AftersalesCase>;
   queryFulfillmentPlans(query?: FulfillmentPlanQuery): Promise<FulfillmentPlanView[]>;
   createFulfillmentPlan(input: CreateFulfillmentPlanInput): Promise<FulfillmentPlanView>;
   addFulfillmentPlanOrders(input: AddFulfillmentPlanOrdersInput): Promise<FulfillmentPlanView>;

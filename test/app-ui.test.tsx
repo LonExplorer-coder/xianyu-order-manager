@@ -65,6 +65,7 @@ const emptyAftersalesRounds: Pick<
     scenario: 'other',
     steps: [],
     timeline: [],
+    stepEvents: [],
   },
   rounds: [],
   fulfillment: {
@@ -553,6 +554,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     changeAftersalesCaseWorkflowTemplate: vi.fn(),
     updateAftersalesCase: vi.fn(),
     progressAftersalesCase: vi.fn(),
+    recordAftersalesWorkflowStepEvent: vi.fn(),
     queryFulfillmentPlans: vi.fn().mockResolvedValue([]),
     createFulfillmentPlan: vi.fn(),
     addFulfillmentPlanOrders: vi.fn(),
@@ -12199,6 +12201,7 @@ describe('订单管理工作台', () => {
           occurredAt: '2026-08-14T10:30:00+08:00',
           createdAt: '2026-08-14T02:30:00.000Z',
         }],
+        stepEvents: [],
       },
       status: 'waiting_refund',
       revision: 1,
@@ -12248,6 +12251,7 @@ describe('订单管理工作台', () => {
         scenario: returnTemplate.scenario,
         steps: returnTemplate.steps,
         timeline: currentCase.workflowTemplate.timeline,
+        stepEvents: [],
       },
     };
     const changeWorkflow = vi.fn().mockResolvedValue(changedCase);

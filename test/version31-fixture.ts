@@ -1,7 +1,34 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v51 建立流程步骤事件表；存在事件数据时拒绝降级。
+export function removeVersion51ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 51',
+  ).get();
+  if (!applied) return;
+  const hasTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'aftersales_case_step_events'
+  `).get();
+  if (hasTable) {
+    const eventCount = database.prepare(
+      'SELECT COUNT(*) AS count FROM aftersales_case_step_events',
+    ).get() as { count: number };
+    if (eventCount.count > 0) {
+      throw new Error('v51 测试降级前必须移除流程步骤事件数据');
+    }
+  }
+  database.exec(`
+    BEGIN IMMEDIATE;
+    DROP TABLE IF EXISTS aftersales_case_step_events;
+    DELETE FROM schema_migrations WHERE version = 51;
+    COMMIT;
+  `);
+}
+
 // v50 只规范化模板版本数据，没有结构产物；存在「需要检查」步骤时拒绝降级。
 export function removeVersion50ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion51ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 50',
   ).get();
