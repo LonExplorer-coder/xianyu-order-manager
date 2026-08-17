@@ -281,7 +281,7 @@ describe('修改标准商品默认订单单价', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 48 });
+        .toEqual({ version: 49 });
       verified.prepare(`
         INSERT INTO standard_product_price_events (
           id, standard_product_id,

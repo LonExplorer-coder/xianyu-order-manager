@@ -440,7 +440,11 @@ describe('正向发货异常上层处理', () => {
     });
     expect(refunded).toMatchObject({
       status: 'waiting_replacement',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 1_000 } },
+      refund: {
+        status: 'confirmed',
+        refundRecords: [{ amountCents: 1_000 }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 1_000 },
+      },
     });
 
     const claimed = application.progressShipmentPackageCarrierClaim({

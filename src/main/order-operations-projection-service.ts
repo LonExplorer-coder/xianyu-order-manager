@@ -451,7 +451,14 @@ export class OrderOperationsProjectionService {
       JOIN aftersales_cases AS cases ON cases.id = case_items.case_id
       LEFT JOIN pending_financial_items AS refunds
         ON refunds.aftersales_case_id = cases.id
-      LEFT JOIN financial_records AS refund_records
+      LEFT JOIN (
+        SELECT
+          pending_item_id,
+          SUM(amount_cents) AS amount_cents,
+          MAX(occurred_at) AS occurred_at
+        FROM financial_records
+        GROUP BY pending_item_id
+      ) AS refund_records
         ON refund_records.pending_item_id = refunds.id
       JOIN shipment_package_items AS shipment_items
         ON shipment_items.id = case_items.shipment_package_item_id
@@ -1729,7 +1736,9 @@ function buildProjection(
       (total, item) => total + item.quantity,
       0,
     );
-    if (aftersalesCase.refund?.status === 'confirmed' && outstandingQuantity > 0) {
+    if (aftersalesCase.refund !== null
+      && (aftersalesCase.refund.actualAmountCents ?? 0) > 0
+      && outstandingQuantity > 0) {
       const riskId = `refund-without-goods:${aftersalesCase.id}`;
       risks.push({
         id: riskId,
@@ -1792,14 +1801,24 @@ function buildProjection(
     });
     if (aftersalesCase.refund) {
       const refundOccurredAt = aftersalesCase.refund.occurredAt ?? aftersalesCase.occurredAt;
+      const refundDetail = aftersalesCase.refund.actualAmountCents === null
+        ? `申请金额 ¥${(aftersalesCase.refund.requestedAmountCents / 100).toFixed(2)}`
+        : aftersalesCase.refund.actualAmountCents > aftersalesCase.refund.requestedAmountCents
+          ? `实退 ¥${(aftersalesCase.refund.actualAmountCents / 100).toFixed(2)}`
+            + ` 超过申请 ¥${(aftersalesCase.refund.requestedAmountCents / 100).toFixed(2)}，请人工核对`
+          : aftersalesCase.refund.status === 'pending'
+            ? `已退 ¥${(aftersalesCase.refund.actualAmountCents / 100).toFixed(2)}`
+              + ` · 剩余 ¥${(
+                (aftersalesCase.refund.requestedAmountCents
+                  - aftersalesCase.refund.actualAmountCents) / 100
+              ).toFixed(2)}`
+            : `实际退款 ¥${(aftersalesCase.refund.actualAmountCents / 100).toFixed(2)}`;
       facts.push({
         id: `refund:${aftersalesCase.id}`,
         kind: 'refund',
         label: '退款',
         value: aftersalesCase.refund.status,
-        detail: aftersalesCase.refund.actualAmountCents === null
-          ? `申请金额 ¥${(aftersalesCase.refund.requestedAmountCents / 100).toFixed(2)}`
-          : `实际退款 ¥${(aftersalesCase.refund.actualAmountCents / 100).toFixed(2)}`,
+        detail: refundDetail,
         affectedQuantity: aftersalesCase.items.reduce(
           (total, item) => total + item.quantity,
           0,
@@ -2120,7 +2139,8 @@ function parseOptionalCarrierClaimStatus(value: unknown): CarrierClaimStatus | n
 }
 
 function parsePendingFinancialItemStatus(value: unknown): PendingFinancialItemStatus {
-  if (value === 'pending' || value === 'confirmed' || value === 'cancelled') return value;
+  if (value === 'pending' || value === 'confirmed' || value === 'cancelled'
+    || value === 'ended') return value;
   throw new Error('数据库资金事项状态投影格式错误');
 }
 

@@ -4,6 +4,7 @@ import type {
   AftersalesReturnStatus,
   AftersalesStatus,
   CarrierClaimStatus,
+  PendingFinancialItemStatus,
 } from './aftersales-cases';
 import type { ShipmentLogisticsStatus } from './shipment-records';
 import type { FulfillmentPlanType } from './fulfillment-plans';
@@ -185,7 +186,7 @@ export type AftersalesOperationsCoordinationInput = {
   updatedAt: string;
   itemQuantity: number;
   refund: null | {
-    status: 'pending' | 'confirmed' | 'cancelled';
+    status: PendingFinancialItemStatus;
     requestedAmountCents: number;
     occurredAt: string;
   };

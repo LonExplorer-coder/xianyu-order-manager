@@ -104,6 +104,22 @@ describe('售后流程模板 Electron IPC', () => {
       caseId: '', expectedRevision: 1, workflowTemplateId: custom.id,
       occurredAt: '2026-08-14T10:00:00+08:00', reason: '测试',
     })).rejects.toThrow('售后处理单标识无效');
+    await expect(invoke('aftersales-cases:progress', {
+      kind: 'adjust_refund_target',
+      caseId: 'case-1',
+      expectedRevision: 2,
+      requestedRefundCents: 500,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '调整目标',
+      extra: 1,
+    })).rejects.toThrow('调整退款目标参数包含未知字段：extra');
+    await expect(invoke('aftersales-cases:progress', {
+      kind: 'end_refund',
+      caseId: 'case-1',
+      expectedRevision: 2,
+      occurredAt: '2026-08-14T10:00:00+08:00',
+      reason: '  ',
+    })).rejects.toThrow('请填写 1 至 500 字的结束退款原因');
   });
 });
 

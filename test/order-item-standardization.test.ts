@@ -455,7 +455,7 @@ describe('标准商品显示偏好迁移', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 48 });
+        .toEqual({ version: 49 });
       expect(() => verified.prepare(`
         UPDATE order_items SET standard_display_preference = NULL WHERE id = ?
       `).run(linkedOrder.items[0].id)).toThrow(/inconsistent/u);

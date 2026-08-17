@@ -502,7 +502,11 @@ describe('售后流程模板', () => {
     });
     expect(refunded).toMatchObject({
       status: 'waiting_replacement',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 500 } },
+      refund: {
+        status: 'confirmed',
+        refundRecords: [{ amountCents: 500 }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 500 },
+      },
     });
   });
 
@@ -887,7 +891,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 48 });
+        .toEqual({ version: 49 });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'

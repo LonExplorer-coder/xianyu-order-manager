@@ -1,6 +1,127 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion49ExtensionArtifacts(database: DatabaseSync): void {
+  const hasAdjustmentTable = database.prepare(`
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'aftersales_refund_target_adjustment_events'
+  `).get();
+  if (!hasAdjustmentTable) return;
+  for (const [table, label] of [
+    ['aftersales_refund_target_adjustment_events', '退款目标调整'],
+    ['aftersales_refund_ending_events', '结束退款'],
+  ] as const) {
+    const eventCount = database.prepare(
+      `SELECT COUNT(*) AS count FROM ${table}`,
+    ).get() as { count: number };
+    if (eventCount.count > 0) {
+      throw new Error(`v49 测试降级前必须移除${label}事件数据`);
+    }
+  }
+  const endedCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM pending_financial_items WHERE status = 'ended'
+  `).get() as { count: number };
+  if (endedCount.count > 0) {
+    throw new Error('v49 测试降级前必须移除已结束的退款事项');
+  }
+  const multiRecordCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT pending_item_id
+      FROM financial_records
+      GROUP BY pending_item_id
+      HAVING COUNT(*) > 1
+    )
+  `).get() as { count: number };
+  if (multiRecordCount.count > 0) {
+    throw new Error('v49 测试降级前必须移除多笔实际退款数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS aftersales_refund_target_adjustment_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_refund_target_adjustment_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS aftersales_refund_target_adjustment_events_by_item;
+    DROP TABLE aftersales_refund_target_adjustment_events;
+    DROP TRIGGER IF EXISTS aftersales_refund_ending_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS aftersales_refund_ending_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS aftersales_refund_ending_events_by_item;
+    DROP TABLE aftersales_refund_ending_events;
+
+    CREATE TABLE pending_financial_items_v48 (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+      aftersales_case_id TEXT NOT NULL UNIQUE
+        REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'cancelled')),
+      created_at TEXT NOT NULL,
+      resolved_at TEXT,
+      CHECK (
+        (status = 'pending' AND resolved_at IS NULL)
+        OR (status IN ('confirmed', 'cancelled') AND resolved_at IS NOT NULL)
+      )
+    ) STRICT;
+    INSERT INTO pending_financial_items_v48 (
+      id, kind, aftersales_case_id, requested_amount_cents, status, created_at, resolved_at
+    )
+    SELECT id, kind, aftersales_case_id, requested_amount_cents, status, created_at, resolved_at
+    FROM pending_financial_items;
+    DROP TABLE pending_financial_items;
+    ALTER TABLE pending_financial_items_v48 RENAME TO pending_financial_items;
+
+    DROP TRIGGER aftersales_outbound_exception_refund_link_identity_is_valid_on_insert;
+    DROP TRIGGER financial_records_are_immutable_on_update;
+    DROP TRIGGER financial_records_are_immutable_on_delete;
+    DROP INDEX financial_records_by_pending_item;
+    CREATE TABLE financial_records_v48 (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+      pending_item_id TEXT NOT NULL UNIQUE
+        REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+      aftersales_case_id TEXT NOT NULL
+        REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      occurred_at TEXT NOT NULL,
+      note TEXT NOT NULL CHECK (length(trim(note)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO financial_records_v48 (
+      id, kind, pending_item_id, aftersales_case_id, amount_cents, occurred_at, note, created_at
+    )
+    SELECT id, kind, pending_item_id, aftersales_case_id, amount_cents, occurred_at, note, created_at
+    FROM financial_records;
+    DROP TABLE financial_records;
+    ALTER TABLE financial_records_v48 RENAME TO financial_records;
+    CREATE TRIGGER financial_records_are_immutable_on_update
+    BEFORE UPDATE ON financial_records
+    BEGIN
+      SELECT RAISE(ABORT, 'financial records are immutable');
+    END;
+    CREATE TRIGGER financial_records_are_immutable_on_delete
+    BEFORE DELETE ON financial_records
+    BEGIN
+      SELECT RAISE(ABORT, 'financial records are immutable');
+    END;
+    CREATE TRIGGER aftersales_outbound_exception_refund_link_identity_is_valid_on_insert
+    BEFORE INSERT ON aftersales_outbound_exception_refund_links
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM financial_records AS financial
+      JOIN aftersales_outbound_exception_decision_events AS decision
+        ON decision.id = NEW.decision_event_id
+      WHERE financial.id = NEW.financial_record_id
+        AND financial.aftersales_case_id = decision.case_id
+        AND decision.after_decision IN ('refund_only', 'refund_and_replacement')
+    ) BEGIN
+      SELECT RAISE(ABORT, 'outbound exception refund link identity mismatch');
+    END;
+    DELETE FROM schema_migrations WHERE version = 49;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion48ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion49ExtensionArtifacts(database);
   const hasTable = database.prepare(`
     SELECT 1 FROM sqlite_schema
     WHERE type = 'table' AND name = 'product_identity_correction_events'

@@ -715,6 +715,7 @@ export function ProgressAftersalesCaseDialog({
       || outboundExceptionDecision === 'refund_and_replacement')
     && (aftersalesCase.refund === null || aftersalesCase.refund.status === 'cancelled');
   const needsAmount = kind === 'confirm_refund'
+    || kind === 'adjust_refund_target'
     || kind === 'open_carrier_claim'
     || kind === 'confirm_carrier_compensation'
     || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved')
@@ -953,6 +954,15 @@ export function ProgressAftersalesCaseDialog({
             kind, ...common, actualRefundCents: amountCents as number,
             occurredAt: normalizedOccurredAt as string, note: reason,
           };
+          break;
+        case 'adjust_refund_target':
+          input = {
+            kind, ...common, requestedRefundCents: amountCents as number,
+            occurredAt: normalizedOccurredAt as string, reason,
+          };
+          break;
+        case 'end_refund':
+          input = { kind, ...common, occurredAt: normalizedOccurredAt as string, reason };
           break;
         case 'complete':
         case 'cancel':
@@ -1309,7 +1319,8 @@ export function ProgressAftersalesCaseDialog({
             </select>
           </label>
         )}
-        {(kind === 'confirm_refund' || kind === 'open_carrier_claim'
+        {(kind === 'confirm_refund' || kind === 'adjust_refund_target'
+          || kind === 'open_carrier_claim'
           || kind === 'confirm_carrier_compensation'
           || (kind === 'resolve_carrier_claim' && claimOutcome === 'approved')) && (
           <label>
@@ -1784,6 +1795,20 @@ function progressDialogCopy(kind: ProgressAftersalesCaseInput['kind']) {
     reasonLabel: '退款确认说明',
     confirmLabel: '确认退款',
   };
+  if (kind === 'adjust_refund_target') return {
+    title: '调整退款目标金额',
+    description: '调整只改目标并逐次留痕；已发生的实际退款记录保持不变。',
+    timeLabel: '调整时间',
+    reasonLabel: '调整原因',
+    confirmLabel: '确认调整',
+  };
+  if (kind === 'end_refund') return {
+    title: '结束退款',
+    description: '部分退款后明确不再补退剩余金额；退款步骤不会因此视作已完成。',
+    timeLabel: '结束时间',
+    reasonLabel: '结束原因',
+    confirmLabel: '确认结束退款',
+  };
   if (kind === 'correct_return_logistics') return {
     title: '更正退货物流',
     description: '当前信息更新为正确值，旧承运方、运单号和更正原因会保留在历史中；已有收到和检查事实不会被清空。',
@@ -1896,6 +1921,7 @@ function returnDiscrepancyOptionLabel(kind: AftersalesReturnDiscrepancy['kind'])
 
 function progressAmountLabel(kind: ProgressAftersalesCaseInput['kind']): string {
   if (kind === 'confirm_refund') return '实际退款金额（元）';
+  if (kind === 'adjust_refund_target') return '调整后的退款目标金额（元）';
   if (kind === 'open_carrier_claim') return '申请索赔金额（元）';
   if (kind === 'confirm_carrier_compensation') return '实际赔付金额（元）';
   return '承运方同意赔付金额（元）';

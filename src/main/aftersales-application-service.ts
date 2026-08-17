@@ -9,6 +9,8 @@ import {
   normalizeCreateAftersalesCaseInput,
   normalizeProgressAftersalesCaseInput,
   normalizeUpdateAftersalesCaseInput,
+  isSettledRefundStatus,
+  projectAftersalesRefundFulfillment,
   type AftersalesCase,
   type AftersalesCaseEvent,
   type AftersalesCaseItem,
@@ -325,8 +327,9 @@ export class AftersalesApplicationService {
       && (target.workflow === 'refund_only' || target.workflow === 'return_refund')
       ? prepared.requestedRefundCents ?? null
       : null;
+    const refundSettled = isSettledRefundStatus(current.refund?.status ?? null);
     const nextStatus = target.workflow === 'refund_only'
-      ? current.refund?.status === 'confirmed' ? 'ready_to_complete' : 'waiting_refund'
+      ? refundSettled ? 'ready_to_complete' : 'waiting_refund'
       : targetDirection === null
         ? 'processing'
         : statusForHandlingDirection(targetDirection);
@@ -550,6 +553,8 @@ export class AftersalesApplicationService {
         prepared.kind === 'decide_outbound_logistics_exception'
         || prepared.kind === 'confirm_refund'
         || prepared.kind === 'cancel_refund_request'
+        || prepared.kind === 'adjust_refund_target'
+        || prepared.kind === 'end_refund'
         || prepared.kind === 'create_replacement_shipment'
         || prepared.kind === 'start_next_round'
         || prepared.kind === 'complete'
@@ -559,6 +564,8 @@ export class AftersalesApplicationService {
       && !(carriesRefundFromEarlierTemplate && (
         prepared.kind === 'confirm_refund'
         || prepared.kind === 'cancel_refund_request'
+        || prepared.kind === 'adjust_refund_target'
+        || prepared.kind === 'end_refund'
         || prepared.kind === 'complete'
       ))) {
       throw new Error('一般售后请使用状态更新功能');
@@ -587,6 +594,9 @@ export class AftersalesApplicationService {
     const now = new Date().toISOString();
     if (prepared.kind === 'cancel_refund_request') {
       if (current.refund?.status !== 'pending') throw new Error('当前没有待处理的退款申请');
+      if (current.refund.refundRecords.length > 0) {
+        throw new Error('已发生实际退款，请改用结束退款或调整退款目标金额');
+      }
       const confirmedDecisions = current.coordination.outboundExceptionHistory
         .filter((exception) => exception.stage === 'confirmed')
         .map(({ decision }) => decision);
@@ -609,9 +619,7 @@ export class AftersalesApplicationService {
       );
       this.workspace.transaction(() => {
         this.cancelPendingRefund(current, prepared.reason, prepared.occurredAt, now);
-        const replacementPending = current.rounds.some(({ replacementRequired }) => (
-          replacementRequired
-        )) && !this.allRequiredReplacementRoundsDelivered(current);
+        const replacementPending = this.replacementDeliveryPending(current);
         this.advanceCase(current, replacementPending
           ? 'waiting_replacement'
           : current.workflow === 'general' ? 'processing' : 'ready_to_complete',
@@ -1765,10 +1773,17 @@ export class AftersalesApplicationService {
           ?? latestReturnDecisionEvidenceAt(current.returns)
         : current.occurredAt);
       if (!earliestRefundAt) throw new Error('退货记录缺少检查、丢件或索赔时间');
+      const latestRecordAt = refund.refundRecords.at(-1)?.occurredAt ?? null;
+      const refundNotBefore = latestRecordAt !== null
+        && Date.parse(latestRecordAt) > Date.parse(earliestRefundAt)
+        ? latestRecordAt
+        : earliestRefundAt;
       assertOccurredAtNotBefore(
         prepared.occurredAt,
-        earliestRefundAt,
-        current.workflow === 'return_refund' && !explicitOnlyRefund
+        refundNotBefore,
+        latestRecordAt !== null
+          ? '补退时间不能早于上一笔实际退款'
+          : current.workflow === 'return_refund' && !explicitOnlyRefund
           ? current.coordination.returnException?.timeline.length
             ? '实际退款时间不能早于退货异常处理选择时间'
             : current.returns.some(hasUnresolvedConfirmedLoss)
@@ -1778,6 +1793,8 @@ export class AftersalesApplicationService {
               : '实际退款时间不能早于退货检查时间'
           : '实际退款时间不能早于售后发生时间',
       );
+      const refundedAfter = refund.fulfillment.refundedAmountCents
+        + prepared.actualRefundCents;
       const financialRecordId = randomUUID();
       this.workspace.transaction(() => {
         this.workspace.database.prepare(`
@@ -1811,33 +1828,152 @@ export class AftersalesApplicationService {
               )
           `).run(financialRecordId, now, current.id);
         }
-        const resolved = this.workspace.database.prepare(`
+        const replacementPending = this.replacementDeliveryPending(current);
+        if (refundedAfter >= refund.requestedAmountCents) {
+          this.confirmPendingRefund({
+            pendingItemId: refund.pendingItemId,
+            requestedAmountCents: refund.requestedAmountCents,
+            refundedAmountCents: refundedAfter,
+            reason: prepared.note,
+            occurredAt: prepared.occurredAt,
+            now,
+          });
+          this.advanceCase(
+            current,
+            replacementPending ? 'waiting_replacement' : 'ready_to_complete',
+            `确认实际退款：${prepared.note}`,
+            now,
+          );
+        } else {
+          this.advanceCase(current, current.status, `部分退款：${prepared.note}`, now);
+        }
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'adjust_refund_target') {
+      const refund = current.refund;
+      if (!refund || (refund.status !== 'pending' && refund.status !== 'confirmed')) {
+        throw new Error('当前退款申请尚不能调整目标金额');
+      }
+      if (prepared.requestedRefundCents === refund.requestedAmountCents) {
+        throw new Error('退款目标金额没有变化');
+      }
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        refund.latestEventAt,
+        '调整退款目标时间不能早于上一条退款事件',
+      );
+      this.workspace.transaction(() => {
+        const updated = this.workspace.database.prepare(`
           UPDATE pending_financial_items
-          SET status = 'confirmed', resolved_at = ?
-          WHERE id = ? AND status = 'pending'
-        `).run(now, refund.pendingItemId);
-        if (resolved.changes !== 1) throw new Error('退款申请已在其他操作中处理');
+          SET requested_amount_cents = ?
+          WHERE id = ? AND requested_amount_cents = ?
+            AND status IN ('pending', 'confirmed')
+        `).run(
+          prepared.requestedRefundCents,
+          refund.pendingItemId,
+          refund.requestedAmountCents,
+        );
+        if (updated.changes !== 1) throw new Error('退款申请已在其他操作中变更');
         this.workspace.database.prepare(`
-          INSERT INTO pending_financial_item_events (
-            id, pending_item_id, kind, requested_amount_cents,
-            actual_amount_cents, reason, occurred_at, created_at
-          ) VALUES (?, ?, 'confirmed', ?, ?, ?, ?, ?)
+          INSERT INTO aftersales_refund_target_adjustment_events (
+            id, pending_item_id, before_amount_cents, after_amount_cents,
+            reason, occurred_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(
           randomUUID(),
           refund.pendingItemId,
           refund.requestedAmountCents,
-          prepared.actualRefundCents,
-          prepared.note,
+          prepared.requestedRefundCents,
+          prepared.reason,
           prepared.occurredAt,
           now,
         );
-        const replacementPending = current.rounds.some(({ replacementRequired }) => (
-          replacementRequired
-        )) && !this.allRequiredReplacementRoundsDelivered(current);
+        const refundedAmountCents = refund.fulfillment.refundedAmountCents;
+        if (refund.status === 'pending' && refundedAmountCents >= prepared.requestedRefundCents) {
+          this.confirmPendingRefund({
+            pendingItemId: refund.pendingItemId,
+            requestedAmountCents: prepared.requestedRefundCents,
+            refundedAmountCents,
+            reason: prepared.reason,
+            occurredAt: prepared.occurredAt,
+            now,
+          });
+          this.advanceCase(
+            current,
+            this.replacementDeliveryPending(current)
+              ? 'waiting_replacement'
+              : 'ready_to_complete',
+            `调整退款目标至已退金额：${prepared.reason}`,
+            now,
+          );
+        } else if (refund.status === 'confirmed'
+          && refundedAmountCents < prepared.requestedRefundCents) {
+          const reopened = this.workspace.database.prepare(`
+            UPDATE pending_financial_items
+            SET status = 'pending', resolved_at = NULL
+            WHERE id = ? AND status = 'confirmed'
+          `).run(refund.pendingItemId);
+          if (reopened.changes !== 1) throw new Error('退款申请已在其他操作中处理');
+          this.advanceCase(
+            current,
+            current.status === 'ready_to_complete' ? 'waiting_refund' : current.status,
+            `上调退款目标：${prepared.reason}`,
+            now,
+          );
+        } else {
+          this.advanceCase(current, current.status, `调整退款目标：${prepared.reason}`, now);
+        }
+      });
+      return this.get(current.id);
+    }
+    if (prepared.kind === 'end_refund') {
+      const refund = current.refund;
+      if (!refund || refund.status === 'cancelled' || refund.status === 'ended') {
+        throw new Error('当前退款申请尚不能结束退款');
+      }
+      const refundedAmountCents = refund.fulfillment.refundedAmountCents;
+      if (refundedAmountCents === 0) {
+        throw new Error('结束退款前至少要有一笔实际退款');
+      }
+      if (refundedAmountCents > refund.requestedAmountCents) {
+        throw new Error('实退已超过退款目标，请人工核对金额');
+      }
+      if (refund.status === 'confirmed'
+        || refundedAmountCents >= refund.requestedAmountCents) {
+        throw new Error('退款已足额，无需结束退款');
+      }
+      assertOccurredAtNotBefore(
+        prepared.occurredAt,
+        refund.latestEventAt,
+        '结束退款时间不能早于上一条退款事件',
+      );
+      this.workspace.transaction(() => {
+        const ended = this.workspace.database.prepare(`
+          UPDATE pending_financial_items
+          SET status = 'ended', resolved_at = ?
+          WHERE id = ? AND status = 'pending'
+        `).run(now, refund.pendingItemId);
+        if (ended.changes !== 1) throw new Error('退款申请已在其他操作中处理');
+        this.workspace.database.prepare(`
+          INSERT INTO aftersales_refund_ending_events (
+            id, pending_item_id, requested_amount_cents, refunded_amount_cents,
+            reason, occurred_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          refund.pendingItemId,
+          refund.requestedAmountCents,
+          refundedAmountCents,
+          prepared.reason,
+          prepared.occurredAt,
+          now,
+        );
+        const replacementPending = this.replacementDeliveryPending(current);
         this.advanceCase(
           current,
           replacementPending ? 'waiting_replacement' : 'ready_to_complete',
-          `确认实际退款：${prepared.note}`,
+          `结束退款：${prepared.reason}`,
           now,
         );
       });
@@ -1846,7 +1982,7 @@ export class AftersalesApplicationService {
     if (prepared.kind === 'cancel') {
       const refund = current.refund;
       this.workspace.transaction(() => {
-        if (refund?.status === 'pending') {
+        if (refund?.status === 'pending' && refund.refundRecords.length === 0) {
           const cancelled = this.workspace.database.prepare(`
             UPDATE pending_financial_items
             SET status = 'cancelled', resolved_at = ?
@@ -1872,9 +2008,9 @@ export class AftersalesApplicationService {
     if (
       current.status !== 'ready_to_complete'
       || (current.refund !== null
-        && current.refund.status !== 'confirmed'
+        && !isSettledRefundStatus(current.refund.status)
         && current.refund.status !== 'cancelled')
-      || (!replacementWorkflow && current.refund?.status !== 'confirmed')
+      || (!replacementWorkflow && !isSettledRefundStatus(current.refund?.status ?? null))
       || !this.allRequiredReplacementRoundsDelivered(current)
     ) {
       throw new Error('请先完成退款与必要的退货处理');
@@ -1932,7 +2068,7 @@ export class AftersalesApplicationService {
       return;
     }
     if (current.refund !== null
-      && current.refund.status !== 'confirmed'
+      && !isSettledRefundStatus(current.refund.status)
       && current.refund.status !== 'cancelled') {
       if (current.status !== 'waiting_refund') {
         this.workspace.transaction(() => {
@@ -2974,14 +3110,26 @@ export class AftersalesApplicationService {
     `).get(caseId) as SqlRow | undefined;
     if (!row) return null;
     const status = asString(row.status);
-    if (status !== 'pending' && status !== 'confirmed' && status !== 'cancelled') {
+    if (status !== 'pending' && status !== 'confirmed' && status !== 'cancelled'
+      && status !== 'ended') {
       throw new Error('数据库待确认资金事项状态错误');
     }
-    const actualRow = this.workspace.database.prepare(`
+    const pendingItemId = asString(row.id);
+    const requestedAmountCents = asNumber(row.requested_amount_cents);
+    const recordRows = this.workspace.database.prepare(`
       SELECT *
       FROM financial_records
       WHERE pending_item_id = ?
-    `).get(asString(row.id)) as SqlRow | undefined;
+      ORDER BY occurred_at, created_at, id
+    `).all(pendingItemId) as unknown as SqlRow[];
+    const refundRecords = recordRows.map((recordRow) => ({
+      id: asString(recordRow.id),
+      kind: 'aftersales_refund' as const,
+      amountCents: asNumber(recordRow.amount_cents),
+      occurredAt: asString(recordRow.occurred_at),
+      note: asString(recordRow.note),
+      createdAt: asString(recordRow.created_at),
+    }));
     const caseOccurredAt = asString((this.workspace.database.prepare(`
       SELECT occurred_at FROM aftersales_cases WHERE id = ?
     `).get(caseId) as SqlRow).occurred_at);
@@ -2992,7 +3140,7 @@ export class AftersalesApplicationService {
       FROM pending_financial_item_events
       WHERE pending_item_id = ?
       ORDER BY sequence
-    `).all(asString(row.id)) as unknown as SqlRow[];
+    `).all(pendingItemId) as unknown as SqlRow[];
     const reopeningRows = this.workspace.database.prepare(`
       SELECT
         'reopened' AS kind,
@@ -3004,24 +3152,67 @@ export class AftersalesApplicationService {
       FROM aftersales_refund_reopening_events AS reopen
       WHERE reopen.pending_item_id = ?
       ORDER BY reopen.sequence
-    `).all(asString(row.id)) as unknown as SqlRow[];
+    `).all(pendingItemId) as unknown as SqlRow[];
+    const adjustmentRows = this.workspace.database.prepare(`
+      SELECT
+        'target_adjusted' AS kind,
+        adjust.after_amount_cents AS requested_amount_cents,
+        adjust.before_amount_cents AS before_amount_cents,
+        NULL AS actual_amount_cents,
+        adjust.reason,
+        adjust.occurred_at,
+        adjust.created_at
+      FROM aftersales_refund_target_adjustment_events AS adjust
+      WHERE adjust.pending_item_id = ?
+      ORDER BY adjust.sequence
+    `).all(pendingItemId) as unknown as SqlRow[];
+    const endingRows = this.workspace.database.prepare(`
+      SELECT
+        'ended' AS kind,
+        ending.requested_amount_cents,
+        NULL AS before_amount_cents,
+        ending.refunded_amount_cents AS actual_amount_cents,
+        ending.reason,
+        ending.occurred_at,
+        ending.created_at
+      FROM aftersales_refund_ending_events AS ending
+      WHERE ending.pending_item_id = ?
+      ORDER BY ending.sequence
+    `).all(pendingItemId) as unknown as SqlRow[];
     const timeline = [
-      ...refundEventRows.map((eventRow) => {
-        const kind = asString(eventRow.kind) as 'created' | 'confirmed' | 'cancelled';
-        return {
-          kind,
-          requestedAmountCents: asNumber(eventRow.requested_amount_cents),
-          actualAmountCents: eventRow.actual_amount_cents === null
-            ? null
-            : asNumber(eventRow.actual_amount_cents),
-          reason: asString(eventRow.reason),
-          occurredAt: asString(eventRow.occurred_at),
-          createdAt: asString(eventRow.created_at),
-        };
-      }),
+      ...adjustmentRows.map((eventRow) => ({
+        kind: 'target_adjusted' as const,
+        requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+        beforeAmountCents: asNumber(eventRow.before_amount_cents),
+        actualAmountCents: null,
+        reason: asString(eventRow.reason),
+        occurredAt: asString(eventRow.occurred_at),
+        createdAt: asString(eventRow.created_at),
+      })),
+      ...endingRows.map((eventRow) => ({
+        kind: 'ended' as const,
+        requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+        beforeAmountCents: null,
+        actualAmountCents: asNumber(eventRow.actual_amount_cents),
+        reason: asString(eventRow.reason),
+        occurredAt: asString(eventRow.occurred_at),
+        createdAt: asString(eventRow.created_at),
+      })),
+      ...refundEventRows.map((eventRow) => ({
+        kind: asString(eventRow.kind) as 'created' | 'confirmed' | 'cancelled',
+        requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+        beforeAmountCents: null,
+        actualAmountCents: eventRow.actual_amount_cents === null
+          ? null
+          : asNumber(eventRow.actual_amount_cents),
+        reason: asString(eventRow.reason),
+        occurredAt: asString(eventRow.occurred_at),
+        createdAt: asString(eventRow.created_at),
+      })),
       ...reopeningRows.map((eventRow) => ({
         kind: 'reopened' as const,
         requestedAmountCents: asNumber(eventRow.requested_amount_cents),
+        beforeAmountCents: null,
         actualAmountCents: null,
         reason: asString(eventRow.reason),
         occurredAt: asString(eventRow.occurred_at),
@@ -3033,21 +3224,18 @@ export class AftersalesApplicationService {
         ? occurredDifference
         : first.createdAt.localeCompare(second.createdAt);
     });
-    const latestEventAt = timeline.reduce((latest, event) => (
-      Date.parse(event.occurredAt) > Date.parse(latest) ? event.occurredAt : latest
+    const latestEventAt = [
+      ...timeline.map((event) => event.occurredAt),
+      ...refundRecords.map((record) => record.occurredAt),
+    ].reduce((latest, occurredAt) => (
+      Date.parse(occurredAt) > Date.parse(latest) ? occurredAt : latest
     ), caseOccurredAt);
     return {
-      pendingItemId: asString(row.id),
-      requestedAmountCents: asNumber(row.requested_amount_cents),
+      pendingItemId,
+      requestedAmountCents,
       status,
-      actualRecord: actualRow ? {
-        id: asString(actualRow.id),
-        kind: 'aftersales_refund',
-        amountCents: asNumber(actualRow.amount_cents),
-        occurredAt: asString(actualRow.occurred_at),
-        note: asString(actualRow.note),
-        createdAt: asString(actualRow.created_at),
-      } : null,
+      refundRecords,
+      fulfillment: projectAftersalesRefundFulfillment(requestedAmountCents, refundRecords),
       createdAt: asString(row.created_at),
       latestEventAt,
       timeline,
@@ -3597,7 +3785,7 @@ export class AftersalesApplicationService {
     now: string,
   ): void {
     const refund = current.refund;
-    if (!refund || refund.status !== 'pending') return;
+    if (!refund || refund.status !== 'pending' || refund.refundRecords.length > 0) return;
     const cancelled = this.workspace.database.prepare(`
       UPDATE pending_financial_items
       SET status = 'cancelled', resolved_at = ?
@@ -3666,6 +3854,41 @@ export class AftersalesApplicationService {
   private allRequiredReplacementRoundsDelivered(current: AftersalesCase): boolean {
     const requiredRounds = current.rounds.filter(({ replacementRequired }) => replacementRequired);
     return requiredRounds.every(replacementRoundDelivered);
+  }
+
+  private replacementDeliveryPending(current: AftersalesCase): boolean {
+    return current.rounds.some(({ replacementRequired }) => replacementRequired)
+      && !this.allRequiredReplacementRoundsDelivered(current);
+  }
+
+  private confirmPendingRefund(input: {
+    pendingItemId: string;
+    requestedAmountCents: number;
+    refundedAmountCents: number;
+    reason: string;
+    occurredAt: string;
+    now: string;
+  }): void {
+    const resolved = this.workspace.database.prepare(`
+      UPDATE pending_financial_items
+      SET status = 'confirmed', resolved_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(input.now, input.pendingItemId);
+    if (resolved.changes !== 1) throw new Error('退款申请已在其他操作中处理');
+    this.workspace.database.prepare(`
+      INSERT INTO pending_financial_item_events (
+        id, pending_item_id, kind, requested_amount_cents,
+        actual_amount_cents, reason, occurred_at, created_at
+      ) VALUES (?, ?, 'confirmed', ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      input.pendingItemId,
+      input.requestedAmountCents,
+      input.refundedAmountCents,
+      input.reason,
+      input.occurredAt,
+      input.now,
+    );
   }
 
   private advanceCasesForReturnRecord(

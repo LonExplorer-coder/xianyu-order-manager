@@ -18,7 +18,7 @@ const PORTABLE_SMOKE_LOGISTICS_REASON = '便携版验收确认买家已签收';
 const PORTABLE_SMOKE_AFTERSALES_REASON = '便携版验收登记部分退款';
 const PORTABLE_SMOKE_REFUND_NOTE = '便携版验收确认实际退款';
 const PORTABLE_SMOKE_REQUESTED_REFUND_CENTS = 400;
-const PORTABLE_SMOKE_ACTUAL_REFUND_CENTS = 300;
+const PORTABLE_SMOKE_ACTUAL_REFUND_CENTS = 400;
 
 export type PortableReleaseSmokeInput = {
   phase: 'write' | 'read';
@@ -138,8 +138,10 @@ export async function runPortableReleaseDataSmoke(
       aftersalesCase.items[0]?.quantity !== 1 ||
       aftersalesCase.refund?.status !== 'confirmed' ||
       aftersalesCase.refund.requestedAmountCents !== PORTABLE_SMOKE_REQUESTED_REFUND_CENTS ||
-      aftersalesCase.refund.actualRecord?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      aftersalesCase.refund.actualRecord?.note !== PORTABLE_SMOKE_REFUND_NOTE ||
+      aftersalesCase.refund.refundRecords.length !== 1 ||
+      aftersalesCase.refund.refundRecords[0]?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      aftersalesCase.refund.refundRecords[0]?.note !== PORTABLE_SMOKE_REFUND_NOTE ||
+      aftersalesCase.refund.fulfillment.kind !== 'complete' ||
       aftersalesCase.refund.timeline.length !== 2 ||
       aftersalesCase.refund.timeline[0]?.kind !== 'created' ||
       aftersalesCase.refund.timeline[0]?.requestedAmountCents !==
@@ -165,8 +167,8 @@ export async function runPortableReleaseDataSmoke(
       assertOccurredNotAfterCreated(event.occurredAt, event.createdAt, '退款时间线');
     }
     assertOccurredNotAfterCreated(
-      aftersalesCase.refund.actualRecord.occurredAt,
-      aftersalesCase.refund.actualRecord.createdAt,
+      aftersalesCase.refund.refundRecords[0].occurredAt,
+      aftersalesCase.refund.refundRecords[0].createdAt,
       '实际退款',
     );
 

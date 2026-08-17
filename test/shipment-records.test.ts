@@ -2829,7 +2829,7 @@ describe('发货记录', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 48 });
+        .toEqual({ version: 49 });
       expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.prepare(`
         UPDATE logistics_exception_events SET reason = '尝试改写旧异常'
@@ -3490,7 +3490,7 @@ describe('退货异常跨流程协调', () => {
 
     expect(lost).toMatchObject({
       status: 'waiting_return',
-      refund: { status: 'pending', actualRecord: null },
+      refund: { status: 'pending', refundRecords: [] },
       coordination: {
         currentTodo: '退货已确认丢失，请选择退款处理并继续承运异常处理',
         risk: '退货商品未回到卖家控制中，不能登记收到或检查',
@@ -3549,7 +3549,7 @@ describe('退货异常跨流程协调', () => {
       reason: '先等待承运方补充调查结论',
     });
     expect(waiting).toMatchObject({
-      refund: { status: 'pending', actualRecord: null },
+      refund: { status: 'pending', refundRecords: [] },
       coordination: {
         currentTodo: '继续等待承运调查，实际退款尚未发生',
         returnException: {
@@ -3575,7 +3575,7 @@ describe('退货异常跨流程协调', () => {
       reason: '与买家协商先退部分款项',
     });
     expect(partial).toMatchObject({
-      refund: { status: 'pending', actualRecord: null },
+      refund: { status: 'pending', refundRecords: [] },
       coordination: {
         currentTodo: '核对并确认部分实际退款，承运异常继续独立处理',
         returnException: {
@@ -3592,7 +3592,7 @@ describe('退货异常跨流程协调', () => {
       },
     });
 
-    const refunded = application.progressAftersalesCase({
+    const partialRefunded = application.progressAftersalesCase({
       kind: 'confirm_refund',
       caseId: partial.id,
       expectedRevision: partial.revision,
@@ -3600,12 +3600,37 @@ describe('退货异常跨流程协调', () => {
       occurredAt: occurredAt(60),
       note: '平台确认实际退回六元',
     });
+    expect(partialRefunded).toMatchObject({
+      refund: {
+        requestedAmountCents: 1_000,
+        status: 'pending',
+        refundRecords: [{ amountCents: 600 }],
+        fulfillment: {
+          kind: 'partial',
+          refundedAmountCents: 600,
+          remainingAmountCents: 400,
+        },
+      },
+      coordination: {
+        currentTodo: '核对并确认部分实际退款，承运异常继续独立处理',
+        returnException: { decision: 'partial_refund' },
+      },
+    });
+    const refunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: partialRefunded.id,
+      expectedRevision: partialRefunded.revision,
+      actualRefundCents: 400,
+      occurredAt: occurredAt(65),
+      note: '补退剩余四元',
+    });
     expect(refunded).toMatchObject({
       status: 'ready_to_complete',
       refund: {
         requestedAmountCents: 1_000,
         status: 'confirmed',
-        actualRecord: { amountCents: 600 },
+        refundRecords: [{ amountCents: 600 }, { amountCents: 400 }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 1_000 },
       },
       coordination: {
         currentTodo: '部分实际退款已确认，继续处理退货物流异常',
@@ -3706,7 +3731,7 @@ describe('退货异常跨流程协调', () => {
     });
     expect(lost).toMatchObject({
       status: 'ready_to_complete',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 1_000 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 1_000 }] },
       returns: [{ currentException: { exceptionType: 'lost', stage: 'confirmed' } }],
       coordination: {
         currentTodo: '退货已确认丢失，请选择退款处理并继续承运异常处理',
@@ -3723,7 +3748,7 @@ describe('退货异常跨流程协调', () => {
       reason: '已退款，继续等待承运方调查',
     });
     expect(waiting).toMatchObject({
-      refund: { status: 'confirmed', actualRecord: { amountCents: 1_000 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 1_000 }] },
       coordination: {
         currentTodo: '实际退款已确认，继续等待承运调查',
         returnException: { decision: 'wait_investigation' },
@@ -4989,7 +5014,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(completed).toMatchObject({
       status: 'cancelled',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 1_000 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 1_000 }] },
       returns: [{ carrierClaim: { status: 'pending' } }],
     });
     expect(application.getOrder(sourceItem.orderId).operations.currentTodo).toBe('跟进承运索赔');
@@ -5023,7 +5048,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(compensated).toMatchObject({
       status: 'cancelled',
-      refund: { actualRecord: { amountCents: 1_000 } },
+      refund: { refundRecords: [{ amountCents: 1_000 }] },
       returns: [{
         carrierClaim: {
           status: 'paid',
@@ -5084,7 +5109,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(inspectedAfterCompletion).toMatchObject({
       status: 'cancelled',
-      refund: { actualRecord: { amountCents: 1_000 } },
+      refund: { refundRecords: [{ amountCents: 1_000 }] },
       returns: [{
         status: 'inspected',
         carrierClaim: { status: 'paid', actualCompensation: { amountCents: 700 } },
@@ -5150,7 +5175,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(refundedBeforeClaimResult).toMatchObject({
       status: 'ready_to_complete',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 500 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 500 }] },
       returns: [{ carrierClaim: { status: 'pending' } }],
     });
     const receivedAfterRefund = application.progressAftersalesCase({
@@ -5163,7 +5188,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(receivedAfterRefund).toMatchObject({
       status: 'ready_to_complete',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 500 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 500 }] },
       returns: [{ status: 'received' }],
     });
     const inspectedAfterRefund = application.progressAftersalesCase({
@@ -5177,7 +5202,7 @@ describe('退货物流与承运索赔', () => {
     });
     expect(inspectedAfterRefund).toMatchObject({
       status: 'ready_to_complete',
-      refund: { status: 'confirmed', actualRecord: { amountCents: 500 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 500 }] },
       returns: [{ status: 'inspected', carrierClaim: { status: 'pending' } }],
     });
     const rejected = application.progressAftersalesCase({
@@ -5463,7 +5488,7 @@ describe('退货物流与承运索赔', () => {
       kind: 'confirm_refund',
       caseId: inspected.id,
       expectedRevision: inspected.revision,
-      actualRefundCents: 900,
+      actualRefundCents: 1_000,
       occurredAt: '2026-08-12T10:40:00+08:00',
       note: '旧版人工确认实际退款',
     });
@@ -5582,7 +5607,8 @@ describe('退货物流与承运索赔', () => {
       },
       refund: {
         status: 'confirmed',
-        actualRecord: { amountCents: 900, note: '旧版人工确认实际退款' },
+        refundRecords: [{ amountCents: 1_000, note: '旧版人工确认实际退款' }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 1_000 },
       },
       returns: [{
         status: 'inspected',
@@ -6137,7 +6163,7 @@ describe('售后处理单', () => {
     expect(created).toMatchObject({
       status: 'waiting_refund',
       returns: [],
-      refund: { status: 'pending', requestedAmountCents: 900, actualRecord: null },
+      refund: { status: 'pending', requestedAmountCents: 900, refundRecords: [] },
       coordination: {
         handlingDirection: 'only_refund',
         physicalControl: 'carrier',
@@ -6145,7 +6171,7 @@ describe('售后处理单', () => {
       },
     });
 
-    const refunded = application.progressAftersalesCase({
+    const partialRefunded = application.progressAftersalesCase({
       kind: 'confirm_refund',
       caseId: created.id,
       expectedRevision: created.revision,
@@ -6153,13 +6179,30 @@ describe('售后处理单', () => {
       occurredAt: occurredAt(10),
       note: '已核对平台退款记录',
     });
+    expect(partialRefunded.refund).toMatchObject({
+      status: 'pending',
+      fulfillment: {
+        kind: 'partial',
+        refundedAmountCents: 850,
+        remainingAmountCents: 50,
+      },
+    });
+
+    const refunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: partialRefunded.id,
+      expectedRevision: partialRefunded.revision,
+      actualRefundCents: 50,
+      occurredAt: occurredAt(15),
+      note: '补退剩余款项',
+    });
     expect(refunded).toMatchObject({
       status: 'ready_to_complete',
       returns: [],
       refund: {
         status: 'confirmed',
         requestedAmountCents: 900,
-        actualRecord: { amountCents: 850 },
+        refundRecords: [{ amountCents: 850 }, { amountCents: 50 }],
       },
       coordination: {
         currentTodo: '实际退款已确认，继续跟踪并收回原正向包裹',
@@ -6179,7 +6222,7 @@ describe('售后处理单', () => {
     expect(delivered).toMatchObject({
       status: 'ready_to_complete',
       returns: [],
-      refund: { status: 'confirmed', actualRecord: { amountCents: 850 } },
+      refund: { status: 'confirmed', refundRecords: [{ amountCents: 850 }, { amountCents: 50 }] },
       coordination: {
         physicalControl: 'buyer',
         currentTodo: '买家已退款且原商品已签收，请跟进收回商品',
@@ -6428,7 +6471,7 @@ describe('售后处理单', () => {
     expect(replacementPending).toMatchObject({
       status: 'waiting_replacement',
       returns: [],
-      refund: { status: 'pending', actualRecord: null },
+      refund: { status: 'pending', refundRecords: [] },
       coordination: {
         handlingDirection: 'replacement',
         currentTodo: '安排第 2 轮补发',
@@ -7615,7 +7658,7 @@ describe('售后处理单', () => {
       refund: {
         requestedAmountCents: 600,
         status: 'pending',
-        actualRecord: null,
+        refundRecords: [],
       },
       returns: [],
       timeline: [{
@@ -7668,7 +7711,7 @@ describe('售后处理单', () => {
       note: '试图登记早于售后发生的退款',
     })).toThrow('实际退款时间不能早于售后发生时间');
 
-    const confirmed = application.progressAftersalesCase({
+    const partial = application.progressAftersalesCase({
       kind: 'confirm_refund',
       caseId: created.id,
       expectedRevision: created.revision,
@@ -7677,17 +7720,22 @@ describe('售后处理单', () => {
       note: '平台账单确认实际退回 5 元',
     });
 
-    expect(confirmed).toMatchObject({
-      status: 'ready_to_complete',
+    expect(partial).toMatchObject({
+      status: 'waiting_refund',
       revision: 2,
       refund: {
         requestedAmountCents: 600,
-        status: 'confirmed',
-        actualRecord: {
+        status: 'pending',
+        refundRecords: [{
           kind: 'aftersales_refund',
           amountCents: 500,
           occurredAt: '2026-08-13T20:20:00+08:00',
           note: '平台账单确认实际退回 5 元',
+        }],
+        fulfillment: {
+          kind: 'partial',
+          refundedAmountCents: 500,
+          remainingAmountCents: 100,
         },
       },
       timeline: [
@@ -7696,11 +7744,31 @@ describe('售后处理单', () => {
           kind: 'updated',
           baseRevision: 1,
           resultRevision: 2,
-          changeReason: '确认实际退款：平台账单确认实际退回 5 元',
+          changeReason: '部分退款：平台账单确认实际退回 5 元',
           before: expect.objectContaining({ status: 'waiting_refund' }),
-          after: expect.objectContaining({ status: 'ready_to_complete' }),
+          after: expect.objectContaining({ status: 'waiting_refund' }),
         }),
       ],
+    });
+
+    const confirmed = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: partial.id,
+      expectedRevision: partial.revision,
+      actualRefundCents: 100,
+      occurredAt: '2026-08-13T20:25:00+08:00',
+      note: '补退剩余 1 元',
+    });
+
+    expect(confirmed).toMatchObject({
+      status: 'ready_to_complete',
+      revision: 3,
+      refund: {
+        requestedAmountCents: 600,
+        status: 'confirmed',
+        refundRecords: [{ amountCents: 500 }, { amountCents: 100 }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 600 },
+      },
     });
 
     const completed = application.progressAftersalesCase({
@@ -7711,7 +7779,7 @@ describe('售后处理单', () => {
     });
     expect(completed).toMatchObject({
       status: 'completed',
-      revision: 3,
+      revision: 4,
       refund: confirmed.refund,
     });
     expect(application.queryShipmentRecords()[0].packages[0].logisticsStatus).toBe('in_transit');
@@ -7759,7 +7827,7 @@ describe('售后处理单', () => {
       refund: {
         requestedAmountCents: 1_000,
         status: 'cancelled',
-        actualRecord: null,
+        refundRecords: [],
       },
       timeline: [
         expect.objectContaining({ resultRevision: 1 }),
@@ -7835,7 +7903,7 @@ describe('售后处理单', () => {
     });
     expect(inspectedAfterCancellation).toMatchObject({
       status: 'cancelled',
-      refund: { status: 'cancelled', actualRecord: null },
+      refund: { status: 'cancelled', refundRecords: [] },
       returns: [{
         status: 'inspected',
         inspection: { result: 'resellable', note: '取消退款后仍完成退货检查' },
@@ -7859,7 +7927,7 @@ describe('售后处理单', () => {
         expect.objectContaining({
           id: inspectedAfterCancellation.id,
           status: 'cancelled',
-          refund: expect.objectContaining({ status: 'cancelled', actualRecord: null }),
+          refund: expect.objectContaining({ status: 'cancelled', refundRecords: [] }),
           returns: [expect.objectContaining({
             id: returnRegistered.returns[0].id,
             status: 'inspected',
@@ -8011,13 +8079,29 @@ describe('售后处理单', () => {
       note: '试图登记早于检查的退款时间',
     })).toThrow('实际退款时间不能早于退货检查时间');
 
-    const refunded = application.progressAftersalesCase({
+    const partialRefunded = application.progressAftersalesCase({
       kind: 'confirm_refund',
       caseId: inspected.id,
       expectedRevision: inspected.revision,
       actualRefundCents: 900,
       occurredAt: '2026-08-13T21:40:00+08:00',
       note: '平台确认实际退款 9 元',
+    });
+    expect(partialRefunded.refund).toMatchObject({
+      status: 'pending',
+      fulfillment: {
+        kind: 'partial',
+        refundedAmountCents: 900,
+        remainingAmountCents: 100,
+      },
+    });
+    const refunded = application.progressAftersalesCase({
+      kind: 'confirm_refund',
+      caseId: partialRefunded.id,
+      expectedRevision: partialRefunded.revision,
+      actualRefundCents: 100,
+      occurredAt: '2026-08-13T21:45:00+08:00',
+      note: '补退剩余 1 元',
     });
     const completed = application.progressAftersalesCase({
       kind: 'complete',
@@ -8030,7 +8114,8 @@ describe('售后处理单', () => {
       refund: {
         requestedAmountCents: 1_000,
         status: 'confirmed',
-        actualRecord: { amountCents: 900 },
+        refundRecords: [{ amountCents: 900 }, { amountCents: 100 }],
+        fulfillment: { kind: 'complete', refundedAmountCents: 1_000 },
       },
       returns: [{ status: 'inspected', inspection: { result: 'defective' } }],
     });
@@ -8045,11 +8130,11 @@ describe('售后处理单', () => {
       id: completed.id,
       workflow: 'return_refund',
       status: 'completed',
-      revision: 6,
+      revision: 7,
       refund: {
         requestedAmountCents: 1_000,
         status: 'confirmed',
-        actualRecord: { amountCents: 900 },
+        refundRecords: [{ amountCents: 900 }, { amountCents: 100 }],
       },
       returns: [{
         id: returnRecord.id,
@@ -8063,7 +8148,7 @@ describe('售后处理单', () => {
       }],
       timeline: expect.arrayContaining([
         expect.objectContaining({ resultRevision: 1 }),
-        expect.objectContaining({ resultRevision: 6 }),
+        expect.objectContaining({ resultRevision: 7 }),
       ]),
     }]);
     reopened.close();

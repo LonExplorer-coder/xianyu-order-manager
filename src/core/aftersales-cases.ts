@@ -46,7 +46,11 @@ export type AftersalesWorkflow =
 
 export type AftersalesReplacementWorkflow = 'exchange' | 'direct_replacement';
 
-export type PendingFinancialItemStatus = 'pending' | 'confirmed' | 'cancelled';
+export type PendingFinancialItemStatus = 'pending' | 'confirmed' | 'cancelled' | 'ended';
+
+export function isSettledRefundStatus(status: PendingFinancialItemStatus | null): boolean {
+  return status === 'confirmed' || status === 'ended';
+}
 
 export type AftersalesReturnStatus = 'in_transit' | 'received' | 'inspected';
 
@@ -85,16 +89,24 @@ export type CarrierClaimStatus = SharedCarrierClaimStatus;
 
 export type ReturnInspectionResult = 'resellable' | 'defective' | 'scrapped' | 'other';
 
+export type AftersalesRefundFulfillment =
+  | { kind: 'unfulfilled'; refundedAmountCents: 0 }
+  | { kind: 'partial'; refundedAmountCents: number; remainingAmountCents: number }
+  | { kind: 'complete'; refundedAmountCents: number }
+  | { kind: 'conflict'; refundedAmountCents: number; excessAmountCents: number };
+
 export type AftersalesRefund = {
   pendingItemId: string;
   requestedAmountCents: number;
   status: PendingFinancialItemStatus;
-  actualRecord: AftersalesRefundFinancialRecord | null;
+  refundRecords: AftersalesRefundFinancialRecord[];
+  fulfillment: AftersalesRefundFulfillment;
   createdAt: string;
   latestEventAt: string;
   timeline: Array<{
-    kind: 'created' | 'confirmed' | 'cancelled' | 'reopened';
+    kind: 'created' | 'confirmed' | 'cancelled' | 'reopened' | 'target_adjusted' | 'ended';
     requestedAmountCents: number;
+    beforeAmountCents: number | null;
     actualAmountCents: number | null;
     reason: string;
     occurredAt: string;
@@ -110,6 +122,34 @@ export type AftersalesRefundFinancialRecord = {
   note: string;
   createdAt: string;
 };
+
+export function projectAftersalesRefundFulfillment(
+  requestedAmountCents: number,
+  refundRecords: ReadonlyArray<Pick<AftersalesRefundFinancialRecord, 'amountCents'>>,
+): AftersalesRefundFulfillment {
+  const refundedAmountCents = refundRecords.reduce(
+    (total, record) => total + record.amountCents,
+    0,
+  );
+  if (refundedAmountCents === 0) {
+    return { kind: 'unfulfilled', refundedAmountCents: 0 };
+  }
+  if (refundedAmountCents < requestedAmountCents) {
+    return {
+      kind: 'partial',
+      refundedAmountCents,
+      remainingAmountCents: requestedAmountCents - refundedAmountCents,
+    };
+  }
+  if (refundedAmountCents === requestedAmountCents) {
+    return { kind: 'complete', refundedAmountCents };
+  }
+  return {
+    kind: 'conflict',
+    refundedAmountCents,
+    excessAmountCents: refundedAmountCents - requestedAmountCents,
+  };
+}
 
 export type AftersalesReturnItem = AftersalesCaseItemInput & {
   id: string;
@@ -407,6 +447,21 @@ export type ProgressAftersalesCaseInput =
     actualRefundCents: number;
     occurredAt: string;
     note: string;
+  }
+  | {
+    kind: 'adjust_refund_target';
+    caseId: string;
+    expectedRevision: number;
+    requestedRefundCents: number;
+    occurredAt: string;
+    reason: string;
+  }
+  | {
+    kind: 'end_refund';
+    caseId: string;
+    expectedRevision: number;
+    occurredAt: string;
+    reason: string;
   }
   | {
     kind: 'complete';
@@ -1227,6 +1282,33 @@ export function normalizeProgressAftersalesCaseInput(
       actualRefundCents: money(record.actualRefundCents, false) as number,
       occurredAt: dateTime(record.occurredAt, '实际退款时间无效'),
       note: boundedText(record.note, 500, '请填写 1 至 500 字的退款确认说明'),
+    };
+  }
+  if (record.kind === 'adjust_refund_target') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'requestedRefundCents', 'occurredAt', 'reason'],
+      '调整退款目标参数',
+    );
+    return {
+      kind: 'adjust_refund_target',
+      ...common,
+      requestedRefundCents: positiveMoney(record.requestedRefundCents, '退款目标金额无效'),
+      occurredAt: dateTime(record.occurredAt, '调整退款目标时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的退款目标调整原因'),
+    };
+  }
+  if (record.kind === 'end_refund') {
+    rejectUnknownKeys(
+      record,
+      ['kind', 'caseId', 'expectedRevision', 'occurredAt', 'reason'],
+      '结束退款参数',
+    );
+    return {
+      kind: 'end_refund',
+      ...common,
+      occurredAt: dateTime(record.occurredAt, '结束退款时间无效'),
+      reason: boundedText(record.reason, 500, '请填写 1 至 500 字的结束退款原因'),
     };
   }
   if (record.kind === 'complete' || record.kind === 'cancel') {

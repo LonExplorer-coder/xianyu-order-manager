@@ -202,6 +202,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(46)) migrateToVersion46(database);
   if (!versions.has(47)) migrateToVersion47(database);
   if (!versions.has(48)) migrateToVersion48(database);
+  if (!versions.has(49)) migrateToVersion49(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5974,6 +5975,161 @@ function migrateToVersion48(database: DatabaseSync): void {
     database.exec('COMMIT;');
   } catch (error) {
     rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion49(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE financial_records_v49 (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+        pending_item_id TEXT NOT NULL
+          REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+        aftersales_case_id TEXT NOT NULL
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        occurred_at TEXT NOT NULL,
+        note TEXT NOT NULL CHECK (length(trim(note)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO financial_records_v49 (
+        id, kind, pending_item_id, aftersales_case_id,
+        amount_cents, occurred_at, note, created_at
+      )
+      SELECT
+        id, kind, pending_item_id, aftersales_case_id,
+        amount_cents, occurred_at, note, created_at
+      FROM financial_records;
+
+      DROP TRIGGER aftersales_outbound_exception_refund_link_identity_is_valid_on_insert;
+      DROP TABLE financial_records;
+      ALTER TABLE financial_records_v49 RENAME TO financial_records;
+
+      CREATE TRIGGER aftersales_outbound_exception_refund_link_identity_is_valid_on_insert
+      BEFORE INSERT ON aftersales_outbound_exception_refund_links
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM financial_records AS financial
+        JOIN aftersales_outbound_exception_decision_events AS decision
+          ON decision.id = NEW.decision_event_id
+        WHERE financial.id = NEW.financial_record_id
+          AND financial.aftersales_case_id = decision.case_id
+          AND decision.after_decision IN ('refund_only', 'refund_and_replacement')
+      ) BEGIN
+        SELECT RAISE(ABORT, 'outbound exception refund link identity mismatch');
+      END;
+
+      CREATE INDEX financial_records_by_pending_item
+      ON financial_records (pending_item_id, occurred_at, created_at);
+
+      CREATE TRIGGER financial_records_are_immutable_on_update
+      BEFORE UPDATE ON financial_records
+      BEGIN
+        SELECT RAISE(ABORT, 'financial records are immutable');
+      END;
+
+      CREATE TRIGGER financial_records_are_immutable_on_delete
+      BEFORE DELETE ON financial_records
+      BEGIN
+        SELECT RAISE(ABORT, 'financial records are immutable');
+      END;
+
+      CREATE TABLE pending_financial_items_v49 (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind = 'aftersales_refund'),
+        aftersales_case_id TEXT NOT NULL UNIQUE
+          REFERENCES aftersales_cases(id) ON DELETE RESTRICT,
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'cancelled', 'ended')),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK (
+          (status = 'pending' AND resolved_at IS NULL)
+          OR (status IN ('confirmed', 'cancelled', 'ended') AND resolved_at IS NOT NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO pending_financial_items_v49 (
+        id, kind, aftersales_case_id, requested_amount_cents,
+        status, created_at, resolved_at
+      )
+      SELECT
+        id, kind, aftersales_case_id, requested_amount_cents,
+        status, created_at, resolved_at
+      FROM pending_financial_items;
+
+      DROP TABLE pending_financial_items;
+      ALTER TABLE pending_financial_items_v49 RENAME TO pending_financial_items;
+
+      CREATE TABLE aftersales_refund_target_adjustment_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        pending_item_id TEXT NOT NULL
+          REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+        before_amount_cents INTEGER NOT NULL CHECK (before_amount_cents > 0),
+        after_amount_cents INTEGER NOT NULL CHECK (after_amount_cents > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (before_amount_cents <> after_amount_cents)
+      ) STRICT;
+
+      CREATE INDEX aftersales_refund_target_adjustment_events_by_item
+      ON aftersales_refund_target_adjustment_events (pending_item_id, sequence);
+
+      CREATE TRIGGER aftersales_refund_target_adjustment_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_refund_target_adjustment_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales refund target adjustment events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_refund_target_adjustment_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_refund_target_adjustment_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales refund target adjustment events are immutable');
+      END;
+
+      CREATE TABLE aftersales_refund_ending_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        pending_item_id TEXT NOT NULL
+          REFERENCES pending_financial_items(id) ON DELETE RESTRICT,
+        requested_amount_cents INTEGER NOT NULL CHECK (requested_amount_cents > 0),
+        refunded_amount_cents INTEGER NOT NULL CHECK (refunded_amount_cents > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (refunded_amount_cents < requested_amount_cents)
+      ) STRICT;
+
+      CREATE INDEX aftersales_refund_ending_events_by_item
+      ON aftersales_refund_ending_events (pending_item_id, sequence);
+
+      CREATE TRIGGER aftersales_refund_ending_events_are_immutable_on_update
+      BEFORE UPDATE ON aftersales_refund_ending_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales refund ending events are immutable');
+      END;
+
+      CREATE TRIGGER aftersales_refund_ending_events_are_immutable_on_delete
+      BEFORE DELETE ON aftersales_refund_ending_events
+      BEGIN
+        SELECT RAISE(ABORT, 'aftersales refund ending events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (49, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+    database.exec('PRAGMA foreign_keys = ON;');
+  } catch (error) {
+    rollbackQuietly(database);
+    database.exec('PRAGMA foreign_keys = ON;');
     throw error;
   }
 }

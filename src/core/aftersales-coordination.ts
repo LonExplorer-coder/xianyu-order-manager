@@ -5,6 +5,7 @@ import type {
   LogisticsExceptionType,
   OutboundLogisticsStatus,
 } from './logistics-exceptions';
+import { isSettledRefundStatus, type PendingFinancialItemStatus } from './aftersales-cases';
 import type { ShipmentRecord } from './shipment-records';
 
 export type AftersalesHandlingDirection =
@@ -235,7 +236,7 @@ export function coordinateAftersales(input: {
   sourcePackages: AftersalesSourcePackageEvidence[];
   interception: AftersalesInterception | null;
   handlingDirectionTimeline?: AftersalesHandlingDirectionEvent[];
-  refundStatus?: 'pending' | 'confirmed' | 'cancelled' | null;
+  refundStatus?: PendingFinancialItemStatus | null;
   returnExceptions?: Array<AftersalesReturnExceptionEvidence & {
     decisionTimeline: AftersalesReturnExceptionDecisionEvent[];
   }>;
@@ -301,7 +302,7 @@ export function coordinateAftersales(input: {
 
 function actionForOutboundException(
   exception: AftersalesOutboundExceptionCoordination,
-  refundStatus: 'pending' | 'confirmed' | 'cancelled' | null,
+  refundStatus: PendingFinancialItemStatus | null,
 ): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
   const risk = `正向${exception.exceptionType === 'lost' ? '丢件' : '物流异常'}影响 ${exception.affectedQuantity} 件商品`;
   if (exception.decision === null) {
@@ -315,7 +316,7 @@ function actionForOutboundException(
   }
   if (exception.decision === 'refund_only') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '实际退款已确认，继续处理正向物流异常和承运索赔'
         : '核对并确认实际退款，正向物流异常继续独立处理',
       risk,
@@ -325,7 +326,7 @@ function actionForOutboundException(
     return { currentTodo: '建立并跟进独立补发记录，原正向异常继续独立处理', risk };
   }
   return {
-    currentTodo: refundStatus === 'confirmed'
+    currentTodo: isSettledRefundStatus(refundStatus)
       ? '实际退款已确认，继续建立或跟进独立补发记录'
       : '确认实际退款并建立独立补发记录',
     risk,
@@ -346,7 +347,7 @@ function coordinateReturnException(
 
 function actionForReturnException(
   exception: AftersalesReturnExceptionCoordination,
-  refundStatus: 'pending' | 'confirmed' | 'cancelled' | null,
+  refundStatus: PendingFinancialItemStatus | null,
 ): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
   const risk = exception.exceptionType === 'delivery_dispute'
     ? '签收扫描不等于卖家实际收到，不能直接进入检查'
@@ -365,7 +366,7 @@ function actionForReturnException(
   }
   if (exception.decision === 'wait_investigation') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '实际退款已确认，继续等待承运调查'
         : '继续等待承运调查，实际退款尚未发生',
       risk,
@@ -373,7 +374,7 @@ function actionForReturnException(
   }
   if (exception.decision === 'refund_in_advance') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '先行实际退款已确认，继续处理退货物流异常'
         : '核对并确认先行实际退款，承运异常继续独立处理',
       risk,
@@ -381,7 +382,7 @@ function actionForReturnException(
   }
   if (exception.decision === 'partial_refund') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '部分实际退款已确认，继续处理退货物流异常'
         : '核对并确认部分实际退款，承运异常继续独立处理',
       risk,
@@ -389,7 +390,7 @@ function actionForReturnException(
   }
   if (exception.decision === 'reject_refund') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '已记录实际退款，原拒绝退款选择与异常继续保留'
         : '已选择拒绝退款，继续处理退货物流异常',
       risk,
@@ -397,7 +398,7 @@ function actionForReturnException(
   }
   if (exception.decision === 'negotiate') {
     return {
-      currentTodo: refundStatus === 'confirmed'
+      currentTodo: isSettledRefundStatus(refundStatus)
         ? '实际退款已确认，承运异常继续独立处理'
         : '继续与买家协商，承运异常独立处理',
       risk,
@@ -509,7 +510,7 @@ function actionFor(input: {
   hasConfirmedLoss: boolean;
   handlingDirection: AftersalesHandlingDirection | null;
   interception: AftersalesInterception | null;
-  refundStatus: 'pending' | 'confirmed' | 'cancelled' | null;
+  refundStatus: PendingFinancialItemStatus | null;
 }): Pick<AftersalesCoordination, 'currentTodo' | 'risk'> {
   if (input.physicalControl === 'confirmed_lost') {
     if (input.handlingDirection === 'replacement') {
@@ -520,7 +521,7 @@ function actionFor(input: {
     }
     if (input.handlingDirection === 'only_refund') {
       return {
-        currentTodo: input.refundStatus === 'confirmed'
+        currentTodo: isSettledRefundStatus(input.refundStatus)
           ? '实际退款已确认，丢件调查可继续独立跟进'
           : '核对并确认实际退款',
         risk: '原正向包裹已确认丢失',
@@ -541,7 +542,7 @@ function actionFor(input: {
       }
       if (input.handlingDirection === 'only_refund') {
         return {
-          currentTodo: input.refundStatus === 'confirmed'
+          currentTodo: isSettledRefundStatus(input.refundStatus)
             ? '实际退款已确认，继续分别跟踪所选商品实物'
             : '核对并确认实际退款',
           risk: '所选商品的实物控制关系不一致，退款与实物需分别跟踪',
@@ -560,7 +561,7 @@ function actionFor(input: {
     }
     if (input.handlingDirection === 'only_refund') {
       return {
-        currentTodo: input.refundStatus === 'confirmed'
+        currentTodo: isSettledRefundStatus(input.refundStatus)
           ? '实际退款已确认，继续调查未收回商品'
           : '核对并确认实际退款',
         risk: '部分商品已确认丢失，退款与其余实物需分别跟踪',
@@ -581,7 +582,7 @@ function actionFor(input: {
     };
   }
   if (input.interception?.status === 'requested') {
-    if (input.handlingDirection === 'only_refund' && input.refundStatus === 'confirmed') {
+    if (input.handlingDirection === 'only_refund' && isSettledRefundStatus(input.refundStatus)) {
       return {
         currentTodo: '实际退款已确认，拦截请求仍待确认',
         risk: '拦截结果未确认，不应假定原正向包裹已收回',
@@ -620,13 +621,13 @@ function actionFor(input: {
     return { currentTodo: '等待买家退回', risk: null };
   }
   if (input.handlingDirection === 'only_refund') {
-    if (input.refundStatus === 'confirmed' && input.physicalControl === 'buyer') {
+    if (isSettledRefundStatus(input.refundStatus) && input.physicalControl === 'buyer') {
       return {
         currentTodo: '买家已退款且原商品已签收，请跟进收回商品',
         risk: '资金已退出，原商品仍在买家控制中',
       };
     }
-    if (input.refundStatus === 'confirmed' && input.physicalControl === 'carrier') {
+    if (isSettledRefundStatus(input.refundStatus) && input.physicalControl === 'carrier') {
       return {
         currentTodo: '实际退款已确认，继续跟踪并收回原正向包裹',
         risk: '买家已退款，原商品仍在运输中',

@@ -295,12 +295,30 @@ export function AftersalesCasePanel({
           {aftersalesCase.refund && (
             <>
               <div className="shipment-record-card__aftersales-facts" aria-label="退款事实">
-                <span>申请退款 <strong>{formatMoney(aftersalesCase.refund.requestedAmountCents)}</strong></span>
-                {aftersalesCase.refund.actualRecord ? (
-                  <span>实际退款 <strong>{formatMoney(aftersalesCase.refund.actualRecord.amountCents)}</strong></span>
+                <span>退款目标 <strong>{formatMoney(aftersalesCase.refund.requestedAmountCents)}</strong></span>
+                {aftersalesCase.refund.refundRecords.length > 0 ? (
+                  <span>
+                    已退累计 <strong>{formatMoney(
+                      aftersalesCase.refund.fulfillment.refundedAmountCents,
+                    )}</strong>
+                    （{aftersalesCase.refund.refundRecords.length} 笔）
+                  </span>
                 ) : (
                   <span>{aftersalesCase.refund.status === 'cancelled' ? '退款申请已取消' : '实际退款待确认'}</span>
                 )}
+                {aftersalesCase.refund.fulfillment.kind === 'partial' && (
+                  <span>
+                    {aftersalesCase.refund.status === 'ended' ? '未再补退' : '剩余'}
+                    {' '}<strong>{formatMoney(
+                      aftersalesCase.refund.fulfillment.remainingAmountCents,
+                    )}</strong>
+                    {aftersalesCase.refund.status === 'ended' ? '' : ' 待退'}
+                  </span>
+                )}
+                {aftersalesCase.refund.fulfillment.kind === 'conflict' && (
+                  <span role="alert">实退累计已超过退款目标，请人工核对</span>
+                )}
+                {aftersalesCase.refund.status === 'ended' && <span>已带原因结束退款（未足额）</span>}
               </div>
               {aftersalesCase.refund.timeline.length > 0 && (
                 <details className="shipment-record-card__timeline">
@@ -310,10 +328,13 @@ export function AftersalesCasePanel({
                       <li key={`${event.kind}-${event.createdAt}`}>
                         <strong>{refundEventLabel(event.kind)}</strong>
                         <span>
-                          申请 {formatMoney(event.requestedAmountCents)}
-                          {event.actualAmountCents === null
-                            ? ''
-                            : ` · 实际 ${formatMoney(event.actualAmountCents)}`}
+                          {event.kind === 'target_adjusted'
+                            ? `${formatMoney(event.beforeAmountCents ?? 0)} → ${formatMoney(event.requestedAmountCents)}`
+                            : `申请 ${formatMoney(event.requestedAmountCents)}${
+                              event.actualAmountCents === null
+                                ? ''
+                                : ` · 实际 ${formatMoney(event.actualAmountCents)}`
+                            }`}
                           {' · '}{event.reason}
                         </span>
                         <small>{formatDateTime(event.occurredAt)}</small>
@@ -745,6 +766,30 @@ export function AftersalesCasePanel({
                   {progressActionLabel('confirm_refund')}
                 </button>
               )}
+              {aftersalesCase.refund?.status === 'pending'
+                && aftersalesCase.refund.fulfillment.kind === 'partial'
+                && aftersalesCase.status !== 'completed'
+                && aftersalesCase.status !== 'cancelled' && (
+                <>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setProgressTarget({
+                      aftersalesCase,
+                      kind: 'adjust_refund_target',
+                    })}
+                  >
+                    {progressActionLabel('adjust_refund_target')}
+                  </button>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setProgressTarget({ aftersalesCase, kind: 'end_refund' })}
+                  >
+                    {progressActionLabel('end_refund')}
+                  </button>
+                </>
+              )}
               {aftersalesCase.status === 'ready_to_complete'
                 && primaryProgressAction(aftersalesCase) !== 'complete' && (
                 <button
@@ -1036,6 +1081,8 @@ function progressActionLabel(kind: ProgressAftersalesCaseInput['kind']): string 
     receive_return: '确认收到退货',
     inspect_return: '记录退货检查',
     confirm_refund: '确认实际退款',
+    adjust_refund_target: '调整退款目标金额',
+    end_refund: '结束退款',
     complete: '完成售后',
     cancel: '取消售后',
     correct_return_logistics: '更正退货物流',
@@ -1189,13 +1236,15 @@ function carrierClaimEventDescription(
 }
 
 function refundEventLabel(
-  kind: 'created' | 'confirmed' | 'cancelled' | 'reopened',
+  kind: 'created' | 'confirmed' | 'cancelled' | 'reopened' | 'target_adjusted' | 'ended',
 ): string {
   return {
     created: '申请退款',
     confirmed: '确认实际退款',
     cancelled: '取消退款申请',
     reopened: '重新申请退款',
+    target_adjusted: '调整退款目标',
+    ended: '结束退款',
   }[kind];
 }
 
