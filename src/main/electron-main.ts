@@ -32,8 +32,12 @@ import type {
 import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
+  normalizeCreateProductMappingInput,
+  normalizeCorrectProductMappingInput,
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
+  normalizeProductMappingReasonInput,
+  normalizeProductMappingSearch,
   normalizeProductStandardizationConfirmations,
   normalizeStandardProductInput,
   normalizeUpdateOrderItemStandardizationInput,
@@ -228,6 +232,42 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('products:price-events', (_event, productId: unknown) => (
     desktopSession.listStandardProductPriceEvents(parseWorkflowId(productId, '标准商品'))
   ));
+  ipcMain.handle('products:mapping-stats', (_event, productId: unknown) => (
+    desktopSession.getProductMappingStats(parseWorkflowId(productId, '标准商品'))
+  ));
+  ipcMain.handle('products:list-mappings', (_event, productId: unknown, search: unknown) => (
+    desktopSession.listProductMappings(
+      parseWorkflowId(productId, '标准商品'),
+      normalizeProductMappingSearch(search),
+    )
+  ));
+  ipcMain.handle('products:list-mapping-events', (_event, productId: unknown) => (
+    desktopSession.listProductMappingEvents(parseWorkflowId(productId, '标准商品'))
+  ));
+  ipcMain.handle('products:create-mapping', (_event, productId: unknown, input: unknown) => (
+    desktopSession.createProductMapping(
+      parseWorkflowId(productId, '标准商品'),
+      normalizeCreateProductMappingInput(input),
+    )
+  ));
+  ipcMain.handle('products:correct-mapping', (_event, mappingId: unknown, input: unknown) => (
+    desktopSession.correctProductMapping(
+      parseWorkflowId(mappingId, '商品映射'),
+      normalizeCorrectProductMappingInput(input),
+    )
+  ));
+  ipcMain.handle('products:disable-mapping', (_event, mappingId: unknown, input: unknown) => (
+    desktopSession.disableProductMapping(
+      parseWorkflowId(mappingId, '商品映射'),
+      normalizeProductMappingReasonInput(input),
+    )
+  ));
+  ipcMain.handle('products:delete-mapping', (_event, mappingId: unknown, input: unknown) => {
+    desktopSession.deleteProductMapping(
+      parseWorkflowId(mappingId, '商品映射'),
+      normalizeProductMappingReasonInput(input),
+    );
+  });
   ipcMain.handle(
     'products:preview-draft-standardizations',
     (_event, draft: OrderDraft) => desktopSession.previewDraftProductStandardizations(draft),

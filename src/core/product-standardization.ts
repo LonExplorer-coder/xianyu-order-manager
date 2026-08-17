@@ -24,6 +24,40 @@ export type ProductStandardizationSource = 'exact' | 'mapping' | 'manual';
 /** 商品映射的三级适用范围：当前平台与卖家账号、当前平台全部账号或整个工作区。 */
 export type ProductMappingScope = 'current_account' | 'current_platform' | 'workspace';
 
+/** 商品映射的当前状态：有效或已停用；停用保留行与历史但不再参与匹配。 */
+export type ProductMappingStatus = 'active' | 'disabled';
+
+/** 商品映射的建立来源：关联确认建立或手工新增。 */
+export type ProductMappingOrigin = 'confirmation' | 'manual';
+
+/** 不可变商品映射变更事件的操作类型。 */
+export type ProductMappingEventType = 'created' | 'corrected' | 'disabled' | 'deleted';
+
+/** 商品映射变更事件的前值或后值快照。 */
+export type ProductMappingEventSnapshot = {
+  sourceTitle: string;
+  sourceSpec: string;
+  standardProductId: string;
+  scope: ProductMappingScope;
+  platform: string | null;
+  sellerAccount: string | null;
+  status: ProductMappingStatus;
+};
+
+/** 不可变商品映射变更事件：前后值快照、来源、原因与时间；删除映射后仍按标准商品可查。 */
+export type ProductMappingEvent = {
+  id: string;
+  mappingId: string;
+  standardProductId: string;
+  eventType: ProductMappingEventType;
+  before: ProductMappingEventSnapshot | null;
+  after: ProductMappingEventSnapshot | null;
+  origin: ProductMappingOrigin;
+  reason: string;
+  occurredAt: string;
+  createdAt: string;
+};
+
 export type ProductMapping = {
   id: string;
   sourceTitle: string;
@@ -32,8 +66,63 @@ export type ProductMapping = {
   platform: string | null;
   sellerAccount: string | null;
   standardProductId: string;
+  status: ProductMappingStatus;
+  origin: ProductMappingOrigin;
+  lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/** 商品映射可视列表行：映射本身、目标 SKU 与标准商品、命中订单数投影。 */
+export type ProductMappingView = ProductMapping & {
+  sourceTitleKey: string;
+  sourceSpecKey: string;
+  targetProductSku: string;
+  targetProductName: string;
+  hitOrderCount: number;
+};
+
+/** 标准商品详情的映射区域统计，全部由关联事实投影。 */
+export type ProductMappingStats = {
+  activeMappingCount: number;
+  linkedOrderCount: number;
+  linkedItemCount: number;
+  linkedTotalQuantity: number;
+};
+
+export type CreateProductMappingInput = {
+  sourceTitle: string;
+  sourceSpec: string;
+  scope: ProductMappingScope;
+  platform: string | null;
+  sellerAccount: string | null;
+};
+
+export type CorrectProductMappingInput = {
+  standardProductId?: string;
+  scope?: ProductMappingScope;
+  platform?: string | null;
+  sellerAccount?: string | null;
+  reason: string;
+};
+
+export type ProductMappingReasonInput = {
+  reason: string;
+};
+
+/** 命中投影所需的映射关联事实：source='mapping' 的订单商品明细。 */
+export type ProductMappingHitFact = {
+  sourceTitle: string;
+  sourceSpec: string;
+  standardProductId: string;
+  orderId: string;
+  quantity: number;
+};
+
+export type ProductMappingHitSummary = {
+  orderCount: number;
+  itemCount: number;
+  totalQuantity: number;
 };
 
 /** 映射匹配上下文：待匹配订单商品所属的平台与卖家账号。 */
@@ -49,34 +138,90 @@ export type ProductMappingMatch = {
 
 /**
  * 规格 4.3 的映射匹配优先级：当前账号映射 → 当前平台映射 → 工作区映射。
- * 传入的候选映射已由调用方按规范化原文标题与规格筛好。
+ * 传入的候选映射已由调用方按规范化原文标题与规格筛好（且只含有效映射）；
+ * 返回命中结果及其来源行，供调用方更新最近使用时间。
  */
-export function selectProductMappingMatch(
-  mappings: readonly Pick<
+export function selectProductMappingMatch<
+  Row extends Pick<
     ProductMapping,
     'scope' | 'platform' | 'sellerAccount' | 'standardProductId'
-  >[],
+  >,
+>(
+  mappings: readonly Row[],
   context: ProductMappingMatchContext,
-): ProductMappingMatch | null {
+): (ProductMappingMatch & { row: Row }) | null {
   const account = mappings.find((mapping) => (
     mapping.scope === 'current_account' &&
     mapping.platform === context.platform &&
     mapping.sellerAccount === context.sellerAccount
   ));
   if (account) {
-    return { standardProductId: account.standardProductId, scope: 'current_account' };
+    return {
+      standardProductId: account.standardProductId,
+      scope: 'current_account',
+      row: account,
+    };
   }
   const platform = mappings.find((mapping) => (
     mapping.scope === 'current_platform' && mapping.platform === context.platform
   ));
   if (platform) {
-    return { standardProductId: platform.standardProductId, scope: 'current_platform' };
+    return {
+      standardProductId: platform.standardProductId,
+      scope: 'current_platform',
+      row: platform,
+    };
   }
   const workspace = mappings.find((mapping) => mapping.scope === 'workspace');
   if (workspace) {
-    return { standardProductId: workspace.standardProductId, scope: 'workspace' };
+    return {
+      standardProductId: workspace.standardProductId,
+      scope: 'workspace',
+      row: workspace,
+    };
   }
   return null;
+}
+
+/** 映射的规范化原文匹配键，命中投影与列表查询共用同一口径。 */
+export function productMappingSourceKey(sourceTitle: string, sourceSpec: string): string {
+  return `${normalizeProductText(sourceTitle)}\u0000${normalizeProductText(sourceSpec)}`;
+}
+
+/**
+ * 命中统计由关联事实（standardization_source='mapping' 的订单商品明细）投影，
+ * 按规范化原文键与目标商品汇总命中订单数、明细数与商品总数量，不另存计数副本。
+ * 同一原文可在不同范围指向不同商品（规格 4.4 只约束同范围唯一），
+ * 因此汇总键必须带目标商品，避免跨商品串数。
+ */
+export function summarizeProductMappingHits(
+  facts: readonly ProductMappingHitFact[],
+): ReadonlyMap<string, ProductMappingHitSummary> {
+  const orderIdsByKey = new Map<string, Set<string>>();
+  const summaries = new Map<string, ProductMappingHitSummary>();
+  for (const fact of facts) {
+    const key = productMappingHitKey(fact.sourceTitle, fact.sourceSpec, fact.standardProductId);
+    const orderIds = orderIdsByKey.get(key) ?? new Set<string>();
+    orderIds.add(fact.orderId);
+    orderIdsByKey.set(key, orderIds);
+    const summary = summaries.get(key) ?? { orderCount: 0, itemCount: 0, totalQuantity: 0 };
+    summary.itemCount += 1;
+    summary.totalQuantity += fact.quantity;
+    summaries.set(key, summary);
+  }
+  for (const [key, summary] of summaries) {
+    summary.orderCount = orderIdsByKey.get(key)?.size ?? 0;
+  }
+  return summaries;
+}
+
+/** 命中投影键：规范化原文键 + 目标商品，命中投影与映射视图查询共用同一口径。 */
+export function productMappingHitKey(
+  sourceTitle: string,
+  sourceSpec: string,
+  standardProductId: string,
+): string {
+  return `${productMappingSourceKey(sourceTitle, sourceSpec)}\u0000${standardProductId}`;
 }
 
 export type ProductStandardizationCandidate = {
@@ -711,6 +856,127 @@ export function normalizeUpdateStandardProductInput(
       : {}),
     expectedRevision: record.expectedRevision as number,
   };
+}
+
+const CREATE_MAPPING_KEYS = new Set([
+  'sourceTitle',
+  'sourceSpec',
+  'scope',
+  'platform',
+  'sellerAccount',
+]);
+const CORRECT_MAPPING_KEYS = new Set([
+  'standardProductId',
+  'scope',
+  'platform',
+  'sellerAccount',
+  'reason',
+]);
+
+export function normalizeCreateProductMappingInput(
+  value: unknown,
+): CreateProductMappingInput {
+  const record = requireMappingRecord(value, '商品映射', CREATE_MAPPING_KEYS);
+  return {
+    sourceTitle: requiredProductText(record.sourceTitle, '原始商品标题', 300),
+    sourceSpec: normalizeMappingSourceSpec(record.sourceSpec),
+    ...normalizeMappingScopeFields(record),
+  };
+}
+
+export function normalizeCorrectProductMappingInput(
+  value: unknown,
+): CorrectProductMappingInput {
+  const record = requireMappingRecord(value, '商品映射更正', CORRECT_MAPPING_KEYS);
+  const reason = normalizeMappingChangeReason(record.reason);
+  const result: CorrectProductMappingInput = { reason };
+  let hasChange = false;
+  if ('standardProductId' in record) {
+    result.standardProductId = normalizeBatchProductId(record.standardProductId);
+    hasChange = true;
+  }
+  if ('scope' in record) {
+    Object.assign(result, normalizeMappingScopeFields(record));
+    hasChange = true;
+  }
+  if (!hasChange) throw new Error('商品映射更正内容为空');
+  return result;
+}
+
+export function normalizeProductMappingReasonInput(
+  value: unknown,
+): ProductMappingReasonInput {
+  const record = requireMappingRecord(value, '商品映射操作', new Set(['reason']));
+  return { reason: normalizeMappingChangeReason(record.reason) };
+}
+
+export function normalizeProductMappingSearch(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error('商品映射搜索内容无效');
+  const normalized = value.trim();
+  if (normalized.length > 300) throw new Error('商品映射搜索内容无效');
+  return normalized;
+}
+
+function requireMappingRecord(
+  value: unknown,
+  label: string,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label}内容无效`);
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
+    throw new Error(`${label}包含未知字段`);
+  }
+  return record;
+}
+
+function normalizeMappingScopeFields(record: Record<string, unknown>): {
+  scope: ProductMappingScope;
+  platform: string | null;
+  sellerAccount: string | null;
+} {
+  const scope = record.scope;
+  if (scope !== 'current_account' && scope !== 'current_platform' && scope !== 'workspace') {
+    throw new Error('商品映射适用范围无效');
+  }
+  const platform = normalizeOptionalMappingText(record.platform);
+  const sellerAccount = normalizeOptionalMappingText(record.sellerAccount);
+  if (scope === 'current_account' && (!platform || !sellerAccount)) {
+    throw new Error('当前平台与卖家账号级映射必须提供平台与卖家账号');
+  }
+  if (scope === 'current_platform') {
+    if (!platform) throw new Error('当前平台级映射必须提供平台');
+    if (sellerAccount) throw new Error('当前平台级映射不能包含卖家账号');
+  }
+  if (scope === 'workspace' && (platform || sellerAccount)) {
+    throw new Error('工作区级映射不能包含平台或卖家账号');
+  }
+  return { scope, platform, sellerAccount };
+}
+
+function normalizeOptionalMappingText(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new Error('商品映射范围字段无效');
+  const normalized = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  if (normalized.length > 200) throw new Error('商品映射范围字段无效');
+  return normalized || null;
+}
+
+function normalizeMappingSourceSpec(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('原始规格无效');
+  const normalized = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  if (normalized.length > 300) throw new Error('原始规格无效');
+  return normalized;
+}
+
+function normalizeMappingChangeReason(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('映射变更原因无效');
+  const reason = value.trim();
+  if (!reason || reason.length > 500) throw new Error('映射变更原因无效');
+  return reason;
 }
 
 export function normalizeProductText(value: string): string {

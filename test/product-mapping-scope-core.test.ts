@@ -37,7 +37,7 @@ describe('商品映射匹配优先级', () => {
         sellerAccount: '主账号',
         standardProductId: 'product-account',
       }),
-    ], context)).toEqual({
+    ], context)).toMatchObject({
       standardProductId: 'product-account',
       scope: 'current_account',
     });
@@ -57,7 +57,7 @@ describe('商品映射匹配优先级', () => {
         sellerAccount: '另一个账号',
         standardProductId: 'product-account',
       }),
-    ], context)).toEqual({
+    ], context)).toMatchObject({
       standardProductId: 'product-platform',
       scope: 'current_platform',
     });
@@ -77,7 +77,7 @@ describe('商品映射匹配优先级', () => {
         sellerAccount: '另一个账号',
         standardProductId: 'product-account',
       }),
-    ], context)).toEqual({
+    ], context)).toMatchObject({
       standardProductId: 'product-workspace',
       scope: 'workspace',
     });

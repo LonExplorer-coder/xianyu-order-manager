@@ -34,12 +34,18 @@ import {
 } from '../core/order-intake';
 import { hasEquivalentOrderContent } from '../core/order-comparison';
 import type {
+  CreateProductMappingInput,
   CreateStandardProductInput,
+  CorrectProductMappingInput,
   DraftItemProductStandardization,
   OrderItemStandardizationBatchApplyInput,
   OrderItemStandardizationBatchPreview,
   OrderItemStandardizationBatchPreviewInput,
   OrderItemStandardizationBatchResult,
+  ProductMappingEvent,
+  ProductMappingReasonInput,
+  ProductMappingStats,
+  ProductMappingView,
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
@@ -426,6 +432,43 @@ export class DesktopSession {
 
   public listStandardProductPriceEvents(productId: string): StandardProductPriceEvent[] {
     return this.requireApplication().listStandardProductPriceEvents(productId);
+  }
+
+  public getProductMappingStats(productId: string): ProductMappingStats {
+    return this.requireApplication().getProductMappingStats(productId);
+  }
+
+  public listProductMappings(productId: string, search?: string): ProductMappingView[] {
+    return this.requireApplication().listProductMappings(productId, search);
+  }
+
+  public listProductMappingEvents(productId: string): ProductMappingEvent[] {
+    return this.requireApplication().listProductMappingEvents(productId);
+  }
+
+  public createProductMapping(
+    productId: string,
+    input: CreateProductMappingInput,
+  ): ProductMappingView {
+    return this.requireApplication().createProductMapping(productId, input);
+  }
+
+  public correctProductMapping(
+    mappingId: string,
+    input: CorrectProductMappingInput,
+  ): ProductMappingView {
+    return this.requireApplication().correctProductMapping(mappingId, input);
+  }
+
+  public disableProductMapping(
+    mappingId: string,
+    input: ProductMappingReasonInput,
+  ): ProductMappingView {
+    return this.requireApplication().disableProductMapping(mappingId, input);
+  }
+
+  public deleteProductMapping(mappingId: string, input: ProductMappingReasonInput): void {
+    this.requireApplication().deleteProductMapping(mappingId, input);
   }
 
   public previewDraftProductStandardizations(

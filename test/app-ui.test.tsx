@@ -44,6 +44,10 @@ import {
   type AftersalesWorkflowTemplate,
 } from '../src/core/aftersales-workflow-templates';
 import type { TableTemplate, UpdateTableTemplateInput } from '../src/core/table-templates';
+import type {
+  ProductMappingEvent,
+  ProductMappingView,
+} from '../src/core/product-standardization';
 import { LocalApplication } from '../src/main/local-application';
 import { App } from '../src/renderer/App';
 import { hasActiveParentAftersalesCase } from '../src/renderer/aftersales-presentation';
@@ -500,6 +504,18 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     updateStandardProduct: vi.fn(),
     listStandardProductPriceEvents: vi.fn().mockResolvedValue([]),
     previewDraftProductStandardizations: vi.fn().mockResolvedValue([]),
+    getProductMappingStats: vi.fn().mockResolvedValue({
+      activeMappingCount: 0,
+      linkedOrderCount: 0,
+      linkedItemCount: 0,
+      linkedTotalQuantity: 0,
+    }),
+    listProductMappings: vi.fn().mockResolvedValue([]),
+    listProductMappingEvents: vi.fn().mockResolvedValue([]),
+    createProductMapping: vi.fn(),
+    correctProductMapping: vi.fn(),
+    disableProductMapping: vi.fn(),
+    deleteProductMapping: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
@@ -4345,6 +4361,249 @@ describe('订单管理工作台', () => {
       updatedAt: '2026-08-14T10:01:00.000Z',
     }));
     expect(await screen.findByText('已修改商品')).toBeVisible();
+  });
+
+  it('标准商品详情展示商品映射统计与列表，支持搜索、新增与停用', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-mapping',
+      sku: 'SKU-UI-MAPPING',
+      name: '娃鞋白模',
+      specification: '05M',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const existingMapping: ProductMappingView = {
+      id: 'mapping-ui-1',
+      sourceTitle: '古风娃鞋白模-闲鱼专拍',
+      sourceSpec: '05M',
+      sourceTitleKey: '古风娃鞋白模-闲鱼专拍',
+      sourceSpecKey: '05m',
+      standardProductId: product.id,
+      targetProductSku: product.sku,
+      targetProductName: product.name,
+      scope: 'current_account',
+      platform: 'xianyu',
+      sellerAccount: '映射账号甲',
+      status: 'active',
+      origin: 'confirmation',
+      lastUsedAt: '2026-08-15T09:00:00.000Z',
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-15T09:00:00.000Z',
+      hitOrderCount: 2,
+    };
+    let mappings = [existingMapping];
+    const listProductMappings = vi.fn(async (_productId: string, search?: string) => (
+      search
+        ? mappings.filter((mapping) => mapping.sourceTitle.includes(search))
+        : mappings
+    ));
+    const getProductMappingStats = vi.fn().mockResolvedValue({
+      activeMappingCount: 1,
+      linkedOrderCount: 2,
+      linkedItemCount: 3,
+      linkedTotalQuantity: 5,
+    });
+    const createProductMapping = vi.fn(async (_productId: string, input: {
+      sourceTitle: string;
+      sourceSpec: string;
+      scope: ProductMappingView['scope'];
+    }) => {
+      const created = {
+        ...existingMapping,
+        id: 'mapping-ui-2',
+        sourceTitle: input.sourceTitle,
+        sourceSpec: input.sourceSpec,
+        sourceTitleKey: input.sourceTitle,
+        sourceSpecKey: input.sourceSpec,
+        scope: input.scope,
+        platform: null,
+        sellerAccount: null,
+        origin: 'manual' as const,
+        lastUsedAt: null,
+        hitOrderCount: 0,
+      };
+      mappings = [...mappings, created];
+      return created;
+    });
+    const disableProductMapping = vi.fn(async (mappingId: string) => {
+      mappings = mappings.map((mapping) => (
+        mapping.id === mappingId ? { ...mapping, status: 'disabled' as const } : mapping
+      ));
+      return mappings.find((mapping) => mapping.id === mappingId);
+    });
+    const mappingEvent: ProductMappingEvent = {
+      id: 'mapping-event-ui-1',
+      mappingId: existingMapping.id,
+      standardProductId: product.id,
+      eventType: 'created',
+      before: null,
+      after: {
+        sourceTitle: existingMapping.sourceTitle,
+        sourceSpec: existingMapping.sourceSpec,
+        standardProductId: product.id,
+        scope: 'current_account',
+        platform: 'xianyu',
+        sellerAccount: '映射账号甲',
+        status: 'active',
+      },
+      origin: 'confirmation',
+      reason: '',
+      occurredAt: '2026-08-14T10:00:00.000Z',
+      createdAt: '2026-08-14T10:00:00.000Z',
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+    });
+    Object.assign(api, {
+      listProductMappings,
+      listProductMappingEvents: vi.fn().mockResolvedValue([mappingEvent]),
+      getProductMappingStats,
+      createProductMapping,
+      correctProductMapping: vi.fn(),
+      disableProductMapping,
+      deleteProductMapping: vi.fn(),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '标准商品' }));
+    await user.click(await screen.findByRole('button', { name: `编辑标准商品 ${product.sku}` }));
+
+    const section = await screen.findByRole('region', { name: '商品映射' });
+    expect(within(section).getByText('有效映射 1')).toBeVisible();
+    expect(within(section).getByText('已关联订单 2')).toBeVisible();
+    expect(within(section).getByText('商品明细 3')).toBeVisible();
+    expect(within(section).getByText('商品总数量 5')).toBeVisible();
+    expect(within(section).getByText(/只影响以后的匹配/u)).toBeVisible();
+
+    expect(within(section).getAllByText('古风娃鞋白模-闲鱼专拍').length).toBeGreaterThan(0);
+    expect(within(section).getByText(/匹配值 古风娃鞋白模-闲鱼专拍 \/ 05m/u)).toBeVisible();
+    expect(within(section).getByText(/SKU-UI-MAPPING · 娃鞋白模/u)).toBeVisible();
+    expect(within(section).getByText(/当前平台与卖家账号：xianyu \/ 映射账号甲/u)).toBeVisible();
+    expect(within(section).getAllByText('关联确认建立').length).toBeGreaterThan(0);
+    expect(within(section).getByText('命中订单数 2')).toBeVisible();
+    expect(within(section).getByText(/最近使用 2026-08-15/u)).toBeVisible();
+
+    const eventsList = within(section).getByText('变更记录');
+    expect(eventsList).toBeVisible();
+    expect(within(section).getByText('建立')).toBeVisible();
+    expect(within(section).getByText(/时间 2026-08-14 10:00:00/u)).toBeVisible();
+
+    const search = within(section).getByRole('searchbox', { name: '搜索原文标题或规格' });
+    await user.type(search, '白模');
+    await waitFor(() => expect(listProductMappings).toHaveBeenLastCalledWith(
+      product.id,
+      '白模',
+    ));
+    await user.clear(search);
+    await waitFor(() => expect(listProductMappings).toHaveBeenLastCalledWith(product.id, ''));
+
+    await user.click(within(section).getByRole('button', { name: '新增映射' }));
+    await user.type(within(section).getByRole('textbox', { name: '原始商品标题' }), '古风娃鞋白模-专柜');
+    await user.type(within(section).getByRole('textbox', { name: '原始规格' }), '06M');
+    await user.selectOptions(
+      within(section).getByRole('combobox', { name: '适用范围' }),
+      'workspace',
+    );
+    await user.click(within(section).getByRole('button', { name: '建立映射' }));
+    await waitFor(() => expect(createProductMapping).toHaveBeenCalledWith(product.id, {
+      sourceTitle: '古风娃鞋白模-专柜',
+      sourceSpec: '06M',
+      scope: 'workspace',
+      platform: null,
+      sellerAccount: null,
+    }));
+    expect(await within(section).findByText('古风娃鞋白模-专柜')).toBeVisible();
+
+    await user.click(within(section).getByRole('button', { name: '停用映射 古风娃鞋白模-闲鱼专拍' }));
+    await user.type(within(section).getByRole('textbox', { name: '映射变更原因' }), '不再销售');
+    await user.click(within(section).getByRole('button', { name: '确认停用' }));
+    await waitFor(() => expect(disableProductMapping).toHaveBeenCalledWith('mapping-ui-1', {
+      reason: '不再销售',
+    }));
+    expect(await within(section).findByText('已停用')).toBeVisible();
+  });
+
+  it('从商品映射进入按原文筛选的关联订单商品明细', async () => {
+    const user = userEvent.setup();
+    const product = {
+      id: 'product-ui-linked',
+      sku: 'SKU-UI-LINKED',
+      name: '娃鞋白模',
+      specification: '05M',
+      defaultOrderPriceCents: null,
+      revision: 1,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+    };
+    const mappingView = {
+      id: 'mapping-ui-linked',
+      sourceTitle: '古风娃鞋白模-闲鱼专拍',
+      sourceSpec: '05M',
+      sourceTitleKey: '古风娃鞋白模-闲鱼专拍',
+      sourceSpecKey: '05m',
+      standardProductId: product.id,
+      targetProductSku: product.sku,
+      targetProductName: product.name,
+      scope: 'workspace',
+      platform: null,
+      sellerAccount: null,
+      status: 'active',
+      origin: 'manual',
+      lastUsedAt: null,
+      createdAt: '2026-08-14T10:00:00.000Z',
+      updatedAt: '2026-08-14T10:00:00.000Z',
+      hitOrderCount: 1,
+    };
+    const queryOrderItems = vi.fn().mockResolvedValue({ items: [], customFieldValues: [] });
+    const summary = orderSummary();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([summary])),
+      queryOrderItems,
+      listStandardProducts: vi.fn().mockResolvedValue([product]),
+    });
+    Object.assign(api, {
+      listProductMappings: vi.fn().mockResolvedValue([mappingView]),
+      getProductMappingStats: vi.fn().mockResolvedValue({
+        activeMappingCount: 1,
+        linkedOrderCount: 1,
+        linkedItemCount: 1,
+        linkedTotalQuantity: 1,
+      }),
+      createProductMapping: vi.fn(),
+      correctProductMapping: vi.fn(),
+      disableProductMapping: vi.fn(),
+      deleteProductMapping: vi.fn(),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '标准商品' }));
+    await user.click(await screen.findByRole('button', { name: `编辑标准商品 ${product.sku}` }));
+    const section = await screen.findByRole('region', { name: '商品映射' });
+    await user.click(within(section).getByRole(
+      'button',
+      { name: '查看映射 古风娃鞋白模-闲鱼专拍 的关联订单' },
+    ));
+
+    await waitFor(() => expect(queryOrderItems).toHaveBeenLastCalledWith(
+      { sourceTitle: '古风娃鞋白模-闲鱼专拍', sourceSpec: '05M' },
+      [],
+    ));
+    expect(await screen.findByRole('tab', { name: '订单商品明细', selected: true }))
+      .toBeInTheDocument();
   });
 
   it('订单校对只展示模糊候选，人工选中并勾选后才提交商品映射', async () => {

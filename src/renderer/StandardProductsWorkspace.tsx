@@ -2,6 +2,11 @@ import { useEffect, useState, type FormEvent } from 'react';
 
 import type { DesktopApi } from '../core/desktop-api';
 import type {
+  ProductMappingEvent,
+  ProductMappingOrigin,
+  ProductMappingScope,
+  ProductMappingStats,
+  ProductMappingView,
   StandardProduct,
   StandardProductPriceEvent,
 } from '../core/product-standardization';
@@ -22,7 +27,40 @@ const EMPTY_FORM: ProductForm = {
   priceChangeReason: '',
 };
 
-export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
+type MappingEditor =
+  | { kind: 'create' }
+  | { kind: 'correct'; mapping: ProductMappingView }
+  | { kind: 'disable'; mapping: ProductMappingView }
+  | { kind: 'delete'; mapping: ProductMappingView }
+  | null;
+
+type MappingForm = {
+  sourceTitle: string;
+  sourceSpec: string;
+  scope: ProductMappingScope;
+  platform: string;
+  sellerAccount: string;
+  targetProductId: string;
+  reason: string;
+};
+
+const EMPTY_MAPPING_FORM: MappingForm = {
+  sourceTitle: '',
+  sourceSpec: '',
+  scope: 'current_account',
+  platform: 'xianyu',
+  sellerAccount: '',
+  targetProductId: '',
+  reason: '',
+};
+
+export function StandardProductsWorkspace({
+  api,
+  onOpenLinkedOrderItems,
+}: {
+  api: DesktopApi;
+  onOpenLinkedOrderItems: (source: { sourceTitle: string; sourceSpec: string }) => void;
+}) {
   const [products, setProducts] = useState<StandardProduct[]>([]);
   const [editing, setEditing] = useState<StandardProduct | null>(null);
   const [form, setForm] = useState<ProductForm>(EMPTY_FORM);
@@ -30,6 +68,17 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{
+    kind: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [mappings, setMappings] = useState<ProductMappingView[]>([]);
+  const [mappingStats, setMappingStats] = useState<ProductMappingStats | null>(null);
+  const [mappingEvents, setMappingEvents] = useState<ProductMappingEvent[]>([]);
+  const [mappingSearch, setMappingSearch] = useState('');
+  const [mappingEditor, setMappingEditor] = useState<MappingEditor>(null);
+  const [mappingForm, setMappingForm] = useState<MappingForm>(EMPTY_MAPPING_FORM);
+  const [mappingSaving, setMappingSaving] = useState(false);
+  const [mappingFeedback, setMappingFeedback] = useState<{
     kind: 'success' | 'error';
     message: string;
   } | null>(null);
@@ -66,6 +115,31 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
     return () => { active = false; };
   }, [api, editing]);
 
+  useEffect(() => {
+    if (!editing) {
+      setMappings([]);
+      setMappingStats(null);
+      setMappingEvents([]);
+      return;
+    }
+    let active = true;
+    void Promise.all([
+      api.getProductMappingStats(editing.id),
+      api.listProductMappings(editing.id, mappingSearch.trim()),
+      api.listProductMappingEvents(editing.id),
+    ])
+      .then(([stats, list, events]) => {
+        if (!active) return;
+        setMappingStats(stats);
+        setMappings(list);
+        setMappingEvents(events);
+      })
+      .catch((error: unknown) => {
+        if (active) setMappingFeedback({ kind: 'error', message: errorMessage(error) });
+      });
+    return () => { active = false; };
+  }, [api, editing, mappingSearch]);
+
   function beginEdit(product: StandardProduct) {
     setEditing(product);
     setForm({
@@ -76,11 +150,15 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
       priceChangeReason: '',
     });
     setFeedback(null);
+    setMappingEditor(null);
+    setMappingFeedback(null);
   }
 
   function resetForm() {
     setEditing(null);
     setForm(EMPTY_FORM);
+    setMappingEditor(null);
+    setMappingFeedback(null);
   }
 
   async function saveProduct(event: FormEvent<HTMLFormElement>) {
@@ -128,6 +206,86 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
       setFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function refreshMappings(productId: string) {
+    const [stats, list, events] = await Promise.all([
+      api.getProductMappingStats(productId),
+      api.listProductMappings(productId, mappingSearch.trim()),
+      api.listProductMappingEvents(productId),
+    ]);
+    setMappingStats(stats);
+    setMappings(list);
+    setMappingEvents(events);
+  }
+
+  function beginMappingEditor(editor: Exclude<MappingEditor, null>) {
+    setMappingFeedback(null);
+    setMappingEditor(editor);
+    if (editor.kind === 'create') {
+      setMappingForm(EMPTY_MAPPING_FORM);
+    } else if (editor.kind === 'correct') {
+      setMappingForm({
+        ...EMPTY_MAPPING_FORM,
+        scope: editor.mapping.scope,
+        platform: editor.mapping.platform ?? 'xianyu',
+        sellerAccount: editor.mapping.sellerAccount ?? '',
+        targetProductId: editor.mapping.standardProductId,
+      });
+    } else {
+      setMappingForm(EMPTY_MAPPING_FORM);
+    }
+  }
+
+  function mappingScopePayload(formState: MappingForm) {
+    return {
+      scope: formState.scope,
+      platform: formState.scope === 'workspace' ? null : formState.platform,
+      sellerAccount: formState.scope === 'current_account' ? formState.sellerAccount : null,
+    };
+  }
+
+  async function submitMappingEditor(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editing || !mappingEditor) return;
+    setMappingSaving(true);
+    setMappingFeedback(null);
+    try {
+      if (mappingEditor.kind === 'create') {
+        await api.createProductMapping(editing.id, {
+          sourceTitle: mappingForm.sourceTitle,
+          sourceSpec: mappingForm.sourceSpec,
+          ...mappingScopePayload(mappingForm),
+        });
+        setMappingFeedback({ kind: 'success', message: '商品映射已建立。' });
+      } else if (mappingEditor.kind === 'correct') {
+        const mapping = mappingEditor.mapping;
+        await api.correctProductMapping(mapping.id, {
+          standardProductId: mappingForm.targetProductId,
+          ...(mappingForm.scope !== mapping.scope
+            ? mappingScopePayload(mappingForm)
+            : {}),
+          reason: mappingForm.reason,
+        });
+        setMappingFeedback({ kind: 'success', message: '商品映射已更正，历史订单保持不变。' });
+      } else if (mappingEditor.kind === 'disable') {
+        await api.disableProductMapping(mappingEditor.mapping.id, {
+          reason: mappingForm.reason,
+        });
+        setMappingFeedback({ kind: 'success', message: '商品映射已停用，不再参与匹配。' });
+      } else {
+        await api.deleteProductMapping(mappingEditor.mapping.id, {
+          reason: mappingForm.reason,
+        });
+        setMappingFeedback({ kind: 'success', message: '商品映射已删除，变更留痕仍可追溯。' });
+      }
+      setMappingEditor(null);
+      await refreshMappings(editing.id);
+    } catch (error) {
+      setMappingFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setMappingSaving(false);
     }
   }
 
@@ -281,8 +439,311 @@ export function StandardProductsWorkspace({ api }: { api: DesktopApi }) {
           </div>
         </form>
       </div>
+
+      {editing && (
+        <section className="fields-panel" aria-label="商品映射">
+          <div className="fields-panel__heading">
+            <div>
+              <span className="section-kicker">商品映射</span>
+              <h2>{editing.sku} 的映射规则</h2>
+            </div>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={mappingSaving}
+              onClick={() => beginMappingEditor({ kind: 'create' })}
+            >
+              新增映射
+            </button>
+          </div>
+          <p>
+            新增、更正、停用或删除映射只影响以后的匹配，不会改写已关联的历史订单。
+          </p>
+          {mappingStats && (
+            <div className="field-definition-card__meta" aria-label="商品映射统计">
+              <span>有效映射 {mappingStats.activeMappingCount}</span>
+              <span>已关联订单 {mappingStats.linkedOrderCount}</span>
+              <span>商品明细 {mappingStats.linkedItemCount}</span>
+              <span>商品总数量 {mappingStats.linkedTotalQuantity}</span>
+            </div>
+          )}
+          <label className="field">
+            <span className="field-label">搜索映射</span>
+            <input
+              type="search"
+              aria-label="搜索原文标题或规格"
+              disabled={mappingSaving}
+              value={mappingSearch}
+              onChange={(event) => setMappingSearch(event.target.value)}
+            />
+          </label>
+
+          {mappingEditor && (
+            <form
+              className="field-definition-card"
+              aria-label="商品映射操作"
+              onSubmit={(event) => void submitMappingEditor(event)}
+            >
+              {mappingEditor.kind === 'create' && (
+                <>
+                  <label className="field">
+                    <span className="field-label">原始商品标题<i aria-hidden="true">*</i></span>
+                    <input
+                      required
+                      disabled={mappingSaving}
+                      value={mappingForm.sourceTitle}
+                      onChange={(event) => setMappingForm((current) => ({
+                        ...current,
+                        sourceTitle: event.target.value,
+                      }))}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">原始规格</span>
+                    <input
+                      disabled={mappingSaving}
+                      value={mappingForm.sourceSpec}
+                      onChange={(event) => setMappingForm((current) => ({
+                        ...current,
+                        sourceSpec: event.target.value,
+                      }))}
+                    />
+                  </label>
+                </>
+              )}
+              {(mappingEditor.kind === 'create' || mappingEditor.kind === 'correct') && (
+                <>
+                  {mappingEditor.kind === 'correct' && (
+                    <label className="field">
+                      <span className="field-label">目标标准商品<i aria-hidden="true">*</i></span>
+                      <select
+                        aria-label="目标标准商品"
+                        disabled={mappingSaving}
+                        value={mappingForm.targetProductId}
+                        onChange={(event) => setMappingForm((current) => ({
+                          ...current,
+                          targetProductId: event.target.value,
+                        }))}
+                      >
+                        {products.map((product) => (
+                          <option key={product.id} value={product.id}>
+                            {product.sku} · {product.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <label className="field">
+                    <span className="field-label">适用范围<i aria-hidden="true">*</i></span>
+                    <select
+                      aria-label="适用范围"
+                      disabled={mappingSaving}
+                      value={mappingForm.scope}
+                      onChange={(event) => setMappingForm((current) => ({
+                        ...current,
+                        scope: event.target.value as ProductMappingScope,
+                      }))}
+                    >
+                      <option value="current_account">当前平台与卖家账号</option>
+                      <option value="current_platform">当前平台全部账号</option>
+                      <option value="workspace">整个工作区</option>
+                    </select>
+                  </label>
+                  {mappingForm.scope !== 'workspace' && (
+                    <label className="field">
+                      <span className="field-label">平台<i aria-hidden="true">*</i></span>
+                      <input
+                        required
+                        disabled={mappingSaving}
+                        value={mappingForm.platform}
+                        onChange={(event) => setMappingForm((current) => ({
+                          ...current,
+                          platform: event.target.value,
+                        }))}
+                      />
+                    </label>
+                  )}
+                  {mappingForm.scope === 'current_account' && (
+                    <label className="field">
+                      <span className="field-label">卖家账号<i aria-hidden="true">*</i></span>
+                      <input
+                        required
+                        disabled={mappingSaving}
+                        value={mappingForm.sellerAccount}
+                        onChange={(event) => setMappingForm((current) => ({
+                          ...current,
+                          sellerAccount: event.target.value,
+                        }))}
+                      />
+                    </label>
+                  )}
+                </>
+              )}
+              {mappingEditor.kind !== 'create' && (
+                <label className="field">
+                  <span className="field-label">映射变更原因<i aria-hidden="true">*</i></span>
+                  <input
+                    required
+                    disabled={mappingSaving}
+                    value={mappingForm.reason}
+                    onChange={(event) => setMappingForm((current) => ({
+                      ...current,
+                      reason: event.target.value,
+                    }))}
+                  />
+                </label>
+              )}
+              <div className="form-actions">
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={mappingSaving}
+                  onClick={() => setMappingEditor(null)}
+                >
+                  取消
+                </button>
+                <button className="button button--primary" type="submit" disabled={mappingSaving}>
+                  {mappingSaving
+                    ? '正在保存…'
+                    : mappingEditor.kind === 'create'
+                      ? '建立映射'
+                      : mappingEditor.kind === 'correct'
+                        ? '保存更正'
+                        : mappingEditor.kind === 'disable'
+                          ? '确认停用'
+                          : '确认删除'}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {mappingFeedback && (
+            <p
+              className={`fields-feedback fields-feedback--${mappingFeedback.kind}`}
+              role={mappingFeedback.kind === 'error' ? 'alert' : 'status'}
+            >
+              {mappingFeedback.message}
+            </p>
+          )}
+
+          {mappings.length === 0 ? (
+            <div className="fields-empty">
+              <strong>没有符合条件的商品映射</strong>
+              <p>新增映射后，以后识别到相同原文的订单商品会自动关联到当前标准商品。</p>
+            </div>
+          ) : (
+            <div className="field-definition-list">
+              {mappings.map((mapping) => (
+                <article className="field-definition-card" key={mapping.id}>
+                  <div>
+                    <strong>{mapping.sourceTitle}</strong>
+                    <span>{mapping.sourceSpec || '无规格'}</span>
+                  </div>
+                  <div className="field-definition-card__meta">
+                    <span>匹配值 {mapping.sourceTitleKey} / {mapping.sourceSpecKey}</span>
+                    <span>目标 {mapping.targetProductSku} · {mapping.targetProductName}</span>
+                    <span>{mappingScopeLabel(mapping)}</span>
+                    <span>{mappingOriginLabel(mapping.origin)}</span>
+                    <span>建立时间 {mapping.createdAt.slice(0, 10)}</span>
+                    <span>
+                      最近使用 {mapping.lastUsedAt ? mapping.lastUsedAt.slice(0, 10) : '从未使用'}
+                    </span>
+                    <span>命中订单数 {mapping.hitOrderCount}</span>
+                    <span>{mapping.status === 'active' ? '有效' : '已停用'}</span>
+                  </div>
+                  <div className="form-actions">
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={mappingSaving}
+                      aria-label={`查看映射 ${mapping.sourceTitle} 的关联订单`}
+                      onClick={() => onOpenLinkedOrderItems({
+                        sourceTitle: mapping.sourceTitle,
+                        sourceSpec: mapping.sourceSpec,
+                      })}
+                    >
+                      关联订单
+                    </button>
+                    {mapping.status === 'active' && (
+                      <>
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          disabled={mappingSaving}
+                          aria-label={`更正映射 ${mapping.sourceTitle}`}
+                          onClick={() => beginMappingEditor({ kind: 'correct', mapping })}
+                        >
+                          更正
+                        </button>
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          disabled={mappingSaving}
+                          aria-label={`停用映射 ${mapping.sourceTitle}`}
+                          onClick={() => beginMappingEditor({ kind: 'disable', mapping })}
+                        >
+                          停用
+                        </button>
+                      </>
+                    )}
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      disabled={mappingSaving}
+                      aria-label={`删除映射 ${mapping.sourceTitle}`}
+                      onClick={() => beginMappingEditor({ kind: 'delete', mapping })}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+
+          {mappingEvents.length > 0 && (
+            <div className="field-definition-list" aria-label="商品映射变更记录">
+              <strong>变更记录</strong>
+              {mappingEvents.map((event) => (
+                <article className="field-definition-card" key={event.id}>
+                  <div>
+                    <strong>{mappingEventTypeLabel(event.eventType)}</strong>
+                    <span>{event.after?.sourceTitle ?? event.before?.sourceTitle ?? ''}</span>
+                  </div>
+                  <div className="field-definition-card__meta">
+                    <span>{mappingOriginLabel(event.origin)}</span>
+                    <span>时间 {event.occurredAt.slice(0, 19).replace('T', ' ')}</span>
+                    {event.reason && <span>原因 {event.reason}</span>}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </section>
   );
+}
+
+function mappingScopeLabel(mapping: ProductMappingView): string {
+  if (mapping.scope === 'current_account') {
+    return `当前平台与卖家账号：${mapping.platform ?? ''} / ${mapping.sellerAccount ?? ''}`;
+  }
+  if (mapping.scope === 'current_platform') {
+    return `当前平台全部账号：${mapping.platform ?? ''}`;
+  }
+  return '整个工作区';
+}
+
+function mappingOriginLabel(origin: ProductMappingOrigin): string {
+  return origin === 'confirmation' ? '关联确认建立' : '手工新增';
+}
+
+function mappingEventTypeLabel(eventType: ProductMappingEvent['eventType']): string {
+  if (eventType === 'created') return '建立';
+  if (eventType === 'corrected') return '更正';
+  if (eventType === 'disabled') return '停用';
+  return '删除';
 }
 
 function formatMoney(cents: number | null): string {

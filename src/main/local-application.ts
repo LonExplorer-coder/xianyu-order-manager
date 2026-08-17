@@ -99,8 +99,11 @@ import {
 import { matchOrderItemIds } from '../core/order-item-matching';
 import {
   fuzzyProductSimilarity,
+  normalizeCreateProductMappingInput,
+  normalizeCorrectProductMappingInput,
   normalizeOrderItemStandardizationBatchApplyInput,
   normalizeOrderItemStandardizationBatchPreviewInput,
+  normalizeProductMappingReasonInput,
   normalizeProductText,
   normalizeProductStandardizationConfirmations,
   normalizeSkuKey,
@@ -109,7 +112,9 @@ import {
   normalizeUpdateStandardProductInput,
   planOrderItemStandardizationBatch,
   PRODUCT_SIMILARITY_THRESHOLD,
+  productMappingHitKey,
   selectProductMappingMatch,
+  summarizeProductMappingHits,
   type DraftItemProductStandardization,
   type OrderItemStandardizationBatchApplyInput,
   type OrderItemStandardizationBatchBlockReason,
@@ -120,9 +125,17 @@ import {
   type OrderItemStandardizationBatchPreviewItem,
   type OrderItemStandardizationBatchPreviewOrder,
   type OrderItemStandardizationBatchResult,
+  type ProductMappingEvent,
+  type ProductMappingEventSnapshot,
+  type ProductMappingEventType,
+  type ProductMappingHitSummary,
   type ProductMappingMatch,
   type ProductMappingMatchContext,
+  type ProductMappingOrigin,
   type ProductMappingScope,
+  type ProductMappingStats,
+  type ProductMappingStatus,
+  type ProductMappingView,
   type ProductStandardizationConfirmation,
   type ProductStandardizationSource,
   type StandardDisplayPreference,
@@ -2390,6 +2403,9 @@ export class LocalApplication {
           standardization.source,
           plannedStandardDisplayPreference(standardization.standardProductId, undefined),
         );
+        if (standardization.matchedMappingId) {
+          this.markProductMappingUsed(standardization.matchedMappingId, now);
+        }
         if (standardization.createMapping && standardization.standardProductId) {
           this.insertProductMapping(
             item,
@@ -2594,6 +2610,7 @@ export class LocalApplication {
         standardProductId: existingItem.standardProduct.id,
         source: existingItem.standardizationSource,
         createMapping: false,
+        matchedMappingId: null,
       });
     });
     const standardizationChanges: OrderFieldChange[] = [];
@@ -2843,6 +2860,9 @@ export class LocalApplication {
             WHERE definitions.granularity = 'order_item'
               AND definitions.default_value_json IS NOT NULL
           `).run(itemId, now, now);
+        }
+        if (standardization.matchedMappingId) {
+          this.markProductMappingUsed(standardization.matchedMappingId, now);
         }
         if (standardization.createMapping && standardization.standardProductId) {
           this.insertProductMapping(
@@ -4037,17 +4057,19 @@ export class LocalApplication {
   private matchedProductMapping(
     item: Pick<RecognitionItem, 'sourceTitle' | 'sourceSpec'>,
     context: ProductMappingMatchContext,
-  ): ProductMappingMatch | null {
+  ): (ProductMappingMatch & { row: { id: string } }) | null {
     const workspace = this.requireWorkspace();
+    // 已停用的映射不参与匹配（规格 4.2）。
     const rows = workspace.database.prepare(`
-      SELECT scope, platform, seller_account, standard_product_id
+      SELECT id, scope, platform, seller_account, standard_product_id
       FROM product_mappings
-      WHERE source_title_key = ? AND source_spec_key = ?
+      WHERE source_title_key = ? AND source_spec_key = ? AND status = 'active'
     `).all(
       normalizeProductText(item.sourceTitle),
       normalizeProductText(item.sourceSpec),
     ) as unknown as SqlRow[];
     return selectProductMappingMatch(rows.map((row) => ({
+      id: asString(row.id),
       scope: asProductMappingScope(row.scope),
       platform: row.platform === null ? null : asString(row.platform),
       sellerAccount: row.seller_account === null ? null : asString(row.seller_account),
@@ -4142,6 +4164,7 @@ export class LocalApplication {
     standardProductId: string | null;
     source: ProductStandardizationSource | null;
     createMapping: boolean;
+    matchedMappingId: string | null;
   }> {
     const choices = normalizeProductStandardizationConfirmations(confirmations);
     const itemById = new Map(items.map((item) => [item.id, item]));
@@ -4159,6 +4182,7 @@ export class LocalApplication {
         standardProductId: string | null;
         source: ProductStandardizationSource | null;
         createMapping: boolean;
+        matchedMappingId: string | null;
       },
     ]> = items.map((item) => {
       const choice = choiceByItemId.get(item.id);
@@ -4167,6 +4191,7 @@ export class LocalApplication {
           standardProductId: choice.standardProductId,
           source: choice.standardProductId ? 'manual' : null,
           createMapping: choice.createMapping,
+          matchedMappingId: null,
         }];
       }
       const mapping = this.matchedProductMapping(item, mappingContext);
@@ -4175,6 +4200,7 @@ export class LocalApplication {
           standardProductId: mapping.standardProductId,
           source: 'mapping',
           createMapping: false,
+          matchedMappingId: mapping.row.id,
         }];
       }
       const exactId = this.exactStandardProductId(item);
@@ -4182,6 +4208,7 @@ export class LocalApplication {
         standardProductId: exactId,
         source: exactId ? 'exact' : null,
         createMapping: false,
+        matchedMappingId: null,
       }];
     });
     return new Map(entries);
@@ -4204,6 +4231,7 @@ export class LocalApplication {
         AND seller_account = ?
         AND source_title_key = ?
         AND source_spec_key = ?
+        AND status = 'active'
     `).get(
       context.platform,
       context.sellerAccount,
@@ -4212,15 +4240,16 @@ export class LocalApplication {
     ) as SqlRow | undefined;
     if (existing) {
       if (asString(existing.standard_product_id) === standardProductId) return;
-      throw new Error('当前平台与卖家账号已存在指向其他 SKU 的商品映射');
+      throw new Error(productMappingConflictMessage('current_account'));
     }
+    const mappingId = randomUUID();
     workspace.database.prepare(`
       INSERT INTO product_mappings (
         id, source_title, source_spec, source_title_key, source_spec_key,
-        standard_product_id, scope, platform, seller_account, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'current_account', ?, ?, ?, ?)
+        standard_product_id, scope, platform, seller_account, origin, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'current_account', ?, ?, 'confirmation', ?, ?)
     `).run(
-      randomUUID(),
+      mappingId,
       item.sourceTitle,
       item.sourceSpec,
       sourceTitleKey,
@@ -4228,6 +4257,371 @@ export class LocalApplication {
       standardProductId,
       context.platform,
       context.sellerAccount,
+      now,
+      now,
+    );
+    this.insertProductMappingEvent(
+      mappingId,
+      standardProductId,
+      'created',
+      null,
+      {
+        sourceTitle: item.sourceTitle,
+        sourceSpec: item.sourceSpec,
+        standardProductId,
+        scope: 'current_account',
+        platform: context.platform,
+        sellerAccount: context.sellerAccount,
+        status: 'active',
+      },
+      'confirmation',
+      '',
+      now,
+    );
+  }
+
+  public getProductMappingStats(productId: string): ProductMappingStats {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    this.getStandardProduct(id);
+    const mappingRow = workspace.database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM product_mappings
+      WHERE standard_product_id = ? AND status = 'active'
+    `).get(id) as SqlRow;
+    // 已关联订单数、明细数与商品总数量由商品标准化关联事实投影，不另存计数副本。
+    const linkedRow = workspace.database.prepare(`
+      SELECT
+        COUNT(DISTINCT order_id) AS order_count,
+        COUNT(*) AS item_count,
+        COALESCE(SUM(quantity), 0) AS total_quantity
+      FROM order_items
+      WHERE standard_product_id = ?
+    `).get(id) as SqlRow;
+    return {
+      activeMappingCount: asNumber(mappingRow.count),
+      linkedOrderCount: asNumber(linkedRow.order_count),
+      linkedItemCount: asNumber(linkedRow.item_count),
+      linkedTotalQuantity: asNumber(linkedRow.total_quantity),
+    };
+  }
+
+  public listProductMappings(productId: string, search?: string): ProductMappingView[] {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    this.getStandardProduct(id);
+    const hitSummaries = this.projectProductMappingHits();
+    const needle = search?.trim() ? normalizeProductText(search) : '';
+    return (workspace.database.prepare(`
+      SELECT mappings.*, products.sku AS target_sku, products.name AS target_name
+      FROM product_mappings AS mappings
+      JOIN standard_products AS products ON products.id = mappings.standard_product_id
+      WHERE mappings.standard_product_id = ?
+      ORDER BY mappings.created_at, mappings.id
+    `).all(id) as unknown as SqlRow[])
+      .map((row) => parseProductMappingViewRow(row, hitSummaries))
+      .filter((view) => (
+        !needle || view.sourceTitleKey.includes(needle) || view.sourceSpecKey.includes(needle)
+      ));
+  }
+
+  public listProductMappingEvents(productId: string): ProductMappingEvent[] {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    this.getStandardProduct(id);
+    // 删除与更正保留历史：事件按标准商品归集，映射行删除后仍可追溯。
+    return (workspace.database.prepare(`
+      SELECT *
+      FROM product_mapping_events
+      WHERE standard_product_id = ?
+      ORDER BY sequence
+    `).all(id) as unknown as SqlRow[]).map(parseProductMappingEventRow);
+  }
+
+  public createProductMapping(productId: string, input: unknown): ProductMappingView {
+    const workspace = this.requireWorkspace();
+    const id = productId.trim();
+    if (!id || id.length > 200) throw new Error('标准商品标识无效');
+    this.getStandardProduct(id);
+    const normalized = normalizeCreateProductMappingInput(input);
+    const now = new Date().toISOString();
+    return workspace.transaction(() => {
+      const conflict = this.findActiveProductMappingConflict({
+        sourceTitleKey: normalizeProductText(normalized.sourceTitle),
+        sourceSpecKey: normalizeProductText(normalized.sourceSpec),
+        scope: normalized.scope,
+        platform: normalized.platform,
+        sellerAccount: normalized.sellerAccount,
+        excludeMappingId: null,
+      });
+      if (conflict) {
+        if (conflict.standardProductId === id) return this.getProductMappingView(conflict.id);
+        throw new Error(productMappingConflictMessage(normalized.scope));
+      }
+      const mappingId = randomUUID();
+      workspace.database.prepare(`
+        INSERT INTO product_mappings (
+          id, source_title, source_spec, source_title_key, source_spec_key,
+          standard_product_id, scope, platform, seller_account, status, origin,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', ?, ?)
+      `).run(
+        mappingId,
+        normalized.sourceTitle,
+        normalized.sourceSpec,
+        normalizeProductText(normalized.sourceTitle),
+        normalizeProductText(normalized.sourceSpec),
+        id,
+        normalized.scope,
+        normalized.platform,
+        normalized.sellerAccount,
+        now,
+        now,
+      );
+      this.insertProductMappingEvent(
+        mappingId,
+        id,
+        'created',
+        null,
+        {
+          sourceTitle: normalized.sourceTitle,
+          sourceSpec: normalized.sourceSpec,
+          standardProductId: id,
+          scope: normalized.scope,
+          platform: normalized.platform,
+          sellerAccount: normalized.sellerAccount,
+          status: 'active',
+        },
+        'manual',
+        '',
+        now,
+      );
+      return this.getProductMappingView(mappingId);
+    });
+  }
+
+  public correctProductMapping(mappingId: string, input: unknown): ProductMappingView {
+    const workspace = this.requireWorkspace();
+    const id = mappingId.trim();
+    if (!id || id.length > 200) throw new Error('商品映射标识无效');
+    const normalized = normalizeCorrectProductMappingInput(input);
+    const now = new Date().toISOString();
+    return workspace.transaction(() => {
+      const current = this.getProductMappingRecord(id);
+      if (current.status !== 'active') throw new Error('已停用的商品映射不能更正');
+      const nextProductId = normalized.standardProductId ?? current.standardProductId;
+      this.getStandardProduct(nextProductId);
+      const scopeChanged = normalized.scope !== undefined;
+      const next = {
+        standardProductId: nextProductId,
+        scope: scopeChanged ? normalized.scope as ProductMappingScope : current.scope,
+        platform: scopeChanged ? normalized.platform ?? null : current.platform,
+        sellerAccount: scopeChanged ? normalized.sellerAccount ?? null : current.sellerAccount,
+      };
+      if (
+        next.standardProductId === current.standardProductId &&
+        next.scope === current.scope &&
+        next.platform === current.platform &&
+        next.sellerAccount === current.sellerAccount
+      ) {
+        throw new Error('商品映射未发生变化');
+      }
+      const conflict = this.findActiveProductMappingConflict({
+        sourceTitleKey: current.sourceTitleKey,
+        sourceSpecKey: current.sourceSpecKey,
+        scope: next.scope,
+        platform: next.platform,
+        sellerAccount: next.sellerAccount,
+        excludeMappingId: id,
+      });
+      if (conflict) throw new Error(productMappingConflictMessage(next.scope));
+      // 规格 4.5：更正只影响以后的匹配，不改写已关联的历史订单。
+      workspace.database.prepare(`
+        UPDATE product_mappings
+        SET
+          standard_product_id = ?,
+          scope = ?,
+          platform = ?,
+          seller_account = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        next.standardProductId,
+        next.scope,
+        next.platform,
+        next.sellerAccount,
+        now,
+        id,
+      );
+      this.insertProductMappingEvent(
+        id,
+        next.standardProductId,
+        'corrected',
+        productMappingSnapshot(current),
+        { ...productMappingSnapshot(current), ...next },
+        'manual',
+        normalized.reason,
+        now,
+      );
+      return this.getProductMappingView(id);
+    });
+  }
+
+  public disableProductMapping(mappingId: string, input: unknown): ProductMappingView {
+    const workspace = this.requireWorkspace();
+    const id = mappingId.trim();
+    if (!id || id.length > 200) throw new Error('商品映射标识无效');
+    const normalized = normalizeProductMappingReasonInput(input);
+    const now = new Date().toISOString();
+    return workspace.transaction(() => {
+      const current = this.getProductMappingRecord(id);
+      if (current.status === 'disabled') throw new Error('商品映射已停用');
+      workspace.database.prepare(`
+        UPDATE product_mappings
+        SET status = 'disabled', updated_at = ?
+        WHERE id = ?
+      `).run(now, id);
+      this.insertProductMappingEvent(
+        id,
+        current.standardProductId,
+        'disabled',
+        productMappingSnapshot(current),
+        { ...productMappingSnapshot(current), status: 'disabled' },
+        'manual',
+        normalized.reason,
+        now,
+      );
+      return this.getProductMappingView(id);
+    });
+  }
+
+  public deleteProductMapping(mappingId: string, input: unknown): void {
+    const workspace = this.requireWorkspace();
+    const id = mappingId.trim();
+    if (!id || id.length > 200) throw new Error('商品映射标识无效');
+    const normalized = normalizeProductMappingReasonInput(input);
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      const current = this.getProductMappingRecord(id);
+      // 删除保留历史：行删除，事件留痕，product_mapping_events 是唯一审计源。
+      this.insertProductMappingEvent(
+        id,
+        current.standardProductId,
+        'deleted',
+        productMappingSnapshot(current),
+        null,
+        'manual',
+        normalized.reason,
+        now,
+      );
+      workspace.database.prepare('DELETE FROM product_mappings WHERE id = ?').run(id);
+    });
+  }
+
+  private getProductMappingRecord(mappingId: string): ProductMappingRecord {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT * FROM product_mappings WHERE id = ?
+    `).get(mappingId) as SqlRow | undefined;
+    if (!row) throw new Error('未找到商品映射');
+    return parseProductMappingRecord(row);
+  }
+
+  private getProductMappingView(mappingId: string): ProductMappingView {
+    const workspace = this.requireWorkspace();
+    const hitSummaries = this.projectProductMappingHits();
+    const row = workspace.database.prepare(`
+      SELECT mappings.*, products.sku AS target_sku, products.name AS target_name
+      FROM product_mappings AS mappings
+      JOIN standard_products AS products ON products.id = mappings.standard_product_id
+      WHERE mappings.id = ?
+    `).get(mappingId) as SqlRow | undefined;
+    if (!row) throw new Error('未找到商品映射');
+    return parseProductMappingViewRow(row, hitSummaries);
+  }
+
+  private projectProductMappingHits(): ReadonlyMap<string, ProductMappingHitSummary> {
+    const workspace = this.requireWorkspace();
+    const facts = (workspace.database.prepare(`
+      SELECT order_id, source_title, source_spec, standard_product_id, quantity
+      FROM order_items
+      WHERE standardization_source = 'mapping'
+    `).all() as unknown as SqlRow[]).map((row) => ({
+      orderId: asString(row.order_id),
+      sourceTitle: asString(row.source_title),
+      sourceSpec: asString(row.source_spec),
+      standardProductId: asString(row.standard_product_id),
+      quantity: asNumber(row.quantity),
+    }));
+    return summarizeProductMappingHits(facts);
+  }
+
+  private markProductMappingUsed(mappingId: string, now: string): void {
+    this.requireWorkspace().database.prepare(
+      'UPDATE product_mappings SET last_used_at = ? WHERE id = ?',
+    ).run(now, mappingId);
+  }
+
+  private findActiveProductMappingConflict(query: {
+    sourceTitleKey: string;
+    sourceSpecKey: string;
+    scope: ProductMappingScope;
+    platform: string | null;
+    sellerAccount: string | null;
+    excludeMappingId: string | null;
+  }): { id: string; standardProductId: string } | null {
+    const workspace = this.requireWorkspace();
+    const scopeCondition = query.scope === 'current_account'
+      ? 'platform = ? AND seller_account = ?'
+      : query.scope === 'current_platform'
+        ? 'platform = ? AND seller_account IS NULL'
+        : 'platform IS NULL AND seller_account IS NULL';
+    const params: string[] = [];
+    if (query.scope !== 'workspace') params.push(query.platform as string);
+    if (query.scope === 'current_account') params.push(query.sellerAccount as string);
+    params.push(query.sourceTitleKey, query.sourceSpecKey);
+    const rows = workspace.database.prepare(`
+      SELECT id, standard_product_id
+      FROM product_mappings
+      WHERE scope = ?
+        AND ${scopeCondition}
+        AND source_title_key = ?
+        AND source_spec_key = ?
+        AND status = 'active'
+    `).all(query.scope, ...params) as unknown as SqlRow[];
+    const conflict = rows.find((row) => asString(row.id) !== query.excludeMappingId);
+    return conflict
+      ? { id: asString(conflict.id), standardProductId: asString(conflict.standard_product_id) }
+      : null;
+  }
+
+  private insertProductMappingEvent(
+    mappingId: string,
+    standardProductId: string,
+    eventType: ProductMappingEventType,
+    before: ProductMappingEventSnapshot | null,
+    after: ProductMappingEventSnapshot | null,
+    origin: ProductMappingOrigin,
+    reason: string,
+    now: string,
+  ): void {
+    this.requireWorkspace().database.prepare(`
+      INSERT INTO product_mapping_events (
+        id, mapping_id, standard_product_id, event_type, before_json, after_json,
+        origin, reason, occurred_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      mappingId,
+      standardProductId,
+      eventType,
+      before === null ? null : JSON.stringify(before),
+      after === null ? null : JSON.stringify(after),
+      origin,
+      reason,
       now,
       now,
     );
@@ -8503,6 +8897,131 @@ function asProductMappingScope(
     return value;
   }
   throw new Error('数据库商品映射适用范围无效');
+}
+
+function asProductMappingStatus(
+  value: string | number | null | undefined,
+): ProductMappingStatus {
+  if (value === 'active' || value === 'disabled') return value;
+  throw new Error('数据库商品映射状态无效');
+}
+
+function asProductMappingOrigin(
+  value: string | number | null | undefined,
+): ProductMappingOrigin {
+  if (value === 'confirmation' || value === 'manual') return value;
+  throw new Error('数据库商品映射建立来源无效');
+}
+
+type ProductMappingRecord = {
+  id: string;
+  sourceTitle: string;
+  sourceSpec: string;
+  sourceTitleKey: string;
+  sourceSpecKey: string;
+  standardProductId: string;
+  scope: ProductMappingScope;
+  platform: string | null;
+  sellerAccount: string | null;
+  status: ProductMappingStatus;
+  origin: ProductMappingOrigin;
+  lastUsedAt: string | null;
+};
+
+function parseProductMappingRecord(row: SqlRow): ProductMappingRecord {
+  return {
+    id: asString(row.id),
+    sourceTitle: asString(row.source_title),
+    sourceSpec: asString(row.source_spec),
+    sourceTitleKey: asString(row.source_title_key),
+    sourceSpecKey: asString(row.source_spec_key),
+    standardProductId: asString(row.standard_product_id),
+    scope: asProductMappingScope(row.scope),
+    platform: row.platform === null ? null : asString(row.platform),
+    sellerAccount: row.seller_account === null ? null : asString(row.seller_account),
+    status: asProductMappingStatus(row.status),
+    origin: asProductMappingOrigin(row.origin),
+    lastUsedAt: row.last_used_at === null ? null : asString(row.last_used_at),
+  };
+}
+
+function productMappingSnapshot(record: ProductMappingRecord): ProductMappingEventSnapshot {
+  return {
+    sourceTitle: record.sourceTitle,
+    sourceSpec: record.sourceSpec,
+    standardProductId: record.standardProductId,
+    scope: record.scope,
+    platform: record.platform,
+    sellerAccount: record.sellerAccount,
+    status: record.status,
+  };
+}
+
+function asProductMappingEventType(
+  value: string | number | null | undefined,
+): ProductMappingEventType {
+  if (value === 'created' || value === 'corrected' || value === 'disabled' || value === 'deleted') {
+    return value;
+  }
+  throw new Error('数据库商品映射变更事件类型无效');
+}
+
+function parseProductMappingEventSnapshot(
+  value: string | null,
+): ProductMappingEventSnapshot | null {
+  if (value === null) return null;
+  const parsed = JSON.parse(value) as ProductMappingEventSnapshot;
+  return {
+    sourceTitle: asString(parsed.sourceTitle),
+    sourceSpec: asString(parsed.sourceSpec),
+    standardProductId: asString(parsed.standardProductId),
+    scope: asProductMappingScope(parsed.scope),
+    platform: parsed.platform === null ? null : asString(parsed.platform),
+    sellerAccount: parsed.sellerAccount === null ? null : asString(parsed.sellerAccount),
+    status: asProductMappingStatus(parsed.status),
+  };
+}
+
+function parseProductMappingEventRow(row: SqlRow): ProductMappingEvent {
+  return {
+    id: asString(row.id),
+    mappingId: asString(row.mapping_id),
+    standardProductId: asString(row.standard_product_id),
+    eventType: asProductMappingEventType(row.event_type),
+    before: parseProductMappingEventSnapshot(
+      row.before_json === null ? null : asString(row.before_json),
+    ),
+    after: parseProductMappingEventSnapshot(
+      row.after_json === null ? null : asString(row.after_json),
+    ),
+    origin: asProductMappingOrigin(row.origin),
+    reason: asString(row.reason),
+    occurredAt: asString(row.occurred_at),
+    createdAt: asString(row.created_at),
+  };
+}
+
+function parseProductMappingViewRow(
+  row: SqlRow,
+  hitSummaries: ReadonlyMap<string, ProductMappingHitSummary>,
+): ProductMappingView {
+  const record = parseProductMappingRecord(row);
+  return {
+    ...record,
+    targetProductSku: asString(row.target_sku),
+    targetProductName: asString(row.target_name),
+    hitOrderCount: hitSummaries.get(
+      productMappingHitKey(record.sourceTitle, record.sourceSpec, record.standardProductId),
+    )?.orderCount ?? 0,
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function productMappingConflictMessage(scope: ProductMappingScope): string {
+  if (scope === 'current_account') return '当前平台与卖家账号已存在指向其他 SKU 的商品映射';
+  if (scope === 'current_platform') return '当前平台已存在指向其他 SKU 的商品映射';
+  return '工作区已存在指向其他 SKU 的商品映射';
 }
 
 function asStandardDisplayPreference(

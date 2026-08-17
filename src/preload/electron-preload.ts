@@ -60,6 +60,27 @@ const api: DesktopApi = {
   listStandardProductPriceEvents: (productId) => (
     ipcRenderer.invoke('products:price-events', productId)
   ),
+  getProductMappingStats: (productId) => (
+    ipcRenderer.invoke('products:mapping-stats', productId)
+  ),
+  listProductMappings: (productId, search) => (
+    ipcRenderer.invoke('products:list-mappings', productId, search)
+  ),
+  listProductMappingEvents: (productId) => (
+    ipcRenderer.invoke('products:list-mapping-events', productId)
+  ),
+  createProductMapping: (productId, input) => (
+    ipcRenderer.invoke('products:create-mapping', productId, input)
+  ),
+  correctProductMapping: (mappingId, input) => (
+    ipcRenderer.invoke('products:correct-mapping', mappingId, input)
+  ),
+  disableProductMapping: (mappingId, input) => (
+    ipcRenderer.invoke('products:disable-mapping', mappingId, input)
+  ),
+  deleteProductMapping: (mappingId, input) => (
+    ipcRenderer.invoke('products:delete-mapping', mappingId, input)
+  ),
   previewDraftProductStandardizations: (draft) => (
     ipcRenderer.invoke('products:preview-draft-standardizations', draft)
   ),

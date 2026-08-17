@@ -32,12 +32,18 @@ import type {
 } from './candidate-verification-settings';
 import type { CandidateAdjudicationAuditView } from './candidate-adjudication-audit';
 import type {
+  CreateProductMappingInput,
   CreateStandardProductInput,
+  CorrectProductMappingInput,
   DraftItemProductStandardization,
   OrderItemStandardizationBatchApplyInput,
   OrderItemStandardizationBatchPreview,
   OrderItemStandardizationBatchPreviewInput,
   OrderItemStandardizationBatchResult,
+  ProductMappingEvent,
+  ProductMappingReasonInput,
+  ProductMappingStats,
+  ProductMappingView,
   ProductStandardizationConfirmation,
   StandardProduct,
   StandardProductPriceEvent,
@@ -172,6 +178,22 @@ export interface DesktopApi {
   previewDraftProductStandardizations(
     draft: OrderDraft,
   ): Promise<DraftItemProductStandardization[]>;
+  getProductMappingStats(productId: string): Promise<ProductMappingStats>;
+  listProductMappings(productId: string, search?: string): Promise<ProductMappingView[]>;
+  listProductMappingEvents(productId: string): Promise<ProductMappingEvent[]>;
+  createProductMapping(
+    productId: string,
+    input: CreateProductMappingInput,
+  ): Promise<ProductMappingView>;
+  correctProductMapping(
+    mappingId: string,
+    input: CorrectProductMappingInput,
+  ): Promise<ProductMappingView>;
+  disableProductMapping(
+    mappingId: string,
+    input: ProductMappingReasonInput,
+  ): Promise<ProductMappingView>;
+  deleteProductMapping(mappingId: string, input: ProductMappingReasonInput): Promise<void>;
   listOrders(): Promise<OrderSummary[]>;
   queryOrders(
     query: OrderWorkbenchQuery,

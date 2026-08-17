@@ -200,6 +200,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(44)) migrateToVersion44(database);
   if (!versions.has(45)) migrateToVersion45(database);
   if (!versions.has(46)) migrateToVersion46(database);
+  if (!versions.has(47)) migrateToVersion47(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -5838,6 +5839,92 @@ function migrateToVersion46(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion47(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE product_mappings
+      ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'disabled'));
+
+      ALTER TABLE product_mappings
+      ADD COLUMN origin TEXT NOT NULL DEFAULT 'confirmation'
+        CHECK (origin IN ('confirmation', 'manual'));
+
+      ALTER TABLE product_mappings
+      ADD COLUMN last_used_at TEXT;
+
+      DROP INDEX product_mappings_one_per_account_source;
+      DROP INDEX product_mappings_one_per_platform_source;
+      DROP INDEX product_mappings_one_per_workspace_source;
+
+      CREATE UNIQUE INDEX product_mappings_one_per_account_source
+      ON product_mappings (platform, seller_account, source_title_key, source_spec_key)
+      WHERE scope = 'current_account' AND status = 'active';
+
+      CREATE UNIQUE INDEX product_mappings_one_per_platform_source
+      ON product_mappings (platform, source_title_key, source_spec_key)
+      WHERE scope = 'current_platform' AND status = 'active';
+
+      CREATE UNIQUE INDEX product_mappings_one_per_workspace_source
+      ON product_mappings (source_title_key, source_spec_key)
+      WHERE scope = 'workspace' AND status = 'active';
+
+      CREATE TABLE product_mapping_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        mapping_id TEXT NOT NULL,
+        standard_product_id TEXT NOT NULL,
+        event_type TEXT NOT NULL
+          CHECK (event_type IN ('created', 'corrected', 'disabled', 'deleted')),
+        before_json TEXT CHECK (before_json IS NULL OR json_valid(before_json)),
+        after_json TEXT CHECK (after_json IS NULL OR json_valid(after_json)),
+        origin TEXT NOT NULL CHECK (origin IN ('confirmation', 'manual')),
+        reason TEXT NOT NULL DEFAULT '',
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (event_type = 'created' AND before_json IS NULL AND after_json IS NOT NULL)
+          OR (
+            event_type = 'corrected'
+            AND before_json IS NOT NULL AND after_json IS NOT NULL
+            AND before_json <> after_json
+            AND length(trim(reason)) BETWEEN 1 AND 500
+          )
+          OR (
+            event_type = 'disabled'
+            AND before_json IS NOT NULL AND after_json IS NOT NULL
+            AND length(trim(reason)) BETWEEN 1 AND 500
+          )
+          OR (
+            event_type = 'deleted'
+            AND before_json IS NOT NULL AND after_json IS NULL
+            AND length(trim(reason)) BETWEEN 1 AND 500
+          )
+        )
+      ) STRICT;
+
+      CREATE INDEX product_mapping_events_by_product
+      ON product_mapping_events (standard_product_id, sequence);
+
+      CREATE TRIGGER product_mapping_events_are_immutable_on_update
+      BEFORE UPDATE ON product_mapping_events
+      BEGIN SELECT RAISE(ABORT, 'product mapping events are immutable'); END;
+
+      CREATE TRIGGER product_mapping_events_are_immutable_on_delete
+      BEFORE DELETE ON product_mapping_events
+      BEGIN SELECT RAISE(ABORT, 'product mapping events are immutable'); END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (47, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
   }
 }
 

@@ -1,6 +1,53 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+export function removeVersion47ExtensionArtifacts(database: DatabaseSync): void {
+  const hasStatusColumn = database.prepare(`
+    SELECT 1 FROM pragma_table_info('product_mappings') WHERE name = 'status'
+  `).get();
+  if (!hasStatusColumn) return;
+  const eventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM product_mapping_events',
+  ).get() as { count: number };
+  if (eventCount.count > 0) {
+    throw new Error('v47 测试降级前必须移除映射变更留痕数据');
+  }
+  const trackedCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM product_mappings
+    WHERE status <> 'active' OR origin <> 'confirmation' OR last_used_at IS NOT NULL
+  `).get() as { count: number };
+  if (trackedCount.count > 0) {
+    throw new Error('v47 测试降级前必须移除映射状态与使用追踪数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS product_mapping_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS product_mapping_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS product_mapping_events_by_mapping;
+    DROP TABLE product_mapping_events;
+    DROP INDEX product_mappings_one_per_account_source;
+    DROP INDEX product_mappings_one_per_platform_source;
+    DROP INDEX product_mappings_one_per_workspace_source;
+    ALTER TABLE product_mappings DROP COLUMN status;
+    ALTER TABLE product_mappings DROP COLUMN origin;
+    ALTER TABLE product_mappings DROP COLUMN last_used_at;
+    CREATE UNIQUE INDEX product_mappings_one_per_account_source
+    ON product_mappings (platform, seller_account, source_title_key, source_spec_key)
+    WHERE scope = 'current_account';
+    CREATE UNIQUE INDEX product_mappings_one_per_platform_source
+    ON product_mappings (platform, source_title_key, source_spec_key)
+    WHERE scope = 'current_platform';
+    CREATE UNIQUE INDEX product_mappings_one_per_workspace_source
+    ON product_mappings (source_title_key, source_spec_key)
+    WHERE scope = 'workspace';
+    DELETE FROM schema_migrations WHERE version = 47;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 export function removeVersion46ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion47ExtensionArtifacts(database);
   const hasScopeColumn = database.prepare(`
     SELECT 1 FROM pragma_table_info('product_mappings') WHERE name = 'scope'
   `).get();

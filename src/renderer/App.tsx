@@ -1322,6 +1322,15 @@ export function App({ api }: AppProps) {
     });
   }
 
+  function openMappingLinkedOrderItems(source: { sourceTitle: string; sourceSpec: string }) {
+    leaveOrderDetails(() => {
+      setShipmentFocus(null);
+      setOrdersWorkspaceView('order_items');
+      changeOrderItemQuery({ sourceTitle: source.sourceTitle, sourceSpec: source.sourceSpec });
+      setActivePage('orders');
+    });
+  }
+
   if (!bootstrap) {
     return <SystemScreen kind="loading" />;
   }
@@ -1379,7 +1388,12 @@ export function App({ api }: AppProps) {
   } else if (activePage === 'recipients') {
     workspace = <RecipientsWorkspace api={api} />;
   } else if (activePage === 'products') {
-    workspace = <StandardProductsWorkspace api={api} />;
+    workspace = (
+      <StandardProductsWorkspace
+        api={api}
+        onOpenLinkedOrderItems={openMappingLinkedOrderItems}
+      />
+    );
   } else if (activePage === 'templates') {
     workspace = (
       <TableTemplatesWorkspace

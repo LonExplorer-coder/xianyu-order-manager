@@ -411,6 +411,12 @@ describe('商品映射三级适用范围', () => {
         UPDATE product_mappings
         SET scope = 'workspace', platform = NULL, seller_account = NULL;
       `);
+      // v47 起建立映射会写变更留痕；模拟真实 v45 数据库前先清除这些留痕。
+      legacy.exec(`
+        DROP TRIGGER IF EXISTS product_mapping_events_are_immutable_on_update;
+        DROP TRIGGER IF EXISTS product_mapping_events_are_immutable_on_delete;
+        DELETE FROM product_mapping_events;
+      `);
       removeVersion46ExtensionArtifacts(legacy);
       expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
         .toEqual({ version: 45 });
@@ -540,7 +546,7 @@ describe('商品映射三级适用范围', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 46 });
+        .toEqual({ version: 47 });
       expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       reopened.close();
