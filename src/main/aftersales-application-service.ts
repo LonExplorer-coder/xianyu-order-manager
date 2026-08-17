@@ -414,8 +414,10 @@ export class AftersalesApplicationService {
     }
     // 切换只声明方向并保存选择事件；退款申请、拦截与轮次等事实由对应领域动作显式建立。
     const refundSettled = isSettledRefundStatus(current.refund?.status ?? null);
-    const nextStatus = target.workflow === 'refund_only'
-      ? refundSettled ? 'ready_to_complete' : 'waiting_refund'
+    // 退款已结清的切换直接具备完成条件；未结清时按目标流程的方向推导状态。
+    const nextStatus = (target.workflow === 'refund_only' || target.workflow === 'return_refund')
+      && refundSettled
+      ? 'ready_to_complete'
       : targetDirection === null
         ? 'processing'
         : statusForHandlingDirection(targetDirection);
@@ -1699,7 +1701,10 @@ export class AftersalesApplicationService {
               returnRecordIds.includes(returnRecord.id)
             ))?.workflow === 'exchange'
               ? 'waiting_replacement'
-              : 'waiting_refund',
+              : isSettledRefundStatus(linkedCase.refund?.status ?? null)
+                // 退款先结清的售后：退货检查完成即具备完成条件。
+                ? 'ready_to_complete'
+                : 'waiting_refund',
           prepared.note,
           now,
         );
