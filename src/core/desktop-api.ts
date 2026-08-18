@@ -11,6 +11,11 @@ import type {
   RecognitionBatchView,
 } from './contracts';
 import type {
+  BackupCreateOutcome,
+  BackupRestoreOutcome,
+  BackupVerifyOutcome,
+} from './backup';
+import type {
   CreateCustomFieldDefinitionInput,
   CustomFieldDefinition,
   CustomFieldValueRecord,
@@ -149,6 +154,9 @@ export interface DesktopApi {
   getBootstrapState(): Promise<BootstrapState>;
   retryDataDirectory(): Promise<BootstrapState>;
   selectDataDirectory(): Promise<BootstrapState>;
+  createBackup(): Promise<BackupCreateOutcome>;
+  verifyBackup(): Promise<BackupVerifyOutcome>;
+  restoreBackup(): Promise<BackupRestoreOutcome>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;

@@ -23,6 +23,11 @@ import type {
   SaveCandidateVerificationSettingsInput,
 } from '../core/candidate-verification-settings';
 import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
+import type {
+  BackupCreateOutcome,
+  BackupRestoreOutcome,
+  BackupVerifyOutcome,
+} from '../core/backup';
 import { normalizeOrderExportInput } from '../core/order-export';
 import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
 import type {
@@ -98,6 +103,14 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+type CreatableDirectoryDialogProperty = 'openDirectory' | 'createDirectory' | 'promptToCreate';
+
+function creatableDirectoryProperties(): CreatableDirectoryDialogProperty[] {
+  return process.platform === 'darwin'
+    ? ['openDirectory', 'createDirectory']
+    : ['openDirectory', 'promptToCreate'];
+}
+
 export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
   ipcMain.handle('app:retry-data-directory', () => desktopSession.retryDataDirectory());
@@ -111,9 +124,7 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       defaultPath: currentState.kind === 'ready'
         ? currentState.dataDirectory
         : join(app.getPath('documents'), '闲鱼订单数据'),
-      properties: process.platform === 'darwin'
-        ? ['openDirectory', 'createDirectory']
-        : ['openDirectory', 'promptToCreate'],
+      properties: creatableDirectoryProperties(),
     });
     if (selection.canceled || selection.filePaths.length === 0) {
       return desktopSession.getState();
@@ -124,6 +135,68 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       platform: process.platform,
     });
     return desktopSession.useDataDirectory(selection.filePaths[0]);
+  });
+
+  ipcMain.handle('backup:create', async (event): Promise<BackupCreateOutcome> => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showOpenDialog(window, {
+      title: '选择备份保存位置',
+      buttonLabel: '备份到这里',
+      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      properties: creatableDirectoryProperties(),
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { kind: 'canceled' };
+    }
+    const result = await desktopSession.createBackup(
+      selection.filePaths[0],
+      app.getVersion(),
+    );
+    return { kind: 'created', ...result };
+  });
+
+  ipcMain.handle('backup:verify', async (event): Promise<BackupVerifyOutcome> => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showOpenDialog(window, {
+      title: '选择要验证的备份',
+      buttonLabel: '验证此备份',
+      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      properties: ['openDirectory'],
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { kind: 'canceled' };
+    }
+    return {
+      kind: 'verified',
+      result: await desktopSession.verifyBackup(selection.filePaths[0]),
+    };
+  });
+
+  ipcMain.handle('backup:restore', async (event): Promise<BackupRestoreOutcome> => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const backupSelection = await dialog.showOpenDialog(window, {
+      title: '选择要恢复的备份',
+      buttonLabel: '恢复此备份',
+      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      properties: ['openDirectory'],
+    });
+    if (backupSelection.canceled || backupSelection.filePaths.length === 0) {
+      return { kind: 'canceled' };
+    }
+    const targetSelection = await dialog.showOpenDialog(window, {
+      title: '选择恢复位置（新空目录）',
+      buttonLabel: '恢复到这里',
+      defaultPath: join(app.getPath('documents'), '闲鱼订单数据-恢复'),
+      properties: creatableDirectoryProperties(),
+    });
+    if (targetSelection.canceled || targetSelection.filePaths.length === 0) {
+      return { kind: 'canceled' };
+    }
+    const result = await desktopSession.restoreBackup({
+      backupDirectory: backupSelection.filePaths[0],
+      targetDirectory: targetSelection.filePaths[0],
+    });
+    return { kind: 'restored', ...result };
   });
 
   ipcMain.handle('workflow:select-source-screenshots', async () => {

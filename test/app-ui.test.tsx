@@ -495,6 +495,9 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       dataDirectory: '/Users/test/闲鱼订单',
       orders: [],
     }),
+    createBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
+    verifyBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
+    restoreBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
     selectSourceScreenshots: vi.fn(async () => {
       selectedDraft = await selectOneSourceScreenshot();
       return selectedDraft ? batchForDraft(selectedDraft) : null;
@@ -9921,6 +9924,74 @@ describe('订单管理工作台', () => {
     expect(selectDataDirectory).not.toHaveBeenCalled();
   });
 
+  it('设置页提供一键备份、验证与恢复入口并就地反馈结果', async () => {
+    const user = userEvent.setup();
+    const verificationOk = {
+      ok: true,
+      problems: [],
+      checkedFiles: 2,
+      totalBytes: 6_144,
+      createdAt: '2026-08-18T02:30:00.000Z',
+      appVersion: '0.2.43',
+    };
+    const createBackup = vi.fn().mockResolvedValue({
+      kind: 'created' as const,
+      backupDirectory: '/Volumes/Backup/xianyu-backup-20260818-103000',
+      database: { path: 'xianyu-order-manager.sqlite3', sha256: 'a', bytes: 2_048 },
+      files: [{ path: 'screenshots/shot-1.png', sha256: 'b', bytes: 4_096 }],
+      totals: { files: 1, bytes: 4_096 },
+      verification: verificationOk,
+    });
+    const verifyBackup = vi.fn().mockResolvedValue({
+      kind: 'verified' as const,
+      result: {
+        ok: false,
+        problems: ['screenshots/shot-1.png 校验和不一致，内容已损坏或被篡改'],
+        checkedFiles: 2,
+        totalBytes: 6_144,
+        createdAt: '2026-08-18T02:30:00.000Z',
+        appVersion: '0.2.43',
+      },
+    });
+    const restoreBackup = vi.fn().mockResolvedValue({
+      kind: 'restored' as const,
+      targetDirectory: '/Users/test/闲鱼订单数据-恢复',
+      restoredFiles: 2,
+      restoredBytes: 6_144,
+      verification: verificationOk,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      createBackup,
+      verifyBackup,
+      restoreBackup,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByRole('heading', { name: '备份与恢复' })).toBeVisible();
+    expect(screen.getByText(/API 密钥只保存在本机系统凭据中/)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '立即备份' }));
+    expect(await screen.findByText(/备份完成并验证通过：\/Volumes\/Backup\/xianyu-backup-20260818-103000/))
+      .toBeVisible();
+    expect(createBackup).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: '验证备份' }));
+    expect(await screen.findByText(/备份验证未通过/)).toBeVisible();
+    expect(screen.getByText(/校验和不一致，内容已损坏或被篡改/)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '恢复备份…' }));
+    expect(await screen.findByText(/已恢复到 \/Users\/test\/闲鱼订单数据-恢复/))
+      .toBeVisible();
+    expect(screen.getByText(/可经「更改数据目录」切换到恢复结果/)).toBeVisible();
+  });
+
   it('设置页确认选择不同数据目录后重载新目录工作区', async () => {
     const user = userEvent.setup();
     const selectDataDirectory = vi.fn().mockResolvedValue({
@@ -10021,9 +10092,10 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
     const settingsGroup = screen.getByRole('group', { name: '应用设置' });
-    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 3)
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 4)
       .map((heading) => heading.textContent)).toEqual([
         '数据存储位置',
+        '备份与恢复',
         '自动入库',
         '百炼 OCR',
       ]);

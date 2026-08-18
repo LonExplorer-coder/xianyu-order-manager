@@ -128,6 +128,16 @@ import { OcrSettingsService } from './ocr-settings';
 import { CandidateVerificationSettingsService } from './candidate-verification-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
+import {
+  createBackup,
+  restoreBackup as restoreBackupFrom,
+  verifyBackup as verifyBackupDirectory,
+} from './backup-service';
+import type {
+  BackupVerificationReport,
+  CreateBackupResult,
+  RestoreBackupResult,
+} from '../core/backup';
 
 export type DataDirectoryValidator = (dataDirectory: string) => void;
 
@@ -179,6 +189,31 @@ export class DesktopSession {
 
   public useDataDirectory(dataDirectory: string): BootstrapState {
     return this.open(dataDirectory, true);
+  }
+
+  public createBackup(backupRootDirectory: string, appVersion: string): Promise<CreateBackupResult> {
+    const application = this.requireApplication();
+    return createBackup({
+      dataDirectory: application.dataDirectory,
+      database: application.database,
+      backupRootDirectory,
+      appVersion,
+    });
+  }
+
+  public verifyBackup(backupDirectory: string): Promise<BackupVerificationReport> {
+    return verifyBackupDirectory(backupDirectory);
+  }
+
+  public restoreBackup(input: {
+    backupDirectory: string;
+    targetDirectory: string;
+  }): Promise<RestoreBackupResult> {
+    const application = this.requireApplication();
+    return restoreBackupFrom({
+      ...input,
+      currentDataDirectory: application.dataDirectory,
+    });
   }
 
   public submitSourceScreenshots(sourcePaths: string[]): Promise<RecognitionBatchView> {

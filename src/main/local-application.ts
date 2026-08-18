@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 
 import type {
   ConfirmedOrderSnapshot,
@@ -353,6 +354,14 @@ export class LocalApplication {
       throw new Error('请先关闭当前数据目录');
     }
     this.workspace = Workspace.open(dataDirectory);
+  }
+
+  public get dataDirectory(): string {
+    return this.requireWorkspace().dataDirectory;
+  }
+
+  public get database(): DatabaseSync {
+    return this.requireWorkspace().database;
   }
 
   public createRecognitionBatch(input: {

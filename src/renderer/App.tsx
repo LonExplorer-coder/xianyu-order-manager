@@ -7012,6 +7012,8 @@ function SettingsWorkspace({
     useState(false);
   const [dataDirectoryFeedback, setDataDirectoryFeedback] =
     useState<SettingsFeedback>(null);
+  const [backupBusy, setBackupBusy] = useState<'create' | 'verify' | 'restore' | null>(null);
+  const [backupFeedback, setBackupFeedback] = useState<SettingsFeedback>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -7107,6 +7109,75 @@ function SettingsWorkspace({
       await onChangeDataDirectory();
     } catch (error) {
       setDataDirectoryFeedback({ kind: 'error', message: errorMessage(error) });
+    }
+  }
+
+  async function runBackupCreate() {
+    if (backupBusy) return;
+    setBackupBusy('create');
+    setBackupFeedback(null);
+    try {
+      const outcome = await api.createBackup();
+      if (outcome.kind === 'canceled') return;
+      if (outcome.verification.ok) {
+        setBackupFeedback({
+          kind: 'success',
+          message: `备份完成并验证通过：${outcome.backupDirectory}（${outcome.totals.files} 个文件，${formatBackupBytes(outcome.totals.bytes)}）`,
+        });
+      } else {
+        setBackupFeedback({
+          kind: 'error',
+          message: `备份已写入但验证未通过，请勿依赖此备份：${outcome.verification.problems.join('；')}`,
+        });
+      }
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBackupBusy(null);
+    }
+  }
+
+  async function runBackupVerify() {
+    if (backupBusy) return;
+    setBackupBusy('verify');
+    setBackupFeedback(null);
+    try {
+      const outcome = await api.verifyBackup();
+      if (outcome.kind === 'canceled') return;
+      if (outcome.result.ok) {
+        setBackupFeedback({
+          kind: 'success',
+          message: `备份验证通过，共 ${outcome.result.checkedFiles} 个文件、${formatBackupBytes(outcome.result.totalBytes)}`
+            + (outcome.result.createdAt ? `，创建于 ${outcome.result.createdAt}` : ''),
+        });
+      } else {
+        setBackupFeedback({
+          kind: 'error',
+          message: `备份验证未通过：${outcome.result.problems.join('；')}`,
+        });
+      }
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBackupBusy(null);
+    }
+  }
+
+  async function runBackupRestore() {
+    if (backupBusy) return;
+    setBackupBusy('restore');
+    setBackupFeedback(null);
+    try {
+      const outcome = await api.restoreBackup();
+      if (outcome.kind === 'canceled') return;
+      setBackupFeedback({
+        kind: 'success',
+        message: `已恢复到 ${outcome.targetDirectory}（${outcome.restoredFiles} 个文件，${formatBackupBytes(outcome.restoredBytes)}）；当前数据未改动，可经「更改数据目录」切换到恢复结果`,
+      });
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBackupBusy(null);
     }
   }
 
@@ -7317,6 +7388,50 @@ function SettingsWorkspace({
               </div>
             )}
             <SettingsNotice feedback={dataDirectoryFeedback} />
+          </section>
+
+          <section className="settings-section settings-section--backup" aria-labelledby="backup-heading">
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">本机数据</span>
+                <h2 id="backup-heading">备份与恢复</h2>
+                <p>
+                  备份覆盖订单、模板、商品映射和来源截图；API 密钥只保存在本机系统凭据中，不进入备份。
+                  备份可保存到外接硬盘或同步盘，并在 Mac 与 Windows 之间互相恢复；
+                  同一数据目录同一时间只能由一台机器打开。
+                </p>
+              </div>
+            </div>
+            <div className="backup-actions">
+              <button
+                className="button button--primary"
+                type="button"
+                aria-busy={backupBusy === 'create'}
+                disabled={backupBusy !== null}
+                onClick={() => void runBackupCreate()}
+              >
+                {backupBusy === 'create' ? '正在备份…' : '立即备份'}
+              </button>
+              <button
+                className="button button--quiet"
+                type="button"
+                aria-busy={backupBusy === 'verify'}
+                disabled={backupBusy !== null}
+                onClick={() => void runBackupVerify()}
+              >
+                {backupBusy === 'verify' ? '正在验证…' : '验证备份'}
+              </button>
+              <button
+                className="button button--quiet"
+                type="button"
+                aria-busy={backupBusy === 'restore'}
+                disabled={backupBusy !== null}
+                onClick={() => void runBackupRestore()}
+              >
+                {backupBusy === 'restore' ? '正在恢复…' : '恢复备份…'}
+              </button>
+            </div>
+            <SettingsNotice feedback={backupFeedback} />
           </section>
 
           {orderIntakeLoading && !orderIntakeSettings && (
@@ -7724,6 +7839,16 @@ function SettingsWorkspace({
       </div>
     </section>
   );
+}
+
+function formatBackupBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 function SettingsNotice({ feedback }: { feedback: SettingsFeedback }) {
