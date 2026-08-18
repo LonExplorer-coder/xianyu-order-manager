@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { basename, extname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, dirname, extname, join } from 'node:path';
 
 import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
 import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
@@ -32,6 +33,7 @@ import type {
   BackupVerifyOutcome,
   SaveBackupSettingsInput,
 } from '../core/backup';
+import { formatBackupStamp } from './backup-service';
 import { normalizeOrderExportInput } from '../core/order-export';
 import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
 import type {
@@ -115,6 +117,12 @@ function creatableDirectoryProperties(): CreatableDirectoryDialogProperty[] {
     : ['openDirectory', 'promptToCreate'];
 }
 
+function backupPickerDefaultPath(settings: BackupSettingsView): string {
+  return settings.manualBackupRootDirectory
+    ?? settings.backupRootDirectory
+    ?? join(app.getPath('documents'), '闲鱼订单备份');
+}
+
 export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
   ipcMain.handle('app:retry-data-directory', () => desktopSession.retryDataDirectory());
@@ -142,6 +150,18 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   });
 
   ipcMain.handle('backup:create', async (event): Promise<BackupCreateOutcome> => {
+    const settings = desktopSession.getBackupSettings();
+    if (settings.manualBackupRootDirectory) {
+      const rememberedRoot = settings.manualBackupRootDirectory;
+      if (!existsSync(rememberedRoot)) {
+        throw new Error(`配置的备份位置不存在或已断开（${rememberedRoot}）；请接上外接硬盘或在设置中重新选择备份位置`);
+      }
+      const result = await desktopSession.createBackup(
+        rememberedRoot,
+        app.getVersion(),
+      );
+      return { kind: 'created', ...result };
+    }
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
     const selection = await dialog.showOpenDialog(window, {
       title: '选择备份保存位置',
@@ -156,15 +176,19 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       selection.filePaths[0],
       app.getVersion(),
     );
+    desktopSession.updateBackupLocationDefaults({
+      manualBackupRootDirectory: selection.filePaths[0],
+    });
     return { kind: 'created', ...result };
   });
 
   ipcMain.handle('backup:verify', async (event): Promise<BackupVerifyOutcome> => {
+    const settings = desktopSession.getBackupSettings();
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
     const selection = await dialog.showOpenDialog(window, {
       title: '选择要验证的备份',
       buttonLabel: '验证此备份',
-      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      defaultPath: backupPickerDefaultPath(settings),
       properties: ['openDirectory'],
     });
     if (selection.canceled || selection.filePaths.length === 0) {
@@ -177,29 +201,52 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   });
 
   ipcMain.handle('backup:restore', async (event): Promise<BackupRestoreOutcome> => {
+    const settings = desktopSession.getBackupSettings();
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
     const backupSelection = await dialog.showOpenDialog(window, {
       title: '选择要恢复的备份',
       buttonLabel: '恢复此备份',
-      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      defaultPath: settings.manualBackupRootDirectory
+        ?? settings.backupRootDirectory
+        ?? join(app.getPath('documents'), '闲鱼订单备份'),
       properties: ['openDirectory'],
     });
     if (backupSelection.canceled || backupSelection.filePaths.length === 0) {
       return { kind: 'canceled' };
     }
-    const targetSelection = await dialog.showOpenDialog(window, {
-      title: '选择恢复位置（新空目录）',
-      buttonLabel: '恢复到这里',
-      defaultPath: join(app.getPath('documents'), '闲鱼订单数据-恢复'),
-      properties: creatableDirectoryProperties(),
-    });
-    if (targetSelection.canceled || targetSelection.filePaths.length === 0) {
-      return { kind: 'canceled' };
+    const backupDirectory = backupSelection.filePaths[0];
+
+    let targetDirectory: string;
+    if (settings.restoreTargetDirectory) {
+      const stamp = formatBackupStamp(new Date());
+      let candidate = join(settings.restoreTargetDirectory, `闲鱼订单数据-恢复-${stamp}`);
+      let suffix = 2;
+      while (existsSync(candidate)) {
+        candidate = join(settings.restoreTargetDirectory, `闲鱼订单数据-恢复-${stamp}-${suffix}`);
+        suffix += 1;
+      }
+      targetDirectory = candidate;
+    } else {
+      const targetSelection = await dialog.showOpenDialog(window, {
+        title: '选择恢复位置（新空目录）',
+        buttonLabel: '恢复到这里',
+        defaultPath: join(app.getPath('documents'), '闲鱼订单数据-恢复'),
+        properties: creatableDirectoryProperties(),
+      });
+      if (targetSelection.canceled || targetSelection.filePaths.length === 0) {
+        return { kind: 'canceled' };
+      }
+      targetDirectory = targetSelection.filePaths[0];
+      desktopSession.updateBackupLocationDefaults({
+        // 只补未配置的记忆项，不覆盖用户显式设置过的位置。
+        ...(settings.manualBackupRootDirectory
+          ? {}
+          : { manualBackupRootDirectory: dirname(backupDirectory) }),
+        restoreTargetDirectory: dirname(targetDirectory),
+      });
     }
-    const result = await desktopSession.restoreBackup({
-      backupDirectory: backupSelection.filePaths[0],
-      targetDirectory: targetSelection.filePaths[0],
-    });
+
+    const result = await desktopSession.restoreBackup({ backupDirectory, targetDirectory });
     return { kind: 'restored', ...result };
   });
 
@@ -208,8 +255,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ));
 
   ipcMain.handle('backup:save-settings', (_event, input: unknown): BackupSettingsView => {
+    const previous = desktopSession.getBackupSettings();
     const saved = desktopSession.saveBackupSettings(input as SaveBackupSettingsInput);
-    if (saved.autoBackupEnabled) {
+    if (saved.autoBackupEnabled && !previous.autoBackupEnabled) {
       void desktopSession.runAutomaticBackup(app.getVersion()).catch((error: unknown) => {
         console.error(
           '自动备份执行失败：',
@@ -220,12 +268,17 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     return saved;
   });
 
-  ipcMain.handle('backup:select-root', async (event): Promise<BackupSelectRootOutcome> => {
+  ipcMain.handle('backup:select-root', async (event, purpose: unknown): Promise<BackupSelectRootOutcome> => {
+    const settings = desktopSession.getBackupSettings();
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const forRestore = purpose === 'restore';
     const selection = await dialog.showOpenDialog(window, {
-      title: '选择自动备份保存位置',
-      buttonLabel: '使用此位置',
-      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      title: forRestore ? '选择恢复位置' : '选择备份保存位置',
+      buttonLabel: forRestore ? '使用此目录' : '使用此位置',
+      defaultPath: forRestore
+        ? settings.restoreTargetDirectory
+          ?? join(app.getPath('documents'), '闲鱼订单数据-恢复')
+        : backupPickerDefaultPath(settings),
       properties: creatableDirectoryProperties(),
     });
     if (selection.canceled || selection.filePaths.length === 0) {

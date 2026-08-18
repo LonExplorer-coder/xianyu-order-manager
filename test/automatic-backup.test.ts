@@ -67,6 +67,8 @@ describe('自动备份设置', () => {
     expect(DEFAULT_BACKUP_SETTINGS).toEqual({
       autoBackupEnabled: false,
       backupRootDirectory: null,
+      manualBackupRootDirectory: null,
+      restoreTargetDirectory: null,
       maxVersions: 30,
       capacityLimitBytes: 5 * 1024 * 1024 * 1024,
     });
@@ -75,12 +77,16 @@ describe('自动备份设置', () => {
     file.write({
       autoBackupEnabled: true,
       backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+      manualBackupRootDirectory: '/Volumes/Backup/手动备份',
+      restoreTargetDirectory: '/Volumes/Backup/恢复区',
       maxVersions: 10,
       capacityLimitBytes: 2 * 1024 * 1024 * 1024,
     });
     expect(file.read()).toEqual({
       autoBackupEnabled: true,
       backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+      manualBackupRootDirectory: '/Volumes/Backup/手动备份',
+      restoreTargetDirectory: '/Volumes/Backup/恢复区',
       maxVersions: 10,
       capacityLimitBytes: 2 * 1024 * 1024 * 1024,
     });

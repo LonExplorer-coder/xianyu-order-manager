@@ -50,6 +50,7 @@ import type {
   BackupEventRecord,
   BackupSettingsView,
   BackupStatusView,
+  BackupVerificationReport,
   SaveBackupSettingsInput,
 } from '../core/backup';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
@@ -7025,6 +7026,9 @@ function SettingsWorkspace({
   const [backupPolicyBusy, setBackupPolicyBusy] = useState(false);
   const [backupMaxVersionsInput, setBackupMaxVersionsInput] = useState('');
   const [backupCapacityGbInput, setBackupCapacityGbInput] = useState('');
+  const [manualBackupRootInput, setManualBackupRootInput] = useState('');
+  const [restoreTargetInput, setRestoreTargetInput] = useState('');
+  const [backupVerifyResult, setBackupVerifyResult] = useState<BackupVerificationReport | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -7127,6 +7131,7 @@ function SettingsWorkspace({
     if (backupBusy) return;
     setBackupBusy('create');
     setBackupFeedback(null);
+    setBackupVerifyResult(null);
     try {
       const outcome = await api.createBackup();
       if (outcome.kind === 'canceled') return;
@@ -7152,21 +7157,11 @@ function SettingsWorkspace({
     if (backupBusy) return;
     setBackupBusy('verify');
     setBackupFeedback(null);
+    setBackupVerifyResult(null);
     try {
       const outcome = await api.verifyBackup();
       if (outcome.kind === 'canceled') return;
-      if (outcome.result.ok) {
-        setBackupFeedback({
-          kind: 'success',
-          message: `备份验证通过，共 ${outcome.result.checkedFiles} 个文件、${formatBackupBytes(outcome.result.totalBytes)}`
-            + (outcome.result.createdAt ? `，创建于 ${outcome.result.createdAt}` : ''),
-        });
-      } else {
-        setBackupFeedback({
-          kind: 'error',
-          message: `备份验证未通过：${outcome.result.problems.join('；')}`,
-        });
-      }
+      setBackupVerifyResult(outcome.result);
     } catch (error) {
       setBackupFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
@@ -7178,6 +7173,7 @@ function SettingsWorkspace({
     if (backupBusy) return;
     setBackupBusy('restore');
     setBackupFeedback(null);
+    setBackupVerifyResult(null);
     try {
       const outcome = await api.restoreBackup();
       if (outcome.kind === 'canceled') return;
@@ -7200,6 +7196,8 @@ function SettingsWorkspace({
         setAutoBackupSettings(settings);
         setBackupMaxVersionsInput(String(settings.maxVersions));
         setBackupCapacityGbInput(bytesToGbText(settings.capacityLimitBytes));
+        setManualBackupRootInput(settings.manualBackupRootDirectory ?? '');
+        setRestoreTargetInput(settings.restoreTargetDirectory ?? '');
       })
       .catch((error: unknown) => {
         if (active) setBackupFeedback({ kind: 'error', message: errorMessage(error) });
@@ -7225,6 +7223,8 @@ function SettingsWorkspace({
       setAutoBackupSettings(saved);
       setBackupMaxVersionsInput(String(saved.maxVersions));
       setBackupCapacityGbInput(bytesToGbText(saved.capacityLimitBytes));
+      setManualBackupRootInput(saved.manualBackupRootDirectory ?? '');
+      setRestoreTargetInput(saved.restoreTargetDirectory ?? '');
       setBackupStatus(await api.getBackupStatus());
       setBackupFeedback({ kind: 'success', message: successMessage });
     } catch (error) {
@@ -7277,6 +7277,39 @@ function SettingsWorkspace({
       },
       '备份策略已保存',
     );
+  }
+
+  function commitBackupPath(
+    field: 'manualBackupRootDirectory' | 'restoreTargetDirectory',
+    value: string,
+  ) {
+    if (!autoBackupSettings || backupPolicyBusy) return;
+    const trimmed = value.trim();
+    if (trimmed === (autoBackupSettings[field] ?? '')) return;
+    const label = field === 'manualBackupRootDirectory' ? '手动备份位置' : '恢复位置';
+    void saveAutoBackupSettings(
+      { ...autoBackupSettings, [field]: trimmed || null },
+      trimmed ? `${label}已设为 ${trimmed}` : `${label}已清除`,
+    );
+  }
+
+  async function browseBackupLocation(
+    field: 'manualBackupRootDirectory' | 'restoreTargetDirectory',
+  ) {
+    if (!autoBackupSettings || backupPolicyBusy) return;
+    setBackupFeedback(null);
+    try {
+      const outcome = await api.selectBackupRoot(
+        field === 'restoreTargetDirectory' ? 'restore' : 'backup',
+      );
+      if (outcome.kind === 'canceled') return;
+      await saveAutoBackupSettings(
+        { ...autoBackupSettings, [field]: outcome.directory },
+        `${field === 'manualBackupRootDirectory' ? '手动备份位置' : '恢复位置'}已设为 ${outcome.directory}`,
+      );
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    }
   }
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -7530,6 +7563,75 @@ function SettingsWorkspace({
               </button>
             </div>
 
+            <div className="backup-paths">
+              <label className="backup-path-row">
+                <span>手动备份位置</span>
+                <input
+                  type="text"
+                  value={manualBackupRootInput}
+                  placeholder="配置后「立即备份」不再弹窗，直接备份到这里；留空则每次选择"
+                  disabled={backupPolicyBusy}
+                  onChange={(event) => setManualBackupRootInput(event.target.value)}
+                  onBlur={() => commitBackupPath('manualBackupRootDirectory', manualBackupRootInput)}
+                />
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  aria-label="浏览手动备份位置"
+                  disabled={backupPolicyBusy}
+                  onClick={() => void browseBackupLocation('manualBackupRootDirectory')}
+                >
+                  浏览
+                </button>
+              </label>
+              <label className="backup-path-row">
+                <span>恢复位置</span>
+                <input
+                  type="text"
+                  value={restoreTargetInput}
+                  placeholder="配置后「恢复备份」只选备份，恢复到其下的时间戳子目录；留空则每次选择"
+                  disabled={backupPolicyBusy}
+                  onChange={(event) => setRestoreTargetInput(event.target.value)}
+                  onBlur={() => commitBackupPath('restoreTargetDirectory', restoreTargetInput)}
+                />
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  aria-label="浏览恢复位置"
+                  disabled={backupPolicyBusy}
+                  onClick={() => void browseBackupLocation('restoreTargetDirectory')}
+                >
+                  浏览
+                </button>
+              </label>
+            </div>
+
+            {backupVerifyResult && (
+              <div
+                className={`backup-verify-result${backupVerifyResult.ok ? ' is-ok' : ' is-error'}`}
+                role={backupVerifyResult.ok ? 'status' : 'alert'}
+                aria-label="备份验证结果"
+              >
+                <div className="backup-verify-summary">
+                  <strong>{backupVerifyResult.ok ? '备份验证通过' : '备份验证未通过'}</strong>
+                  <span>
+                    {`共 ${backupVerifyResult.checkedFiles} 个文件 · ${formatBackupBytes(backupVerifyResult.totalBytes)}`}
+                    {backupVerifyResult.createdAt
+                      ? ` · 备份创建于 ${new Date(backupVerifyResult.createdAt).toLocaleString()}`
+                      : ''}
+                  </span>
+                </div>
+                {backupVerifyResult.problems.length > 0 && (
+                  <ul>
+                    {backupVerifyResult.problems.map((problem) => (
+                      <li key={problem}>{problem}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            <SettingsNotice feedback={backupFeedback} />
+
             <div className="backup-auto">
               <div className="backup-auto-heading">
                 <div>
@@ -7637,7 +7739,6 @@ function SettingsWorkspace({
                 </div>
               )}
             </div>
-            <SettingsNotice feedback={backupFeedback} />
           </section>
 
           {orderIntakeLoading && !orderIntakeSettings && (

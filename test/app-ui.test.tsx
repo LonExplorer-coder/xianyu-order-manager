@@ -501,6 +501,8 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     getBackupSettings: vi.fn().mockResolvedValue({
       autoBackupEnabled: false,
       backupRootDirectory: null,
+      manualBackupRootDirectory: null,
+      restoreTargetDirectory: null,
       maxVersions: 30,
       capacityLimitBytes: 5 * 1024 * 1024 * 1024,
     }),
@@ -10014,6 +10016,8 @@ describe('订单管理工作台', () => {
       getBackupSettings: vi.fn().mockResolvedValue({
         autoBackupEnabled: false,
         backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+        manualBackupRootDirectory: null,
+        restoreTargetDirectory: null,
         maxVersions: 30,
         capacityLimitBytes: 5 * 1024 * 1024 * 1024,
       }),
@@ -10066,6 +10070,51 @@ describe('订单管理工作台', () => {
       backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
       maxVersions: 30,
     }));
+  });
+
+  it('设置页可直接填写并记忆手动备份位置与恢复位置', async () => {
+    const user = userEvent.setup();
+    const saveBackupSettings = vi.fn(async (input: unknown) => input);
+    const selectBackupRoot = vi.fn().mockResolvedValue({
+      kind: 'selected' as const,
+      directory: '/Volumes/Backup/通过浏览选择的恢复位置',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      saveBackupSettings: saveBackupSettings as DesktopApi['saveBackupSettings'],
+      selectBackupRoot,
+      getBackupSettings: vi.fn().mockResolvedValue({
+        autoBackupEnabled: false,
+        backupRootDirectory: null,
+        manualBackupRootDirectory: null,
+        restoreTargetDirectory: null,
+        maxVersions: 30,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const manualInput = await screen.findByLabelText('手动备份位置');
+    await user.clear(manualInput);
+    await user.type(manualInput, '/Volumes/Backup/手动输入的备份位置');
+    await user.tab();
+
+    expect(await screen.findByText('手动备份位置已设为 /Volumes/Backup/手动输入的备份位置'))
+      .toBeVisible();
+    expect(saveBackupSettings).toHaveBeenCalledWith(expect.objectContaining({
+      manualBackupRootDirectory: '/Volumes/Backup/手动输入的备份位置',
+    }));
+
+    await user.click(screen.getByRole('button', { name: '浏览恢复位置' }));
+    expect(await screen.findByText('恢复位置已设为 /Volumes/Backup/通过浏览选择的恢复位置'))
+      .toBeVisible();
+    expect(selectBackupRoot).toHaveBeenCalledWith('restore');
   });
 
   it('设置页确认选择不同数据目录后重载新目录工作区', async () => {

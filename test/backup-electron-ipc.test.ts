@@ -1,3 +1,8 @@
+import { mkdirSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
@@ -48,6 +53,15 @@ function fakeSession(members: Record<string, unknown>): DesktopSession {
   return {
     onRecognitionBatchesChanged: () => () => undefined,
     onOrdersChanged: () => () => undefined,
+    getBackupSettings: () => ({
+      autoBackupEnabled: false,
+      backupRootDirectory: null,
+      manualBackupRootDirectory: null,
+      restoreTargetDirectory: null,
+      maxVersions: 30,
+      capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+    }),
+    updateBackupLocationDefaults: vi.fn(),
     ...members,
   } as unknown as DesktopSession;
 }
@@ -74,18 +88,75 @@ describe('备份 Electron IPC', () => {
         createdAt: '2026-08-18T02:30:00.000Z', appVersion: '0.2.43',
       },
     });
-    registerIpcHandlers(fakeSession({ createBackup }));
+    const updateBackupLocationDefaults = vi.fn();
+    registerIpcHandlers(fakeSession({ createBackup, updateBackupLocationDefaults }));
     electronBoundary.showOpenDialog.mockResolvedValue(directorySelection('/Volumes/Backup'));
 
     const outcome = await invoke('backup:create') as Awaited<ReturnType<DesktopApi['createBackup']>>;
 
     expect(electronBoundary.showOpenDialog).toHaveBeenCalledTimes(1);
     expect(createBackup).toHaveBeenCalledWith('/Volumes/Backup', '0.2.43');
+    expect(updateBackupLocationDefaults).toHaveBeenCalledWith({
+      manualBackupRootDirectory: '/Volumes/Backup',
+    });
     expect(outcome).toMatchObject({
       kind: 'created',
       backupDirectory: '/Volumes/Backup/xianyu-backup-20260818-103000',
       totals: { files: 1, bytes: 4 },
     });
+  });
+
+  it('已配置手动备份位置时立即备份不弹窗，直接在该位置执行', async () => {
+    const rememberedRoot = await mkdtemp(join(tmpdir(), 'xianyu-ipc-remembered-'));
+    const createBackup = vi.fn().mockResolvedValue({
+      backupDirectory: join(rememberedRoot, 'xianyu-backup-20260818-103000'),
+      database: { path: 'xianyu-order-manager.sqlite3', sha256: 'a', bytes: 10 },
+      files: [],
+      totals: { files: 0, bytes: 0 },
+      verification: {
+        ok: true, problems: [], checkedFiles: 1, totalBytes: 10,
+        createdAt: '2026-08-18T02:30:00.000Z', appVersion: '0.2.43',
+      },
+    });
+    const updateBackupLocationDefaults = vi.fn();
+    registerIpcHandlers(fakeSession({
+      createBackup,
+      updateBackupLocationDefaults,
+      getBackupSettings: () => ({
+        autoBackupEnabled: false,
+        backupRootDirectory: null,
+        manualBackupRootDirectory: rememberedRoot,
+        restoreTargetDirectory: null,
+        maxVersions: 30,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    }));
+
+    const outcome = await invoke('backup:create');
+
+    expect(electronBoundary.showOpenDialog).not.toHaveBeenCalled();
+    expect(createBackup).toHaveBeenCalledWith(rememberedRoot, '0.2.43');
+    expect(updateBackupLocationDefaults).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ kind: 'created' });
+  });
+
+  it('配置的备份位置已断开时报错并拒绝执行，不静默写到其他磁盘', async () => {
+    const createBackup = vi.fn();
+    registerIpcHandlers(fakeSession({
+      createBackup,
+      getBackupSettings: () => ({
+        autoBackupEnabled: false,
+        backupRootDirectory: null,
+        manualBackupRootDirectory: '/Volumes/未连接的备份盘/闲鱼订单备份',
+        restoreTargetDirectory: null,
+        maxVersions: 30,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    }));
+
+    await expect(invoke('backup:create')).rejects.toThrow('不存在或已断开');
+    expect(electronBoundary.showOpenDialog).not.toHaveBeenCalled();
+    expect(createBackup).not.toHaveBeenCalled();
   });
 
   it('取消备份位置选择时返回 canceled 且不触发备份', async () => {
@@ -139,7 +210,8 @@ describe('备份 Electron IPC', () => {
         createdAt: '2026-08-18T02:30:00.000Z', appVersion: '0.2.43',
       },
     });
-    registerIpcHandlers(fakeSession({ restoreBackup }));
+    const updateBackupLocationDefaults = vi.fn();
+    registerIpcHandlers(fakeSession({ restoreBackup, updateBackupLocationDefaults }));
     electronBoundary.showOpenDialog
       .mockResolvedValueOnce(directorySelection('/Volumes/Backup/xianyu-backup-1'))
       .mockResolvedValueOnce(directorySelection('/Users/test/Documents/闲鱼订单数据-恢复'));
@@ -150,6 +222,10 @@ describe('备份 Electron IPC', () => {
     expect(restoreBackup).toHaveBeenCalledWith({
       backupDirectory: '/Volumes/Backup/xianyu-backup-1',
       targetDirectory: '/Users/test/Documents/闲鱼订单数据-恢复',
+    });
+    expect(updateBackupLocationDefaults).toHaveBeenCalledWith({
+      manualBackupRootDirectory: '/Volumes/Backup',
+      restoreTargetDirectory: '/Users/test/Documents',
     });
     expect(outcome).toMatchObject({
       kind: 'restored',
@@ -168,6 +244,57 @@ describe('备份 Electron IPC', () => {
     expect(canceledTarget).toEqual({ kind: 'canceled' });
     expect(restoreBackup).toHaveBeenCalledTimes(1);
   });
+
+  it('已配置恢复位置时只选备份，目标自动为其下时间戳子目录', async () => {
+    const restoreArea = await mkdtemp(join(tmpdir(), 'xianyu-ipc-restore-area-'));
+    const restoreBackup = vi.fn(async (input: { targetDirectory: string }) => {
+      // 模拟真实恢复：目标目录被真正创建，供第二次调用的唯一性判断使用。
+      mkdirSync(input.targetDirectory, { recursive: true });
+      return {
+        targetDirectory: input.targetDirectory,
+        restoredFiles: 2,
+        restoredBytes: 14,
+        verification: {
+          ok: true, problems: [], checkedFiles: 2, totalBytes: 14,
+          createdAt: '2026-08-18T02:30:00.000Z', appVersion: '0.2.43',
+        },
+      };
+    });
+    const updateBackupLocationDefaults = vi.fn();
+    registerIpcHandlers(fakeSession({
+      restoreBackup,
+      updateBackupLocationDefaults,
+      getBackupSettings: () => ({
+        autoBackupEnabled: false,
+        backupRootDirectory: null,
+        manualBackupRootDirectory: null,
+        restoreTargetDirectory: restoreArea,
+        maxVersions: 30,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    }));
+    electronBoundary.showOpenDialog
+      .mockResolvedValueOnce(directorySelection('/Volumes/Backup/xianyu-backup-1'));
+
+    const outcome = await invoke('backup:restore');
+
+    expect(electronBoundary.showOpenDialog).toHaveBeenCalledTimes(1);
+    expect(restoreBackup).toHaveBeenCalledWith({
+      backupDirectory: '/Volumes/Backup/xianyu-backup-1',
+      targetDirectory: expect.stringMatching(/闲鱼订单数据-恢复-\d{8}-\d{6}/),
+    });
+    expect(updateBackupLocationDefaults).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ kind: 'restored' });
+
+    // 同一秒内再次恢复时目标目录不冲突。
+    electronBoundary.showOpenDialog
+      .mockResolvedValueOnce(directorySelection('/Volumes/Backup/xianyu-backup-1'));
+    await invoke('backup:restore');
+    const [firstCall, secondCall] = restoreBackup.mock.calls as Array<
+      [{ targetDirectory: string }]
+    >;
+    expect(secondCall[0].targetDirectory).not.toBe(firstCall[0].targetDirectory);
+  });
 });
 
 describe('自动备份设置 Electron IPC', () => {
@@ -178,10 +305,14 @@ describe('自动备份设置 Electron IPC', () => {
     capacityLimitBytes: 2 * 1024 * 1024 * 1024,
   };
 
-  it('保存设置回传视图，开启时立即触发一次自动备份检查', async () => {
+  it('保存设置回传视图，从关闭切换为开启时立即触发一次自动备份检查', async () => {
     const saveBackupSettings = vi.fn().mockReturnValue(settingsInput);
     const runAutomaticBackup = vi.fn().mockResolvedValue({ ran: false, reason: 'no-workspace' });
-    registerIpcHandlers(fakeSession({ saveBackupSettings, runAutomaticBackup }));
+    registerIpcHandlers(fakeSession({
+      saveBackupSettings,
+      runAutomaticBackup,
+      getBackupSettings: () => ({ ...settingsInput, autoBackupEnabled: false }),
+    }));
 
     const saved = await invoke('backup:save-settings', settingsInput);
 
@@ -189,6 +320,19 @@ describe('自动备份设置 Electron IPC', () => {
     expect(saved).toEqual(settingsInput);
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(runAutomaticBackup).toHaveBeenCalledWith('0.2.43');
+  });
+
+  it('保存设置时若自动备份原本已开启则不重复触发检查', async () => {
+    const runAutomaticBackup = vi.fn();
+    registerIpcHandlers(fakeSession({
+      saveBackupSettings: vi.fn().mockReturnValue(settingsInput),
+      runAutomaticBackup,
+      getBackupSettings: () => settingsInput,
+    }));
+
+    await invoke('backup:save-settings', settingsInput);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runAutomaticBackup).not.toHaveBeenCalled();
   });
 
   it('关闭自动备份保存时不触发备份检查', async () => {

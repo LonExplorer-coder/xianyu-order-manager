@@ -244,6 +244,8 @@ export class DesktopSession {
     const record: BackupSettingsRecord = {
       autoBackupEnabled: input.autoBackupEnabled,
       backupRootDirectory: input.backupRootDirectory,
+      manualBackupRootDirectory: input.manualBackupRootDirectory,
+      restoreTargetDirectory: input.restoreTargetDirectory,
       maxVersions: input.maxVersions,
       capacityLimitBytes: input.capacityLimitBytes,
     };
@@ -252,6 +254,28 @@ export class DesktopSession {
     }
     this.backupSettings?.write(record);
     return { ...record };
+  }
+
+  /** 供主进程在对话框选择后回写路径记忆；不触发自动备份检查。 */
+  public updateBackupLocationDefaults(patch: {
+    manualBackupRootDirectory?: string | null;
+    restoreTargetDirectory?: string | null;
+  }): BackupSettingsView {
+    const record = this.readBackupSettings();
+    const merged: BackupSettingsRecord = {
+      ...record,
+      ...('manualBackupRootDirectory' in patch
+        ? { manualBackupRootDirectory: patch.manualBackupRootDirectory ?? null }
+        : {}),
+      ...('restoreTargetDirectory' in patch
+        ? { restoreTargetDirectory: patch.restoreTargetDirectory ?? null }
+        : {}),
+    };
+    if (!isValidBackupSettings(merged)) {
+      throw new Error('备份设置无效：保留版本数需为 1–1000 的整数，容量上限需在 100 MB 到 2 TB 之间');
+    }
+    this.backupSettings?.write(merged);
+    return { ...merged };
   }
 
   public async getBackupStatus(): Promise<BackupStatusView | null> {

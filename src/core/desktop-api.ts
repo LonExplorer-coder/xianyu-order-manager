@@ -163,7 +163,7 @@ export interface DesktopApi {
   restoreBackup(): Promise<BackupRestoreOutcome>;
   getBackupSettings(): Promise<BackupSettingsView>;
   saveBackupSettings(input: SaveBackupSettingsInput): Promise<BackupSettingsView>;
-  selectBackupRoot(): Promise<BackupSelectRootOutcome>;
+  selectBackupRoot(purpose?: 'backup' | 'restore'): Promise<BackupSelectRootOutcome>;
   getBackupStatus(): Promise<BackupStatusView | null>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;

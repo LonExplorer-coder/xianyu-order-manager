@@ -48,6 +48,8 @@ export type BackupRestoreOutcome =
 export interface BackupSettingsView {
   autoBackupEnabled: boolean;
   backupRootDirectory: string | null;
+  manualBackupRootDirectory: string | null;
+  restoreTargetDirectory: string | null;
   maxVersions: number;
   capacityLimitBytes: number;
 }

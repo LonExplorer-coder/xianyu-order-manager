@@ -4,6 +4,10 @@ import { join } from 'node:path';
 export interface BackupSettingsRecord {
   autoBackupEnabled: boolean;
   backupRootDirectory: string | null;
+  /** 手动「立即备份」的默认位置；配置后不再弹目录选择框。 */
+  manualBackupRootDirectory: string | null;
+  /** 「恢复备份」的默认父目录；每次恢复在其下建时间戳子目录。 */
+  restoreTargetDirectory: string | null;
   maxVersions: number;
   capacityLimitBytes: number;
 }
@@ -11,6 +15,8 @@ export interface BackupSettingsRecord {
 export const DEFAULT_BACKUP_SETTINGS: BackupSettingsRecord = {
   autoBackupEnabled: false,
   backupRootDirectory: null,
+  manualBackupRootDirectory: null,
+  restoreTargetDirectory: null,
   maxVersions: 30,
   capacityLimitBytes: 5 * 1024 * 1024 * 1024,
 };
@@ -49,6 +55,14 @@ export class BackupSettingsFile {
       backupRootDirectory:
         typeof parsed.backupRootDirectory === 'string' && parsed.backupRootDirectory.trim()
           ? parsed.backupRootDirectory
+          : null,
+      manualBackupRootDirectory:
+        typeof parsed.manualBackupRootDirectory === 'string' && parsed.manualBackupRootDirectory.trim()
+          ? parsed.manualBackupRootDirectory
+          : null,
+      restoreTargetDirectory:
+        typeof parsed.restoreTargetDirectory === 'string' && parsed.restoreTargetDirectory.trim()
+          ? parsed.restoreTargetDirectory
           : null,
       maxVersions: integerInRange(parsed.maxVersions, 1, 1_000)
         ?? DEFAULT_BACKUP_SETTINGS.maxVersions,

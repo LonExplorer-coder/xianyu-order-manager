@@ -95,7 +95,7 @@ function sqlStringLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function formatBackupStamp(instant: Date): string {
+export function formatBackupStamp(instant: Date): string {
   const pad = (value: number) => String(value).padStart(2, '0');
   return [
     String(instant.getFullYear()),
