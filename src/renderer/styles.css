@@ -6676,6 +6676,43 @@ select:focus-visible {
   font-size: 12px;
 }
 
+.fulfillment-plan-demand__totals {
+  color: var(--navy-950);
+}
+
+.fulfillment-plan-demand__alerts {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  list-style: none;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.fulfillment-plan-demand__alerts li {
+  color: var(--navy-700);
+}
+
+.fulfillment-plan-demand__unmapped {
+  margin: 0 0 12px;
+}
+
+.fulfillment-plan-demand__unmapped h4 {
+  margin: 0 0 4px;
+  color: var(--navy-950);
+}
+
+.fulfillment-plan-demand__unmapped p {
+  margin: 0 0 6px;
+  color: var(--navy-500);
+}
+
+.fulfillment-plan-demand__unmapped ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--navy-700);
+}
+
 .fulfillment-plan-progress-order {
   display: grid;
   gap: 4px;

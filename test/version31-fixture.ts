@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 // v51 建立流程步骤事件表；存在事件数据时拒绝降级。
 export function removeVersion51ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion52ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 51',
   ).get();
@@ -412,6 +413,46 @@ export function removeVersion42ExtensionArtifacts(database: DatabaseSync): void 
     DROP TABLE recipients;
     ALTER TABLE shipment_record_order_snapshots DROP COLUMN readable_order_number;
     DELETE FROM schema_migrations WHERE version = 42;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+export function removeVersion52ExtensionArtifacts(database: DatabaseSync): void {
+  const hasDemandTables = database.prepare(`
+    SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'purchase_suggestions'
+  `).get();
+  const planColumns = database.prepare(
+    'PRAGMA table_info(fulfillment_plans)',
+  ).all() as Array<{ name: string }>;
+  const hasThresholdColumn = planColumns.some(({ name }) => name === 'demand_alert_threshold');
+  if (!hasDemandTables && !hasThresholdColumn) return;
+  const refundCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM fulfillment_refund_events
+  `).get() as { count: number };
+  const suggestionCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM purchase_suggestions
+  `).get() as { count: number };
+  if (refundCount.count > 0 || suggestionCount.count > 0) {
+    throw new Error('v52 测试降级前必须移除发货前退款与采购建议数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS purchase_suggestion_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS purchase_suggestion_events_are_immutable_on_delete;
+    DROP TRIGGER IF EXISTS fulfillment_refund_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS fulfillment_refund_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS purchase_suggestion_events_by_plan;
+    DROP INDEX IF EXISTS purchase_suggestion_events_by_suggestion;
+    DROP INDEX IF EXISTS purchase_suggestions_by_plan;
+    DROP INDEX IF EXISTS purchase_suggestions_by_product;
+    DROP INDEX IF EXISTS fulfillment_refund_events_by_plan;
+    DROP TABLE purchase_suggestion_events;
+    DROP TABLE purchase_suggestions;
+    DROP TABLE fulfillment_refund_events;
+    ALTER TABLE fulfillment_plans DROP COLUMN demand_alert_threshold;
+    DELETE FROM schema_migrations WHERE version = 52;
     COMMIT;
     PRAGMA foreign_keys = ON;
   `);

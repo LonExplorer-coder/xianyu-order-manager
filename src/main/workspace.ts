@@ -208,6 +208,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(49)) migrateToVersion49(database);
   if (!versions.has(50)) migrateToVersion50(database);
   if (!versions.has(51)) migrateToVersion51(database);
+  if (!versions.has(52)) migrateToVersion52(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6241,6 +6242,110 @@ function migrateToVersion51(database: DatabaseSync): void {
       END;
     `);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (51, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+// v52 交付预售需求域：履约计划增加需求提醒阈值；发货前退款事实与采购建议
+// 各自拥有不可变事件表。既有工作区没有这类事实，全部从空历史开始。
+function migrateToVersion52(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      ALTER TABLE fulfillment_plans
+        ADD COLUMN demand_alert_threshold INTEGER
+          CHECK (demand_alert_threshold IS NULL OR demand_alert_threshold > 0);
+
+      CREATE TABLE fulfillment_refund_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE RESTRICT,
+        order_item_id TEXT NOT NULL REFERENCES order_items(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX fulfillment_refund_events_by_plan
+        ON fulfillment_refund_events (plan_id, sequence);
+
+      CREATE TRIGGER fulfillment_refund_events_are_immutable_on_update
+        BEFORE UPDATE ON fulfillment_refund_events
+        BEGIN
+          SELECT RAISE(ABORT, 'fulfillment refund events are immutable');
+        END;
+
+      CREATE TRIGGER fulfillment_refund_events_are_immutable_on_delete
+        BEFORE DELETE ON fulfillment_refund_events
+        BEGIN
+          SELECT RAISE(ABORT, 'fulfillment refund events are immutable');
+        END;
+
+      CREATE TABLE purchase_suggestions (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        standard_product_id TEXT NOT NULL REFERENCES standard_products(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed', 'cancelled')),
+        created_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        cancelled_at TEXT,
+        cancel_reason TEXT,
+        CHECK (status != 'draft' OR (confirmed_at IS NULL AND cancelled_at IS NULL)),
+        CHECK (status != 'draft' OR cancel_reason IS NULL),
+        CHECK (status != 'confirmed' OR confirmed_at IS NOT NULL),
+        CHECK (status != 'confirmed' OR (cancelled_at IS NULL AND cancel_reason IS NULL)),
+        CHECK ((status = 'cancelled') = (cancelled_at IS NOT NULL)),
+        CHECK (cancelled_at IS NULL OR cancel_reason IS NOT NULL)
+      ) STRICT;
+
+      CREATE INDEX purchase_suggestions_by_plan
+        ON purchase_suggestions (plan_id, created_at, id);
+
+      CREATE INDEX purchase_suggestions_by_product
+        ON purchase_suggestions (standard_product_id, status);
+
+      CREATE TABLE purchase_suggestion_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        suggestion_id TEXT NOT NULL REFERENCES purchase_suggestions(id) ON DELETE RESTRICT,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        event_type TEXT NOT NULL CHECK (
+          event_type IN ('created', 'confirmed', 'cancelled', 'reduced')
+        ),
+        quantity INTEGER CHECK (quantity IS NULL OR quantity > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (event_type != 'reduced' OR quantity IS NOT NULL),
+        CHECK (event_type = 'reduced' OR quantity IS NULL)
+      ) STRICT;
+
+      CREATE INDEX purchase_suggestion_events_by_plan
+        ON purchase_suggestion_events (plan_id, sequence);
+
+      CREATE INDEX purchase_suggestion_events_by_suggestion
+        ON purchase_suggestion_events (suggestion_id, sequence);
+
+      CREATE TRIGGER purchase_suggestion_events_are_immutable_on_update
+        BEFORE UPDATE ON purchase_suggestion_events
+        BEGIN
+          SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+        END;
+
+      CREATE TRIGGER purchase_suggestion_events_are_immutable_on_delete
+        BEFORE DELETE ON purchase_suggestion_events
+        BEGIN
+          SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+        END;
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (52, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

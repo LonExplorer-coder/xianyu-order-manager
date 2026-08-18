@@ -182,6 +182,19 @@ const api: DesktopApi = {
   queryFulfillmentPlanOrderCandidates: () => (
     ipcRenderer.invoke('fulfillment-plans:order-candidates')
   ),
+  queryFulfillmentDemand: (planId) => ipcRenderer.invoke('fulfillment-plans:demand', planId),
+  registerFulfillmentRefund: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:register-refund', input)
+  ),
+  createPurchaseSuggestion: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:create-purchase-suggestion', input)
+  ),
+  confirmPurchaseSuggestion: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:confirm-purchase-suggestion', input)
+  ),
+  cancelPurchaseSuggestion: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:cancel-purchase-suggestion', input)
+  ),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   exportShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:export', input),

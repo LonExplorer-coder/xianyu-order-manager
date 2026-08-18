@@ -583,6 +583,21 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('fulfillment-plans:order-candidates', () => (
     desktopSession.queryFulfillmentPlanOrderCandidates()
   ));
+  ipcMain.handle('fulfillment-plans:demand', (_event, planId: unknown) => (
+    desktopSession.queryFulfillmentDemand(planId)
+  ));
+  ipcMain.handle('fulfillment-plans:register-refund', (_event, input: unknown) => (
+    desktopSession.registerFulfillmentRefund(input)
+  ));
+  ipcMain.handle('fulfillment-plans:create-purchase-suggestion', (_event, input: unknown) => (
+    desktopSession.createPurchaseSuggestion(input)
+  ));
+  ipcMain.handle('fulfillment-plans:confirm-purchase-suggestion', (_event, input: unknown) => (
+    desktopSession.confirmPurchaseSuggestion(input)
+  ));
+  ipcMain.handle('fulfillment-plans:cancel-purchase-suggestion', (_event, input: unknown) => (
+    desktopSession.cancelPurchaseSuggestion(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

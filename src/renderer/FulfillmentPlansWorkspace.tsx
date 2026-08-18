@@ -12,6 +12,11 @@ import {
   type FulfillmentPlanType,
   type FulfillmentPlanView,
 } from '../core/fulfillment-plans';
+import type { PresaleDemandView } from '../core/fulfillment-demand';
+import {
+  presaleDemandAlerts,
+  purchaseSuggestionStatusLabel,
+} from '../core/fulfillment-demand';
 import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
 import {
   ConfirmDangerDialog,
@@ -27,6 +32,7 @@ type CreateFormState = {
   expectedShipAt: string;
   targetQuantity: string;
   deadlineAt: string;
+  demandAlertThreshold: string;
   reason: string;
 };
 
@@ -43,7 +49,33 @@ type DelayFormState = {
   expectedShipAt: string;
   targetQuantity: string;
   deadlineAt: string;
+  demandAlertThreshold: string;
   markDelayed: boolean;
+  reason: string;
+};
+
+type RefundFormState = {
+  planId: string;
+  orderId: string;
+  orderItemId: string;
+  quantity: string;
+  reason: string;
+};
+
+type SuggestionFormState = {
+  planId: string;
+  standardProductId: string;
+  quantity: string;
+  reason: string;
+};
+
+type SuggestionPromptKind = 'confirm' | 'cancel';
+
+type SuggestionPromptState = {
+  kind: SuggestionPromptKind;
+  planId: string;
+  suggestionId: string;
+  label: string;
   reason: string;
 };
 
@@ -93,6 +125,10 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   const [createForm, setCreateForm] = useState<CreateFormState>(blankCreateForm());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [progressByPlan, setProgressByPlan] = useState<Record<string, FulfillmentPlanProgressView>>({});
+  const [demandByPlan, setDemandByPlan] = useState<Record<string, PresaleDemandView>>({});
+  const [refundForm, setRefundForm] = useState<RefundFormState | null>(null);
+  const [suggestionForm, setSuggestionForm] = useState<SuggestionFormState | null>(null);
+  const [suggestionPrompt, setSuggestionPrompt] = useState<SuggestionPromptState | null>(null);
   const [readableNumbers, setReadableNumbers] = useState<Record<string, string | null>>({});
   const [addOrders, setAddOrders] = useState<AddOrdersState | null>(null);
   const [delayForm, setDelayForm] = useState<DelayFormState | null>(null);
@@ -150,6 +186,21 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   }, [api, expandedId, plans]);
 
   useEffect(() => {
+    if (!expandedId) return;
+    const plan = plans.find(({ id }) => id === expandedId);
+    if (!plan || plan.type !== 'presale') return;
+    let stale = false;
+    api.queryFulfillmentDemand(expandedId)
+      .then((view) => {
+        if (!stale) setDemandByPlan((current) => ({ ...current, [expandedId]: view }));
+      })
+      .catch((value) => {
+        if (!stale) setError(errorMessage(value));
+      });
+    return () => { stale = true; };
+  }, [api, expandedId, plans]);
+
+  useEffect(() => {
     const orderIds = [...new Set(
       plans.flatMap((plan) => plan.members.map((member) => member.orderId)),
     )];
@@ -177,6 +228,9 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           ? Number(createForm.targetQuantity)
           : null,
         deadlineAt: createForm.deadlineAt || null,
+        demandAlertThreshold: createForm.demandAlertThreshold.trim()
+          ? Number(createForm.demandAlertThreshold)
+          : null,
         reason: createForm.reason,
       });
       setCreating(false);
@@ -298,12 +352,83 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           ? Number(delayForm.targetQuantity)
           : null,
         deadlineAt: delayForm.deadlineAt || null,
+        demandAlertThreshold: delayForm.demandAlertThreshold.trim()
+          ? Number(delayForm.demandAlertThreshold)
+          : null,
         markDelayed: delayForm.markDelayed,
         reason: delayForm.reason,
       });
       setDelayForm(null);
       setFeedback('已更新履约计划');
       await refresh();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitRefund(): Promise<void> {
+    if (!refundForm) return;
+    setBusy(true);
+    setError('');
+    try {
+      const view = await api.registerFulfillmentRefund({
+        planId: refundForm.planId,
+        orderId: refundForm.orderId,
+        orderItemId: refundForm.orderItemId,
+        quantity: Number(refundForm.quantity),
+        reason: refundForm.reason,
+      });
+      setDemandByPlan((current) => ({ ...current, [refundForm.planId]: view }));
+      setRefundForm(null);
+      setFeedback('已登记发货前退款并重算需求与未确认建议');
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitSuggestion(): Promise<void> {
+    if (!suggestionForm) return;
+    setBusy(true);
+    setError('');
+    try {
+      const view = await api.createPurchaseSuggestion({
+        planId: suggestionForm.planId,
+        standardProductId: suggestionForm.standardProductId,
+        quantity: Number(suggestionForm.quantity),
+        reason: suggestionForm.reason,
+      });
+      setDemandByPlan((current) => ({ ...current, [suggestionForm.planId]: view }));
+      setSuggestionForm(null);
+      setFeedback('已生成待确认采购建议');
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitSuggestionPrompt(): Promise<void> {
+    if (!suggestionPrompt) return;
+    setBusy(true);
+    setError('');
+    try {
+      const input = {
+        planId: suggestionPrompt.planId,
+        suggestionId: suggestionPrompt.suggestionId,
+        reason: suggestionPrompt.reason,
+      };
+      const view = suggestionPrompt.kind === 'confirm'
+        ? await api.confirmPurchaseSuggestion(input)
+        : await api.cancelPurchaseSuggestion(input);
+      setDemandByPlan((current) => ({ ...current, [suggestionPrompt.planId]: view }));
+      setSuggestionPrompt(null);
+      setFeedback(suggestionPrompt.kind === 'confirm'
+        ? '已确认采购建议，计入采购在途数量'
+        : '已取消采购建议');
     } catch (value) {
       setError(errorMessage(value));
     } finally {
@@ -468,6 +593,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                           expectedShipAt: '',
                           targetQuantity: '',
                           deadlineAt: '',
+                          demandAlertThreshold: '',
                           markDelayed: plan.type === 'presale',
                           reason: '',
                         })}
@@ -555,6 +681,214 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                             ))}
                           </tbody>
                         </table>
+                      </div>
+                    )}
+                    {plan.type === 'presale' && (
+                      <div className="fulfillment-plan-demand" aria-label="预售需求与采购建议">
+                        <h3>预售需求与采购建议</h3>
+                        <p className="fulfillment-plan-progress__hint">
+                          有效需求按未释放成员订单实时累计；已分配现货与到货待检查由库存模块提供（尚未接入，按 0 计）。建议确认后计入采购在途，不会自动生成采购订单。
+                        </p>
+                        {!demandByPlan[plan.id] ? (
+                          <p role="status">正在读取预售需求…</p>
+                        ) : (() => {
+                          const demand = demandByPlan[plan.id]!;
+                          const alerts = presaleDemandAlerts(demand);
+                          return (
+                            <>
+                              <p className="fulfillment-plan-demand__totals">
+                                有效需求 {demand.totals.demandQuantity} 件
+                                {' · '}退款/取消 {demand.totals.refundedOrCancelledQuantity} 件
+                                {' · '}确认在途 {demand.totals.confirmedInTransitQuantity} 件
+                                {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
+                                {' · '}未覆盖缺口 <strong>{demand.totals.uncoveredQuantity}</strong> 件
+                                {' · '}已分配现货 {demand.totals.allocatedStockQuantity} 件
+                                {' · '}待检查 {demand.totals.pendingInspectionQuantity} 件
+                                {' · '}已释放 {demand.totals.releasedOrderCount} 单
+                              </p>
+                              {alerts.length > 0 && (
+                                <ul className="fulfillment-plan-demand__alerts">
+                                  {alerts.map((alert) => <li key={alert}>{alert}</li>)}
+                                </ul>
+                              )}
+                              {demand.products.length === 0 ? (
+                                <p>暂无映射到标准商品的有效需求。</p>
+                              ) : (
+                                <div className="table-frame table-frame--embedded">
+                                  <table aria-label="预售商品需求">
+                                    <thead>
+                                      <tr>
+                                        <th>标准商品</th>
+                                        <th>有效需求</th>
+                                        <th>退款/取消</th>
+                                        <th>确认在途</th>
+                                        <th>未确认建议</th>
+                                        <th>未覆盖缺口</th>
+                                        <th>提示</th>
+                                        <th>操作</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {demand.products.map((product) => (
+                                        <tr key={product.standardProductId}>
+                                          <td>
+                                            {product.sku}
+                                            {' · '}
+                                            {product.name}
+                                            {product.specification ? `（${product.specification}）` : ''}
+                                          </td>
+                                          <td>{product.demandQuantity}</td>
+                                          <td>{product.refundedOrCancelledQuantity}</td>
+                                          <td>{product.confirmedInTransitQuantity}</td>
+                                          <td>{product.draftSuggestionQuantity}</td>
+                                          <td><strong>{product.uncoveredQuantity}</strong></td>
+                                          <td>
+                                            {product.overPurchaseRisk
+                                              ? '确认采购超过当前需求，多采购风险'
+                                              : product.draftExceedsUncovered
+                                                ? '未确认建议超过当前缺口'
+                                                : '—'}
+                                          </td>
+                                          <td>
+                                            {open && (
+                                              <button
+                                                className="button button--quiet"
+                                                type="button"
+                                                disabled={
+                                                  busy
+                                                  || product.uncoveredQuantity
+                                                    - product.draftSuggestionQuantity <= 0
+                                                }
+                                                onClick={() => setSuggestionForm({
+                                                  planId: plan.id,
+                                                  standardProductId: product.standardProductId,
+                                                  quantity: '',
+                                                  reason: '',
+                                                })}
+                                              >
+                                                生成采购建议
+                                              </button>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                              {demand.unmapped.length > 0 && (
+                                <div className="fulfillment-plan-demand__unmapped">
+                                  <h4>未映射标准商品的明细</h4>
+                                  <p>以下明细尚未关联标准商品，不能生成采购建议，请先在订单校对中关联标准商品或建立映射。</p>
+                                  <ul>
+                                    {demand.unmapped.map((entry) => (
+                                      <li key={`${entry.sourceTitle}\u0000${entry.sourceSpec}`}>
+                                        {`${entry.sourceTitle}${entry.sourceSpec ? `（${entry.sourceSpec}）` : ''} × ${entry.quantity} · 涉及 ${entry.orderCount} 单`}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              <div className="table-frame table-frame--embedded">
+                                <table aria-label="采购建议">
+                                  <thead>
+                                    <tr>
+                                      <th>商品</th>
+                                      <th>数量</th>
+                                      <th>状态</th>
+                                      <th>时间</th>
+                                      <th>操作</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {demand.suggestions.length === 0 ? (
+                                      <tr><td colSpan={5}>暂无采购建议</td></tr>
+                                    ) : demand.suggestions.map((suggestion) => (
+                                      <tr key={suggestion.id}>
+                                        <td>
+                                          {suggestion.sku}
+                                          {' · '}
+                                          {suggestion.name}
+                                          {suggestion.specification ? `（${suggestion.specification}）` : ''}
+                                        </td>
+                                        <td>{suggestion.quantity}</td>
+                                        <td>
+                                          {purchaseSuggestionStatusLabel(suggestion.status)}
+                                          {suggestion.cancelReason ? `（${suggestion.cancelReason}）` : ''}
+                                        </td>
+                                        <td>
+                                          {formatDateTime(suggestion.createdAt)}
+                                          {suggestion.confirmedAt
+                                            ? ` · 确认于 ${formatDateTime(suggestion.confirmedAt)}`
+                                            : ''}
+                                        </td>
+                                        <td>
+                                          {open && suggestion.status === 'draft' && (
+                                            <button
+                                              className="button button--quiet"
+                                              type="button"
+                                              disabled={busy}
+                                              onClick={() => setSuggestionPrompt({
+                                                kind: 'confirm',
+                                                planId: plan.id,
+                                                suggestionId: suggestion.id,
+                                                label: `${suggestion.sku} · ${suggestion.name} × ${suggestion.quantity}`,
+                                                reason: '',
+                                              })}
+                                            >
+                                              确认
+                                            </button>
+                                          )}
+                                          {open && (suggestion.status === 'draft'
+                                            || suggestion.status === 'confirmed') && (
+                                            <button
+                                              className="button button--quiet"
+                                              type="button"
+                                              disabled={busy}
+                                              onClick={() => setSuggestionPrompt({
+                                                kind: 'cancel',
+                                                planId: plan.id,
+                                                suggestionId: suggestion.id,
+                                                label: `${suggestion.sku} · ${suggestion.name} × ${suggestion.quantity}`,
+                                                reason: '',
+                                              })}
+                                            >
+                                              取消
+                                            </button>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {open && (
+                                <footer>
+                                  <button
+                                    className="button button--quiet"
+                                    type="button"
+                                    disabled={busy || plan.activeOrderCount === 0}
+                                    onClick={() => {
+                                      const firstActive = plan.members.find(
+                                        (member) => member.releasedAt === null
+                                          && member.removedAt === null,
+                                      );
+                                      setRefundForm({
+                                        planId: plan.id,
+                                        orderId: firstActive?.orderId ?? '',
+                                        orderItemId: firstActive?.items[0]?.itemId ?? '',
+                                        quantity: '',
+                                        reason: '',
+                                      });
+                                    }}
+                                  >
+                                    登记发货前退款
+                                  </button>
+                                </footer>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                     {plan.releasedOrderCount > 0 && (
@@ -690,6 +1024,22 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                 onChange={(event) => setCreateForm({
                   ...createForm,
                   expectedShipAt: event.target.value,
+                })}
+              />
+            </label>
+          )}
+          {createForm.type === 'presale' && (
+            <label>
+              <span>需求提醒阈值（件，可选）</span>
+              <input
+                aria-label="需求提醒阈值"
+                type="number"
+                min="1"
+                value={createForm.demandAlertThreshold}
+                disabled={busy}
+                onChange={(event) => setCreateForm({
+                  ...createForm,
+                  demandAlertThreshold: event.target.value,
                 })}
               />
             </label>
@@ -877,6 +1227,22 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                 </label>
               </>
             )}
+            {plan.type === 'presale' && (
+              <label>
+                <span>新的需求提醒阈值（件，留空保持不变）</span>
+                <input
+                  aria-label="新的需求提醒阈值"
+                  type="number"
+                  min="1"
+                  value={delayForm.demandAlertThreshold}
+                  disabled={busy}
+                  onChange={(event) => setDelayForm({
+                    ...delayForm,
+                    demandAlertThreshold: event.target.value,
+                  })}
+                />
+              </label>
+            )}
             <label className="shared-dialog__check">
               <input
                 type="checkbox"
@@ -915,6 +1281,229 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           </DialogShell>
         );
       })()}
+
+      {refundForm && (() => {
+        const plan = plans.find(({ id }) => id === refundForm.planId);
+        if (!plan) return null;
+        const activeMembers = plan.members.filter(
+          (member) => member.releasedAt === null && member.removedAt === null,
+        );
+        const selectedMember = activeMembers.find(
+          (member) => member.orderId === refundForm.orderId,
+        ) ?? activeMembers[0];
+        const quantityValid = /^\d+$/.test(refundForm.quantity.trim())
+          && Number(refundForm.quantity.trim()) > 0;
+        return (
+          <DialogShell
+            kicker={plan.type === 'presale' ? '预售计划' : '团购计划'}
+            title={`登记发货前退款 · ${plan.name}`}
+            description="退款精确到商品与数量，只减少有效需求、库存预留与未确认建议；已确认采购不会被改写。整单退款请在订单列表更新平台交易状态。"
+            busy={busy}
+            onClose={() => setRefundForm(null)}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitRefund();
+            }}
+          >
+            <label>
+              <span>成员订单</span>
+              <select
+                aria-label="退款成员订单"
+                value={selectedMember?.orderId ?? ''}
+                disabled={busy}
+                onChange={(event) => {
+                  const member = activeMembers.find(
+                    (candidate) => candidate.orderId === event.target.value,
+                  );
+                  setRefundForm({
+                    ...refundForm,
+                    orderId: event.target.value,
+                    orderItemId: member?.items[0]?.itemId ?? '',
+                  });
+                }}
+              >
+                {activeMembers.map((member) => (
+                  <option key={member.orderId} value={member.orderId}>
+                    {`${member.systemOrderNumber} · ${member.buyerNickname}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>商品</span>
+              <select
+                aria-label="退款商品"
+                value={refundForm.orderItemId}
+                disabled={busy || !selectedMember}
+                onChange={(event) => setRefundForm({
+                  ...refundForm,
+                  orderItemId: event.target.value,
+                })}
+              >
+                {(selectedMember?.items ?? []).map((item) => (
+                  <option key={item.itemId} value={item.itemId}>
+                    {`${`${item.sourceTitle} ${item.sourceSpec}`.trim()} × ${item.quantity}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>退款数量（件）</span>
+              <input
+                aria-label="退款数量"
+                type="number"
+                min="1"
+                value={refundForm.quantity}
+                disabled={busy}
+                onChange={(event) => setRefundForm({
+                  ...refundForm,
+                  quantity: event.target.value,
+                })}
+              />
+            </label>
+            <ReasonField
+              label="退款原因"
+              value={refundForm.reason}
+              saving={busy}
+              onChange={(reason) => setRefundForm({ ...refundForm, reason })}
+            />
+            <footer>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={busy}
+                onClick={() => setRefundForm(null)}
+              >
+                取消
+              </button>
+              <button
+                className="button button--primary"
+                type="submit"
+                disabled={
+                  busy
+                  || !refundForm.orderId
+                  || !refundForm.orderItemId
+                  || !quantityValid
+                  || refundForm.reason.trim() === ''
+                }
+              >
+                登记退款
+              </button>
+            </footer>
+          </DialogShell>
+        );
+      })()}
+
+      {suggestionForm && (() => {
+        const plan = plans.find(({ id }) => id === suggestionForm.planId);
+        const demand = plan ? demandByPlan[plan.id] : undefined;
+        const product = demand?.products.find(
+          (candidate) => candidate.standardProductId === suggestionForm.standardProductId,
+        );
+        if (!plan || !demand || !product) return null;
+        const capacity = Math.max(
+          0,
+          product.uncoveredQuantity - product.draftSuggestionQuantity,
+        );
+        const quantityValid = /^\d+$/.test(suggestionForm.quantity.trim())
+          && Number(suggestionForm.quantity.trim()) > 0;
+        return (
+          <DialogShell
+            kicker="预售计划"
+            title={`生成采购建议 · ${plan.name}`}
+            description={`从尚未被采购在途覆盖的需求中选择数量；当前可建议 ${capacity} 件。建议需人工确认后才计入采购在途，不会自动生成采购订单。`}
+            busy={busy}
+            onClose={() => setSuggestionForm(null)}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitSuggestion();
+            }}
+          >
+            <p>
+              {`${product.sku} · ${product.name}${product.specification ? `（${product.specification}）` : ''}`}
+              {' · '}有效需求 {product.demandQuantity} 件 · 未覆盖 {product.uncoveredQuantity} 件
+            </p>
+            <label>
+              <span>建议数量（件）</span>
+              <input
+                aria-label="建议数量"
+                type="number"
+                min="1"
+                max={capacity}
+                value={suggestionForm.quantity}
+                disabled={busy}
+                onChange={(event) => setSuggestionForm({
+                  ...suggestionForm,
+                  quantity: event.target.value,
+                })}
+              />
+            </label>
+            <ReasonField
+              label="生成原因"
+              value={suggestionForm.reason}
+              saving={busy}
+              onChange={(reason) => setSuggestionForm({ ...suggestionForm, reason })}
+            />
+            <footer>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={busy}
+                onClick={() => setSuggestionForm(null)}
+              >
+                取消
+              </button>
+              <button
+                className="button button--primary"
+                type="submit"
+                disabled={busy || !quantityValid || suggestionForm.reason.trim() === ''}
+              >
+                生成建议
+              </button>
+            </footer>
+          </DialogShell>
+        );
+      })()}
+
+      {suggestionPrompt && (
+        <DialogShell
+          kicker="采购建议"
+          title={suggestionPrompt.kind === 'confirm'
+            ? '确认采购建议'
+            : '取消采购建议'}
+          description={`${suggestionPrompt.label}。${suggestionPrompt.kind === 'confirm' ? '确认后计入采购在途数量，后续转为采购订单。' : '取消需给出原因；已确认建议的取消对应与供应方协商结果。'}`}
+          busy={busy}
+          onClose={() => setSuggestionPrompt(null)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitSuggestionPrompt();
+          }}
+        >
+          <ReasonField
+            label={suggestionPrompt.kind === 'confirm' ? '确认原因' : '取消原因'}
+            value={suggestionPrompt.reason}
+            saving={busy}
+            onChange={(reason) => setSuggestionPrompt({ ...suggestionPrompt, reason })}
+          />
+          <footer>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={busy}
+              onClick={() => setSuggestionPrompt(null)}
+            >
+              取消
+            </button>
+            <button
+              className="button button--primary"
+              type="submit"
+              disabled={busy || suggestionPrompt.reason.trim() === ''}
+            >
+              {suggestionPrompt.kind === 'confirm' ? '确认建议' : '确认取消'}
+            </button>
+          </footer>
+        </DialogShell>
+      )}
 
       {reasonPrompt && (() => {
         const plan = plans.find(({ id }) => id === reasonPrompt.planId);
@@ -999,6 +1588,7 @@ function blankCreateForm(): CreateFormState {
     expectedShipAt: '',
     targetQuantity: '',
     deadlineAt: '',
+    demandAlertThreshold: '',
     reason: '',
   };
 }
@@ -1008,6 +1598,7 @@ function planConditions(plan: FulfillmentPlanView): string {
   if (plan.expectedShipAt) parts.push(`预计发货 ${formatDateTime(plan.expectedShipAt)}`);
   if (plan.targetQuantity !== null) parts.push(`成团数量 ${plan.targetQuantity} 件`);
   if (plan.deadlineAt) parts.push(`截止 ${formatDateTime(plan.deadlineAt)}`);
+  if (plan.demandAlertThreshold !== null) parts.push(`需求提醒阈值 ${plan.demandAlertThreshold} 件`);
   return parts.length > 0 ? parts.join(' · ') : '无条件';
 }
 

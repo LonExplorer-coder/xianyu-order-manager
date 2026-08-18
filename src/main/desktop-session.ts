@@ -118,6 +118,7 @@ import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
 } from '../core/fulfillment-plans';
+import type { PresaleDemandView } from '../core/fulfillment-demand';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -832,6 +833,26 @@ export class DesktopSession {
 
   public queryFulfillmentPlanOrderCandidates(): OrderSummary[] {
     return this.requireApplication().queryFulfillmentPlanOrderCandidates();
+  }
+
+  public queryFulfillmentDemand(planId: unknown): PresaleDemandView {
+    return this.requireApplication().queryFulfillmentDemand(planId);
+  }
+
+  public registerFulfillmentRefund(input: unknown): PresaleDemandView {
+    return this.requireApplication().registerFulfillmentRefund(input);
+  }
+
+  public createPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.requireApplication().createPurchaseSuggestion(input);
+  }
+
+  public confirmPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.requireApplication().confirmPurchaseSuggestion(input);
+  }
+
+  public cancelPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.requireApplication().cancelPurchaseSuggestion(input);
   }
 
   public exportOrdersToWorkbook(

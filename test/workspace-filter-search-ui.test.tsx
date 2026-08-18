@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
+import type { PresaleDemandView } from '../src/core/fulfillment-demand';
 import type { FulfillmentPlanView } from '../src/core/fulfillment-plans';
 import type { RecipientSummaryView } from '../src/core/recipients';
 import { FulfillmentPlansWorkspace } from '../src/renderer/FulfillmentPlansWorkspace';
@@ -129,6 +130,194 @@ describe('收件人工作区筛选工具栏', () => {
   });
 });
 
+describe('预售需求与采购建议区块', () => {
+  it('展开预售计划呈现需求数字、阈值提醒、未映射提示与建议列表', async () => {
+    const user = userEvent.setup();
+    renderDemandPlans();
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    expect(await screen.findByText('预售需求与采购建议')).toBeVisible();
+    expect(screen.getByText((_, element) => (
+      element?.className === 'fulfillment-plan-demand__totals'
+      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 已分配现货 0 件 · 待检查 0 件 · 已释放 1 单'
+    ))).toBeVisible();
+    expect(screen.getByText('玻璃保鲜盒（1000ml）未覆盖 6 件，达到提醒阈值')).toBeVisible();
+    expect(screen.getByText('确认采购超过当前需求，多采购风险')).toBeVisible();
+    expect(screen.getByText(/未建档手作发夹（蓝色） × 2 · 涉及 1 单/)).toBeVisible();
+    expect(screen.getByText(/请先在订单校对中关联标准商品或建立映射/)).toBeVisible();
+    expect(screen.getAllByText(/待确认|已确认（采购在途）/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: '登记发货前退款' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '确认' })).toBeVisible();
+  });
+
+  it('登记发货前退款提交商品数量与原因', async () => {
+    const user = userEvent.setup();
+    const registerFulfillmentRefund = vi.fn().mockResolvedValue(demandFixture());
+    renderDemandPlans({ registerFulfillmentRefund });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    await screen.findByText('预售需求与采购建议');
+    await user.click(screen.getByRole('button', { name: '登记发货前退款' }));
+    await user.clear(screen.getByRole('spinbutton', { name: '退款数量' }));
+    await user.type(screen.getByRole('spinbutton', { name: '退款数量' }), '1');
+    await user.type(
+      screen.getByRole('textbox', { name: /退款原因/ }),
+      '买家退回1件',
+    );
+    await user.click(screen.getByRole('button', { name: '登记退款' }));
+    expect(registerFulfillmentRefund).toHaveBeenCalledWith({
+      planId: 'plan-demand',
+      orderId: 'order-demand-1',
+      orderItemId: 'item-demand-1',
+      quantity: 1,
+      reason: '买家退回1件',
+    });
+  });
+
+  it('确认待确认建议需填写原因并计入采购在途', async () => {
+    const user = userEvent.setup();
+    const confirmPurchaseSuggestion = vi.fn().mockResolvedValue(demandFixture());
+    renderDemandPlans({ confirmPurchaseSuggestion });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    await screen.findByText('预售需求与采购建议');
+    await user.click(screen.getByRole('button', { name: '确认' }));
+    await user.type(
+      screen.getByRole('textbox', { name: /确认原因/ }),
+      '联系供应方下单',
+    );
+    await user.click(screen.getByRole('button', { name: '确认建议' }));
+    expect(confirmPurchaseSuggestion).toHaveBeenCalledWith({
+      planId: 'plan-demand',
+      suggestionId: 'suggestion-draft',
+      reason: '联系供应方下单',
+    });
+  });
+});
+
+function demandFixture(): PresaleDemandView {
+  return {
+    planId: 'plan-demand',
+    planName: '八月预售',
+    demandAlertThreshold: 5,
+    products: [{
+      standardProductId: 'product-1',
+      sku: 'SKU-DEMAND-A',
+      name: '玻璃保鲜盒',
+      specification: '1000ml',
+      demandQuantity: 10,
+      refundedOrCancelledQuantity: 2,
+      confirmedInTransitQuantity: 4,
+      draftSuggestionQuantity: 3,
+      uncoveredQuantity: 6,
+      overPurchaseRisk: false,
+      draftExceedsUncovered: false,
+    }, {
+      standardProductId: 'product-2',
+      sku: 'SKU-DEMAND-B',
+      name: '硅胶封口夹',
+      specification: '大号',
+      demandQuantity: 2,
+      refundedOrCancelledQuantity: 0,
+      confirmedInTransitQuantity: 5,
+      draftSuggestionQuantity: 0,
+      uncoveredQuantity: 0,
+      overPurchaseRisk: true,
+      draftExceedsUncovered: false,
+    }],
+    unmapped: [{
+      sourceTitle: '未建档手作发夹',
+      sourceSpec: '蓝色',
+      quantity: 2,
+      orderCount: 1,
+    }],
+    suggestions: [
+      {
+        id: 'suggestion-confirmed',
+        planId: 'plan-demand',
+        standardProductId: 'product-1',
+        sku: 'SKU-DEMAND-A',
+        name: '玻璃保鲜盒',
+        specification: '1000ml',
+        quantity: 4,
+        status: 'confirmed',
+        createdAt: '2026-08-10T08:00:00.000Z',
+        confirmedAt: '2026-08-11T08:00:00.000Z',
+        cancelledAt: null,
+        cancelReason: null,
+      },
+      {
+        id: 'suggestion-draft',
+        planId: 'plan-demand',
+        standardProductId: 'product-1',
+        sku: 'SKU-DEMAND-A',
+        name: '玻璃保鲜盒',
+        specification: '1000ml',
+        quantity: 3,
+        status: 'draft',
+        createdAt: '2026-08-12T08:00:00.000Z',
+        confirmedAt: null,
+        cancelledAt: null,
+        cancelReason: null,
+      },
+    ],
+    totals: {
+      demandQuantity: 10,
+      refundedOrCancelledQuantity: 2,
+      confirmedInTransitQuantity: 4,
+      draftSuggestionQuantity: 3,
+      uncoveredQuantity: 6,
+      allocatedStockQuantity: 0,
+      pendingInspectionQuantity: 0,
+      releasedOrderCount: 1,
+    },
+  };
+}
+
+function renderDemandPlans(overrides: Record<string, unknown> = {}): void {
+  const api = {
+    queryFulfillmentPlans: vi.fn().mockResolvedValue([
+      plan({
+        id: 'plan-demand',
+        name: '八月预售',
+        expectedShipAt: '2099-01-01T00:00:00.000Z',
+        demandAlertThreshold: 5,
+        activeOrderCount: 1,
+        activeItemQuantity: 10,
+        members: [{
+          orderId: 'order-demand-1',
+          systemOrderNumber: 'XY2608-0001',
+          platformOrderNumber: 'XY-DEMAND-0001',
+          buyerNickname: '测试买家',
+          joinedAt: '2026-08-10T08:00:00.000Z',
+          joinReason: '加入预售',
+          releasedAt: null,
+          releasedReason: null,
+          removedAt: null,
+          removedReason: null,
+          items: [{
+            itemId: 'item-demand-1',
+            sourceTitle: '玻璃保鲜盒',
+            sourceSpec: '1000ml',
+            quantity: 10,
+          }],
+        }],
+      }),
+    ]),
+    queryFulfillmentPlanProgress: vi.fn(
+      async (planId: string) => ({ planId, orders: [] }),
+    ),
+    queryFulfillmentDemand: vi.fn().mockResolvedValue(demandFixture()),
+    getReadableOrderNumbers: vi.fn().mockResolvedValue({}),
+    registerFulfillmentRefund: vi.fn(),
+    createPurchaseSuggestion: vi.fn(),
+    confirmPurchaseSuggestion: vi.fn(),
+    cancelPurchaseSuggestion: vi.fn(),
+    ...overrides,
+  } as unknown as DesktopApi;
+  render(<FulfillmentPlansWorkspace api={api} />);
+}
+
 function renderPlans(): void {
   const api = {
     queryFulfillmentPlans: vi.fn().mockResolvedValue(planFixtures()),
@@ -192,6 +381,7 @@ function plan(overrides: Partial<FulfillmentPlanView> & { id: string; name: stri
     expectedShipAt: null,
     targetQuantity: null,
     deadlineAt: null,
+    demandAlertThreshold: null,
     revision: 1,
     createdAt: '2026-08-01T00:00:00.000Z',
     updatedAt: '2026-08-01T00:00:00.000Z',

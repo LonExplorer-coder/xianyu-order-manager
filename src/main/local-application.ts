@@ -234,6 +234,7 @@ import {
   prepareLogisticsStatusChange,
 } from '../core/logistics-exceptions';
 import type { AftersalesCase } from '../core/aftersales-cases';
+import type { PresaleDemandView } from '../core/fulfillment-demand';
 import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
@@ -274,6 +275,7 @@ import {
 } from '../core/system-order-number';
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
+import { FulfillmentDemandService } from './fulfillment-demand-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
 import type { RecipientSummaryView } from '../core/recipients';
@@ -2795,6 +2797,15 @@ export class LocalApplication {
       if (updatedOrder.changes !== 1) {
         throw new Error('订单已在其他操作中更新，请刷新对比后重试');
       }
+      if (['refunded', 'cancelled'].includes(draft.platformTransactionStatus)) {
+        new FulfillmentDemandService(workspace).shrinkDraftsAfterOrderExit(
+          orderId,
+          now,
+          draft.platformTransactionStatus === 'refunded'
+            ? '订单整单退款后重算未确认建议'
+            : '订单取消后重算未确认建议',
+        );
+      }
       this.recipientService().ensureRecipient(draft.recipient, draft.phoneNormalized, now);
 
       workspace.database
@@ -3304,6 +3315,15 @@ export class LocalApplication {
         );
         if (updated.changes !== 1) {
           throw new Error('订单已在其他操作中更新，请刷新后重试');
+        }
+        if (['refunded', 'cancelled'].includes(prepared.patch.platformTransactionStatus)) {
+          new FulfillmentDemandService(workspace).shrinkDraftsAfterOrderExit(
+            target.orderId,
+            now,
+            prepared.patch.platformTransactionStatus === 'refunded'
+              ? '订单整单退款后重算未确认建议'
+              : '订单取消后重算未确认建议',
+          );
         }
         const eventId = randomUUID();
         workspace.database.prepare(`
@@ -6087,6 +6107,26 @@ export class LocalApplication {
     ).orders;
   }
 
+  public queryFulfillmentDemand(planId: unknown): PresaleDemandView {
+    return this.fulfillmentDemandService().demand(planId);
+  }
+
+  public registerFulfillmentRefund(input: unknown): PresaleDemandView {
+    return this.fulfillmentDemandService().registerRefund(input);
+  }
+
+  public createPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.fulfillmentDemandService().createSuggestion(input);
+  }
+
+  public confirmPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.fulfillmentDemandService().confirmSuggestion(input);
+  }
+
+  public cancelPurchaseSuggestion(input: unknown): PresaleDemandView {
+    return this.fulfillmentDemandService().cancelSuggestion(input);
+  }
+
   public queryRecipients(): RecipientView[] {
     return this.recipientService().queryRecipients();
   }
@@ -7969,6 +8009,10 @@ export class LocalApplication {
 
   private fulfillmentPlanService(): FulfillmentPlanService {
     return new FulfillmentPlanService(this.requireWorkspace());
+  }
+
+  private fulfillmentDemandService(): FulfillmentDemandService {
+    return new FulfillmentDemandService(this.requireWorkspace());
   }
 
   private recipientService(): RecipientService {

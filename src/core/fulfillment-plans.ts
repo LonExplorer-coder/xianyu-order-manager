@@ -32,6 +32,7 @@ export type FulfillmentPlanMemberView = {
   removedAt: string | null;
   removedReason: string | null;
   items: Array<{
+    itemId: string;
     sourceTitle: string;
     sourceSpec: string;
     quantity: number;
@@ -57,6 +58,7 @@ export type FulfillmentPlanView = {
   expectedShipAt: string | null;
   targetQuantity: number | null;
   deadlineAt: string | null;
+  demandAlertThreshold: number | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -116,6 +118,7 @@ export type CreateFulfillmentPlanInput = {
   expectedShipAt: string | null;
   targetQuantity: number | null;
   deadlineAt: string | null;
+  demandAlertThreshold: number | null;
   reason: string;
 };
 
@@ -147,6 +150,7 @@ export type UpdateFulfillmentPlanInput = {
   expectedShipAt: string | null;
   targetQuantity: number | null;
   deadlineAt: string | null;
+  demandAlertThreshold: number | null;
   markDelayed: boolean;
   reason: string;
 };
@@ -201,12 +205,14 @@ export function normalizeCreateFulfillmentPlanInput(
     'expectedShipAt',
     'targetQuantity',
     'deadlineAt',
+    'demandAlertThreshold',
     'reason',
   ], '创建履约计划参数无效');
   if (!isFulfillmentPlanType(record.type)) throw new Error('履约计划类型无效');
   const expectedShipAt = optionalTime(record.expectedShipAt, '预计发货时间无效');
   const targetQuantity = optionalTargetQuantity(record.targetQuantity);
   const deadlineAt = optionalTime(record.deadlineAt, '团购截止时间无效');
+  const demandAlertThreshold = optionalAlertThreshold(record.demandAlertThreshold);
   if (record.type === 'presale' && expectedShipAt === null) {
     throw new Error('预售计划需要预计发货时间');
   }
@@ -219,6 +225,7 @@ export function normalizeCreateFulfillmentPlanInput(
     expectedShipAt,
     targetQuantity,
     deadlineAt,
+    demandAlertThreshold,
     reason: requiredReason(record.reason),
   };
 }
@@ -291,6 +298,7 @@ export function normalizeUpdateFulfillmentPlanInput(
     'expectedShipAt',
     'targetQuantity',
     'deadlineAt',
+    'demandAlertThreshold',
     'markDelayed',
     'reason',
   ], '更新履约计划参数无效');
@@ -306,9 +314,12 @@ export function normalizeUpdateFulfillmentPlanInput(
   const deadlineAt = record.deadlineAt === undefined
     ? null
     : optionalTime(record.deadlineAt, '团购截止时间无效');
+  const demandAlertThreshold = record.demandAlertThreshold === undefined
+    ? null
+    : optionalAlertThreshold(record.demandAlertThreshold);
   const markDelayed = record.markDelayed === true;
   if (name === null && expectedShipAt === null && targetQuantity === null
-    && deadlineAt === null && !markDelayed) {
+    && deadlineAt === null && demandAlertThreshold === null && !markDelayed) {
     throw new Error('没有需要更新的履约计划内容');
   }
   return {
@@ -318,6 +329,7 @@ export function normalizeUpdateFulfillmentPlanInput(
     expectedShipAt,
     targetQuantity,
     deadlineAt,
+    demandAlertThreshold,
     markDelayed,
     reason: requiredReason(record.reason),
   };
@@ -470,6 +482,12 @@ function optionalTime(value: unknown, message: string): string | null {
 function optionalTargetQuantity(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
   if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error('成团数量无效');
+  return Number(value);
+}
+
+function optionalAlertThreshold(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error('需求提醒阈值无效');
   return Number(value);
 }
 

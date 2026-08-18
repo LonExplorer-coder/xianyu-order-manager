@@ -603,6 +603,11 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     closeFulfillmentPlan: vi.fn(),
     queryFulfillmentPlanProgress: vi.fn(),
     queryFulfillmentPlanOrderCandidates: vi.fn().mockResolvedValue([]),
+    queryFulfillmentDemand: vi.fn().mockRejectedValue(new Error('预售需求仅用于预售计划')),
+    registerFulfillmentRefund: vi.fn(),
+    createPurchaseSuggestion: vi.fn(),
+    confirmPurchaseSuggestion: vi.fn(),
+    cancelPurchaseSuggestion: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     previewOrderExport: vi.fn().mockResolvedValue({
       orderCount: 0,

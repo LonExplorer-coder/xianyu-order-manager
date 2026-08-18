@@ -9,6 +9,7 @@ import type {
   Recognizer,
   RecognizerSource,
 } from '../src/core/contracts';
+import type { PresaleDemandView } from '../src/core/fulfillment-demand';
 import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
@@ -771,6 +772,100 @@ describe('履约计划 Electron IPC', () => {
     openSession(root, dataDirectory);
     expect(await invoke('orders:readable-numbers', [orderA.id, orderB.id, orderC.id]))
       .toEqual(beforeRestart);
+  });
+});
+
+describe('预售需求与采购建议 Electron IPC', () => {
+  it('需求投影、发货前退款与建议生命周期跨 IPC 生效并重启保持', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-demand-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourcePath = join(root, '预售需求订单.png');
+    await writeFile(sourcePath, Buffer.from('demand-ipc-source'));
+    const seeder = new LocalApplication(new SequenceRecognizer([
+      recognition('XY-DEMAND-IPC-0001', 10, '玻璃保鲜盒'),
+    ]));
+    seeder.openDataDirectory(dataDirectory);
+    seeder.createStandardProduct({
+      sku: 'SKU-DEMAND-IPC',
+      name: '玻璃保鲜盒',
+      specification: '标准款',
+      defaultOrderPriceCents: 800,
+      priceChangeReason: '首次定价',
+    });
+    const [draft] = (await seeder.submitRecognitionBatch([sourcePath])).drafts;
+    const order = seeder.confirmDraft(draft);
+    seeder.close();
+
+    const session = openSession(root, dataDirectory);
+    const plan = await invoke('fulfillment-plans:create', {
+      type: 'presale',
+      name: '八月预售',
+      expectedShipAt: '2026-09-30T00:00:00.000Z',
+      demandAlertThreshold: 5,
+      reason: '预售开始备货',
+    }) as FulfillmentPlanView;
+    await invoke('fulfillment-plans:add-orders', {
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      orderIds: [order.id],
+      reason: '加入预售',
+    });
+
+    const demand = await invoke('fulfillment-plans:demand', plan.id) as PresaleDemandView;
+    expect(demand.totals).toMatchObject({ demandQuantity: 10, uncoveredQuantity: 10 });
+    expect(demand.demandAlertThreshold).toBe(5);
+    expect(demand.unmapped).toEqual([]);
+
+    const productId = demand.products[0].standardProductId;
+    const drafted = await invoke('fulfillment-plans:create-purchase-suggestion', {
+      planId: plan.id,
+      standardProductId: productId,
+      quantity: 4,
+      reason: '第1批采购',
+    }) as PresaleDemandView;
+    const draftSuggestion = drafted.suggestions[0];
+    expect(draftSuggestion).toMatchObject({ status: 'draft', quantity: 4 });
+
+    const confirmed = await invoke(
+      'fulfillment-plans:confirm-purchase-suggestion',
+      {
+        planId: plan.id,
+        suggestionId: draftSuggestion.id,
+        reason: '确认第1批',
+      },
+    ) as PresaleDemandView;
+    expect(confirmed.products[0]).toMatchObject({
+      confirmedInTransitQuantity: 4,
+      uncoveredQuantity: 6,
+    });
+
+    const afterRefund = await invoke('fulfillment-plans:register-refund', {
+      planId: plan.id,
+      orderId: order.id,
+      orderItemId: order.items[0].id,
+      quantity: 2,
+      reason: '买家退回2件',
+    }) as PresaleDemandView;
+    expect(afterRefund.products[0]).toMatchObject({
+      demandQuantity: 8,
+      refundedOrCancelledQuantity: 2,
+      confirmedInTransitQuantity: 4,
+      uncoveredQuantity: 4,
+    });
+
+    session.close();
+    sessions.splice(sessions.indexOf(session), 1);
+    openSession(root, dataDirectory);
+    const persisted = await invoke('fulfillment-plans:demand', plan.id) as PresaleDemandView;
+    expect(persisted.totals).toMatchObject({
+      demandQuantity: 8,
+      refundedOrCancelledQuantity: 2,
+      confirmedInTransitQuantity: 4,
+    });
+    expect(persisted.suggestions[0]).toMatchObject({
+      status: 'confirmed',
+      quantity: 4,
+    });
   });
 });
 

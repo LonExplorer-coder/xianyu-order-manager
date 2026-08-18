@@ -144,6 +144,12 @@ import type {
   UpdateFulfillmentPlanInput,
 } from './fulfillment-plans';
 import type {
+  CreatePurchaseSuggestionInput,
+  PresaleDemandView,
+  PurchaseSuggestionActionInput,
+  RegisterFulfillmentRefundInput,
+} from './fulfillment-demand';
+import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
@@ -302,6 +308,17 @@ export interface DesktopApi {
   closeFulfillmentPlan(input: CloseFulfillmentPlanInput): Promise<FulfillmentPlanView>;
   queryFulfillmentPlanProgress(planId: string): Promise<FulfillmentPlanProgressView>;
   queryFulfillmentPlanOrderCandidates(): Promise<OrderSummary[]>;
+  queryFulfillmentDemand(planId: string): Promise<PresaleDemandView>;
+  registerFulfillmentRefund(input: RegisterFulfillmentRefundInput): Promise<PresaleDemandView>;
+  createPurchaseSuggestion(
+    input: CreatePurchaseSuggestionInput,
+  ): Promise<PresaleDemandView>;
+  confirmPurchaseSuggestion(
+    input: PurchaseSuggestionActionInput,
+  ): Promise<PresaleDemandView>;
+  cancelPurchaseSuggestion(
+    input: PurchaseSuggestionActionInput,
+  ): Promise<PresaleDemandView>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;

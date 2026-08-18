@@ -27,6 +27,7 @@ function planView(overrides: Partial<FulfillmentPlanView> = {}): FulfillmentPlan
     expectedShipAt: '2026-08-20T00:00:00.000Z',
     targetQuantity: null,
     deadlineAt: null,
+    demandAlertThreshold: null,
     revision: 1,
     createdAt: NOW,
     updatedAt: NOW,
@@ -58,6 +59,7 @@ describe('履约计划输入规范化', () => {
       expectedShipAt: '2026-08-20T00:00:00.000Z',
       targetQuantity: null,
       deadlineAt: null,
+      demandAlertThreshold: null,
       reason: '预售开始备货',
     });
   });

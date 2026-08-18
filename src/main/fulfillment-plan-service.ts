@@ -41,7 +41,7 @@ export class FulfillmentPlanService {
     }
     const rows = this.workspace.database.prepare(`
       SELECT id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-        revision, created_at, updated_at, closed_at
+        demand_alert_threshold, revision, created_at, updated_at, closed_at
       FROM fulfillment_plans
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at, id
@@ -105,8 +105,8 @@ export class FulfillmentPlanService {
       this.workspace.database.prepare(`
         INSERT INTO fulfillment_plans (
           id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-          revision, created_at, updated_at, closed_at
-        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, 1, ?, ?, NULL)
+          demand_alert_threshold, revision, created_at, updated_at, closed_at
+        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, 1, ?, ?, NULL)
       `).run(
         id,
         prepared.type,
@@ -114,6 +114,7 @@ export class FulfillmentPlanService {
         prepared.expectedShipAt,
         prepared.targetQuantity,
         prepared.deadlineAt,
+        prepared.demandAlertThreshold,
         now,
         now,
       );
@@ -243,6 +244,10 @@ export class FulfillmentPlanService {
         assignments.push('deadline_at = ?');
         parameters.push(prepared.deadlineAt);
       }
+      if (prepared.demandAlertThreshold !== null) {
+        assignments.push('demand_alert_threshold = ?');
+        parameters.push(prepared.demandAlertThreshold);
+      }
       const eventType: FulfillmentPlanEventType = prepared.markDelayed ? 'delayed' : 'updated';
       if (prepared.markDelayed) {
         assignments.push("status = 'delayed'");
@@ -319,6 +324,9 @@ export class FulfillmentPlanService {
       expectedShipAt: plan.expected_ship_at === null ? null : asString(plan.expected_ship_at),
       targetQuantity: typeof plan.target_quantity === 'number' ? plan.target_quantity : null,
       deadlineAt: plan.deadline_at === null ? null : asString(plan.deadline_at),
+      demandAlertThreshold: typeof plan.demand_alert_threshold === 'number'
+        ? Number(plan.demand_alert_threshold)
+        : null,
       revision: Number(plan.revision),
       createdAt: asString(plan.created_at),
       updatedAt: asString(plan.updated_at),
@@ -342,7 +350,7 @@ export class FulfillmentPlanService {
       WHERE id = ?
     `).get(orderId) as SqlRow | undefined;
     const itemRows = this.workspace.database.prepare(`
-      SELECT source_title, source_spec, quantity
+      SELECT id, source_title, source_spec, quantity
       FROM order_items
       WHERE order_id = ?
       ORDER BY position
@@ -359,6 +367,7 @@ export class FulfillmentPlanService {
       removedAt: row.removed_at === null ? null : asString(row.removed_at),
       removedReason: row.removed_reason === null ? null : asString(row.removed_reason),
       items: itemRows.map((item) => ({
+        itemId: asString(item.id),
         sourceTitle: asString(item.source_title),
         sourceSpec: asString(item.source_spec),
         quantity: Number(item.quantity),
@@ -369,7 +378,7 @@ export class FulfillmentPlanService {
   private requirePlanRow(planId: string): SqlRow {
     const row = this.workspace.database.prepare(`
       SELECT id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-        revision, created_at, updated_at, closed_at
+        demand_alert_threshold, revision, created_at, updated_at, closed_at
       FROM fulfillment_plans
       WHERE id = ?
     `).get(planId) as SqlRow | undefined;
