@@ -2042,15 +2042,27 @@ function ShipmentGroupsWorkspace({
       records.some(({ id }) => id === focus.recordId)
     ));
     if (archive) setActiveView(archive.status);
-    const timeout = window.setTimeout(() => {
+    // 目标卡片要等视图切换与数据加载后才会挂载，慢环境下单次定时可能扑空，按小间隔重试。
+    let cancelled = false;
+    let attempts = 0;
+    const attempt = () => {
       const targetId = focus.aftersalesCaseId
         ? `aftersales-case-${focus.aftersalesCaseId}`
         : `shipment-record-${focus.recordId}`;
       const element = document.getElementById(targetId);
-      element?.focus();
-      element?.scrollIntoView?.({ block: 'center' });
-    });
-    return () => window.clearTimeout(timeout);
+      if (element) {
+        element.focus();
+        element.scrollIntoView?.({ block: 'center' });
+        return;
+      }
+      attempts += 1;
+      if (!cancelled && attempts < 40) window.setTimeout(attempt, 50);
+    };
+    const timeout = window.setTimeout(attempt);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
   }, [archives, focus]);
 
   function replaceArchive(nextArchive: ShipmentGroupArchive) {
