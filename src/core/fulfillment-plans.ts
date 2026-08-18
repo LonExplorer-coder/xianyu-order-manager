@@ -18,13 +18,30 @@ export type FulfillmentPlanEventType =
   | 'orders_released'
   | 'updated'
   | 'delayed'
+  | 'formed'
   | 'closed';
+
+export type GroupFormationBasis = 'quantity' | 'deadline' | 'early';
+
+export function isGroupFormationBasis(value: unknown): value is GroupFormationBasis {
+  return value === 'quantity' || value === 'deadline' || value === 'early';
+}
+
+export function groupFormationBasisLabel(basis: GroupFormationBasis): string {
+  const labels: Record<GroupFormationBasis, string> = {
+    quantity: '已达成团数量',
+    deadline: '已到团购截止时间',
+    early: '提前成团',
+  };
+  return labels[basis];
+}
 
 export type FulfillmentPlanMemberView = {
   orderId: string;
   systemOrderNumber: string;
   platformOrderNumber: string;
   buyerNickname: string;
+  platformTransactionStatus: string;
   joinedAt: string;
   joinReason: string;
   releasedAt: string | null;
@@ -39,6 +56,24 @@ export type FulfillmentPlanMemberView = {
   }>;
 };
 
+export function isUnformedAwaitingRefund(
+  member: Pick<
+    FulfillmentPlanMemberView,
+    'releasedAt' | 'removedAt' | 'platformTransactionStatus'
+  >,
+): boolean {
+  return member.releasedAt === null
+    && member.removedAt === null
+    && member.platformTransactionStatus !== 'refunded'
+    && member.platformTransactionStatus !== 'cancelled';
+}
+
+export function isUnformedClosedGroupBuy(
+  plan: Pick<FulfillmentPlanView, 'type' | 'status' | 'formedAt'>,
+): boolean {
+  return plan.type === 'group_buy' && plan.status === 'closed' && plan.formedAt === null;
+}
+
 export type FulfillmentPlanEventView = {
   id: string;
   planId: string;
@@ -46,6 +81,7 @@ export type FulfillmentPlanEventView = {
   eventType: FulfillmentPlanEventType;
   reason: string;
   orderIds: string[];
+  basis: GroupFormationBasis | null;
   occurredAt: string;
   createdAt: string;
 };
@@ -59,6 +95,7 @@ export type FulfillmentPlanView = {
   targetQuantity: number | null;
   deadlineAt: string | null;
   demandAlertThreshold: number | null;
+  formedAt: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -158,6 +195,13 @@ export type UpdateFulfillmentPlanInput = {
 export type CloseFulfillmentPlanInput = {
   planId: string;
   expectedRevision: number;
+  reason: string;
+};
+
+export type ConfirmGroupFormationInput = {
+  planId: string;
+  expectedRevision: number;
+  basis: GroupFormationBasis;
   reason: string;
 };
 
@@ -349,12 +393,32 @@ export function normalizeCloseFulfillmentPlanInput(input: unknown): CloseFulfill
   };
 }
 
+export function normalizeConfirmGroupFormationInput(
+  input: unknown,
+): ConfirmGroupFormationInput {
+  const record = objectValue(input, '确认成团参数无效');
+  rejectUnknownKeys(
+    record,
+    ['planId', 'expectedRevision', 'basis', 'reason'],
+    '确认成团参数无效',
+  );
+  if (!isGroupFormationBasis(record.basis)) {
+    throw new Error('成团依据无效，请选择已达成团数量、已到截止时间或提前成团');
+  }
+  return {
+    planId: planId(record.planId),
+    expectedRevision: expectedRevision(record.expectedRevision),
+    basis: record.basis,
+    reason: requiredReason(record.reason),
+  };
+}
+
 export function isFulfillmentPlanReleaseReady(
   plan: Pick<
     FulfillmentPlanView,
-    'type' | 'status' | 'expectedShipAt' | 'targetQuantity' | 'deadlineAt'
+    'type' | 'status' | 'expectedShipAt' | 'formedAt'
   >,
-  activeItemQuantity: number,
+  _activeItemQuantity: number,
   now: string,
 ): boolean {
   if (plan.status !== 'pending' && plan.status !== 'delayed'
@@ -364,6 +428,16 @@ export function isFulfillmentPlanReleaseReady(
   if (plan.type === 'presale') {
     return plan.expectedShipAt !== null && now >= plan.expectedShipAt;
   }
+  return plan.formedAt !== null;
+}
+
+export function isGroupBuyFormationReady(
+  plan: Pick<FulfillmentPlanView, 'status' | 'targetQuantity' | 'deadlineAt' | 'formedAt'>,
+  activeItemQuantity: number,
+  now: string,
+): boolean {
+  if (plan.formedAt !== null) return false;
+  if (plan.status === 'closed' || plan.status === 'released') return false;
   return (plan.targetQuantity !== null && activeItemQuantity >= plan.targetQuantity)
     || (plan.deadlineAt !== null && now >= plan.deadlineAt);
 }
@@ -371,7 +445,7 @@ export function isFulfillmentPlanReleaseReady(
 export function fulfillmentPlanDisplayStatus(
   plan: Pick<
     FulfillmentPlanView,
-    'type' | 'status' | 'expectedShipAt' | 'targetQuantity' | 'deadlineAt'
+    'type' | 'status' | 'expectedShipAt' | 'targetQuantity' | 'deadlineAt' | 'formedAt'
   >,
   activeItemQuantity: number,
   now: string,
@@ -383,12 +457,16 @@ export function fulfillmentPlanDisplayStatus(
 export function fulfillmentPlanStatusLabel(
   type: FulfillmentPlanType,
   status: FulfillmentPlanDisplayStatus,
+  formedAt: string | null,
 ): string {
   if (status === 'ready') {
-    return type === 'presale' ? '预售·具备释放条件' : '团购·已成团待释放';
+    return type === 'presale' ? '预售·具备释放条件' : '团购·已成团待备货';
   }
   if (status === 'released') return '已释放待发货';
-  if (status === 'closed') return type === 'presale' ? '预售·已关闭' : '未成团已关闭';
+  if (status === 'closed') {
+    if (type === 'presale') return '预售·已关闭';
+    return formedAt === null ? '未成团已关闭' : '团购·已关闭';
+  }
   const labels: Record<
     FulfillmentPlanType,
     Record<'pending' | 'partially_released' | 'delayed', string>
@@ -399,9 +477,9 @@ export function fulfillmentPlanStatusLabel(
       delayed: '预售·已延期',
     },
     group_buy: {
-      pending: '团购·待成团',
+      pending: formedAt === null ? '团购·待成团' : '团购·已成团待备货',
       partially_released: '团购·部分已释放',
-      delayed: '团购·已延期',
+      delayed: formedAt === null ? '团购·已延期' : '团购·已成团待备货',
     },
   };
   return labels[type][status];
@@ -410,18 +488,24 @@ export function fulfillmentPlanStatusLabel(
 export function fulfillmentPlanTodo(
   plan: Pick<
     FulfillmentPlanView,
-    'type' | 'status' | 'expectedShipAt' | 'targetQuantity' | 'deadlineAt'
+    'type' | 'status' | 'expectedShipAt' | 'targetQuantity' | 'deadlineAt' | 'formedAt'
   >,
   activeItemQuantity: number,
   now: string,
 ): string {
   const displayStatus = fulfillmentPlanDisplayStatus(plan, activeItemQuantity, now);
-  if (displayStatus === 'ready') return '具备释放条件，请人工确认释放';
+  if (displayStatus === 'ready') {
+    return plan.type === 'presale'
+      ? '具备释放条件，请人工确认释放'
+      : '已成团，可人工确认释放';
+  }
   switch (plan.status) {
     case 'released':
       return '已全部释放，订单可进入开放发货组';
     case 'closed':
-      return '已关闭，无待办';
+      return plan.type === 'group_buy' && plan.formedAt === null
+        ? '未成团已关闭，成员订单待退款（见计划详情）'
+        : '已关闭，无待办';
     case 'partially_released':
       return '部分订单已释放，剩余订单待人工确认释放';
     case 'delayed':
@@ -431,6 +515,10 @@ export function fulfillmentPlanTodo(
         return plan.expectedShipAt
           ? '待到发货日或人工确认释放'
           : '等待设置预计发货时间';
+      }
+      if (plan.formedAt !== null) return '已成团，可人工确认释放';
+      if (isGroupBuyFormationReady(plan, activeItemQuantity, now)) {
+        return '具备成团条件，请人工确认成团';
       }
       return plan.targetQuantity !== null
         ? `待成团（${activeItemQuantity}/${plan.targetQuantity}）`

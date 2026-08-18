@@ -209,6 +209,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(50)) migrateToVersion50(database);
   if (!versions.has(51)) migrateToVersion51(database);
   if (!versions.has(52)) migrateToVersion52(database);
+  if (!versions.has(53)) migrateToVersion53(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6346,6 +6347,70 @@ function migrateToVersion52(database: DatabaseSync): void {
         END;
     `);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (52, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion53(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      DROP TRIGGER fulfillment_plan_events_are_immutable_on_update;
+      DROP TRIGGER fulfillment_plan_events_are_immutable_on_delete;
+
+      ALTER TABLE fulfillment_plan_events RENAME TO fulfillment_plan_events_v52;
+
+      CREATE TABLE fulfillment_plan_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'created', 'orders_added', 'order_removed', 'orders_released',
+          'updated', 'delayed', 'formed', 'closed'
+        )),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        payload_json TEXT NOT NULL CHECK (
+          json_valid(payload_json) AND json_type(payload_json) = 'object'
+        ),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO fulfillment_plan_events (
+        sequence, id, plan_id, order_id, event_type, reason, payload_json,
+        occurred_at, created_at
+      )
+      SELECT sequence, id, plan_id, order_id, event_type, reason, payload_json,
+        occurred_at, created_at
+      FROM fulfillment_plan_events_v52;
+
+      DROP TABLE fulfillment_plan_events_v52;
+
+      CREATE INDEX fulfillment_plan_events_by_plan
+      ON fulfillment_plan_events (plan_id, sequence);
+
+      CREATE TRIGGER fulfillment_plan_events_are_immutable_on_update
+      BEFORE UPDATE ON fulfillment_plan_events
+      BEGIN
+        SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+      END;
+
+      CREATE TRIGGER fulfillment_plan_events_are_immutable_on_delete
+      BEFORE DELETE ON fulfillment_plan_events
+      BEGIN
+        SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+      END;
+
+      ALTER TABLE fulfillment_plans ADD COLUMN formed_at TEXT;
+
+      ALTER TABLE purchase_suggestions ADD COLUMN risk_acknowledged_at TEXT;
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (53, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

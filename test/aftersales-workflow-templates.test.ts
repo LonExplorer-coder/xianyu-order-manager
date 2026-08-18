@@ -901,7 +901,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 52 });
+        .toEqual({ version: 53 });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'
@@ -1262,7 +1262,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 52 });
+        .toEqual({ version: 53 });
       expect(verified.prepare(`
         SELECT definition_json FROM aftersales_workflow_template_versions
         WHERE template_id = ? AND version = 2
@@ -1683,7 +1683,7 @@ describe('售后流程模板', () => {
     const legacy = new DatabaseSync(databasePath);
     try {
       expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 52 });
+        .toEqual({ version: 53 });
       expect(legacy.prepare(`
         SELECT step_id, kind, reason, remaining_risk, workflow_template_id,
           workflow_template_version, occurred_at

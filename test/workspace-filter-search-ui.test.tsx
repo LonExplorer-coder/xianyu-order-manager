@@ -7,7 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DesktopApi } from '../src/core/desktop-api';
-import type { PresaleDemandView } from '../src/core/fulfillment-demand';
+import type { FulfillmentDemandView } from '../src/core/fulfillment-demand';
 import type { FulfillmentPlanView } from '../src/core/fulfillment-plans';
 import type { RecipientSummaryView } from '../src/core/recipients';
 import { FulfillmentPlansWorkspace } from '../src/renderer/FulfillmentPlansWorkspace';
@@ -195,10 +195,158 @@ describe('预售需求与采购建议区块', () => {
   });
 });
 
-function demandFixture(): PresaleDemandView {
+describe('团购成团与条件性需求区块', () => {
+  function groupBuyMember(
+    orderId: string,
+    platformTransactionStatus: string,
+  ): FulfillmentPlanView['members'][number] {
+    return {
+      orderId,
+      systemOrderNumber: `XY2608-${orderId.slice(-4)}`,
+      platformOrderNumber: `XY-GB-${orderId.slice(-4)}`,
+      buyerNickname: '团购买家',
+      platformTransactionStatus,
+      joinedAt: '2026-08-10T08:00:00.000Z',
+      joinReason: '加入团购',
+      releasedAt: null,
+      releasedReason: null,
+      removedAt: null,
+      removedReason: null,
+      items: [{
+        itemId: `item-${orderId}`,
+        sourceTitle: '玻璃保鲜盒',
+        sourceSpec: '1000ml',
+        quantity: 2,
+      }],
+    };
+  }
+
+  function renderGroupBuyPlans(
+    planOverrides: Partial<FulfillmentPlanView>,
+    apiOverrides: Record<string, unknown> = {},
+  ): void {
+    const api = {
+      queryFulfillmentPlans: vi.fn().mockResolvedValue([
+        plan({
+          id: 'plan-groupbuy-test',
+          name: '处暑团购',
+          type: 'group_buy',
+          ...planOverrides,
+        }),
+      ]),
+      queryFulfillmentPlanProgress: vi.fn(
+        async (planId: string) => ({ planId, orders: [] }),
+      ),
+      queryFulfillmentDemand: vi.fn().mockResolvedValue(demandFixture()),
+      getReadableOrderNumbers: vi.fn().mockResolvedValue({}),
+      ...apiOverrides,
+    } as unknown as DesktopApi;
+    render(<FulfillmentPlansWorkspace api={api} />);
+  }
+
+  it('未成团团购展示确认成团入口，依据与原因经对话框提交', async () => {
+    const user = userEvent.setup();
+    const confirmGroupFormation = vi.fn().mockResolvedValue(
+      plan({
+        id: 'plan-groupbuy-test',
+        name: '处暑团购',
+        type: 'group_buy',
+        formedAt: '2026-08-18T08:00:00.000Z',
+      }),
+    );
+    renderGroupBuyPlans({
+      targetQuantity: 2,
+      activeOrderCount: 1,
+      activeItemQuantity: 2,
+      members: [groupBuyMember('order-gb-1', 'paid')],
+    }, { confirmGroupFormation });
+
+    expect(await screen.findByText('团购·待成团')).toBeVisible();
+    expect(screen.getByText(/具备成团条件，请人工确认成团/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '加入订单' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '全部释放' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '确认成团' }));
+    expect(screen.getByRole('radio', { name: /已达成团数量（2\/2 件）/ })).toBeChecked();
+    await user.type(screen.getByRole('textbox', { name: /成团原因/ }), '到量成团');
+    const submitButtons = screen.getAllByRole('button', { name: '确认成团' });
+    await user.click(submitButtons[submitButtons.length - 1]);
+    expect(confirmGroupFormation).toHaveBeenCalledWith(
+      expect.objectContaining({ basis: 'quantity', reason: '到量成团' }),
+    );
+  });
+
+  it('条件性需求标注预测口径，提前采购必须勾选风险确认', async () => {
+    const user = userEvent.setup();
+    const createPurchaseSuggestion = vi.fn().mockResolvedValue(demandFixture());
+    renderGroupBuyPlans({
+      targetQuantity: 10,
+      activeOrderCount: 1,
+      activeItemQuantity: 2,
+      members: [groupBuyMember('order-gb-2', 'paid')],
+    }, {
+      createPurchaseSuggestion,
+      queryFulfillmentDemand: vi.fn().mockResolvedValue({
+        ...demandFixture(),
+        conditional: true,
+      }),
+    });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    expect(await screen.findByText('条件性团购需求（预测）与采购建议')).toBeVisible();
+    expect(screen.getByText((_, element) => (
+      element?.className === 'fulfillment-plan-demand__totals'
+      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 已分配现货 0 件 · 待检查 0 件 · 已释放 1 单'
+    ))).toBeVisible();
+
+    const generateButtons = screen.getAllByRole('button', { name: '生成采购建议' });
+    await user.click(generateButtons[0]);
+    expect(screen.getByText(/该团购计划尚未确认成团/)).toBeVisible();
+    const submit = screen.getByRole('button', { name: '生成建议' });
+    expect(submit).toBeDisabled();
+    await user.type(screen.getByRole('spinbutton', { name: '建议数量' }), '2');
+    await user.type(screen.getByRole('textbox', { name: /生成原因/ }), '供应方交期长');
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: /我知悉未成团库存风险/ }));
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(createPurchaseSuggestion).toHaveBeenCalledWith(expect.objectContaining({
+      quantity: 2,
+      reason: '供应方交期长',
+      acknowledgeUnformedRisk: true,
+    }));
+  });
+
+  it('未成团关闭的团购展示待退款清单，平台已退款订单移出口径', async () => {
+    const user = userEvent.setup();
+    renderGroupBuyPlans({
+      status: 'closed',
+      closedAt: '2026-08-18T00:00:00.000Z',
+      targetQuantity: 10,
+      activeOrderCount: 2,
+      activeItemQuantity: 4,
+      members: [
+        groupBuyMember('order-gb-3', 'paid'),
+        groupBuyMember('order-gb-4', 'refunded'),
+      ],
+    });
+
+    expect(await screen.findByText('未成团已关闭')).toBeVisible();
+    expect(screen.getByText(/未成团已关闭，成员订单待退款/)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '订单与记录' }));
+    expect(await screen.findByRole('heading', { name: '待退款清单' })).toBeVisible();
+    expect(screen.getByText(/XY2608-gb-3 · 团购买家 · 玻璃保鲜盒 1000ml × 2 件/)).toBeVisible();
+    expect(screen.queryByText(/XY2608-gb-4 · 团购买家/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/预售需求与采购建议/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/条件性团购需求/)).not.toBeInTheDocument();
+  });
+});
+
+function demandFixture(): FulfillmentDemandView {
   return {
     planId: 'plan-demand',
     planName: '八月预售',
+    conditional: false,
     demandAlertThreshold: 5,
     products: [{
       standardProductId: 'product-1',
@@ -245,6 +393,7 @@ function demandFixture(): PresaleDemandView {
         confirmedAt: '2026-08-11T08:00:00.000Z',
         cancelledAt: null,
         cancelReason: null,
+        riskAcknowledgedAt: null,
       },
       {
         id: 'suggestion-draft',
@@ -259,6 +408,7 @@ function demandFixture(): PresaleDemandView {
         confirmedAt: null,
         cancelledAt: null,
         cancelReason: null,
+        riskAcknowledgedAt: null,
       },
     ],
     totals: {
@@ -289,6 +439,7 @@ function renderDemandPlans(overrides: Record<string, unknown> = {}): void {
           systemOrderNumber: 'XY2608-0001',
           platformOrderNumber: 'XY-DEMAND-0001',
           buyerNickname: '测试买家',
+          platformTransactionStatus: 'paid',
           joinedAt: '2026-08-10T08:00:00.000Z',
           joinReason: '加入预售',
           releasedAt: null,
@@ -382,6 +533,7 @@ function plan(overrides: Partial<FulfillmentPlanView> & { id: string; name: stri
     targetQuantity: null,
     deadlineAt: null,
     demandAlertThreshold: null,
+    formedAt: null,
     revision: 1,
     createdAt: '2026-08-01T00:00:00.000Z',
     updatedAt: '2026-08-01T00:00:00.000Z',

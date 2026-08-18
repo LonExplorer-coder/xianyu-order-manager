@@ -234,7 +234,7 @@ import {
   prepareLogisticsStatusChange,
 } from '../core/logistics-exceptions';
 import type { AftersalesCase } from '../core/aftersales-cases';
-import type { PresaleDemandView } from '../core/fulfillment-demand';
+import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
@@ -6094,6 +6094,10 @@ export class LocalApplication {
     return this.fulfillmentPlanService().close(input);
   }
 
+  public confirmGroupFormation(input: unknown): FulfillmentPlanView {
+    return this.fulfillmentPlanService().confirmFormation(input);
+  }
+
   public queryFulfillmentPlanProgress(input: unknown): FulfillmentPlanProgressView {
     return this.fulfillmentPlanService().progress(input);
   }
@@ -6107,23 +6111,23 @@ export class LocalApplication {
     ).orders;
   }
 
-  public queryFulfillmentDemand(planId: unknown): PresaleDemandView {
+  public queryFulfillmentDemand(planId: unknown): FulfillmentDemandView {
     return this.fulfillmentDemandService().demand(planId);
   }
 
-  public registerFulfillmentRefund(input: unknown): PresaleDemandView {
+  public registerFulfillmentRefund(input: unknown): FulfillmentDemandView {
     return this.fulfillmentDemandService().registerRefund(input);
   }
 
-  public createPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public createPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.fulfillmentDemandService().createSuggestion(input);
   }
 
-  public confirmPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public confirmPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.fulfillmentDemandService().confirmSuggestion(input);
   }
 
-  public cancelPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public cancelPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.fulfillmentDemandService().cancelSuggestion(input);
   }
 

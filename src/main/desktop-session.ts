@@ -118,7 +118,7 @@ import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
 } from '../core/fulfillment-plans';
-import type { PresaleDemandView } from '../core/fulfillment-demand';
+import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -827,6 +827,12 @@ export class DesktopSession {
     return result;
   }
 
+  public confirmGroupFormation(input: unknown): FulfillmentPlanView {
+    const result = this.requireApplication().confirmGroupFormation(input);
+    this.refreshOrders();
+    return result;
+  }
+
   public queryFulfillmentPlanProgress(input: unknown): FulfillmentPlanProgressView {
     return this.requireApplication().queryFulfillmentPlanProgress(input);
   }
@@ -835,23 +841,23 @@ export class DesktopSession {
     return this.requireApplication().queryFulfillmentPlanOrderCandidates();
   }
 
-  public queryFulfillmentDemand(planId: unknown): PresaleDemandView {
+  public queryFulfillmentDemand(planId: unknown): FulfillmentDemandView {
     return this.requireApplication().queryFulfillmentDemand(planId);
   }
 
-  public registerFulfillmentRefund(input: unknown): PresaleDemandView {
+  public registerFulfillmentRefund(input: unknown): FulfillmentDemandView {
     return this.requireApplication().registerFulfillmentRefund(input);
   }
 
-  public createPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public createPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.requireApplication().createPurchaseSuggestion(input);
   }
 
-  public confirmPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public confirmPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.requireApplication().confirmPurchaseSuggestion(input);
   }
 
-  public cancelPurchaseSuggestion(input: unknown): PresaleDemandView {
+  public cancelPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.requireApplication().cancelPurchaseSuggestion(input);
   }
 

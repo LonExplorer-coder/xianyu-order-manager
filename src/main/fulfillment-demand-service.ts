@@ -5,10 +5,10 @@ import {
   normalizeCreatePurchaseSuggestionInput,
   normalizePurchaseSuggestionActionInput,
   normalizeRegisterFulfillmentRefundInput,
-  type PresaleDemandProductView,
-  type PresaleDemandTotals,
-  type PresaleDemandUnmappedView,
-  type PresaleDemandView,
+  type FulfillmentDemandProductView,
+  type FulfillmentDemandTotals,
+  type FulfillmentDemandUnmappedView,
+  type FulfillmentDemandView,
   type PurchaseSuggestionEventType,
   type PurchaseSuggestionStatus,
   type PurchaseSuggestionView,
@@ -20,22 +20,23 @@ type SqlRow = Record<string, string | number | null>;
 export class FulfillmentDemandService {
   public constructor(private readonly workspace: Workspace) {}
 
-  public demand(planIdInput: unknown): PresaleDemandView {
-    return this.buildDemandView(this.requirePresalePlan(
+  public demand(planIdInput: unknown): FulfillmentDemandView {
+    return this.buildDemandView(this.requireDemandPlan(
       normalizeFulfillmentPlanId(planIdInput),
     ));
   }
 
-  public registerRefund(input: unknown): PresaleDemandView {
+  public registerRefund(input: unknown): FulfillmentDemandView {
     const prepared = normalizeRegisterFulfillmentRefundInput(input);
     const now = new Date().toISOString();
-    const plan = this.requirePresalePlan(prepared.planId);
+    const plan = this.requireDemandPlan(prepared.planId);
+    this.assertPlanOpen(plan.status as string, '登记发货前退款');
     this.workspace.transaction(() => {
       const member = this.workspace.database.prepare(`
         SELECT id FROM fulfillment_plan_members
         WHERE plan_id = ? AND order_id = ? AND released_at IS NULL AND removed_at IS NULL
       `).get(prepared.planId, prepared.orderId) as SqlRow | undefined;
-      if (!member) throw new Error('订单不是该预售计划的未释放成员');
+      if (!member) throw new Error('订单不是该履约计划的未释放成员');
       const order = this.workspace.database.prepare(`
         SELECT lifecycle_status, platform_transaction_status
         FROM original_orders WHERE id = ?
@@ -96,11 +97,15 @@ export class FulfillmentDemandService {
     return this.buildDemandView(plan);
   }
 
-  public createSuggestion(input: unknown): PresaleDemandView {
+  public createSuggestion(input: unknown): FulfillmentDemandView {
     const prepared = normalizeCreatePurchaseSuggestionInput(input);
     const now = new Date().toISOString();
-    const plan = this.requirePresalePlan(prepared.planId);
-    this.assertPlanOpenForSuggestions(asString(plan.status), '创建采购建议');
+    const plan = this.requireDemandPlan(prepared.planId);
+    this.assertPlanOpen(asString(plan.status), '创建采购建议');
+    const conditional = this.isConditionalPlan(plan);
+    if (conditional && !prepared.acknowledgeUnformedRisk) {
+      throw new Error('未成团计划的需求只用于预测，提前采购需勾选确认未成团库存风险');
+    }
     this.workspace.transaction(() => {
       const product = this.workspace.database.prepare(`
         SELECT id FROM standard_products WHERE id = ?
@@ -118,19 +123,26 @@ export class FulfillmentDemandService {
       this.workspace.database.prepare(`
         INSERT INTO purchase_suggestions (
           id, plan_id, standard_product_id, quantity, status,
-          created_at, confirmed_at, cancelled_at, cancel_reason
-        ) VALUES (?, ?, ?, ?, 'draft', ?, NULL, NULL, NULL)
-      `).run(id, prepared.planId, prepared.standardProductId, prepared.quantity, now);
+          created_at, confirmed_at, cancelled_at, cancel_reason, risk_acknowledged_at
+        ) VALUES (?, ?, ?, ?, 'draft', ?, NULL, NULL, NULL, ?)
+      `).run(
+        id,
+        prepared.planId,
+        prepared.standardProductId,
+        prepared.quantity,
+        now,
+        conditional ? now : null,
+      );
       this.recordSuggestionEvent(id, prepared.planId, 'created', null, prepared.reason, now);
     });
     return this.buildDemandView(plan);
   }
 
-  public confirmSuggestion(input: unknown): PresaleDemandView {
+  public confirmSuggestion(input: unknown): FulfillmentDemandView {
     const prepared = normalizePurchaseSuggestionActionInput(input);
     const now = new Date().toISOString();
-    const plan = this.requirePresalePlan(prepared.planId);
-    this.assertPlanOpenForSuggestions(asString(plan.status), '确认采购建议');
+    const plan = this.requireDemandPlan(prepared.planId);
+    this.assertPlanOpen(asString(plan.status), '确认采购建议');
     this.workspace.transaction(() => {
       const suggestion = this.requireSuggestion(prepared.planId, prepared.suggestionId);
       if (asString(suggestion.status) !== 'draft') {
@@ -153,10 +165,10 @@ export class FulfillmentDemandService {
     return this.buildDemandView(plan);
   }
 
-  public cancelSuggestion(input: unknown): PresaleDemandView {
+  public cancelSuggestion(input: unknown): FulfillmentDemandView {
     const prepared = normalizePurchaseSuggestionActionInput(input);
     const now = new Date().toISOString();
-    const plan = this.requirePresalePlan(prepared.planId);
+    const plan = this.requireDemandPlan(prepared.planId);
     this.workspace.transaction(() => {
       const suggestion = this.requireSuggestion(prepared.planId, prepared.suggestionId);
       if (asString(suggestion.status) === 'cancelled') {
@@ -181,12 +193,11 @@ export class FulfillmentDemandService {
 
   public shrinkDraftsAfterOrderExit(orderId: string, now: string, reason: string): void {
     const membership = this.workspace.database.prepare(`
-      SELECT m.plan_id, p.type
+      SELECT m.plan_id
       FROM fulfillment_plan_members m
-      JOIN fulfillment_plans p ON p.id = m.plan_id
       WHERE m.order_id = ? AND m.released_at IS NULL AND m.removed_at IS NULL
     `).get(orderId) as SqlRow | undefined;
-    if (!membership || asString(membership.type) !== 'presale') return;
+    if (!membership) return;
     const productRows = this.workspace.database.prepare(`
       SELECT DISTINCT standard_product_id FROM order_items
       WHERE order_id = ? AND standard_product_id IS NOT NULL
@@ -198,19 +209,21 @@ export class FulfillmentDemandService {
     this.reduceDraftSuggestions(asString(membership.plan_id), productIds, reason, now);
   }
 
-  private requirePresalePlan(planId: string): SqlRow {
+  private requireDemandPlan(planId: string): SqlRow {
     const plan = this.workspace.database.prepare(`
-      SELECT id, type, name, status, demand_alert_threshold FROM fulfillment_plans
+      SELECT id, type, name, status, formed_at, demand_alert_threshold
+      FROM fulfillment_plans
       WHERE id = ?
     `).get(planId) as SqlRow | undefined;
     if (!plan) throw new Error('未找到履约计划');
-    if (asString(plan.type) !== 'presale') {
-      throw new Error('预售需求与采购建议只适用于预售计划');
-    }
     return plan;
   }
 
-  private assertPlanOpenForSuggestions(status: string, action: string): void {
+  private isConditionalPlan(plan: SqlRow): boolean {
+    return asString(plan.type) === 'group_buy' && plan.formed_at === null;
+  }
+
+  private assertPlanOpen(status: string, action: string): void {
     if (status === 'closed') throw new Error(`履约计划已关闭，不能${action}`);
     if (status === 'released') throw new Error(`履约计划已全部释放，不能${action}`);
   }
@@ -224,7 +237,7 @@ export class FulfillmentDemandService {
     return suggestion;
   }
 
-  private buildDemandView(plan: SqlRow): PresaleDemandView {
+  private buildDemandView(plan: SqlRow): FulfillmentDemandView {
     const planId = asString(plan.id);
     const memberRows = this.workspace.database.prepare(`
       SELECT m.order_id, o.lifecycle_status, o.platform_transaction_status
@@ -253,7 +266,7 @@ export class FulfillmentDemandService {
       refundedOrCancelledQuantity: number;
     };
     const products = new Map<string, ProductAccumulator>();
-    const unmapped = new Map<string, PresaleDemandUnmappedView & { orderIds: Set<string> }>();
+    const unmapped = new Map<string, FulfillmentDemandUnmappedView & { orderIds: Set<string> }>();
     if (activeOrderIds.length > 0) {
       const placeholders = activeOrderIds.map(() => '?').join(', ');
       const itemRows = this.workspace.database.prepare(`
@@ -307,6 +320,7 @@ export class FulfillmentDemandService {
     const suggestionRows = this.workspace.database.prepare(`
       SELECT s.id, s.plan_id, s.standard_product_id, s.quantity, s.status,
         s.created_at, s.confirmed_at, s.cancelled_at, s.cancel_reason,
+        s.risk_acknowledged_at,
         p.sku, p.name, p.specification
       FROM purchase_suggestions s
       JOIN standard_products p ON p.id = s.standard_product_id
@@ -327,7 +341,7 @@ export class FulfillmentDemandService {
       ...confirmedByProduct.keys(),
       ...draftByProduct.keys(),
     ]);
-    const productViews: PresaleDemandProductView[] = [...productIdsWithDemand]
+    const productViews: FulfillmentDemandProductView[] = [...productIdsWithDemand]
       .map((productId) => {
         const info = productInfoById.get(productId)!;
         const demandQuantity = products.get(productId)?.demandQuantity ?? 0;
@@ -364,13 +378,16 @@ export class FulfillmentDemandService {
       confirmedAt: row.confirmed_at === null ? null : asString(row.confirmed_at),
       cancelledAt: row.cancelled_at === null ? null : asString(row.cancelled_at),
       cancelReason: row.cancel_reason === null ? null : asString(row.cancel_reason),
+      riskAcknowledgedAt: row.risk_acknowledged_at === null
+        ? null
+        : asString(row.risk_acknowledged_at),
     }));
 
     const releasedRow = this.workspace.database.prepare(`
       SELECT COUNT(*) AS released FROM fulfillment_plan_members
       WHERE plan_id = ? AND released_at IS NOT NULL
     `).get(planId) as SqlRow;
-    const totals: PresaleDemandTotals = {
+    const totals: FulfillmentDemandTotals = {
       demandQuantity: productViews.reduce((total, view) => total + view.demandQuantity, 0),
       refundedOrCancelledQuantity: productViews.reduce(
         (total, view) => total + view.refundedOrCancelledQuantity,
@@ -395,6 +412,7 @@ export class FulfillmentDemandService {
     return {
       planId,
       planName: asString(plan.name),
+      conditional: this.isConditionalPlan(plan),
       demandAlertThreshold: typeof plan.demand_alert_threshold === 'number'
         ? Number(plan.demand_alert_threshold)
         : null,
@@ -419,7 +437,7 @@ export class FulfillmentDemandService {
     draftQuantity: number;
     uncoveredQuantity: number;
   } {
-    const view = this.buildDemandView(this.requirePresalePlan(planId));
+    const view = this.buildDemandView(this.requireDemandPlan(planId));
     const product = view.products.find(
       (candidate) => candidate.standardProductId === productId,
     );

@@ -10,15 +10,15 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import {
-  presaleDemandAlerts,
+  fulfillmentDemandAlerts,
   purchaseSuggestionStatusLabel,
-  type PresaleDemandView,
+  type FulfillmentDemandView,
 } from '../src/core/fulfillment-demand';
-import type { FulfillmentPlanView } from '../src/core/fulfillment-plans';
+import { isUnformedAwaitingRefund, type FulfillmentPlanView } from '../src/core/fulfillment-plans';
 import type { OriginalOrder } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
 import { Workspace } from '../src/main/workspace';
-import { removeVersion52ExtensionArtifacts } from './version31-fixture';
+import { removeVersion52ExtensionArtifacts, removeVersion53ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
 
@@ -153,7 +153,7 @@ function registerRefund(
   itemIndex: number,
   quantity: number,
   reason: string,
-): PresaleDemandView {
+): FulfillmentDemandView {
   return application.registerFulfillmentRefund({
     planId: plan.id,
     orderId: order.id,
@@ -370,17 +370,163 @@ describe('预售有效需求投影', () => {
     expect(afterRefund.totals.refundedOrCancelledQuantity).toBe(0);
   });
 
-  it('预售需求视图与建议仅适用于预售计划', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'xianyu-demand-type-guard-'));
-    const { application, sources } = await openSeededApplication(root, []);
+  it('未成团团购需求为条件性预测，成团后转为确定需求且保留确认记录', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-demand-conditional-'));
+    const { application, sources } = await openSeededApplication(root, [
+      demandRecognition('XY-GROUP-DEMAND-0001', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 6 },
+      ]),
+    ], [PRESALE_PRODUCT]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+
     const groupBuy = application.createFulfillmentPlan({
       type: 'group_buy',
       name: '团购批次',
+      targetQuantity: 6,
+      reason: '开团',
+    });
+    const withMember = application.addFulfillmentPlanOrders({
+      planId: groupBuy.id,
+      expectedRevision: groupBuy.revision,
+      orderIds: [order.id],
+      reason: '加入团购',
+    });
+
+    const conditional = application.queryFulfillmentDemand(groupBuy.id);
+    expect(conditional.conditional).toBe(true);
+    expect(conditional.totals).toMatchObject({ demandQuantity: 6, uncoveredQuantity: 6 });
+    expect(fulfillmentDemandAlerts({ ...conditional, demandAlertThreshold: 5 }))
+      .toEqual(['玻璃保鲜盒（1000ml）未覆盖 6 件，达到提醒阈值（条件性需求预测）']);
+
+    const formed = application.confirmGroupFormation({
+      planId: groupBuy.id,
+      expectedRevision: withMember.revision,
+      basis: 'quantity',
+      reason: '到量成团',
+    });
+    expect(formed.formedAt).not.toBeNull();
+    expect(formed.events.find(({ eventType }) => eventType === 'formed'))
+      .toMatchObject({ basis: 'quantity', reason: '到量成团' });
+
+    const firm = application.queryFulfillmentDemand(groupBuy.id);
+    expect(firm.conditional).toBe(false);
+    expect(firm.totals).toMatchObject({ demandQuantity: 6, uncoveredQuantity: 6 });
+  });
+
+  it('未成团提前采购必须确认风险并留痕，成团前退款只减对应商品', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-demand-risk-'));
+    const { application, sources } = await openSeededApplication(root, [
+      demandRecognition('XY-GROUP-DEMAND-0002', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 4 },
+        { sourceTitle: ACCESSORY_PRODUCT.name, sourceSpec: ACCESSORY_PRODUCT.specification, quantity: 2 },
+      ]),
+    ], [PRESALE_PRODUCT, ACCESSORY_PRODUCT]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+
+    const groupBuy = application.createFulfillmentPlan({
+      type: 'group_buy',
+      name: '风险团购',
       targetQuantity: 10,
       reason: '开团',
     });
-    expect(() => application.queryFulfillmentDemand(groupBuy.id))
-      .toThrow('预售需求与采购建议只适用于预售计划');
+    application.addFulfillmentPlanOrders({
+      planId: groupBuy.id,
+      expectedRevision: groupBuy.revision,
+      orderIds: [order.id],
+      reason: '加入团购',
+    });
+    const productId = application.queryFulfillmentDemand(groupBuy.id)
+      .products.find(({ sku }) => sku === PRESALE_PRODUCT.sku)!.standardProductId;
+
+    expect(() => application.createPurchaseSuggestion({
+      planId: groupBuy.id,
+      standardProductId: productId,
+      quantity: 2,
+      reason: '想提前采购',
+    })).toThrow('未成团计划的需求只用于预测，提前采购需勾选确认未成团库存风险');
+
+    const riskView = application.createPurchaseSuggestion({
+      planId: groupBuy.id,
+      standardProductId: productId,
+      quantity: 2,
+      reason: '供应方交期长，提前下单',
+      acknowledgeUnformedRisk: true,
+    });
+    const riskSuggestion = riskView.suggestions.find(({ quantity }) => quantity === 2);
+    expect(riskSuggestion).toMatchObject({ status: 'draft' });
+    expect(riskSuggestion?.riskAcknowledgedAt).not.toBeNull();
+
+    registerRefund(application, groupBuy, order, 0, 1, '买家改买别家');
+    const afterRefund = application.queryFulfillmentDemand(groupBuy.id);
+    expect(afterRefund.products.find(({ sku }) => sku === PRESALE_PRODUCT.sku))
+      .toMatchObject({ demandQuantity: 3, draftSuggestionQuantity: 2 });
+    expect(afterRefund.products.find(({ sku }) => sku === ACCESSORY_PRODUCT.sku))
+      .toMatchObject({ demandQuantity: 2 });
+
+    const refreshed = application.getOrder(order.id).order;
+    application.updateOrderPlatformTransactionStatus({
+      targets: [{ orderId: order.id, expectedRevision: refreshed.revision }],
+      patch: { platformTransactionStatus: 'cancelled' },
+    });
+    const afterExit = application.queryFulfillmentDemand(groupBuy.id);
+    expect(afterExit.totals).toMatchObject({ demandQuantity: 0 });
+    expect(afterExit.suggestions.find(({ quantity }) => quantity === 2)).toMatchObject({
+      status: 'cancelled',
+      cancelReason: '订单取消后重算未确认建议',
+    });
+  });
+
+  it('未成团关闭后成员保留待退款清单语义：平台退款状态移出清单口径', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-demand-unformed-close-'));
+    const { application, sources } = await openSeededApplication(root, [
+      demandRecognition('XY-GROUP-DEMAND-0003', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 3 },
+      ]),
+    ], [PRESALE_PRODUCT]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+
+    const groupBuy = application.createFulfillmentPlan({
+      type: 'group_buy',
+      name: '退款团购',
+      targetQuantity: 10,
+      reason: '开团',
+    });
+    const withMember = application.addFulfillmentPlanOrders({
+      planId: groupBuy.id,
+      expectedRevision: groupBuy.revision,
+      orderIds: [order.id],
+      reason: '加入团购',
+    });
+    const closed = application.closeFulfillmentPlan({
+      planId: groupBuy.id,
+      expectedRevision: withMember.revision,
+      reason: '未成团关闭',
+    });
+    expect(closed).toMatchObject({ status: 'closed', formedAt: null });
+    const member = closed.members[0];
+    expect(member).toMatchObject({
+      orderId: order.id,
+      removedAt: null,
+      platformTransactionStatus: 'paid',
+    });
+    expect(isUnformedAwaitingRefund(member)).toBe(true);
+
+    const refreshed = application.getOrder(order.id).order;
+    application.updateOrderPlatformTransactionStatus({
+      targets: [{ orderId: order.id, expectedRevision: refreshed.revision }],
+      patch: { platformTransactionStatus: 'refunded' },
+    });
+    const afterRefund = application.queryFulfillmentPlans()
+      .find(({ id }) => id === groupBuy.id)!;
+    expect(afterRefund.members[0]).toMatchObject({
+      orderId: order.id,
+      removedAt: null,
+      platformTransactionStatus: 'refunded',
+    });
+    expect(isUnformedAwaitingRefund(afterRefund.members[0])).toBe(false);
   });
 });
 
@@ -696,7 +842,7 @@ describe('需求提醒阈值', () => {
 
     const created = createPresalePlan(application, { demandAlertThreshold: 5 });
     expect(created.demandAlertThreshold).toBe(5);
-    expect(presaleDemandAlerts(application.queryFulfillmentDemand(created.id))).toEqual([]);
+    expect(fulfillmentDemandAlerts(application.queryFulfillmentDemand(created.id))).toEqual([]);
 
     const plan = addOrders(application, created, [order.id]);
     const updated = application.updateFulfillmentPlan({
@@ -713,9 +859,9 @@ describe('需求提醒阈值', () => {
     expect(updated.demandAlertThreshold).toBe(8);
     const demand = application.queryFulfillmentDemand(plan.id);
     expect(demand.demandAlertThreshold).toBe(8);
-    expect(presaleDemandAlerts(demand))
+    expect(fulfillmentDemandAlerts(demand))
       .toEqual([`${PRESALE_PRODUCT.name}（${PRESALE_PRODUCT.specification}）未覆盖 10 件，达到提醒阈值`]);
-    expect(presaleDemandAlerts({ ...demand, demandAlertThreshold: 15 })).toEqual([]);
+    expect(fulfillmentDemandAlerts({ ...demand, demandAlertThreshold: 15 })).toEqual([]);
   });
 });
 
@@ -790,6 +936,61 @@ describe('需求域表约束', () => {
         .toThrow();
       expect(() => removeVersion52ExtensionArtifacts(workspace.database))
         .toThrow('v52 测试降级前必须移除发货前退款与采购建议数据');
+    } finally {
+      workspace.close();
+    }
+  });
+
+  it('成团事实与 formed 事件受约束：事件不可变、类型受检、降级拒绝成团数据', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-formation-constraints-'));
+    const { application, sources } = await openSeededApplication(root, [
+      demandRecognition('XY-FORM-CONSTRAINT-0001', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 2 },
+      ]),
+    ], [PRESALE_PRODUCT]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+    const groupBuy = application.createFulfillmentPlan({
+      type: 'group_buy',
+      name: '约束团购',
+      targetQuantity: 2,
+      reason: '开团',
+    });
+    const withMember = application.addFulfillmentPlanOrders({
+      planId: groupBuy.id,
+      expectedRevision: groupBuy.revision,
+      orderIds: [order.id],
+      reason: '加入团购',
+    });
+    application.confirmGroupFormation({
+      planId: groupBuy.id,
+      expectedRevision: withMember.revision,
+      basis: 'quantity',
+      reason: '到量成团',
+    });
+    application.close();
+
+    const workspace = Workspace.open(join(root, '数据'));
+    try {
+      const eventCount = workspace.database.prepare(
+        'SELECT COUNT(*) AS count FROM fulfillment_plan_events',
+      ).get() as { count: number };
+      expect(eventCount.count).toBeGreaterThanOrEqual(3);
+      expect(() => workspace.database.prepare(
+        'UPDATE fulfillment_plan_events SET reason = ?',
+      ).run('改写原因')).toThrow(/fulfillment plan events are immutable/);
+      expect(() => workspace.database.prepare(
+        'DELETE FROM fulfillment_plan_events',
+      ).run()).toThrow(/fulfillment plan events are immutable/);
+      expect(() => workspace.database.prepare(`
+        INSERT INTO fulfillment_plan_events (
+          id, plan_id, order_id, event_type, reason, payload_json,
+          occurred_at, created_at
+        ) VALUES ('bad-event', ?, NULL, 'exploded', '不存在的类型', '{}', ?, ?)
+      `).run(groupBuy.id, '2026-08-18T00:00:00.000Z', '2026-08-18T00:00:00.000Z'))
+        .toThrow();
+      expect(() => removeVersion53ExtensionArtifacts(workspace.database))
+        .toThrow('v53 测试降级前必须移除团购成团数据');
     } finally {
       workspace.close();
     }

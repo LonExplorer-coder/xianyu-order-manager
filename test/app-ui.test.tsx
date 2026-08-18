@@ -607,6 +607,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     registerFulfillmentRefund: vi.fn(),
     createPurchaseSuggestion: vi.fn(),
     confirmPurchaseSuggestion: vi.fn(),
+    confirmGroupFormation: vi.fn(),
     cancelPurchaseSuggestion: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     previewOrderExport: vi.fn().mockResolvedValue({

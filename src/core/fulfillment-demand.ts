@@ -6,7 +6,7 @@ export type PurchaseSuggestionEventType =
   | 'cancelled'
   | 'reduced';
 
-export type PresaleDemandProductView = {
+export type FulfillmentDemandProductView = {
   standardProductId: string;
   sku: string;
   name: string;
@@ -20,7 +20,7 @@ export type PresaleDemandProductView = {
   draftExceedsUncovered: boolean;
 };
 
-export type PresaleDemandUnmappedView = {
+export type FulfillmentDemandUnmappedView = {
   sourceTitle: string;
   sourceSpec: string;
   quantity: number;
@@ -40,9 +40,10 @@ export type PurchaseSuggestionView = {
   confirmedAt: string | null;
   cancelledAt: string | null;
   cancelReason: string | null;
+  riskAcknowledgedAt: string | null;
 };
 
-export type PresaleDemandTotals = {
+export type FulfillmentDemandTotals = {
   demandQuantity: number;
   refundedOrCancelledQuantity: number;
   confirmedInTransitQuantity: number;
@@ -53,14 +54,15 @@ export type PresaleDemandTotals = {
   releasedOrderCount: number;
 };
 
-export type PresaleDemandView = {
+export type FulfillmentDemandView = {
   planId: string;
   planName: string;
+  conditional: boolean;
   demandAlertThreshold: number | null;
-  products: PresaleDemandProductView[];
-  unmapped: PresaleDemandUnmappedView[];
+  products: FulfillmentDemandProductView[];
+  unmapped: FulfillmentDemandUnmappedView[];
   suggestions: PurchaseSuggestionView[];
-  totals: PresaleDemandTotals;
+  totals: FulfillmentDemandTotals;
 };
 
 export type RegisterFulfillmentRefundInput = {
@@ -76,6 +78,7 @@ export type CreatePurchaseSuggestionInput = {
   standardProductId: string;
   quantity: number;
   reason: string;
+  acknowledgeUnformedRisk: boolean;
 };
 
 export type PurchaseSuggestionActionInput = {
@@ -108,7 +111,7 @@ export function normalizeCreatePurchaseSuggestionInput(
   const record = objectValue(input, '创建采购建议参数无效');
   rejectUnknownKeys(
     record,
-    ['planId', 'standardProductId', 'quantity', 'reason'],
+    ['planId', 'standardProductId', 'quantity', 'reason', 'acknowledgeUnformedRisk'],
     '创建采购建议参数无效',
   );
   return {
@@ -116,6 +119,7 @@ export function normalizeCreatePurchaseSuggestionInput(
     standardProductId: identifier(record.standardProductId, '标准商品标识无效'),
     quantity: positiveQuantity(record.quantity, '采购建议数量无效'),
     reason: requiredReason(record.reason),
+    acknowledgeUnformedRisk: record.acknowledgeUnformedRisk === true,
   };
 }
 
@@ -135,12 +139,12 @@ export function normalizePurchaseSuggestionActionInput(
   };
 }
 
-export function presaleDemandAlerts(view: PresaleDemandView): string[] {
+export function fulfillmentDemandAlerts(view: FulfillmentDemandView): string[] {
   if (view.demandAlertThreshold === null) return [];
   return view.products
     .filter(({ uncoveredQuantity }) => uncoveredQuantity >= view.demandAlertThreshold!)
     .map(({ name, specification, uncoveredQuantity }) => (
-      `${name}${specification ? `（${specification}）` : ''}未覆盖 ${uncoveredQuantity} 件，达到提醒阈值`
+      `${name}${specification ? `（${specification}）` : ''}未覆盖 ${uncoveredQuantity} 件，达到提醒阈值${view.conditional ? '（条件性需求预测）' : ''}`
     ));
 }
 

@@ -6,15 +6,20 @@ import {
   fulfillmentPlanDisplayStatus,
   fulfillmentPlanStatusLabel,
   fulfillmentPlanTodo,
+  groupFormationBasisLabel,
+  isGroupBuyFormationReady,
+  isUnformedAwaitingRefund,
+  isUnformedClosedGroupBuy,
   type FulfillmentPlanDisplayStatus,
   type FulfillmentPlanEventType,
   type FulfillmentPlanProgressView,
   type FulfillmentPlanType,
   type FulfillmentPlanView,
+  type GroupFormationBasis,
 } from '../core/fulfillment-plans';
-import type { PresaleDemandView } from '../core/fulfillment-demand';
+import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import {
-  presaleDemandAlerts,
+  fulfillmentDemandAlerts,
   purchaseSuggestionStatusLabel,
 } from '../core/fulfillment-demand';
 import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
@@ -67,6 +72,13 @@ type SuggestionFormState = {
   standardProductId: string;
   quantity: string;
   reason: string;
+  acknowledgeRisk: boolean;
+};
+
+type FormationFormState = {
+  planId: string;
+  basis: GroupFormationBasis;
+  reason: string;
 };
 
 type SuggestionPromptKind = 'confirm' | 'cancel';
@@ -100,6 +112,7 @@ const EVENT_TYPE_LABELS: Record<FulfillmentPlanEventType, string> = {
   orders_released: '释放订单',
   updated: '更新计划',
   delayed: '标记延期',
+  formed: '确认成团',
   closed: '关闭计划',
 };
 
@@ -125,10 +138,11 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   const [createForm, setCreateForm] = useState<CreateFormState>(blankCreateForm());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [progressByPlan, setProgressByPlan] = useState<Record<string, FulfillmentPlanProgressView>>({});
-  const [demandByPlan, setDemandByPlan] = useState<Record<string, PresaleDemandView>>({});
+  const [demandByPlan, setDemandByPlan] = useState<Record<string, FulfillmentDemandView>>({});
   const [refundForm, setRefundForm] = useState<RefundFormState | null>(null);
   const [suggestionForm, setSuggestionForm] = useState<SuggestionFormState | null>(null);
   const [suggestionPrompt, setSuggestionPrompt] = useState<SuggestionPromptState | null>(null);
+  const [formationForm, setFormationForm] = useState<FormationFormState | null>(null);
   const [readableNumbers, setReadableNumbers] = useState<Record<string, string | null>>({});
   const [addOrders, setAddOrders] = useState<AddOrdersState | null>(null);
   const [delayForm, setDelayForm] = useState<DelayFormState | null>(null);
@@ -188,7 +202,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   useEffect(() => {
     if (!expandedId) return;
     const plan = plans.find(({ id }) => id === expandedId);
-    if (!plan || plan.type !== 'presale') return;
+    if (!plan || isUnformedClosedGroupBuy(plan)) return;
     let stale = false;
     api.queryFulfillmentDemand(expandedId)
       .then((view) => {
@@ -328,7 +342,9 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
         reason: closePrompt.reason,
       });
       setClosePrompt(null);
-      setFeedback(plan.type === 'group_buy' ? '未成团已关闭' : '计划已关闭');
+      setFeedback(plan.type === 'group_buy' && plan.formedAt === null
+        ? '未成团已关闭，成员订单已列入待退款清单'
+        : '计划已关闭');
       await refresh();
     } catch (value) {
       setError(errorMessage(value));
@@ -360,6 +376,27 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
       });
       setDelayForm(null);
       setFeedback('已更新履约计划');
+      await refresh();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitFormation(plan: FulfillmentPlanView): Promise<void> {
+    if (!formationForm) return;
+    setBusy(true);
+    setError('');
+    try {
+      const saved = await api.confirmGroupFormation({
+        planId: plan.id,
+        expectedRevision: plan.revision,
+        basis: formationForm.basis,
+        reason: formationForm.reason,
+      });
+      setFormationForm(null);
+      setFeedback(`已确认成团“${saved.name}”，成员锁定，需求转为确定需求`);
       await refresh();
     } catch (value) {
       setError(errorMessage(value));
@@ -400,6 +437,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
         standardProductId: suggestionForm.standardProductId,
         quantity: Number(suggestionForm.quantity),
         reason: suggestionForm.reason,
+        acknowledgeUnformedRisk: suggestionForm.acknowledgeRisk,
       });
       setDemandByPlan((current) => ({ ...current, [suggestionForm.planId]: view }));
       setSuggestionForm(null);
@@ -508,7 +546,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
             >
               <option value="">全部状态</option>
               <option value="pending">待备货/待成团</option>
-              <option value="ready">具备释放条件</option>
+              <option value="ready">具备释放条件/已成团</option>
               <option value="partially_released">部分已释放</option>
               <option value="released">已释放待发货</option>
               <option value="delayed">已延期</option>
@@ -536,6 +574,12 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
             const displayStatus = fulfillmentPlanDisplayStatus(plan, plan.activeItemQuantity, now);
             const expanded = expandedId === plan.id;
             const open = plan.status !== 'closed' && plan.status !== 'released';
+            const groupBuy = plan.type === 'group_buy';
+            const formed = plan.formedAt !== null;
+            const formationEvent = plan.events.find(
+              (event) => event.eventType === 'formed',
+            ) ?? null;
+            const awaitingRefund = plan.members.filter(isUnformedAwaitingRefund);
             return (
               <article className="aftersales-workflow-card" key={plan.id}>
                 <header>
@@ -544,7 +588,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                     <h2>{plan.name}</h2>
                   </div>
                   <span className="status-chip">
-                    {fulfillmentPlanStatusLabel(plan.type, displayStatus)}
+                    {fulfillmentPlanStatusLabel(plan.type, displayStatus, plan.formedAt)}
                   </span>
                 </header>
                 <p>
@@ -552,7 +596,12 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                   {' · '}进行中 {plan.activeOrderCount} 单 / {plan.activeItemQuantity} 件
                   {plan.releasedOrderCount > 0 ? ` · 已释放 ${plan.releasedOrderCount} 单` : ''}
                 </p>
-                <p>当前待办：{fulfillmentPlanTodo(plan, plan.activeItemQuantity, now)}</p>
+                <p>
+                  当前待办：{fulfillmentPlanTodo(plan, plan.activeItemQuantity, now)}
+                  {groupBuy && formed && formationEvent
+                    ? ` · 成团于 ${formatDateTime(plan.formedAt ?? '')}（${groupFormationBasisLabel(formationEvent.basis ?? 'early')}）`
+                    : ''}
+                </p>
                 <footer>
                   <button
                     className="button button--quiet"
@@ -563,27 +612,54 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                   </button>
                   {open && (
                     <>
-                      <button
-                        className="button button--quiet"
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void openAddOrders(plan)}
-                      >
-                        加入订单
-                      </button>
-                      <button
-                        className="button button--quiet"
-                        type="button"
-                        disabled={busy || plan.activeOrderCount === 0}
-                        onClick={() => setReasonPrompt({
-                          kind: 'release_all',
-                          planId: plan.id,
-                          orderId: null,
-                          reason: '',
-                        })}
-                      >
-                        全部释放
-                      </button>
+                      {!(groupBuy && formed) && (
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void openAddOrders(plan)}
+                        >
+                          加入订单
+                        </button>
+                      )}
+                      {groupBuy && !formed ? (
+                        <button
+                          className="button button--primary"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            const quantityReached = plan.targetQuantity !== null
+                              && plan.activeItemQuantity >= plan.targetQuantity;
+                            const deadlineReached = plan.deadlineAt !== null
+                              && now >= plan.deadlineAt;
+                            setFormationForm({
+                              planId: plan.id,
+                              basis: quantityReached
+                                ? 'quantity'
+                                : deadlineReached
+                                  ? 'deadline'
+                                  : 'early',
+                              reason: '',
+                            });
+                          }}
+                        >
+                          确认成团
+                        </button>
+                      ) : (
+                        <button
+                          className="button button--quiet"
+                          type="button"
+                          disabled={busy || plan.activeOrderCount === 0}
+                          onClick={() => setReasonPrompt({
+                            kind: 'release_all',
+                            planId: plan.id,
+                            orderId: null,
+                            reason: '',
+                          })}
+                        >
+                          全部释放
+                        </button>
+                      )}
                       <button
                         className="button button--quiet"
                         type="button"
@@ -646,21 +722,23 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                 <td>{formatDateTime(member.joinedAt)}</td>
                                 <td>{memberStatusLabel(member)}</td>
                                 <td>
-                                  {member.releasedAt === null && member.removedAt === null && (
+                                  {member.releasedAt === null && member.removedAt === null && open && (
                                     <>
-                                      <button
-                                        className="button button--quiet"
-                                        type="button"
-                                        disabled={busy}
-                                        onClick={() => setReasonPrompt({
-                                          kind: 'release_one',
-                                          planId: plan.id,
-                                          orderId: member.orderId,
-                                          reason: '',
-                                        })}
-                                      >
-                                        释放
-                                      </button>
+                                      {!(groupBuy && !formed) && (
+                                        <button
+                                          className="button button--quiet"
+                                          type="button"
+                                          disabled={busy}
+                                          onClick={() => setReasonPrompt({
+                                            kind: 'release_one',
+                                            planId: plan.id,
+                                            orderId: member.orderId,
+                                            reason: '',
+                                          })}
+                                        >
+                                          释放
+                                        </button>
+                                      )}
                                       <button
                                         className="button button--quiet"
                                         type="button"
@@ -683,25 +761,60 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                         </table>
                       </div>
                     )}
-                    {plan.type === 'presale' && (
-                      <div className="fulfillment-plan-demand" aria-label="预售需求与采购建议">
-                        <h3>预售需求与采购建议</h3>
+                    {isUnformedClosedGroupBuy(plan) && (
+                      <div className="fulfillment-plan-awaiting-refund" aria-label="待退款清单">
+                        <h3>待退款清单</h3>
                         <p className="fulfillment-plan-progress__hint">
-                          有效需求按未释放成员订单实时累计；已分配现货与到货待检查由库存模块提供（尚未接入，按 0 计）。建议确认后计入采购在途，不会自动生成采购订单。
+                          未成团关闭后成员订单不恢复发货资格；以下订单需按平台流程退款。
+                          平台交易状态变为退款或取消后自动移出清单。待确认资金事项由财务模块（后续版本）正式承接。
+                        </p>
+                        {awaitingRefund.length === 0 ? (
+                          <p>没有待退款订单：全部成员订单已退款或取消。</p>
+                        ) : (
+                          <ul>
+                            {awaitingRefund.map((member) => (
+                              <li key={member.orderId}>
+                                {`${member.systemOrderNumber} · ${member.buyerNickname} · ${
+                                  member.items.map((item) => (
+                                    `${item.sourceTitle} ${item.sourceSpec}`.trim()
+                                  )).join('；')
+                                } × ${member.items.reduce((sum, item) => sum + item.quantity, 0)} 件`}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                    {!isUnformedClosedGroupBuy(plan) && (
+                      <div
+                        className="fulfillment-plan-demand"
+                        aria-label={groupBuy && !formed ? '条件性团购需求与采购建议' : '有效需求与采购建议'}
+                      >
+                        <h3>
+                          {groupBuy && !formed
+                            ? '条件性团购需求（预测）与采购建议'
+                            : groupBuy
+                              ? '团购确定需求与采购建议'
+                              : '预售需求与采购建议'}
+                        </h3>
+                        <p className="fulfillment-plan-progress__hint">
+                          {groupBuy && !formed
+                            ? '未成团前需求只用于预测，不构成确定采购缺口；提前采购必须勾选确认未成团库存风险。确认成团后同一数据转为确定需求。'
+                            : '有效需求按未释放成员订单实时累计；已分配现货与到货待检查由库存模块提供（尚未接入，按 0 计）。建议确认后计入采购在途，不会自动生成采购订单。'}
                         </p>
                         {!demandByPlan[plan.id] ? (
-                          <p role="status">正在读取预售需求…</p>
+                          <p role="status">正在读取需求…</p>
                         ) : (() => {
                           const demand = demandByPlan[plan.id]!;
-                          const alerts = presaleDemandAlerts(demand);
+                          const alerts = fulfillmentDemandAlerts(demand);
                           return (
                             <>
                               <p className="fulfillment-plan-demand__totals">
-                                有效需求 {demand.totals.demandQuantity} 件
+                                {groupBuy && !formed ? '条件性需求' : '有效需求'} {demand.totals.demandQuantity} 件
                                 {' · '}退款/取消 {demand.totals.refundedOrCancelledQuantity} 件
                                 {' · '}确认在途 {demand.totals.confirmedInTransitQuantity} 件
                                 {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
-                                {' · '}未覆盖缺口 <strong>{demand.totals.uncoveredQuantity}</strong> 件
+                                {' · '}{groupBuy && !formed ? '预测缺口' : '未覆盖缺口'} <strong>{demand.totals.uncoveredQuantity}</strong> 件
                                 {' · '}已分配现货 {demand.totals.allocatedStockQuantity} 件
                                 {' · '}待检查 {demand.totals.pendingInspectionQuantity} 件
                                 {' · '}已释放 {demand.totals.releasedOrderCount} 单
@@ -710,6 +823,11 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                 <ul className="fulfillment-plan-demand__alerts">
                                   {alerts.map((alert) => <li key={alert}>{alert}</li>)}
                                 </ul>
+                              )}
+                              {groupBuy && formed && demand.totals.uncoveredQuantity > 0 && (
+                                <p className="fulfillment-plan-progress__hint">
+                                  未覆盖缺口 {demand.totals.uncoveredQuantity} 件：已成团待采购，建议先补足采购在途，备货条件释放由下一任务承接。
+                                </p>
                               )}
                               {demand.products.length === 0 ? (
                                 <p>暂无映射到标准商品的有效需求。</p>
@@ -764,6 +882,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                                   standardProductId: product.standardProductId,
                                                   quantity: '',
                                                   reason: '',
+                                                  acknowledgeRisk: false,
                                                 })}
                                               >
                                                 生成采购建议
@@ -815,6 +934,9 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                         <td>
                                           {purchaseSuggestionStatusLabel(suggestion.status)}
                                           {suggestion.cancelReason ? `（${suggestion.cancelReason}）` : ''}
+                                          {suggestion.riskAcknowledgedAt
+                                            ? ` · 未成团风险已确认（${formatDateTime(suggestion.riskAcknowledgedAt)}）`
+                                            : ''}
                                         </td>
                                         <td>
                                           {formatDateTime(suggestion.createdAt)}
@@ -1405,11 +1527,12 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           0,
           product.uncoveredQuantity - product.draftSuggestionQuantity,
         );
+        const conditional = demand.conditional;
         const quantityValid = /^\d+$/.test(suggestionForm.quantity.trim())
           && Number(suggestionForm.quantity.trim()) > 0;
         return (
           <DialogShell
-            kicker="预售计划"
+            kicker={plan.type === 'presale' ? '预售计划' : conditional ? '团购计划·未成团' : '团购计划'}
             title={`生成采购建议 · ${plan.name}`}
             description={`从尚未被采购在途覆盖的需求中选择数量；当前可建议 ${capacity} 件。建议需人工确认后才计入采购在途，不会自动生成采购订单。`}
             busy={busy}
@@ -1421,8 +1544,28 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           >
             <p>
               {`${product.sku} · ${product.name}${product.specification ? `（${product.specification}）` : ''}`}
-              {' · '}有效需求 {product.demandQuantity} 件 · 未覆盖 {product.uncoveredQuantity} 件
+              {' · '}{conditional ? '条件性需求' : '有效需求'} {product.demandQuantity} 件
+              {' · '}{conditional ? '预测缺口' : '未覆盖'} {product.uncoveredQuantity} 件
             </p>
+            {conditional && (
+              <div className="settings-notice settings-notice--warning" role="alert">
+                该团购计划尚未确认成团，当前需求只是预测。提前采购形成的库存若最终未成团，需要自行消化或退货。
+              </div>
+            )}
+            {conditional && (
+              <label className="shared-dialog__check">
+                <input
+                  type="checkbox"
+                  checked={suggestionForm.acknowledgeRisk}
+                  disabled={busy}
+                  onChange={(event) => setSuggestionForm({
+                    ...suggestionForm,
+                    acknowledgeRisk: event.target.checked,
+                  })}
+                />
+                <span>我知悉未成团库存风险，确认提前采购</span>
+              </label>
+            )}
             <label>
               <span>建议数量（件）</span>
               <input
@@ -1456,7 +1599,10 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
               <button
                 className="button button--primary"
                 type="submit"
-                disabled={busy || !quantityValid || suggestionForm.reason.trim() === ''}
+                disabled={busy
+                  || !quantityValid
+                  || suggestionForm.reason.trim() === ''
+                  || (conditional && !suggestionForm.acknowledgeRisk)}
               >
                 生成建议
               </button>
@@ -1555,13 +1701,16 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
       {closePrompt && (() => {
         const plan = plans.find(({ id }) => id === closePrompt.planId);
         if (!plan) return null;
+        const unformedGroupBuy = plan.type === 'group_buy' && plan.formedAt === null;
         return (
           <ConfirmDangerDialog
             kicker="不可撤销操作"
             title={`关闭“${plan.name}”`}
-            description={plan.type === 'group_buy'
-              ? '关闭后计划标记为未成团，未释放订单将退出并恢复现货发货资格；关闭不可撤销。'
-              : '关闭后计划停止接收新订单，未释放订单将退出并恢复现货发货资格；关闭不可撤销。'}
+            description={unformedGroupBuy
+              ? '关闭后计划标记为未成团：成员订单不退出、不恢复发货资格，留在计划内形成待退款清单；关闭不可撤销。'
+              : plan.type === 'group_buy'
+                ? '关闭后计划停止接收新订单，未释放订单将退出并恢复现货发货资格；关闭不可撤销。'
+                : '关闭后计划停止接收新订单，未释放订单将退出并恢复现货发货资格；关闭不可撤销。'}
             busy={busy}
             confirmLabel="确认关闭"
             canSubmit={closePrompt.reason.trim() !== ''}
@@ -1575,6 +1724,93 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
               onChange={(reason) => setClosePrompt({ ...closePrompt, reason })}
             />
           </ConfirmDangerDialog>
+        );
+      })()}
+
+      {formationForm && (() => {
+        const plan = plans.find(({ id }) => id === formationForm.planId);
+        if (!plan) return null;
+        const quantityReached = plan.targetQuantity !== null
+          && plan.activeItemQuantity >= plan.targetQuantity;
+        const deadlineReached = plan.deadlineAt !== null && now >= plan.deadlineAt;
+        return (
+          <DialogShell
+            kicker="团购计划"
+            title={`确认成团 · ${plan.name}`}
+            description="成团由人工确认并记录依据与原因；确认后成员锁定，不能再加入新订单，条件性需求转为确定需求，释放订单需先成团。"
+            busy={busy}
+            onClose={() => setFormationForm(null)}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitFormation(plan);
+            }}
+          >
+            <fieldset>
+              <legend>本次成团依据</legend>
+              <label className="shared-dialog__check">
+                <input
+                  type="radio"
+                  name="formation-basis"
+                  value="quantity"
+                  checked={formationForm.basis === 'quantity'}
+                  disabled={busy || !quantityReached}
+                  onChange={() => setFormationForm({ ...formationForm, basis: 'quantity' })}
+                />
+                <span>
+                  已达成团数量（{plan.activeItemQuantity}/{plan.targetQuantity ?? '—'} 件）
+                  {quantityReached ? '' : ' · 尚未达到'}
+                </span>
+              </label>
+              <label className="shared-dialog__check">
+                <input
+                  type="radio"
+                  name="formation-basis"
+                  value="deadline"
+                  checked={formationForm.basis === 'deadline'}
+                  disabled={busy || !deadlineReached}
+                  onChange={() => setFormationForm({ ...formationForm, basis: 'deadline' })}
+                />
+                <span>
+                  已到团购截止时间{plan.deadlineAt ? `（${formatDateTime(plan.deadlineAt)}）` : '（未设置）'}
+                  {deadlineReached ? '' : ' · 尚未到达'}
+                </span>
+              </label>
+              <label className="shared-dialog__check">
+                <input
+                  type="radio"
+                  name="formation-basis"
+                  value="early"
+                  checked={formationForm.basis === 'early'}
+                  disabled={busy}
+                  onChange={() => setFormationForm({ ...formationForm, basis: 'early' })}
+                />
+                <span>提前成团（自行判断，无前置条件）</span>
+              </label>
+            </fieldset>
+            <ReasonField
+              label="成团原因"
+              value={formationForm.reason}
+              saving={busy}
+              onChange={(reason) => setFormationForm({ ...formationForm, reason })}
+            />
+            <footer>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={busy}
+                onClick={() => setFormationForm(null)}
+              >
+                取消
+              </button>
+              <button
+                className="button button--primary"
+                type="submit"
+                disabled={busy || formationForm.reason.trim() === ''}
+              >
+                确认成团
+              </button>
+            </footer>
+          </DialogShell>
         );
       })()}
     </section>

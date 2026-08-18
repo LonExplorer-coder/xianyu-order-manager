@@ -5,9 +5,12 @@ import {
   fulfillmentPlanStatusAfterRelease,
   fulfillmentPlanStatusLabel,
   fulfillmentPlanTodo,
+  groupFormationBasisLabel,
   isFulfillmentPlanReleaseReady,
+  isGroupBuyFormationReady,
   normalizeAddFulfillmentPlanOrdersInput,
   normalizeCloseFulfillmentPlanInput,
+  normalizeConfirmGroupFormationInput,
   normalizeCreateFulfillmentPlanInput,
   normalizeFulfillmentPlanId,
   normalizeReleaseFulfillmentPlanOrdersInput,
@@ -28,6 +31,7 @@ function planView(overrides: Partial<FulfillmentPlanView> = {}): FulfillmentPlan
     targetQuantity: null,
     deadlineAt: null,
     demandAlertThreshold: null,
+    formedAt: null,
     revision: 1,
     createdAt: NOW,
     updatedAt: NOW,
@@ -145,26 +149,36 @@ describe('履约计划释放条件', () => {
     expect(isFulfillmentPlanReleaseReady(plan, 0, '2026-08-20T00:00:00.000Z')).toBe(true);
   });
 
-  it('团购按成员商品数量达到成团数量具备释放条件', () => {
+  it('团购确认成团前不可释放，达到成团数量只是具备成团条件', () => {
     const plan = planView({ type: 'group_buy', expectedShipAt: null, targetQuantity: 30 });
-    expect(isFulfillmentPlanReleaseReady(plan, 18, NOW)).toBe(false);
-    expect(isFulfillmentPlanReleaseReady(plan, 30, NOW)).toBe(true);
-    expect(isFulfillmentPlanReleaseReady(plan, 31, NOW)).toBe(true);
+    expect(isFulfillmentPlanReleaseReady(plan, 30, NOW)).toBe(false);
+    expect(isGroupBuyFormationReady(plan, 18, NOW)).toBe(false);
+    expect(isGroupBuyFormationReady(plan, 30, NOW)).toBe(true);
+    expect(isGroupBuyFormationReady(plan, 31, NOW)).toBe(true);
+    const formed = planView({
+      type: 'group_buy',
+      expectedShipAt: null,
+      targetQuantity: 30,
+      formedAt: NOW,
+    });
+    expect(isGroupBuyFormationReady(formed, 18, NOW)).toBe(false);
+    expect(isFulfillmentPlanReleaseReady(formed, 18, NOW)).toBe(true);
   });
 
-  it('团购到达截止时间后具备释放条件并提示人工确认', () => {
+  it('团购到达截止时间后具备成团条件并提示人工确认', () => {
     const plan = planView({
       type: 'group_buy',
       expectedShipAt: null,
       targetQuantity: null,
       deadlineAt: '2026-08-20T00:00:00.000Z',
     });
-    expect(isFulfillmentPlanReleaseReady(plan, 5, '2026-08-19T23:59:59.000Z')).toBe(false);
+    expect(isGroupBuyFormationReady(plan, 5, '2026-08-19T23:59:59.000Z')).toBe(false);
     expect(fulfillmentPlanTodo(plan, 5, '2026-08-19T23:59:59.000Z'))
       .toBe('待成团，到达截止时间后由人工确认');
-    expect(isFulfillmentPlanReleaseReady(plan, 5, '2026-08-20T00:00:00.000Z')).toBe(true);
-    expect(fulfillmentPlanDisplayStatus(plan, 5, '2026-08-20T00:00:00.000Z')).toBe('ready');
-    expect(fulfillmentPlanTodo(plan, 5, '2026-08-20T00:00:00.000Z')).toContain('人工确认释放');
+    expect(isGroupBuyFormationReady(plan, 5, '2026-08-20T00:00:00.000Z')).toBe(true);
+    expect(fulfillmentPlanDisplayStatus(plan, 5, '2026-08-20T00:00:00.000Z')).toBe('pending');
+    expect(fulfillmentPlanTodo(plan, 5, '2026-08-20T00:00:00.000Z'))
+      .toBe('具备成团条件，请人工确认成团');
   });
 
   it('已释放与已关闭计划不再具备释放条件', () => {
@@ -172,31 +186,70 @@ describe('履约计划释放条件', () => {
     const closed = planView({ status: 'closed', expectedShipAt: '2026-08-01T00:00:00.000Z' });
     expect(isFulfillmentPlanReleaseReady(released, 0, NOW)).toBe(false);
     expect(isFulfillmentPlanReleaseReady(closed, 0, NOW)).toBe(false);
+    expect(isGroupBuyFormationReady(
+      planView({ type: 'group_buy', status: 'closed', targetQuantity: 30 }),
+      30,
+      NOW,
+    )).toBe(false);
   });
 });
 
-describe('履约计划展示状态与待办', () => {
-  it('到达条件但未人工释放时展示为具备释放条件', () => {
-    const plan = planView({ expectedShipAt: '2026-08-01T00:00:00.000Z' });
-    expect(fulfillmentPlanDisplayStatus(plan, 0, NOW)).toBe('ready');
-    expect(fulfillmentPlanStatusLabel(plan.type, 'ready')).toBe('预售·具备释放条件');
-    expect(fulfillmentPlanTodo(plan, 0, NOW)).toContain('人工确认释放');
+describe('团购成团输入与展示状态', () => {
+  it('确认成团输入校验依据与原因', () => {
+    const input = normalizeConfirmGroupFormationInput({
+      planId: 'plan-1',
+      expectedRevision: 1,
+      basis: 'quantity',
+      reason: '到量成团',
+    });
+    expect(input).toEqual({ planId: 'plan-1', expectedRevision: 1, basis: 'quantity', reason: '到量成团' });
+    expect(() => normalizeConfirmGroupFormationInput({
+      planId: 'plan-1',
+      expectedRevision: 1,
+      basis: 'guess',
+      reason: '到量成团',
+    })).toThrow('成团依据无效');
+    expect(() => normalizeConfirmGroupFormationInput({
+      planId: 'plan-1',
+      expectedRevision: 1,
+      basis: 'early',
+      reason: '  ',
+    })).toThrow('请填写非空原因');
+    expect(groupFormationBasisLabel('quantity')).toBe('已达成团数量');
+    expect(groupFormationBasisLabel('deadline')).toBe('已到团购截止时间');
+    expect(groupFormationBasisLabel('early')).toBe('提前成团');
   });
 
-  it('团购展示成团进度与待成团待办', () => {
+  it('团购展示成团进度、成团后与未成团关闭的标签', () => {
     const plan = planView({ type: 'group_buy', expectedShipAt: null, targetQuantity: 30 });
     expect(fulfillmentPlanDisplayStatus(plan, 18, NOW)).toBe('pending');
-    expect(fulfillmentPlanStatusLabel(plan.type, 'pending')).toBe('团购·待成团');
+    expect(fulfillmentPlanStatusLabel(plan.type, 'pending', null)).toBe('团购·待成团');
     expect(fulfillmentPlanTodo(plan, 18, NOW)).toBe('待成团（18/30）');
-    expect(fulfillmentPlanStatusLabel(plan.type, 'ready')).toBe('团购·已成团待释放');
-    expect(fulfillmentPlanStatusLabel(plan.type, 'closed')).toBe('未成团已关闭');
+    expect(fulfillmentPlanStatusLabel(plan.type, 'ready', plan.formedAt)).toBe('团购·已成团待备货');
+    expect(fulfillmentPlanStatusLabel(plan.type, 'closed', null)).toBe('未成团已关闭');
+    expect(fulfillmentPlanStatusLabel(plan.type, 'closed', NOW)).toBe('团购·已关闭');
+    const formed = planView({
+      type: 'group_buy',
+      expectedShipAt: null,
+      targetQuantity: 30,
+      formedAt: NOW,
+    });
+    expect(fulfillmentPlanDisplayStatus(formed, 18, NOW)).toBe('ready');
+    expect(fulfillmentPlanTodo(formed, 18, NOW)).toBe('已成团，可人工确认释放');
+    const closedUnformed = planView({
+      type: 'group_buy',
+      status: 'closed',
+      targetQuantity: 30,
+    });
+    expect(fulfillmentPlanTodo(closedUnformed, 18, NOW))
+      .toBe('未成团已关闭，成员订单待退款（见计划详情）');
   });
 
   it('延期与部分释放状态按类型给出标签', () => {
-    expect(fulfillmentPlanStatusLabel('presale', 'delayed')).toBe('预售·已延期');
-    expect(fulfillmentPlanStatusLabel('presale', 'partially_released')).toBe('预售·部分已释放');
-    expect(fulfillmentPlanStatusLabel('presale', 'released')).toBe('已释放待发货');
-    expect(fulfillmentPlanStatusLabel('presale', 'closed')).toBe('预售·已关闭');
+    expect(fulfillmentPlanStatusLabel('presale', 'delayed', null)).toBe('预售·已延期');
+    expect(fulfillmentPlanStatusLabel('presale', 'partially_released', null)).toBe('预售·部分已释放');
+    expect(fulfillmentPlanStatusLabel('presale', 'released', null)).toBe('已释放待发货');
+    expect(fulfillmentPlanStatusLabel('presale', 'closed', null)).toBe('预售·已关闭');
   });
 });
 

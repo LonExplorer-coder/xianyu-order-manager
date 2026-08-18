@@ -9,7 +9,7 @@ import type {
   Recognizer,
   RecognizerSource,
 } from '../src/core/contracts';
-import type { PresaleDemandView } from '../src/core/fulfillment-demand';
+import type { FulfillmentDemandView } from '../src/core/fulfillment-demand';
 import type {
   FulfillmentPlanProgressView,
   FulfillmentPlanView,
@@ -190,19 +190,30 @@ describe('履约计划 Electron IPC', () => {
     expect(postReleaseIds).not.toContain(orderB.id);
 
     const groupBuyAfterRestart = plansAfterRestart.find(({ id }) => id === groupBuy.id);
+    await expect(invoke('fulfillment-plans:release-orders', {
+      planId: groupBuy.id,
+      expectedRevision: groupBuyAfterRestart?.revision,
+      orderIds: [orderB.id],
+      reason: '未成团直接释放',
+    })).rejects.toThrow('团购计划需先确认成团才能释放订单');
     const closed = await invoke('fulfillment-plans:close', {
       planId: groupBuy.id,
       expectedRevision: groupBuyAfterRestart?.revision,
       reason: '未成团关闭',
     }) as FulfillmentPlanView;
-    expect(closed).toMatchObject({ status: 'closed', activeOrderCount: 0 });
+    expect(closed).toMatchObject({ status: 'closed', activeOrderCount: 1, formedAt: null });
     expect(closed.members[0]).toMatchObject({
       orderId: orderB.id,
-      removedReason: '未成团关闭',
+      platformTransactionStatus: 'paid',
+      removedAt: null,
+      releasedAt: null,
     });
+    const closedEvent = closed.events.find(({ eventType }) => eventType === 'closed');
+    expect(closedEvent?.orderIds).toEqual([]);
     const finalGroups = await invoke('shipment-groups:query') as ShipmentGroupProjection;
-    expect(finalGroups.groups.flatMap((group) => group.orders.map(({ id }) => id)))
-      .toEqual(expect.arrayContaining([orderA.id, orderB.id]));
+    const finalIds = finalGroups.groups.flatMap((group) => group.orders.map(({ id }) => id));
+    expect(finalIds).toContain(orderA.id);
+    expect(finalIds).not.toContain(orderB.id);
 
     const finalPlans = await invoke('fulfillment-plans:query') as FulfillmentPlanView[];
     const finalPresale = finalPlans.find(({ id }) => id === presale.id);
@@ -773,6 +784,108 @@ describe('履约计划 Electron IPC', () => {
     expect(await invoke('orders:readable-numbers', [orderA.id, orderB.id, orderC.id]))
       .toEqual(beforeRestart);
   });
+
+  it('团购成团人工确认：依据校验、成团后锁定成员并解锁释放', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-formation-ipc-'));
+    const dataDirectory = join(root, '数据');
+    const sourceA = join(root, '团购订单A.png');
+    const sourceB = join(root, '团购订单B.png');
+    await writeFile(sourceA, Buffer.from('formation-ipc-source-a'));
+    await writeFile(sourceB, Buffer.from('formation-ipc-source-b'));
+    const seeder = new LocalApplication(new SequenceRecognizer([
+      recognition('XY-FORM-IPC-0001', 2),
+      recognition('XY-FORM-IPC-0002', 1),
+    ]));
+    seeder.openDataDirectory(dataDirectory);
+    const drafts = (await seeder.submitRecognitionBatch([sourceA, sourceB])).drafts;
+    const orderA = seeder.confirmDraft(drafts[0]);
+    const orderB = seeder.confirmDraft(drafts[1]);
+    seeder.close();
+
+    const session = openSession(root, dataDirectory);
+
+    const groupBuy = await invoke('fulfillment-plans:create', {
+      type: 'group_buy',
+      name: '处暑团购',
+      targetQuantity: 3,
+      deadlineAt: '2099-12-31T00:00:00.000Z',
+      reason: '开团',
+    }) as FulfillmentPlanView;
+    await invoke('fulfillment-plans:add-orders', {
+      planId: groupBuy.id,
+      expectedRevision: groupBuy.revision,
+      orderIds: [orderA.id],
+      reason: '先入团',
+    });
+
+    const withMember = (await invoke('fulfillment-plans:query') as FulfillmentPlanView[])
+      .find(({ id }) => id === groupBuy.id);
+    await expect(invoke('fulfillment-plans:confirm-formation', {
+      planId: groupBuy.id,
+      expectedRevision: withMember?.revision,
+      basis: 'quantity',
+      reason: '到量成团',
+    })).rejects.toThrow('活跃件数尚未达到成团数量');
+    await expect(invoke('fulfillment-plans:confirm-formation', {
+      planId: groupBuy.id,
+      expectedRevision: withMember?.revision,
+      basis: 'deadline',
+      reason: '到时成团',
+    })).rejects.toThrow('尚未到达团购截止时间');
+
+    const formed = await invoke('fulfillment-plans:confirm-formation', {
+      planId: groupBuy.id,
+      expectedRevision: withMember?.revision,
+      basis: 'early',
+      reason: '买家催促提前成团',
+    }) as FulfillmentPlanView;
+    expect(formed.formedAt).not.toBeNull();
+    const formedEvent = formed.events.find(({ eventType }) => eventType === 'formed');
+    expect(formedEvent).toMatchObject({
+      reason: '买家催促提前成团',
+      basis: 'early',
+      orderIds: [],
+    });
+    await expect(invoke('fulfillment-plans:confirm-formation', {
+      planId: groupBuy.id,
+      expectedRevision: formed.revision,
+      basis: 'early',
+      reason: '重复确认',
+    })).rejects.toThrow('该团购计划已确认成团');
+
+    await expect(invoke('fulfillment-plans:add-orders', {
+      planId: groupBuy.id,
+      expectedRevision: formed.revision,
+      orderIds: [orderB.id],
+      reason: '成团后加入',
+    })).rejects.toThrow('团购已成团，成员已锁定，不能加入订单');
+
+    const released = await invoke('fulfillment-plans:release-orders', {
+      planId: groupBuy.id,
+      expectedRevision: formed.revision,
+      orderIds: null,
+      reason: '成团备齐释放',
+    }) as FulfillmentPlanView;
+    expect(released).toMatchObject({ status: 'released', releasedOrderCount: 1 });
+    const groups = await invoke('shipment-groups:query') as ShipmentGroupProjection;
+    expect(groups.groups.flatMap((group) => group.orders.map(({ id }) => id)))
+      .toContain(orderA.id);
+    expect(groups.groups.flatMap((group) => group.orders.map(({ id }) => id)))
+      .toContain(orderB.id);
+
+    const presale = await invoke('fulfillment-plans:create', {
+      type: 'presale',
+      name: '白露预售',
+      expectedShipAt: '2026-10-01T00:00:00.000Z',
+      reason: '预售',
+    }) as FulfillmentPlanView;
+    await expect(invoke('fulfillment-plans:confirm-formation', {
+      planId: presale.id,
+      expectedRevision: presale.revision,
+      basis: 'early',
+      reason: '预售没有成团',
+    })).rejects.toThrow('只有团购计划可以确认成团');
+  });
 });
 
 describe('预售需求与采购建议 Electron IPC', () => {
@@ -811,7 +924,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
       reason: '加入预售',
     });
 
-    const demand = await invoke('fulfillment-plans:demand', plan.id) as PresaleDemandView;
+    const demand = await invoke('fulfillment-plans:demand', plan.id) as FulfillmentDemandView;
     expect(demand.totals).toMatchObject({ demandQuantity: 10, uncoveredQuantity: 10 });
     expect(demand.demandAlertThreshold).toBe(5);
     expect(demand.unmapped).toEqual([]);
@@ -822,7 +935,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
       standardProductId: productId,
       quantity: 4,
       reason: '第1批采购',
-    }) as PresaleDemandView;
+    }) as FulfillmentDemandView;
     const draftSuggestion = drafted.suggestions[0];
     expect(draftSuggestion).toMatchObject({ status: 'draft', quantity: 4 });
 
@@ -833,7 +946,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
         suggestionId: draftSuggestion.id,
         reason: '确认第1批',
       },
-    ) as PresaleDemandView;
+    ) as FulfillmentDemandView;
     expect(confirmed.products[0]).toMatchObject({
       confirmedInTransitQuantity: 4,
       uncoveredQuantity: 6,
@@ -845,7 +958,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
       orderItemId: order.items[0].id,
       quantity: 2,
       reason: '买家退回2件',
-    }) as PresaleDemandView;
+    }) as FulfillmentDemandView;
     expect(afterRefund.products[0]).toMatchObject({
       demandQuantity: 8,
       refundedOrCancelledQuantity: 2,
@@ -856,7 +969,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
     session.close();
     sessions.splice(sessions.indexOf(session), 1);
     openSession(root, dataDirectory);
-    const persisted = await invoke('fulfillment-plans:demand', plan.id) as PresaleDemandView;
+    const persisted = await invoke('fulfillment-plans:demand', plan.id) as FulfillmentDemandView;
     expect(persisted.totals).toMatchObject({
       demandQuantity: 8,
       refundedOrCancelledQuantity: 2,

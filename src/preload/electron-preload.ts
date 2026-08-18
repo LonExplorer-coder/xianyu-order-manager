@@ -176,6 +176,9 @@ const api: DesktopApi = {
   ),
   updateFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:update', input),
   closeFulfillmentPlan: (input) => ipcRenderer.invoke('fulfillment-plans:close', input),
+  confirmGroupFormation: (input) => (
+    ipcRenderer.invoke('fulfillment-plans:confirm-formation', input)
+  ),
   queryFulfillmentPlanProgress: (planId) => (
     ipcRenderer.invoke('fulfillment-plans:progress', planId)
   ),

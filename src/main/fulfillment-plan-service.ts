@@ -4,6 +4,7 @@ import {
   fulfillmentPlanStatusAfterRelease,
   normalizeAddFulfillmentPlanOrdersInput,
   normalizeCloseFulfillmentPlanInput,
+  normalizeConfirmGroupFormationInput,
   normalizeCreateFulfillmentPlanInput,
   normalizeFulfillmentPlanId,
   normalizeFulfillmentPlanQuery,
@@ -18,6 +19,7 @@ import {
   type FulfillmentPlanStatus,
   type FulfillmentPlanType,
   type FulfillmentPlanView,
+  type GroupFormationBasis,
 } from '../core/fulfillment-plans';
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { Workspace } from './workspace';
@@ -41,7 +43,7 @@ export class FulfillmentPlanService {
     }
     const rows = this.workspace.database.prepare(`
       SELECT id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-        demand_alert_threshold, revision, created_at, updated_at, closed_at
+        demand_alert_threshold, formed_at, revision, created_at, updated_at, closed_at
       FROM fulfillment_plans
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at, id
@@ -105,8 +107,8 @@ export class FulfillmentPlanService {
       this.workspace.database.prepare(`
         INSERT INTO fulfillment_plans (
           id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-          demand_alert_threshold, revision, created_at, updated_at, closed_at
-        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, 1, ?, ?, NULL)
+          demand_alert_threshold, formed_at, revision, created_at, updated_at, closed_at
+        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NULL, 1, ?, ?, NULL)
       `).run(
         id,
         prepared.type,
@@ -130,6 +132,7 @@ export class FulfillmentPlanService {
       const plan = this.requirePlanRow(prepared.planId);
       this.assertRevision(plan, prepared.expectedRevision);
       this.assertPlanOpen(plan, '加入订单');
+      this.assertGroupBuyNotFormed(plan, '加入订单');
       for (const orderId of prepared.orderIds) {
         this.assertOrderCanJoin(orderId, prepared.planId);
         this.workspace.database.prepare(`
@@ -187,6 +190,7 @@ export class FulfillmentPlanService {
       const status = asString(plan.status) as FulfillmentPlanStatus;
       if (status === 'closed') throw new Error('履约计划已关闭，不能释放订单');
       if (status === 'released') throw new Error('履约计划已全部释放');
+      this.assertGroupBuyFormed(plan, '释放订单');
       const activeMembers = this.activeMemberRows(prepared.planId);
       const activeOrderIds = new Set(activeMembers.map((row) => asString(row.order_id)));
       const releasingIds = prepared.orderIds ?? [...activeOrderIds];
@@ -261,6 +265,46 @@ export class FulfillmentPlanService {
     return this.planView(this.requirePlanRow(prepared.planId));
   }
 
+  public confirmFormation(input: unknown): FulfillmentPlanView {
+    const prepared = normalizeConfirmGroupFormationInput(input);
+    const now = new Date().toISOString();
+    this.workspace.transaction(() => {
+      const plan = this.requirePlanRow(prepared.planId);
+      this.assertRevision(plan, prepared.expectedRevision);
+      this.assertPlanOpen(plan, '确认成团');
+      if (asString(plan.type) !== 'group_buy') throw new Error('只有团购计划可以确认成团');
+      if (plan.formed_at !== null) throw new Error('该团购计划已确认成团');
+      if (prepared.basis === 'quantity') {
+        const targetQuantity = plan.target_quantity;
+        if (typeof targetQuantity !== 'number'
+          || this.activeItemQuantity(prepared.planId) < targetQuantity) {
+          throw new Error('活跃件数尚未达到成团数量，不能按已达成团数量确认');
+        }
+      }
+      if (prepared.basis === 'deadline') {
+        const deadlineAt = plan.deadline_at;
+        if (typeof deadlineAt !== 'string' || now < deadlineAt) {
+          throw new Error('尚未到达团购截止时间，不能按已到截止时间确认');
+        }
+      }
+      this.workspace.database.prepare(`
+        UPDATE fulfillment_plans SET formed_at = ? WHERE id = ?
+      `).run(now, prepared.planId);
+      this.recordEvent(
+        prepared.planId,
+        null,
+        'formed',
+        prepared.reason,
+        [],
+        now,
+        prepared.basis,
+        this.activeItemQuantity(prepared.planId),
+      );
+      this.bumpRevision(prepared.planId, now);
+    });
+    return this.planView(this.requirePlanRow(prepared.planId));
+  }
+
   public close(input: unknown): FulfillmentPlanView {
     const prepared = normalizeCloseFulfillmentPlanInput(input);
     const now = new Date().toISOString();
@@ -269,9 +313,12 @@ export class FulfillmentPlanService {
       this.assertRevision(plan, prepared.expectedRevision);
       const status = asString(plan.status) as FulfillmentPlanStatus;
       if (status === 'closed') throw new Error('履约计划已关闭');
-      const freedOrderIds = this.activeMemberRows(prepared.planId)
-        .map((row) => asString(row.order_id));
-      if (freedOrderIds.length > 0) {
+      const unformedGroupBuy = asString(plan.type) === 'group_buy'
+        && plan.formed_at === null;
+      const freedOrderIds = unformedGroupBuy
+        ? []
+        : this.activeMemberRows(prepared.planId).map((row) => asString(row.order_id));
+      if (!unformedGroupBuy && freedOrderIds.length > 0) {
         this.workspace.database.prepare(`
           UPDATE fulfillment_plan_members
           SET removed_at = ?, removed_reason = ?
@@ -281,7 +328,14 @@ export class FulfillmentPlanService {
       this.workspace.database.prepare(`
         UPDATE fulfillment_plans SET status = 'closed', closed_at = ? WHERE id = ?
       `).run(now, prepared.planId);
-      this.recordEvent(prepared.planId, null, 'closed', prepared.reason, freedOrderIds, now);
+      this.recordEvent(
+        prepared.planId,
+        null,
+        'closed',
+        prepared.reason,
+        unformedGroupBuy ? [] : freedOrderIds,
+        now,
+      );
       this.bumpRevision(prepared.planId, now);
     });
     return this.planView(this.requirePlanRow(prepared.planId));
@@ -313,6 +367,7 @@ export class FulfillmentPlanService {
       eventType: asString(row.event_type) as FulfillmentPlanEventType,
       reason: asString(row.reason),
       orderIds: parseStoredOrderIds(asString(row.payload_json)),
+      basis: parseStoredFormationBasis(asString(row.payload_json)),
       occurredAt: asString(row.occurred_at),
       createdAt: asString(row.created_at),
     }));
@@ -327,6 +382,7 @@ export class FulfillmentPlanService {
       demandAlertThreshold: typeof plan.demand_alert_threshold === 'number'
         ? Number(plan.demand_alert_threshold)
         : null,
+      formedAt: plan.formed_at === null ? null : asString(plan.formed_at),
       revision: Number(plan.revision),
       createdAt: asString(plan.created_at),
       updatedAt: asString(plan.updated_at),
@@ -345,7 +401,8 @@ export class FulfillmentPlanService {
   private memberView(row: SqlRow): FulfillmentPlanMemberView {
     const orderId = asString(row.order_id);
     const order = this.workspace.database.prepare(`
-      SELECT system_order_number, platform_order_number, buyer_nickname
+      SELECT system_order_number, platform_order_number, buyer_nickname,
+        platform_transaction_status
       FROM original_orders
       WHERE id = ?
     `).get(orderId) as SqlRow | undefined;
@@ -360,6 +417,7 @@ export class FulfillmentPlanService {
       systemOrderNumber: order ? asString(order.system_order_number) : '',
       platformOrderNumber: order ? asString(order.platform_order_number) : '',
       buyerNickname: order ? asString(order.buyer_nickname) : '',
+      platformTransactionStatus: order ? asString(order.platform_transaction_status) : '',
       joinedAt: asString(row.joined_at),
       joinReason: asString(row.join_reason),
       releasedAt: row.released_at === null ? null : asString(row.released_at),
@@ -378,12 +436,22 @@ export class FulfillmentPlanService {
   private requirePlanRow(planId: string): SqlRow {
     const row = this.workspace.database.prepare(`
       SELECT id, type, name, status, expected_ship_at, target_quantity, deadline_at,
-        demand_alert_threshold, revision, created_at, updated_at, closed_at
+        demand_alert_threshold, formed_at, revision, created_at, updated_at, closed_at
       FROM fulfillment_plans
       WHERE id = ?
     `).get(planId) as SqlRow | undefined;
     if (!row) throw new Error('未找到履约计划');
     return row;
+  }
+
+  private activeItemQuantity(planId: string): number {
+    const row = this.workspace.database.prepare(`
+      SELECT COALESCE(SUM(items.quantity), 0) AS total
+      FROM order_items AS items
+      JOIN fulfillment_plan_members AS members ON members.order_id = items.order_id
+      WHERE members.plan_id = ? AND members.released_at IS NULL AND members.removed_at IS NULL
+    `).get(planId) as SqlRow | undefined;
+    return Number(row?.total ?? 0);
   }
 
   private activeMemberRow(planId: string, orderId: string): SqlRow | undefined {
@@ -411,6 +479,18 @@ export class FulfillmentPlanService {
     const status = asString(plan.status) as FulfillmentPlanStatus;
     if (status === 'closed') throw new Error(`履约计划已关闭，不能${action}`);
     if (status === 'released') throw new Error(`履约计划已全部释放，不能${action}`);
+  }
+
+  private assertGroupBuyNotFormed(plan: SqlRow, action: string): void {
+    if (asString(plan.type) === 'group_buy' && plan.formed_at !== null) {
+      throw new Error(`团购已成团，成员已锁定，不能${action}`);
+    }
+  }
+
+  private assertGroupBuyFormed(plan: SqlRow, action: string): void {
+    if (asString(plan.type) === 'group_buy' && plan.formed_at === null) {
+      throw new Error(`团购计划需先确认成团才能${action}`);
+    }
   }
 
   private assertOrderCanJoin(orderId: string, planId: string): void {
@@ -454,7 +534,12 @@ export class FulfillmentPlanService {
     reason: string,
     orderIds: readonly string[],
     now: string,
+    basis: GroupFormationBasis | null = null,
+    activeItemQuantity: number | null = null,
   ): void {
+    const payload: Record<string, unknown> = { orderIds: [...orderIds] };
+    if (basis !== null) payload.basis = basis;
+    if (activeItemQuantity !== null) payload.activeItemQuantity = activeItemQuantity;
     this.workspace.database.prepare(`
       INSERT INTO fulfillment_plan_events (
         id, plan_id, order_id, event_type, reason, payload_json, occurred_at, created_at
@@ -465,7 +550,7 @@ export class FulfillmentPlanService {
       orderId,
       eventType,
       reason,
-      JSON.stringify({ orderIds: [...orderIds] }),
+      JSON.stringify(payload),
       now,
       now,
     );
@@ -492,5 +577,18 @@ function parseStoredOrderIds(payloadJson: string): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+function parseStoredFormationBasis(payloadJson: string): GroupFormationBasis | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as { basis?: unknown };
+    if (parsed.basis === 'quantity' || parsed.basis === 'deadline'
+      || parsed.basis === 'early') {
+      return parsed.basis;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }

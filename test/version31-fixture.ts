@@ -1,5 +1,83 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v53 增加团购成团事实与采购建议风险确认列，并重建事件表加入 formed 类型；
+// 存在成团数据时拒绝降级。
+export function removeVersion53ExtensionArtifacts(database: DatabaseSync): void {
+  const planColumns = database.prepare(
+    'PRAGMA table_info(fulfillment_plans)',
+  ).all() as Array<{ name: string }>;
+  const hasFormedAt = planColumns.some(({ name }) => name === 'formed_at');
+  const suggestionColumns = database.prepare(
+    'PRAGMA table_info(purchase_suggestions)',
+  ).all() as Array<{ name: string }>;
+  const hasRiskColumn = suggestionColumns.some(({ name }) => name === 'risk_acknowledged_at');
+  const eventTypeRows = database.prepare(`
+    SELECT sql FROM sqlite_schema
+    WHERE type = 'table' AND name = 'fulfillment_plan_events'
+  `).all() as Array<{ sql: string | null }>;
+  const eventsHaveFormed = eventTypeRows.length > 0
+    && eventTypeRows[0].sql !== null
+    && eventTypeRows[0].sql!.includes("'formed'");
+  if (!hasFormedAt && !hasRiskColumn && !eventsHaveFormed) return;
+  const formedPlans = database.prepare(`
+    SELECT COUNT(*) AS count FROM fulfillment_plans WHERE formed_at IS NOT NULL
+  `).get() as { count: number };
+  const formedEvents = database.prepare(`
+    SELECT COUNT(*) AS count FROM fulfillment_plan_events WHERE event_type = 'formed'
+  `).get() as { count: number };
+  if (formedPlans.count > 0 || formedEvents.count > 0) {
+    throw new Error('v53 测试降级前必须移除团购成团数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS fulfillment_plan_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS fulfillment_plan_events_are_immutable_on_delete;
+    ALTER TABLE fulfillment_plan_events RENAME TO fulfillment_plan_events_v53;
+    CREATE TABLE fulfillment_plan_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+      order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+      event_type TEXT NOT NULL CHECK (event_type IN (
+        'created', 'orders_added', 'order_removed', 'orders_released',
+        'updated', 'delayed', 'closed'
+      )),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      payload_json TEXT NOT NULL CHECK (
+        json_valid(payload_json) AND json_type(payload_json) = 'object'
+      ),
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO fulfillment_plan_events (
+      sequence, id, plan_id, order_id, event_type, reason, payload_json,
+      occurred_at, created_at
+    )
+    SELECT sequence, id, plan_id, order_id, event_type, reason, payload_json,
+      occurred_at, created_at
+    FROM fulfillment_plan_events_v53;
+    DROP TABLE fulfillment_plan_events_v53;
+    CREATE INDEX fulfillment_plan_events_by_plan
+    ON fulfillment_plan_events (plan_id, sequence);
+    CREATE TRIGGER fulfillment_plan_events_are_immutable_on_update
+    BEFORE UPDATE ON fulfillment_plan_events
+    BEGIN
+      SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+    END;
+    CREATE TRIGGER fulfillment_plan_events_are_immutable_on_delete
+    BEFORE DELETE ON fulfillment_plan_events
+    BEGIN
+      SELECT RAISE(ABORT, 'fulfillment plan events are immutable');
+    END;
+    ALTER TABLE fulfillment_plans DROP COLUMN formed_at;
+    ALTER TABLE purchase_suggestions DROP COLUMN risk_acknowledged_at;
+    DELETE FROM schema_migrations WHERE version = 53;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v51 建立流程步骤事件表；存在事件数据时拒绝降级。
 export function removeVersion51ExtensionArtifacts(database: DatabaseSync): void {
   removeVersion52ExtensionArtifacts(database);
@@ -419,6 +497,7 @@ export function removeVersion42ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 export function removeVersion52ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion53ExtensionArtifacts(database);
   const hasDemandTables = database.prepare(`
     SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'purchase_suggestions'
   `).get();

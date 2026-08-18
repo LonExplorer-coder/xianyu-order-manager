@@ -577,6 +577,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('fulfillment-plans:close', (_event, input: unknown) => (
     desktopSession.closeFulfillmentPlan(input)
   ));
+  ipcMain.handle('fulfillment-plans:confirm-formation', (_event, input: unknown) => (
+    desktopSession.confirmGroupFormation(input)
+  ));
   ipcMain.handle('fulfillment-plans:progress', (_event, planId: unknown) => (
     desktopSession.queryFulfillmentPlanProgress(planId)
   ));

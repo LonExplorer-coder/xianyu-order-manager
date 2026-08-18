@@ -135,6 +135,7 @@ import type {
 import type {
   AddFulfillmentPlanOrdersInput,
   CloseFulfillmentPlanInput,
+  ConfirmGroupFormationInput,
   CreateFulfillmentPlanInput,
   FulfillmentPlanProgressView,
   FulfillmentPlanQuery,
@@ -145,7 +146,7 @@ import type {
 } from './fulfillment-plans';
 import type {
   CreatePurchaseSuggestionInput,
-  PresaleDemandView,
+  FulfillmentDemandView,
   PurchaseSuggestionActionInput,
   RegisterFulfillmentRefundInput,
 } from './fulfillment-demand';
@@ -306,19 +307,20 @@ export interface DesktopApi {
   ): Promise<FulfillmentPlanView>;
   updateFulfillmentPlan(input: UpdateFulfillmentPlanInput): Promise<FulfillmentPlanView>;
   closeFulfillmentPlan(input: CloseFulfillmentPlanInput): Promise<FulfillmentPlanView>;
+  confirmGroupFormation(input: ConfirmGroupFormationInput): Promise<FulfillmentPlanView>;
   queryFulfillmentPlanProgress(planId: string): Promise<FulfillmentPlanProgressView>;
   queryFulfillmentPlanOrderCandidates(): Promise<OrderSummary[]>;
-  queryFulfillmentDemand(planId: string): Promise<PresaleDemandView>;
-  registerFulfillmentRefund(input: RegisterFulfillmentRefundInput): Promise<PresaleDemandView>;
+  queryFulfillmentDemand(planId: string): Promise<FulfillmentDemandView>;
+  registerFulfillmentRefund(input: RegisterFulfillmentRefundInput): Promise<FulfillmentDemandView>;
   createPurchaseSuggestion(
     input: CreatePurchaseSuggestionInput,
-  ): Promise<PresaleDemandView>;
+  ): Promise<FulfillmentDemandView>;
   confirmPurchaseSuggestion(
     input: PurchaseSuggestionActionInput,
-  ): Promise<PresaleDemandView>;
+  ): Promise<FulfillmentDemandView>;
   cancelPurchaseSuggestion(
     input: PurchaseSuggestionActionInput,
-  ): Promise<PresaleDemandView>;
+  ): Promise<FulfillmentDemandView>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;

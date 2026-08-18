@@ -5645,6 +5645,12 @@ select:focus-visible {
   color: var(--danger);
 }
 
+.settings-notice--warning {
+  margin-top: 0;
+  border-left-color: #b45309;
+  color: #92400e;
+}
+
 .aftersales-workflows-workspace {
   min-width: 0;
   padding: 32px 40px 56px;
@@ -6678,6 +6684,44 @@ select:focus-visible {
 
 .fulfillment-plan-demand__totals {
   color: var(--navy-950);
+}
+
+.fulfillment-plan-awaiting-refund {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.fulfillment-plan-awaiting-refund h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.fulfillment-plan-awaiting-refund p {
+  margin: 0;
+}
+
+.fulfillment-plan-awaiting-refund ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--navy-700);
+}
+
+.shared-dialog fieldset {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.shared-dialog fieldset legend {
+  margin-bottom: 4px;
+  color: var(--navy-700);
+  font-size: 12px;
 }
 
 .fulfillment-plan-demand__alerts {
