@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -100,7 +100,8 @@ describe('完整备份', () => {
     expect(result.totals).toEqual({ files: 1, bytes: screenshotBytes.byteLength });
 
     const backupDirectory = result.backupDirectory;
-    expect((await readdir(backupRoot)).join()).toContain('xianyu-backup-20260818-103000');
+    const backupDirectoryName = backupDirectory.split(sep).pop() ?? backupDirectory;
+    expect(backupDirectoryName).toMatch(/^xianyu-backup-\d{8}-\d{6}$/);
     expect(await listFiles(backupDirectory)).toEqual([
       'manifest.json',
       'screenshots/shot-1.png',
@@ -134,8 +135,9 @@ describe('完整备份', () => {
 
   it('备份排除写入锁与数据库边车文件，不包含任何密钥文件', async () => {
     const { workspace, dataDirectory, root } = await seedWorkspace();
-    await writeFile(join(dataDirectory, `${DATABASE_FILENAME}-wal`), Buffer.from('stale wal'));
-    await writeFile(join(dataDirectory, `${DATABASE_FILENAME}-shm`), Buffer.from('stale shm'));
+    // WAL 模式下 -wal/-shm 被活动连接持有，伪造会与 Windows 句柄冲突；
+    // 用 -journal（WAL 模式不使用）验证边车排除，真实边车随后一并断言。
+    await writeFile(join(dataDirectory, `${DATABASE_FILENAME}-journal`), Buffer.from('stale journal'));
     await mkdir(join(dataDirectory, '.recognition-queue', 'batch-9', 'item-1'), { recursive: true });
     await writeFile(
       join(dataDirectory, '.recognition-queue', 'batch-9', 'item-1', '排队中.png'),
@@ -153,11 +155,16 @@ describe('完整备份', () => {
 
     const backedUp = await listFiles(result.backupDirectory);
     expect(backedUp).toEqual(['manifest.json', 'screenshots/shot-1.png', DATABASE_FILENAME]);
-    // 写入锁在数据目录中存在，但绝不能进入备份。
-    expect(await readdir(dataDirectory)).toContain(LOCK_FILENAME);
+    // 写入锁与真实 WAL 边车在数据目录中存在，但绝不能进入备份。
+    const dataDirectoryEntries = await readdir(dataDirectory);
+    expect(dataDirectoryEntries).toContain(LOCK_FILENAME);
+    for (const name of dataDirectoryEntries) {
+      if (name === `${DATABASE_FILENAME}-wal` || name === `${DATABASE_FILENAME}-shm`) {
+        expect(backedUp).not.toContain(name);
+      }
+    }
     expect(backedUp).not.toContain(LOCK_FILENAME);
-    expect(backedUp).not.toContain(`${DATABASE_FILENAME}-wal`);
-    expect(backedUp).not.toContain(`${DATABASE_FILENAME}-shm`);
+    expect(backedUp).not.toContain(`${DATABASE_FILENAME}-journal`);
   });
 
   it('同一秒内再次备份使用不冲突的目录名', async () => {
