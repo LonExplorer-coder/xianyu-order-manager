@@ -5241,6 +5241,23 @@ function OrdersWorkspace({
             </select>
           </label>
           <label>
+            <span>回购筛选</span>
+            <select
+              value={query.repurchase === undefined
+                ? ''
+                : query.repurchase ? 'repurchase' : 'first'}
+              onChange={(event) => patchQuery({
+                repurchase: event.target.value === ''
+                  ? undefined
+                  : event.target.value === 'repurchase',
+              })}
+            >
+              <option value="">全部订单</option>
+              <option value="repurchase">仅回购单</option>
+              <option value="first">仅首次购买</option>
+            </select>
+          </label>
+          <label>
             <span>排序方式</span>
             <select
               value={query.customFieldSort
@@ -10616,6 +10633,20 @@ function DetailWorkspace({
               <DetailTerm label="订单号" value={order.orderNumber} />
               <DetailTerm label="支付宝交易号" value={displayValue(order.alipayTransactionNumber)} />
               <DetailTerm label="买家昵称" value={order.buyerNickname || '—'} />
+              <DetailTerm
+                label="回购情况"
+                value={details.spending
+                  ? repurchaseStatusLabel(details.spending.repurchaseRank)
+                  : '未归属收件人'}
+              />
+              <DetailTerm
+                label="下单人累计消费"
+                value={details.spending ? formatMoney(details.spending.totalSpendCents) : '—'}
+              />
+              <DetailTerm
+                label="下单人累计退款"
+                value={details.spending ? formatMoney(details.spending.totalRefundCents) : '—'}
+              />
               <DetailTerm label="备注" value={displayValue(order.note)} wide />
               <DetailTerm label="平台交易状态" value={platformTransactionStatusLabel(order.platformTransactionStatus)} />
               <DetailTerm label="履约状态" value={fulfillmentStatusLabel(order.fulfillmentStatus)} />
@@ -11518,6 +11549,11 @@ function renderTableCellValue(
 function formatMoney(cents: number | null): string {
   if (cents === null) return '—';
   return `¥${(cents / 100).toFixed(2)}`;
+}
+
+function repurchaseStatusLabel(rank: number | null): string {
+  if (rank === null) return '不适用';
+  return rank === 1 ? '首次购买' : `回购（第 ${rank} 次购买）`;
 }
 
 function shipmentExceptionEventDescription(

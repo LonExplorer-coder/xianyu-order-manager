@@ -217,6 +217,7 @@ const sourceSnapshot: SourceSnapshot = {
 };
 const orderDetails: OrderDetails = {
   order: confirmedOrder,
+  spending: null,
   sourceScreenshot,
   sourceSnapshot,
   sources: [{ recognitionStatus: 'imported', sourceScreenshot, sourceSnapshot }],
@@ -6356,6 +6357,54 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('button', { name: '查看订单 XY-ONLY-TRASHED' })).toBeVisible();
     expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
+  });
+
+  it('回购筛选组合查询并在订单详情展示回购与累计金额', async () => {
+    const user = userEvent.setup();
+    const summary = orderSummary();
+    const queryOrders = vi.fn(async (query: OrderWorkbenchQuery) => (
+      workbenchResult(query.repurchase === false ? [] : [summary], {
+        allLifecycleOrderCount: 1,
+      })
+    ));
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [summary],
+      }),
+      listOrders: vi.fn().mockResolvedValue([summary]),
+      queryOrders,
+      getOrder: vi.fn().mockResolvedValue({
+        ...orderDetails,
+        spending: { repurchaseRank: 2, totalSpendCents: 12_345, totalRefundCents: 500 },
+      }),
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,c291cmNl'),
+    });
+
+    render(<App api={api} />);
+    await screen.findByRole('region', { name: '订单查询' });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '回购筛选' }), 'repurchase');
+    expect(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }))
+      .toBeVisible();
+    await waitFor(() => expect(queryOrders).toHaveBeenLastCalledWith(
+      expect.objectContaining({ repurchase: true }),
+      [],
+    ));
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '回购筛选' }), 'first');
+    await waitFor(() => expect(queryOrders).toHaveBeenLastCalledWith(
+      expect.objectContaining({ repurchase: false }),
+      [],
+    ));
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '回购筛选' }), 'repurchase');
+    await user.click(await screen.findByRole('button', { name: `查看订单 ${summary.orderNumber}` }));
+    expect(await screen.findByRole('heading', { level: 1, name: '订单详情' })).toBeVisible();
+    expect(screen.getByText('回购（第 2 次购买）')).toBeVisible();
+    expect(screen.getByText('¥123.45')).toBeVisible();
+    expect(screen.getByText('¥5.00')).toBeVisible();
   });
 
   it('可组合日期、平台卖家和四个状态筛选订单', async () => {

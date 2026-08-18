@@ -5,7 +5,7 @@ import {
   shanghaiMonthKey,
   shanghaiYYMM,
 } from '../core/readable-order-numbers';
-import type { RecipientSummaryView } from '../core/recipients';
+import type { OrderSpendingView, RecipientSummaryView } from '../core/recipients';
 import { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
@@ -38,6 +38,7 @@ export class RecipientService {
   public queryRecipientSummaries(): RecipientSummaryView[] {
     const { byId, byPair } = this.recipientIndexes();
     const ordersByFinal = this.ordersByFinalRecipientId(byPair, byId);
+    const spending = this.spendingProjection();
     return this.queryRecipients().map((view) => {
       const row = byId.get(view.id);
       if (!row) throw new Error('数据库收件人注册表已变化');
@@ -49,6 +50,7 @@ export class RecipientService {
         const address = asString(order.address_original);
         if (address && !addresses.includes(address)) addresses.push(address);
       }
+      const totals = merged ? undefined : spending.byRecipientId.get(view.id);
       return {
         ...view,
         effectiveName: final.display_name === null
@@ -56,8 +58,175 @@ export class RecipientService {
           : asString(final.display_name),
         orderCount: orders.length,
         addresses,
+        totalSpendCents: totals?.totalSpendCents ?? 0,
+        totalRefundCents: totals?.totalRefundCents ?? 0,
       };
     });
+  }
+
+  /**
+   * 收件人累计消费、累计退款与回购序号的只读投影。
+   * 有效订单 = 平台交易状态为已付款或未知且生命周期正常；先后按付款时间、
+   * 下单时间、入库时间回退链排序。退款 = 售后实退资金按受影响订单商品小计
+   * 分摊（回收站、永久删除或无法归属的订单份额不计入），加未走售后登记的
+   * 正常整单退款订单按实付金额推断，同一订单不重复计。
+   */
+  public spendingProjection(): {
+    byOrderId: ReadonlyMap<string, OrderSpendingView>;
+    byRecipientId: ReadonlyMap<string, { totalSpendCents: number; totalRefundCents: number }>;
+  } {
+    const { byId, byPair } = this.recipientIndexes();
+    const orderRows = this.workspace.database.prepare(`
+      SELECT id, recipient, phone_normalized, platform_transaction_status,
+        lifecycle_status, amount_cents, paid_at_normalized, ordered_at_normalized, created_at
+      FROM original_orders
+    `).all() as unknown as SqlRow[];
+
+    type SpendingOrder = {
+      id: string;
+      recipientId: string;
+      valid: boolean;
+      amountCents: number;
+      platformTransactionStatus: string;
+      lifecycleStatus: string;
+      rankMillis: number;
+    };
+    const ordersByRecipient = new Map<string, SpendingOrder[]>();
+    const recipientIdByOrderId = new Map<string, string>();
+    const orderById = new Map<string, SpendingOrder>();
+    for (const row of orderRows) {
+      const name = asString(row.recipient);
+      const phone = asString(row.phone_normalized);
+      if (!name.trim() || !phone.trim()) continue;
+      const pair = byPair.get(recipientPairKey(name, phone));
+      if (!pair) continue;
+      const finalRecipientId = asString(this.resolveFinalRecipient(pair, byId).id);
+      const orderId = asString(row.id);
+      recipientIdByOrderId.set(orderId, finalRecipientId);
+      const status = asString(row.platform_transaction_status);
+      const lifecycle = asString(row.lifecycle_status);
+      const paidAt = asString(row.paid_at_normalized);
+      const orderedAt = asString(row.ordered_at_normalized);
+      const order: SpendingOrder = {
+        id: orderId,
+        recipientId: finalRecipientId,
+        valid: (status === 'paid' || status === 'unknown') && lifecycle === 'active',
+        amountCents: Number(row.amount_cents),
+        platformTransactionStatus: status,
+        lifecycleStatus: lifecycle,
+        // 平台交易时间带 +08:00、入库时间是 UTC ISO，字符串不可直接比较，统一换成纪元毫秒。
+        rankMillis: Date.parse(paidAt || orderedAt || asString(row.created_at)) || 0,
+      };
+      orderById.set(orderId, order);
+      const group = ordersByRecipient.get(finalRecipientId) ?? [];
+      group.push(order);
+      ordersByRecipient.set(finalRecipientId, group);
+    }
+
+    const totalSpendByRecipient = new Map<string, number>();
+    const rankByOrderId = new Map<string, number>();
+    for (const [recipientId, orders] of ordersByRecipient) {
+      const validOrders = orders
+        .filter((order) => order.valid)
+        .sort((left, right) => left.rankMillis - right.rankMillis
+          || left.id.localeCompare(right.id));
+      validOrders.forEach((order, index) => rankByOrderId.set(order.id, index + 1));
+      totalSpendByRecipient.set(
+        recipientId,
+        validOrders.reduce((total, order) => total + order.amountCents, 0),
+      );
+    }
+
+    const totalRefundByRecipient = new Map<string, number>();
+    const refundTouchedOrderIds = new Set<string>();
+    const refundRows = this.workspace.database.prepare(`
+      SELECT financial_records.id, financial_records.amount_cents,
+        financial_records.aftersales_case_id
+      FROM financial_records
+      WHERE financial_records.kind = 'aftersales_refund'
+      ORDER BY financial_records.created_at, financial_records.id
+    `).all() as unknown as SqlRow[];
+    const caseItemsStatement = this.workspace.database.prepare(`
+      SELECT package_items.order_id, SUM(package_items.subtotal_cents) AS subtotal_cents
+      FROM aftersales_case_items AS case_items
+      JOIN shipment_package_items AS package_items
+        ON package_items.id = case_items.shipment_package_item_id
+      WHERE case_items.case_id = ?
+      GROUP BY package_items.order_id
+    `);
+    const addRefund = (recipientId: string, cents: number) => {
+      totalRefundByRecipient.set(recipientId, (totalRefundByRecipient.get(recipientId) ?? 0) + cents);
+    };
+    for (const refundRow of refundRows) {
+      const affected = caseItemsStatement
+        .all(asString(refundRow.aftersales_case_id)) as unknown as SqlRow[];
+      for (const item of affected) refundTouchedOrderIds.add(asString(item.order_id));
+      const amountCents = Number(refundRow.amount_cents);
+      // 退款按受影响订单分摊：分母取全部受影响订单的商品小计，只有可归属且
+      // 生命周期正常的订单把份额计入其收件人，其余份额不计（不摊给别人）。
+      const totalSubtotal = affected.reduce(
+        (total, item) => total + Number(item.subtotal_cents),
+        0,
+      );
+      const credited = affected
+        .map((item) => {
+          const orderId = asString(item.order_id);
+          const order = orderById.get(orderId);
+          if (!order || order.lifecycleStatus !== 'active') return null;
+          return { recipientId: order.recipientId, subtotalCents: Number(item.subtotal_cents) };
+        })
+        .filter((entry): entry is { recipientId: string; subtotalCents: number } => entry !== null);
+      if (credited.length === 0 || totalSubtotal <= 0) continue;
+      let distributed = 0;
+      const shares = credited
+        .map((entry) => ({
+          recipientId: entry.recipientId,
+          cents: Math.floor((amountCents * entry.subtotalCents) / totalSubtotal),
+        }))
+        .sort((left, right) => right.cents - left.cents || left.recipientId.localeCompare(right.recipientId));
+      for (const share of shares) {
+        addRefund(share.recipientId, share.cents);
+        distributed += share.cents;
+      }
+      for (const share of shares) {
+        if (distributed >= amountCents) break;
+        addRefund(share.recipientId, 1);
+        distributed += 1;
+      }
+    }
+    for (const orders of ordersByRecipient.values()) {
+      for (const order of orders) {
+        if (
+          order.platformTransactionStatus !== 'refunded'
+          || order.lifecycleStatus !== 'active'
+          || refundTouchedOrderIds.has(order.id)
+        ) continue;
+        addRefund(order.recipientId, order.amountCents);
+      }
+    }
+
+    const byRecipientId = new Map<string, { totalSpendCents: number; totalRefundCents: number }>();
+    for (const [recipientId, totalSpendCents] of totalSpendByRecipient) {
+      byRecipientId.set(recipientId, {
+        totalSpendCents,
+        totalRefundCents: totalRefundByRecipient.get(recipientId) ?? 0,
+      });
+    }
+    for (const [recipientId, totalRefundCents] of totalRefundByRecipient) {
+      if (!byRecipientId.has(recipientId)) {
+        byRecipientId.set(recipientId, { totalSpendCents: 0, totalRefundCents });
+      }
+    }
+    const byOrderId = new Map<string, OrderSpendingView>();
+    for (const [orderId, recipientId] of recipientIdByOrderId) {
+      const totals = byRecipientId.get(recipientId) ?? { totalSpendCents: 0, totalRefundCents: 0 };
+      byOrderId.set(orderId, {
+        repurchaseRank: rankByOrderId.get(orderId) ?? null,
+        totalSpendCents: totals.totalSpendCents,
+        totalRefundCents: totals.totalRefundCents,
+      });
+    }
+    return { byOrderId, byRecipientId };
   }
 
   public orderIdsForRecipient(recipientId: string): string[] {

@@ -6727,7 +6727,8 @@ export class LocalApplication {
       .getOverviewMany(rows.map((row) => asString(row.id)));
     const readableNumberByOrder = this.recipientService()
       .readableOrderNumbers(rows.map((row) => asString(row.id)));
-    const orders = rows.map((row) => {
+    const spendingByOrderId = this.recipientService().spendingProjection().byOrderId;
+    let orders = rows.map((row) => {
       const id = asString(row.id);
       const itemCount = asNumber(row.item_count);
       const operations = operationsByOrder.get(id);
@@ -6770,8 +6771,17 @@ export class LocalApplication {
         createdAt: asString(row.created_at),
         items: parseOrderSummaryItems(asString(row.items_json)),
         operations: orderOperationsOverview(operations, itemCount),
+        spending: spendingByOrderId.get(id) ?? null,
       };
     });
+    if (query.repurchase !== undefined) {
+      orders = orders.filter((order) => {
+        const rank = order.spending?.repurchaseRank;
+        return rank !== undefined && rank !== null
+          ? query.repurchase ? rank > 1 : rank === 1
+          : false;
+      });
+    }
     if (normalizedScopedOrderIds) {
       const positionById = new Map(
         normalizedScopedOrderIds.map((id, index) => [id, index]),
@@ -7301,6 +7311,7 @@ export class LocalApplication {
       operations: new OrderOperationsProjectionService(workspace.database).get(orderId),
       readableOrderNumber: this.recipientService().readableOrderNumbers([orderId])
         .get(orderId) ?? null,
+      spending: this.recipientService().spendingProjection().byOrderId.get(orderId) ?? null,
     };
   }
 

@@ -1455,3 +1455,74 @@ async function readZipText(filePath: string): Promise<string> {
     });
   });
 }
+
+describe('回购与累计消费导出', () => {
+  it('模板选择的回购与金额字段进入预览并以文本和金额类型导出', async () => {
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-REPURCHASE-001',
+        paidAtOriginal: '2026-07-28 09:31:00',
+        paidAtNormalized: '2026-07-28T09:31:00+08:00',
+      }),
+      recognition({
+        orderNumber: 'XY-REPURCHASE-002',
+        paidAtOriginal: '2026-07-29 09:31:00',
+        paidAtNormalized: '2026-07-29T09:31:00+08:00',
+      }),
+    ]);
+    const ordersByNumber = new Map(
+      application.queryOrders({ lifecycleStatus: 'all' }).orders
+        .map((order) => [order.orderNumber, order]),
+    );
+    const first = ordersByNumber.get('XY-REPURCHASE-001');
+    const second = ordersByNumber.get('XY-REPURCHASE-002');
+    if (!first || !second) throw new Error('测试订单未入库');
+    const template = application.createTableTemplate({
+      name: '回购导出模板',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
+        { field: { kind: 'builtin', key: 'repurchase' }, displayName: '回购单' },
+        { field: { kind: 'builtin', key: 'recipient_total_spend' }, displayName: '下单人累计消费' },
+        { field: { kind: 'builtin', key: 'recipient_total_refund' }, displayName: '下单人累计退款' },
+      ],
+      query: { lifecycleStatus: 'all' },
+    });
+    const input = {
+      scope: { kind: 'selected_orders' as const, orderIds: [first.id, second.id] },
+      orderTemplateId: template.id,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+      masking: 'original' as const,
+    };
+
+    const preview = application.previewOrderExport(input);
+    const sheet = preview.sheets[0];
+    const rowValues = (rowIndex: number) => new Map(
+      sheet.columns.map((column, index) => [column.header, sheet.rows[rowIndex][index]] as const),
+    );
+    expect(Object.fromEntries(rowValues(0))).toMatchObject({
+      '订单号': 'XY-REPURCHASE-001',
+      '回购单': '首次购买',
+      '下单人累计消费': '¥72.00',
+      '下单人累计退款': '¥0.00',
+    });
+    expect(Object.fromEntries(rowValues(1))).toMatchObject({
+      '订单号': 'XY-REPURCHASE-002',
+      '回购单': '回购（第 2 次购买）',
+      '下单人累计消费': '¥72.00',
+      '下单人累计退款': '¥0.00',
+    });
+
+    const destinationPath = join(testRoot, '回购导出.xlsx');
+    await application.exportOrdersToWorkbook(input, destinationPath);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(destinationPath);
+    const worksheet = workbook.getWorksheet('订单总表');
+    if (!worksheet) throw new Error('缺少订单总表');
+    expect(cellByHeader(worksheet, 2, '回购单').value).toBe('首次购买');
+    expect(cellByHeader(worksheet, 2, '下单人累计消费').value).toBe(72);
+    expect(cellByHeader(worksheet, 3, '回购单').value).toBe('回购（第 2 次购买）');
+    expect(cellByHeader(worksheet, 3, '下单人累计退款').value).toBe(0);
+  });
+});

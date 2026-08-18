@@ -847,4 +847,61 @@ describe('表格模板核心契约', () => {
     expect(tableTemplateNameKey(' ＤＡＩＬＹ ')).toBe('daily');
     expect(tableTemplateNameKey('Daily')).toBe(tableTemplateNameKey(' daily '));
   });
+
+  it('回购单与下单人累计消费、退款作为订单内置字段投影并可保存筛选', () => {
+    const base = orderSummaryForProjection('order-1', 'XY-SPEND-FIELD', [
+      { sourceTitle: '海棠杯', sourceSpec: '', quantity: 1 },
+    ]);
+    const first = {
+      ...base,
+      spending: { repurchaseRank: 1, totalSpendCents: 3_600, totalRefundCents: 0 },
+    };
+    const repeat = {
+      ...base,
+      spending: { repurchaseRank: 3, totalSpendCents: 12_400, totalRefundCents: 500 },
+    };
+    const unattributed = { ...base, spending: null };
+
+    expect(projectOrderTableCell(first, { kind: 'builtin', key: 'repurchase' }))
+      .toBe('首次购买');
+    expect(projectOrderTableCell(repeat, { kind: 'builtin', key: 'repurchase' }))
+      .toBe('回购（第 3 次购买）');
+    expect(projectOrderTableCell(unattributed, { kind: 'builtin', key: 'repurchase' }))
+      .toBeNull();
+    expect(projectOrderTableCell(first, { kind: 'builtin', key: 'recipient_total_spend' }))
+      .toBe(3_600);
+    expect(projectOrderTableCell(unattributed, { kind: 'builtin', key: 'recipient_total_spend' }))
+      .toBeNull();
+    expect(projectOrderTableCell(repeat, { kind: 'builtin', key: 'recipient_total_refund' }))
+      .toBe(500);
+
+    expect(availableTableFields('order', definitions)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reference: { kind: 'builtin', key: 'repurchase' },
+        valueType: 'text',
+      }),
+      expect.objectContaining({
+        reference: { kind: 'builtin', key: 'recipient_total_spend' },
+        valueType: 'money',
+      }),
+      expect.objectContaining({
+        reference: { kind: 'builtin', key: 'recipient_total_refund' },
+        valueType: 'money',
+      }),
+    ]));
+
+    const normalized = normalizeCreateTableTemplateInput({
+      name: '回购跟进表',
+      granularity: 'order',
+      columns: [orderColumn({ kind: 'builtin', key: 'repurchase' }, '回购单')],
+      query: { repurchase: true },
+    }, definitions);
+    expect(normalized.query).toMatchObject({ repurchase: true });
+    expect(() => normalizeCreateTableTemplateInput({
+      name: '回购跟进表2',
+      granularity: 'order',
+      columns: [orderColumn({ kind: 'builtin', key: 'repurchase' }, '回购单')],
+      query: { repurchase: 'yes' },
+    }, definitions)).toThrow('回购筛选格式错误');
+  });
 });

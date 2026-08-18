@@ -41,6 +41,8 @@ export type OrderWorkbenchQuery = {
   platformTransactionStatus?: PlatformTransactionStatus;
   fulfillmentStatus?: FulfillmentStatus;
   lifecycleStatus?: LifecycleStatus | 'all';
+  /** true 仅看回购单（第 2 次及以后），false 仅看首次购买；缺省不过滤。 */
+  repurchase?: boolean;
   sortField?: OrderWorkbenchSortField;
   sortDirection?: 'asc' | 'desc';
   customFieldFilter?: CustomFieldFilter;

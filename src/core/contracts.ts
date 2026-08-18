@@ -5,6 +5,7 @@ import type {
 } from './custom-fields';
 import type { QuantitySource } from './quantity-source';
 import type { CandidateAdjudicationAudit } from './candidate-adjudication-audit';
+import type { OrderSpendingView } from './recipients';
 import type {
   ProductStandardizationSource,
   StandardDisplayPreference,
@@ -338,6 +339,8 @@ export type OrderSummary = {
     standardDisplayPreference?: StandardDisplayPreference | null;
   }>;
   operations: OrderOperationsOverview;
+  /** 收件人累计消费与回购投影；未归属收件人的订单为 null，轻量调用方可缺省。 */
+  spending?: OrderSpendingView | null;
 };
 
 export type SourceScreenshot = {
@@ -416,6 +419,8 @@ export type OrderDetails = {
   customFieldValues: CustomFieldValueRecord[];
   operations: OrderOperationsProjection;
   readableOrderNumber: string | null;
+  /** 收件人累计消费与回购投影；未归属收件人的订单为 null。 */
+  spending: OrderSpendingView | null;
 };
 
 export type OrderEditIdentityCorrection = {

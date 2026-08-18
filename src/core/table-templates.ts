@@ -49,6 +49,9 @@ export type OrderBuiltinTableFieldId =
   | 'phone'
   | 'address'
   | 'product_summary'
+  | 'repurchase'
+  | 'recipient_total_spend'
+  | 'recipient_total_refund'
   | 'initial_source_recognition_status'
   | 'platform_transaction_status'
   | 'fulfillment_status'
@@ -304,6 +307,9 @@ const ORDER_BUILTIN_FIELDS = [
   fixedField('order', 'builtin', 'recipient', '收件人', 'text'),
   fixedField('order', 'builtin', 'phone', '手机号', 'text'),
   fixedField('order', 'builtin', 'address', '收货地址', 'text'),
+  fixedField('order', 'builtin', 'repurchase', '回购单', 'text'),
+  fixedField('order', 'builtin', 'recipient_total_spend', '下单人累计消费', 'money'),
+  fixedField('order', 'builtin', 'recipient_total_refund', '下单人累计退款', 'money'),
   fixedField('order', 'builtin', 'initial_source_recognition_status', '识别状态', 'text'),
   fixedField('order', 'builtin', 'platform_transaction_status', '平台交易状态', 'text'),
   fixedField('order', 'builtin', 'fulfillment_status', '履约状态', 'text'),
@@ -379,6 +385,7 @@ const ORDER_QUERY_KEYS = [
   'platformTransactionStatus',
   'fulfillmentStatus',
   'lifecycleStatus',
+  'repurchase',
   'sortField',
   'sortDirection',
   'customFieldFilter',
@@ -695,6 +702,13 @@ export function projectOrderTableCell(
     case 'recipient': return order.recipient;
     case 'phone': return order.phone;
     case 'address': return order.addressOriginal;
+    case 'repurchase': {
+      const rank = order.spending?.repurchaseRank;
+      if (rank === undefined || rank === null) return null;
+      return rank === 1 ? '首次购买' : `回购（第 ${rank} 次购买）`;
+    }
+    case 'recipient_total_spend': return order.spending?.totalSpendCents ?? null;
+    case 'recipient_total_refund': return order.spending?.totalRefundCents ?? null;
     case 'product_summary': return order.items
       .map((item) => {
         const title = displayedProductTitle(item);
@@ -1128,6 +1142,10 @@ function normalizeQuery(
     LIFECYCLE_STATUSES,
     '生命周期状态',
   );
+  if (record.repurchase !== undefined) {
+    if (typeof record.repurchase !== 'boolean') throw new Error('回购筛选格式错误');
+    query.repurchase = record.repurchase;
+  }
   assignOptionalEnum(query, 'sortField', record.sortField, ORDER_SORT_FIELDS, '排序字段');
   assignOptionalEnum(query, 'sortDirection', record.sortDirection, SORT_DIRECTIONS, '排序方向');
   return query;

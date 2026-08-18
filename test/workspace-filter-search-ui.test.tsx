@@ -100,6 +100,13 @@ describe('收件人工作区筛选工具栏', () => {
     expect(screen.getByRole('heading', { name: '张三' })).toBeVisible();
   });
 
+  it('收件人卡片呈现累计消费与累计退款', async () => {
+    renderRecipients();
+    expect(await screen.findByRole('heading', { name: '张三' })).toBeVisible();
+    expect(screen.getByText(/累计消费 ¥123\.45/)).toBeVisible();
+    expect(screen.getByText(/累计退款 ¥5\.00/)).toBeVisible();
+  });
+
   it('搜索联动已合并区块并在无匹配时显示引导空态', async () => {
     const user = userEvent.setup();
     renderRecipients();
@@ -206,6 +213,8 @@ function recipientFixtures(): RecipientSummaryView[] {
       name: '张三',
       phoneNormalized: '13900000001',
       orderCount: 2,
+      totalSpendCents: 12_345,
+      totalRefundCents: 500,
       addresses: ['广东省深圳市南山区甲路1号'],
     }),
     recipient({
@@ -238,6 +247,8 @@ function recipient(
     displayName: null,
     phoneNormalized: '',
     orderCount: 0,
+    totalSpendCents: 0,
+    totalRefundCents: 0,
     addresses: [],
     mergedIntoRecipientId: null,
     mergedReason: null,

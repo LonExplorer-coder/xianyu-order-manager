@@ -202,6 +202,8 @@ export function RecipientsWorkspace({ api }: { api: DesktopApi }) {
                 </header>
                 <p>
                   {recipient.orderCount} 笔订单
+                  {` · 累计消费 ¥${(recipient.totalSpendCents / 100).toFixed(2)}`}
+                  {` · 累计退款 ¥${(recipient.totalRefundCents / 100).toFixed(2)}`}
                   {recipient.addresses.length > 0
                     ? ` · ${recipient.addresses.length} 个地址：${recipient.addresses[0]}${
                       recipient.addresses.length > 1 ? ' 等' : ''

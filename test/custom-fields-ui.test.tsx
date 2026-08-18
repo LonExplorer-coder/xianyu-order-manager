@@ -278,6 +278,7 @@ function details(
 ): OrderDetails {
   return {
     order: confirmedOrder,
+    spending: null,
     sourceScreenshot,
     sourceSnapshot,
     sources: [{
