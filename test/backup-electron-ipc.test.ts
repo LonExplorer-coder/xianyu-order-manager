@@ -38,10 +38,10 @@ vi.mock('electron', () => ({
 
 import { registerIpcHandlers } from '../src/main/electron-main';
 
-function invoke(channel: string): Promise<unknown> {
+function invoke(channel: string, arg?: unknown): Promise<unknown> {
   const handler = electronBoundary.handlers.get(channel);
   if (!handler) throw new Error(`未注册通道：${channel}`);
-  return handler({ sender: 'web-contents' }, undefined) as Promise<unknown>;
+  return handler({ sender: 'web-contents' }, arg) as Promise<unknown>;
 }
 
 function fakeSession(members: Record<string, unknown>): DesktopSession {
@@ -167,5 +167,62 @@ describe('备份 Electron IPC', () => {
     const canceledTarget = await invoke('backup:restore');
     expect(canceledTarget).toEqual({ kind: 'canceled' });
     expect(restoreBackup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('自动备份设置 Electron IPC', () => {
+  const settingsInput = {
+    autoBackupEnabled: true,
+    backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+    maxVersions: 15,
+    capacityLimitBytes: 2 * 1024 * 1024 * 1024,
+  };
+
+  it('保存设置回传视图，开启时立即触发一次自动备份检查', async () => {
+    const saveBackupSettings = vi.fn().mockReturnValue(settingsInput);
+    const runAutomaticBackup = vi.fn().mockResolvedValue({ ran: false, reason: 'no-workspace' });
+    registerIpcHandlers(fakeSession({ saveBackupSettings, runAutomaticBackup }));
+
+    const saved = await invoke('backup:save-settings', settingsInput);
+
+    expect(saveBackupSettings).toHaveBeenCalledWith(settingsInput);
+    expect(saved).toEqual(settingsInput);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runAutomaticBackup).toHaveBeenCalledWith('0.2.43');
+  });
+
+  it('关闭自动备份保存时不触发备份检查', async () => {
+    const runAutomaticBackup = vi.fn();
+    registerIpcHandlers(fakeSession({
+      saveBackupSettings: vi.fn().mockReturnValue({ ...settingsInput, autoBackupEnabled: false }),
+      runAutomaticBackup,
+    }));
+
+    await invoke('backup:save-settings', { ...settingsInput, autoBackupEnabled: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runAutomaticBackup).not.toHaveBeenCalled();
+  });
+
+  it('选择自动备份位置走目录选择器，取消返回 canceled', async () => {
+    registerIpcHandlers(fakeSession({}));
+    electronBoundary.showOpenDialog.mockResolvedValue(
+      directorySelection('/Volumes/Backup/闲鱼订单备份'),
+    );
+
+    const selected = await invoke('backup:select-root');
+    expect(selected).toEqual({ kind: 'selected', directory: '/Volumes/Backup/闲鱼订单备份' });
+
+    electronBoundary.showOpenDialog.mockResolvedValue(directorySelection(null));
+    const canceled = await invoke('backup:select-root');
+    expect(canceled).toEqual({ kind: 'canceled' });
+  });
+
+  it('读取设置与状态直接透传会话结果', async () => {
+    const getBackupSettings = vi.fn().mockReturnValue(settingsInput);
+    const getBackupStatus = vi.fn().mockResolvedValue({ backups: [], totalBytes: 0 });
+    registerIpcHandlers(fakeSession({ getBackupSettings, getBackupStatus }));
+
+    expect(await invoke('backup:get-settings')).toEqual(settingsInput);
+    expect(await invoke('backup:get-status')).toEqual({ backups: [], totalBytes: 0 });
   });
 });

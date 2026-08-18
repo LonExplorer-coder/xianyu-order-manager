@@ -133,10 +133,25 @@ import {
   restoreBackup as restoreBackupFrom,
   verifyBackup as verifyBackupDirectory,
 } from './backup-service';
+import {
+  buildBackupStatus,
+  recordBackupEvents,
+  runAutomaticBackupCycle,
+  type AutomaticBackupResult,
+} from './automatic-backup';
+import {
+  BackupSettingsFile,
+  DEFAULT_BACKUP_SETTINGS,
+  isValidBackupSettings,
+  type BackupSettingsRecord,
+} from './backup-settings-file';
 import type {
-  BackupVerificationReport,
+  BackupSettingsView,
+  BackupStatusView,
   CreateBackupResult,
   RestoreBackupResult,
+  SaveBackupSettingsInput,
+  BackupVerificationReport,
 } from '../core/backup';
 
 export type DataDirectoryValidator = (dataDirectory: string) => void;
@@ -162,6 +177,7 @@ export class DesktopSession {
     private readonly ocrSettings: OcrSettingsService,
     private readonly validateDataDirectory: DataDirectoryValidator = () => undefined,
     private readonly candidateVerificationSettings?: CandidateVerificationSettingsService,
+    private readonly backupSettings?: BackupSettingsFile,
   ) {}
 
   public restore(): BootstrapState {
@@ -214,6 +230,61 @@ export class DesktopSession {
       ...input,
       currentDataDirectory: application.dataDirectory,
     });
+  }
+
+  private readBackupSettings(): BackupSettingsRecord {
+    return this.backupSettings?.read() ?? { ...DEFAULT_BACKUP_SETTINGS };
+  }
+
+  public getBackupSettings(): BackupSettingsView {
+    return { ...this.readBackupSettings() };
+  }
+
+  public saveBackupSettings(input: SaveBackupSettingsInput): BackupSettingsView {
+    const record: BackupSettingsRecord = {
+      autoBackupEnabled: input.autoBackupEnabled,
+      backupRootDirectory: input.backupRootDirectory,
+      maxVersions: input.maxVersions,
+      capacityLimitBytes: input.capacityLimitBytes,
+    };
+    if (!isValidBackupSettings(record)) {
+      throw new Error('备份设置无效：保留版本数需为 1–1000 的整数，容量上限需在 100 MB 到 2 TB 之间');
+    }
+    this.backupSettings?.write(record);
+    return { ...record };
+  }
+
+  public async getBackupStatus(): Promise<BackupStatusView | null> {
+    const { backupRootDirectory, capacityLimitBytes } = this.readBackupSettings();
+    if (!backupRootDirectory) return null;
+    return buildBackupStatus(backupRootDirectory, { capacityLimitBytes });
+  }
+
+  public async runAutomaticBackup(appVersion: string): Promise<AutomaticBackupResult> {
+    if (this.state.kind !== 'ready' || !this.application) {
+      return { ran: false, reason: 'no-workspace' };
+    }
+    const application = this.requireApplication();
+    const settings = this.readBackupSettings();
+    try {
+      return await runAutomaticBackupCycle({
+        dataDirectory: application.dataDirectory,
+        database: application.database,
+        settings,
+        appVersion,
+      });
+    } catch (error) {
+      if (settings.backupRootDirectory) {
+        await recordBackupEvents(settings.backupRootDirectory, [
+          {
+            at: new Date().toISOString(),
+            kind: 'auto-failed',
+            note: error instanceof Error ? error.message : String(error),
+          },
+        ]).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   public submitSourceScreenshots(sourcePaths: string[]): Promise<RecognitionBatchView> {

@@ -16,6 +16,7 @@ import {
   type CandidateVerificationApiKeyStores,
 } from './candidate-verification-settings';
 import { Preferences } from './preferences';
+import { BackupSettingsFile } from './backup-settings-file';
 
 export function createConfiguredDesktopSession(input: {
   configDirectory: string;
@@ -60,6 +61,7 @@ export function createConfiguredDesktopSession(input: {
     ocrSettings,
     input.validateDataDirectory,
     candidateVerificationSettings,
+    new BackupSettingsFile(input.configDirectory),
   );
 }
 

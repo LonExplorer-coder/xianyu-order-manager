@@ -46,6 +46,12 @@ import { FULFILLMENT_STATUS_LABELS } from '../core/fulfillment-status';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import type {
+  BackupEventRecord,
+  BackupSettingsView,
+  BackupStatusView,
+  SaveBackupSettingsInput,
+} from '../core/backup';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
 import type {
@@ -7014,6 +7020,11 @@ function SettingsWorkspace({
     useState<SettingsFeedback>(null);
   const [backupBusy, setBackupBusy] = useState<'create' | 'verify' | 'restore' | null>(null);
   const [backupFeedback, setBackupFeedback] = useState<SettingsFeedback>(null);
+  const [autoBackupSettings, setAutoBackupSettings] = useState<BackupSettingsView | null>(null);
+  const [backupStatus, setBackupStatus] = useState<BackupStatusView | null>(null);
+  const [backupPolicyBusy, setBackupPolicyBusy] = useState(false);
+  const [backupMaxVersionsInput, setBackupMaxVersionsInput] = useState('');
+  const [backupCapacityGbInput, setBackupCapacityGbInput] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -7179,6 +7190,93 @@ function SettingsWorkspace({
     } finally {
       setBackupBusy(null);
     }
+  }
+
+  useEffect(() => {
+    let active = true;
+    void api.getBackupSettings()
+      .then((settings) => {
+        if (!active) return;
+        setAutoBackupSettings(settings);
+        setBackupMaxVersionsInput(String(settings.maxVersions));
+        setBackupCapacityGbInput(bytesToGbText(settings.capacityLimitBytes));
+      })
+      .catch((error: unknown) => {
+        if (active) setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+      });
+    void api.getBackupStatus()
+      .then((status) => {
+        if (active) setBackupStatus(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [api, reloadToken]);
+
+  async function saveAutoBackupSettings(
+    next: SaveBackupSettingsInput,
+    successMessage: string,
+  ) {
+    setBackupPolicyBusy(true);
+    setBackupFeedback(null);
+    try {
+      const saved = await api.saveBackupSettings(next);
+      setAutoBackupSettings(saved);
+      setBackupMaxVersionsInput(String(saved.maxVersions));
+      setBackupCapacityGbInput(bytesToGbText(saved.capacityLimitBytes));
+      setBackupStatus(await api.getBackupStatus());
+      setBackupFeedback({ kind: 'success', message: successMessage });
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBackupPolicyBusy(false);
+    }
+  }
+
+  function toggleAutoBackup() {
+    if (!autoBackupSettings || backupPolicyBusy) return;
+    void saveAutoBackupSettings(
+      { ...autoBackupSettings, autoBackupEnabled: !autoBackupSettings.autoBackupEnabled },
+      autoBackupSettings.autoBackupEnabled ? '自动备份已关闭' : '自动备份已开启',
+    );
+  }
+
+  async function chooseBackupRoot() {
+    if (!autoBackupSettings || backupPolicyBusy) return;
+    setBackupFeedback(null);
+    try {
+      const outcome = await api.selectBackupRoot();
+      if (outcome.kind === 'canceled') return;
+      await saveAutoBackupSettings(
+        { ...autoBackupSettings, backupRootDirectory: outcome.directory },
+        `自动备份位置已设为 ${outcome.directory}`,
+      );
+    } catch (error) {
+      setBackupFeedback({ kind: 'error', message: errorMessage(error) });
+    }
+  }
+
+  function saveBackupPolicy() {
+    if (!autoBackupSettings || backupPolicyBusy) return;
+    const maxVersions = Number(backupMaxVersionsInput);
+    const capacityGb = Number(backupCapacityGbInput);
+    if (!Number.isInteger(maxVersions) || maxVersions < 1 || maxVersions > 1_000) {
+      setBackupFeedback({ kind: 'error', message: '保留版本数需为 1–1000 的整数' });
+      return;
+    }
+    if (!Number.isFinite(capacityGb) || capacityGb < 0.1 || capacityGb > 2_048) {
+      setBackupFeedback({ kind: 'error', message: '容量上限需为 0.1–2048（GB）' });
+      return;
+    }
+    void saveAutoBackupSettings(
+      {
+        ...autoBackupSettings,
+        maxVersions,
+        capacityLimitBytes: Math.round(capacityGb * 1024 * 1024 * 1024),
+      },
+      '备份策略已保存',
+    );
   }
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -7430,6 +7528,114 @@ function SettingsWorkspace({
               >
                 {backupBusy === 'restore' ? '正在恢复…' : '恢复备份…'}
               </button>
+            </div>
+
+            <div className="backup-auto">
+              <div className="backup-auto-heading">
+                <div>
+                  <strong>自动备份</strong>
+                  <p>
+                    开启后每天自动创建一份备份；未变化的截图复用上一份的存储（硬链接），
+                    超出保留版本数或容量上限时从最旧开始清理，最新一份始终保留。
+                  </p>
+                </div>
+                <button
+                  className={`settings-switch${autoBackupSettings?.autoBackupEnabled ? ' is-on' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={autoBackupSettings?.autoBackupEnabled ?? false}
+                  aria-label="自动备份"
+                  aria-busy={backupPolicyBusy}
+                  disabled={!autoBackupSettings || backupPolicyBusy}
+                  onClick={toggleAutoBackup}
+                >
+                  <span className="settings-switch-track" aria-hidden="true"><i /></span>
+                  <span>{autoBackupSettings?.autoBackupEnabled ? '已开启' : '已关闭'}</span>
+                </button>
+              </div>
+              <div className="data-directory-location">
+                <div>
+                  <span>自动备份位置</span>
+                  <code title={autoBackupSettings?.backupRootDirectory ?? undefined}>
+                    {autoBackupSettings?.backupRootDirectory ?? '未选择'}
+                  </code>
+                </div>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  aria-busy={backupPolicyBusy}
+                  disabled={!autoBackupSettings || backupPolicyBusy}
+                  onClick={() => void chooseBackupRoot()}
+                >
+                  <Icon name="folder" />
+                  选择位置
+                </button>
+              </div>
+              <div className="backup-policy">
+                <label>
+                  保留版本数
+                  <input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={backupMaxVersionsInput}
+                    disabled={backupPolicyBusy}
+                    onChange={(event) => setBackupMaxVersionsInput(event.target.value)}
+                  />
+                </label>
+                <label>
+                  容量上限（GB）
+                  <input
+                    type="number"
+                    min={0.1}
+                    max={2048}
+                    step={0.1}
+                    value={backupCapacityGbInput}
+                    disabled={backupPolicyBusy}
+                    onChange={(event) => setBackupCapacityGbInput(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  aria-busy={backupPolicyBusy}
+                  disabled={backupPolicyBusy}
+                  onClick={saveBackupPolicy}
+                >
+                  保存策略
+                </button>
+              </div>
+              {backupStatus && (
+                <div className="backup-status" aria-label="备份状态">
+                  <div className="backup-status-summary">
+                    {`共 ${backupStatus.backups.length} 个备份 · 占用约 ${formatBackupBytes(backupStatus.totalBytes)}（未变化内容按一份估算）/ 上限 ${formatBackupBytes(backupStatus.capacityLimitBytes)}`}
+                    {backupStatus.lastAutoBackupAt
+                      ? ` · 上次自动备份 ${new Date(backupStatus.lastAutoBackupAt).toLocaleString()}`
+                      : ' · 尚未自动备份'}
+                    {backupStatus.lastVerification
+                      ? backupStatus.lastVerification.ok
+                        ? ' · 上次验证通过'
+                        : ` · 上次验证未通过${backupStatus.lastVerification.note ? `：${backupStatus.lastVerification.note}` : ''}`
+                      : ''}
+                  </div>
+                  {backupStatus.overCapacity && (
+                    <p className="backup-over-capacity" role="alert">
+                      备份占用已超过容量上限；最新恢复点已按规则临时保留，请检查备份位置或调整上限。
+                    </p>
+                  )}
+                  {backupStatus.events.length > 0 && (
+                    <ul className="backup-event-log">
+                      {backupStatus.events.slice(-5).reverse().map((event) => (
+                        <li key={`${event.at}-${event.kind}-${event.backupDirectory ?? ''}`}>
+                          <span>{new Date(event.at).toLocaleString()}</span>
+                          <span>{backupEventLabel(event)}</span>
+                          {event.reason ? <span>{event.reason}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
             <SettingsNotice feedback={backupFeedback} />
           </section>
@@ -7849,6 +8055,16 @@ function formatBackupBytes(bytes: number): string {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function backupEventLabel(event: BackupEventRecord): string {
+  if (event.kind === 'auto-created') return '自动备份';
+  if (event.kind === 'auto-failed') return `自动备份失败${event.note ? `：${event.note}` : ''}`;
+  return '清理恢复点';
+}
+
+function bytesToGbText(bytes: number): string {
+  return String(Number((bytes / (1024 * 1024 * 1024)).toFixed(2)));
 }
 
 function SettingsNotice({ feedback }: { feedback: SettingsFeedback }) {

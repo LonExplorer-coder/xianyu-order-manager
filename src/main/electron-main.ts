@@ -26,7 +26,11 @@ import type { SaveOrderIntakeSettingsInput } from '../core/order-intake';
 import type {
   BackupCreateOutcome,
   BackupRestoreOutcome,
+  BackupSelectRootOutcome,
+  BackupSettingsView,
+  BackupStatusView,
   BackupVerifyOutcome,
+  SaveBackupSettingsInput,
 } from '../core/backup';
 import { normalizeOrderExportInput } from '../core/order-export';
 import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
@@ -198,6 +202,41 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     });
     return { kind: 'restored', ...result };
   });
+
+  ipcMain.handle('backup:get-settings', (): BackupSettingsView => (
+    desktopSession.getBackupSettings()
+  ));
+
+  ipcMain.handle('backup:save-settings', (_event, input: unknown): BackupSettingsView => {
+    const saved = desktopSession.saveBackupSettings(input as SaveBackupSettingsInput);
+    if (saved.autoBackupEnabled) {
+      void desktopSession.runAutomaticBackup(app.getVersion()).catch((error: unknown) => {
+        console.error(
+          '自动备份执行失败：',
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }
+    return saved;
+  });
+
+  ipcMain.handle('backup:select-root', async (event): Promise<BackupSelectRootOutcome> => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showOpenDialog(window, {
+      title: '选择自动备份保存位置',
+      buttonLabel: '使用此位置',
+      defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+      properties: creatableDirectoryProperties(),
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { kind: 'canceled' };
+    }
+    return { kind: 'selected', directory: selection.filePaths[0] };
+  });
+
+  ipcMain.handle('backup:get-status', (): Promise<BackupStatusView | null> => (
+    desktopSession.getBackupStatus()
+  ));
 
   ipcMain.handle('workflow:select-source-screenshots', async () => {
     const window = requireWindow();
@@ -1270,6 +1309,18 @@ void app.whenReady().then(async () => {
   session.restore();
   registerIpcHandlers(session);
   mainWindow = createWindow();
+
+  const runAutomaticBackupTick = (): void => {
+    if (!session) return;
+    void session.runAutomaticBackup(app.getVersion()).catch((error: unknown) => {
+      console.error(
+        '自动备份执行失败：',
+        error instanceof Error ? error.message : error,
+      );
+    });
+  };
+  runAutomaticBackupTick();
+  setInterval(runAutomaticBackupTick, 30 * 60 * 1000).unref();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();

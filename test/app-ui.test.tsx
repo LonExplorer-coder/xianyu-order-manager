@@ -498,6 +498,15 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     createBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
     verifyBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
     restoreBackup: vi.fn().mockResolvedValue({ kind: 'canceled' }),
+    getBackupSettings: vi.fn().mockResolvedValue({
+      autoBackupEnabled: false,
+      backupRootDirectory: null,
+      maxVersions: 30,
+      capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+    }),
+    saveBackupSettings: vi.fn(async (input) => input),
+    selectBackupRoot: vi.fn().mockResolvedValue({ kind: 'canceled' }),
+    getBackupStatus: vi.fn().mockResolvedValue(null),
     selectSourceScreenshots: vi.fn(async () => {
       selectedDraft = await selectOneSourceScreenshot();
       return selectedDraft ? batchForDraft(selectedDraft) : null;
@@ -9990,6 +9999,73 @@ describe('订单管理工作台', () => {
     expect(await screen.findByText(/已恢复到 \/Users\/test\/闲鱼订单数据-恢复/))
       .toBeVisible();
     expect(screen.getByText(/可经「更改数据目录」切换到恢复结果/)).toBeVisible();
+  });
+
+  it('设置页可开启自动备份、选择位置并查看状态与清理记录', async () => {
+    const user = userEvent.setup();
+    const saveBackupSettings = vi.fn(async (input: unknown) => input);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      saveBackupSettings: saveBackupSettings as DesktopApi['saveBackupSettings'],
+      getBackupSettings: vi.fn().mockResolvedValue({
+        autoBackupEnabled: false,
+        backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+        maxVersions: 30,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+      }),
+      getBackupStatus: vi.fn().mockResolvedValue({
+        backups: [{
+          backupDirectory: '/Volumes/Backup/闲鱼订单备份/xianyu-backup-20260818-103000',
+          createdAt: '2026-08-18T02:30:00.000Z',
+          appVersion: '0.2.43',
+          bytes: 6_144,
+          files: 1,
+        }],
+        totalBytes: 6_144,
+        capacityLimitBytes: 5 * 1024 * 1024 * 1024,
+        overCapacity: false,
+        lastAutoBackupAt: '2026-08-18T02:30:00.000Z',
+        lastVerification: { at: '2026-08-18T02:30:00.000Z', ok: true },
+        events: [
+          {
+            at: '2026-08-18T02:30:00.000Z',
+            kind: 'auto-created' as const,
+            backupDirectory: '/Volumes/Backup/闲鱼订单备份/xianyu-backup-20260818-103000',
+            bytes: 6_144,
+          },
+          {
+            at: '2026-08-18T02:31:00.000Z',
+            kind: 'deleted' as const,
+            backupDirectory: '/Volumes/Backup/闲鱼订单备份/xianyu-backup-20260817-103000',
+            reason: '版本数超限',
+          },
+        ],
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const autoSwitch = await screen.findByRole('switch', { name: '自动备份' });
+    expect(autoSwitch).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByText('/Volumes/Backup/闲鱼订单备份')).toBeVisible();
+    expect(screen.getByText(/共 1 个备份/)).toBeVisible();
+    expect(screen.getByText(/上次自动备份/)).toBeInTheDocument();
+    expect(screen.getByText(/上次验证通过/)).toBeInTheDocument();
+    expect(screen.getByText('清理恢复点')).toBeVisible();
+    expect(screen.getByText('版本数超限')).toBeVisible();
+
+    await user.click(autoSwitch);
+    expect(await screen.findByText('自动备份已开启')).toBeVisible();
+    expect(saveBackupSettings).toHaveBeenCalledWith(expect.objectContaining({
+      autoBackupEnabled: true,
+      backupRootDirectory: '/Volumes/Backup/闲鱼订单备份',
+      maxVersions: 30,
+    }));
   });
 
   it('设置页确认选择不同数据目录后重载新目录工作区', async () => {

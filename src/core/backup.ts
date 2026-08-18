@@ -44,3 +44,52 @@ export type BackupVerifyOutcome =
 export type BackupRestoreOutcome =
   | { kind: 'canceled' }
   | { kind: 'restored' } & RestoreBackupResult;
+
+export interface BackupSettingsView {
+  autoBackupEnabled: boolean;
+  backupRootDirectory: string | null;
+  maxVersions: number;
+  capacityLimitBytes: number;
+}
+
+export interface SaveBackupSettingsInput extends BackupSettingsView {}
+
+export interface BackupInventoryEntry {
+  backupDirectory: string;
+  createdAt: string | null;
+  appVersion: string | null;
+  bytes: number;
+  files: number;
+}
+
+export type BackupEventKind = 'auto-created' | 'auto-failed' | 'deleted';
+
+export interface BackupEventRecord {
+  at: string;
+  kind: BackupEventKind;
+  backupDirectory?: string;
+  bytes?: number;
+  reason?: string;
+  note?: string;
+  verified?: boolean;
+}
+
+export interface BackupVerificationSummary {
+  at: string;
+  ok: boolean;
+  note?: string;
+}
+
+export interface BackupStatusView {
+  backups: BackupInventoryEntry[];
+  totalBytes: number;
+  capacityLimitBytes: number;
+  overCapacity: boolean;
+  lastAutoBackupAt: string | null;
+  lastVerification: BackupVerificationSummary | null;
+  events: BackupEventRecord[];
+}
+
+export type BackupSelectRootOutcome =
+  | { kind: 'canceled' }
+  | { kind: 'selected'; directory: string };

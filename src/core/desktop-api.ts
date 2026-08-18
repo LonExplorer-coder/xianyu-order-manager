@@ -13,7 +13,11 @@ import type {
 import type {
   BackupCreateOutcome,
   BackupRestoreOutcome,
+  BackupSelectRootOutcome,
+  BackupSettingsView,
+  BackupStatusView,
   BackupVerifyOutcome,
+  SaveBackupSettingsInput,
 } from './backup';
 import type {
   CreateCustomFieldDefinitionInput,
@@ -157,6 +161,10 @@ export interface DesktopApi {
   createBackup(): Promise<BackupCreateOutcome>;
   verifyBackup(): Promise<BackupVerifyOutcome>;
   restoreBackup(): Promise<BackupRestoreOutcome>;
+  getBackupSettings(): Promise<BackupSettingsView>;
+  saveBackupSettings(input: SaveBackupSettingsInput): Promise<BackupSettingsView>;
+  selectBackupRoot(): Promise<BackupSelectRootOutcome>;
+  getBackupStatus(): Promise<BackupStatusView | null>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;

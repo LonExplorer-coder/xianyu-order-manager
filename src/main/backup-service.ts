@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  link,
   mkdir,
   readdir,
   readFile,
@@ -23,8 +24,8 @@ import type {
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
 const MANIFEST_FILENAME = 'manifest.json';
-const BACKUP_FORMAT = 'xianyu-order-backup';
-const BACKUP_FORMAT_VERSION = 1;
+export const BACKUP_FORMAT = 'xianyu-order-backup';
+export const BACKUP_FORMAT_VERSION = 1;
 
 const EXCLUDED_TOP_LEVEL_ENTRIES = new Set([
   DATABASE_FILENAME,
@@ -54,11 +55,29 @@ interface BackupManifest {
   totals: BackupTotals;
 }
 
+export async function readBackupManifest(
+  backupDirectory: string,
+): Promise<BackupManifest | null> {
+  try {
+    const manifest = JSON.parse(
+      await readFile(join(backupDirectory, MANIFEST_FILENAME), 'utf8'),
+    ) as BackupManifest;
+    if (manifest.format !== BACKUP_FORMAT || manifest.formatVersion !== BACKUP_FORMAT_VERSION) {
+      return null;
+    }
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
 export interface CreateBackupInput {
   dataDirectory: string;
   database: DatabaseSync;
   backupRootDirectory: string;
   appVersion: string;
+  /** 指向上一份备份时，校验和一致的文件用硬链接复用存储，失败回退完整拷贝。 */
+  reuseFilesFrom?: string;
   now?: () => Date;
 }
 
@@ -147,6 +166,12 @@ async function uniqueBackupDirectory(
   return candidate;
 }
 
+async function readReusableEntries(previousBackupDirectory: string): Promise<Map<string, string>> {
+  const manifest = await readBackupManifest(previousBackupDirectory);
+  if (!manifest) return new Map();
+  return new Map(manifest.files.map((entry) => [entry.path, entry.sha256]));
+}
+
 export async function createBackup(input: CreateBackupInput): Promise<CreateBackupResult> {
   const dataDirectory = resolve(input.dataDirectory);
   const backupRootDirectory = resolve(input.backupRootDirectory);
@@ -170,6 +195,10 @@ export async function createBackup(input: CreateBackupInput): Promise<CreateBack
     ...(await hashFile(databasePath)),
   };
 
+  const reusable = input.reuseFilesFrom
+    ? await readReusableEntries(resolve(input.reuseFilesFrom))
+    : new Map<string, string>();
+  const reuseSource = input.reuseFilesFrom ? resolve(input.reuseFilesFrom) : null;
   const files: BackupFileEntry[] = [];
   for (const relativePath of await listRelativeFiles(
     dataDirectory,
@@ -180,8 +209,22 @@ export async function createBackup(input: CreateBackupInput): Promise<CreateBack
     const destinationPath = join(backupDirectory, ...relativePath.split('/'));
     await mkdir(dirname(destinationPath), { recursive: true });
     const content = await readFile(sourcePath);
+    const contentSha256 = sha256(content);
+    if (reuseSource && reusable.get(relativePath) === contentSha256) {
+      const previousPath = join(reuseSource, ...relativePath.split('/'));
+      try {
+        // 先核对上一份文件本体未损坏，再复用，避免位腐随硬链接传播。
+        if (sha256(await readFile(previousPath)) === contentSha256) {
+          await link(previousPath, destinationPath);
+          files.push({ path: relativePath, sha256: contentSha256, bytes: content.byteLength });
+          continue;
+        }
+      } catch {
+        // 文件系统不支持硬链接（如部分外接盘）时回退完整拷贝。
+      }
+    }
     await writeFile(destinationPath, content);
-    files.push({ path: relativePath, sha256: sha256(content), bytes: content.byteLength });
+    files.push({ path: relativePath, sha256: contentSha256, bytes: content.byteLength });
   }
 
   const totals: BackupTotals = {

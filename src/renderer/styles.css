@@ -6942,3 +6942,86 @@ select:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 备份与恢复 */
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.backup-auto {
+  display: grid;
+  gap: 1rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-subtle, #e5e7eb);
+}
+
+.backup-auto-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.backup-auto-heading strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.backup-auto-heading p {
+  margin: 0;
+  max-width: 46rem;
+}
+
+.backup-policy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem;
+}
+
+.backup-policy label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+}
+
+.backup-policy input {
+  width: 8rem;
+}
+
+.backup-status {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+  border-radius: 0.6rem;
+  background: var(--surface-muted, #f8fafc);
+}
+
+.backup-status-summary {
+  font-size: 0.875rem;
+}
+
+.backup-over-capacity {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--danger, #b91c1c);
+}
+
+.backup-event-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted, #64748b);
+}
+
+.backup-event-log li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
