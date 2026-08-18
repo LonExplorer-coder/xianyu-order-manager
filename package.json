@@ -1,7 +1,7 @@
 {
   "name": "xianyu-order-manager",
   "productName": "闲鱼订单管理",
-  "version": "0.2.46",
+  "version": "0.2.47",
   "description": "本机优先的闲鱼来源截图识别与订单管理工具",
   "main": ".vite/build/electron-main.js",
   "private": true,

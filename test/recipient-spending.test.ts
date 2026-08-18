@@ -50,53 +50,75 @@ type RecognitionOverrides = Partial<Pick<
 };
 
 describe('收件人累计消费与回购投影', () => {
-  it('回购按平台交易时间回退链排序，动态总额含当前单', async () => {
+  it('回购按购买批次计序，批间回退链排序，动态总额含当前单', async () => {
+    const addressPaid = '广东省深圳市南山区批次一路1号';
+    const addressOrdered = '广东省深圳市南山区批次二路2号';
+    const addressCreated = '广东省深圳市南山区批次三路3号';
     const application = await createApplication([
+      // 批次一（地址一，两单同批）：一笔缺付款时间回退下单时间，定批内最早时间。
       recognition('XY-SPEND-0001', '张三', '13900000001', {
+        amountCents: 2_500,
+        addressOriginal: addressOrdered,
+        addressNormalized: addressOrdered,
+        orderedAtOriginal: '2026-08-02 08:00:00',
+        orderedAtNormalized: '2026-08-02T08:00:00+08:00',
+      }),
+      recognition('XY-SPEND-0002', '张三', '13900000001', {
+        paidAtOriginal: '2026-08-05 08:00:08',
+        paidAtNormalized: '2026-08-05T08:00:08+08:00',
+        amountCents: 600,
+        addressOriginal: addressOrdered,
+        addressNormalized: addressOrdered,
+      }),
+      // 批次二（地址二）：付款、下单都缺，回退入库时间。
+      recognition('XY-SPEND-0003', '张三', '13900000001', {
+        amountCents: 400,
+        addressOriginal: addressCreated,
+        addressNormalized: addressCreated,
+      }),
+      // 批次零（地址三，最早）：有付款时间。
+      recognition('XY-SPEND-0004', '张三', '13900000001', {
         paidAtOriginal: '2026-08-01 08:00:08',
         paidAtNormalized: '2026-08-01T08:00:08+08:00',
         amountCents: 1_000,
+        addressOriginal: addressPaid,
+        addressNormalized: addressPaid,
       }),
-      recognition('XY-SPEND-0002', '张三', '13900000001', {
-        amountCents: 2_500,
-      }),
-      recognition('XY-SPEND-0003', '张三', '13900000001', {
-        amountCents: 400,
-      }),
-      recognition('XY-SPEND-0004', '李四', '13900000002', {
+      recognition('XY-SPEND-0005', '李四', '13900000002', {
         paidAtOriginal: '2026-07-31 08:00:08',
         paidAtNormalized: '2026-07-31T08:00:08+08:00',
         amountCents: 700,
       }),
     ]);
-    const first = findOrder(application, 'XY-SPEND-0001');
-    const second = findOrder(application, 'XY-SPEND-0002');
-    const third = findOrder(application, 'XY-SPEND-0003');
-    const other = findOrder(application, 'XY-SPEND-0004');
-    // 第二笔缺付款时间：回退下单时间；第三笔两者都缺：回退入库时间。
+    const orderedFallback = findOrder(application, 'XY-SPEND-0001');
+    const sameBatch = findOrder(application, 'XY-SPEND-0002');
+    const createdFallback = findOrder(application, 'XY-SPEND-0003');
+    const earliest = findOrder(application, 'XY-SPEND-0004');
+    const other = findOrder(application, 'XY-SPEND-0005');
     const app = backdateAndReopen(application, [
-      [second.id, '2026-08-02T01:00:00.000Z'],
-      [third.id, '2026-08-03T01:00:00.000Z'],
+      [createdFallback.id, '2026-08-03T01:00:00.000Z'],
     ], (database) => {
       database.prepare(`
         UPDATE original_orders
         SET paid_at_original = '', paid_at_normalized = ''
         WHERE id IN (?, ?)
-      `).run(second.id, third.id);
+      `).run(orderedFallback.id, createdFallback.id);
       database.prepare(`
         UPDATE original_orders SET ordered_at_original = '', ordered_at_normalized = ''
         WHERE id = ?
-      `).run(third.id);
+      `).run(createdFallback.id);
     });
 
     const spendingById = workbenchSpending(app);
-    expect(spendingById.get(first.id)?.repurchaseRank).toBe(1);
-    expect(spendingById.get(second.id)?.repurchaseRank).toBe(2);
-    expect(spendingById.get(third.id)?.repurchaseRank).toBe(3);
+    // 批次零（付款 8-01）第 1；批次一（下单 8-02）两单同显第 2；批次二（入库 8-03）第 3。
+    expect(spendingById.get(earliest.id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(orderedFallback.id)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(sameBatch.id)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(createdFallback.id)?.repurchaseRank).toBe(3);
     expect(spendingById.get(other.id)?.repurchaseRank).toBe(1);
-    for (const orderId of [first.id, second.id, third.id]) {
-      expect(spendingById.get(orderId)).toMatchObject({
-        totalSpendCents: 3_900,
+    for (const order of [earliest, orderedFallback, sameBatch, createdFallback]) {
+      expect(spendingById.get(order.id)).toMatchObject({
+        totalSpendCents: 4_500,
         totalRefundCents: 0,
       });
     }
@@ -106,22 +128,24 @@ describe('收件人累计消费与回购投影', () => {
     });
 
     const zhangsan = app.queryRecipientSummaries().find(({ name }) => name === '张三');
-    expect(zhangsan).toMatchObject({ totalSpendCents: 3_900, totalRefundCents: 0 });
-    const details = app.getOrder(third.id);
+    expect(zhangsan).toMatchObject({ totalSpendCents: 4_500, totalRefundCents: 0 });
+    const details = app.getOrder(createdFallback.id);
     expect(details.spending).toMatchObject({
       repurchaseRank: 3,
-      totalSpendCents: 3_900,
+      totalSpendCents: 4_500,
       totalRefundCents: 0,
     });
 
     const repurchaseOnly = app.queryOrders({ repurchase: true }, undefined).orders
       .map((order) => order.id);
-    expect(repurchaseOnly).toHaveLength(2);
-    expect(repurchaseOnly).toEqual(expect.arrayContaining([second.id, third.id]));
+    expect(repurchaseOnly).toHaveLength(3);
+    expect(repurchaseOnly).toEqual(expect.arrayContaining([
+      orderedFallback.id, sameBatch.id, createdFallback.id,
+    ]));
     const firstOnly = app.queryOrders({ repurchase: false }, undefined).orders
       .map((order) => order.id);
-    expect(firstOnly).toEqual(expect.arrayContaining([first.id, other.id]));
-    expect(firstOnly).not.toContain(second.id);
+    expect(firstOnly).toEqual(expect.arrayContaining([earliest.id, other.id]));
+    expect(firstOnly).not.toContain(orderedFallback.id);
   });
 
   it('已取消与整单退款订单不计入消费，整单退款计入退款', async () => {
@@ -180,11 +204,15 @@ describe('收件人累计消费与回购投影', () => {
         paidAtOriginal: '2026-08-01 08:00:08',
         paidAtNormalized: '2026-08-01T08:00:08+08:00',
         amountCents: 1_000,
+        addressOriginal: '广东省深圳市南山区回收一路1号',
+        addressNormalized: '广东省深圳市南山区回收一路1号',
       }),
       recognition('XY-SPEND-T02', '张三', '13900000021', {
         paidAtOriginal: '2026-08-02 08:00:08',
         paidAtNormalized: '2026-08-02T08:00:08+08:00',
         amountCents: 2_000,
+        addressOriginal: '广东省深圳市南山区回收二路2号',
+        addressNormalized: '广东省深圳市南山区回收二路2号',
       }),
     ]);
     const first = findOrder(application, 'XY-SPEND-T01');
@@ -323,20 +351,31 @@ describe('收件人累计消费与回购投影', () => {
     });
   });
 
-  it('同刻并列按系统内部序定序，零金额有效订单计入回购序列', async () => {
+  it('批次同刻并列按发货键定序，零金额有效订单计入批次', async () => {
+    const addressOne = '广东省深圳市南山区并列一路1号';
+    const addressTwo = '广东省深圳市南山区并列二路2号';
     const application = await createApplication([
-      recognition('XY-SPEND-D01', '张三', '13900000071', { amountCents: 0 }),
-      recognition('XY-SPEND-D02', '张三', '13900000071', { amountCents: 1_500 }),
+      recognition('XY-SPEND-D01', '张三', '13900000071', {
+        amountCents: 0,
+        addressOriginal: addressOne,
+        addressNormalized: addressOne,
+      }),
+      recognition('XY-SPEND-D02', '张三', '13900000071', {
+        amountCents: 1_500,
+        addressOriginal: addressTwo,
+        addressNormalized: addressTwo,
+      }),
     ]);
     const zeroAmount = findOrder(application, 'XY-SPEND-D01');
     const other = findOrder(application, 'XY-SPEND-D02');
-    // 两笔付款时间相同（夹具默认值），先后由订单 id 决定。
-    const [earlierId, laterId] = [zeroAmount.id, other.id]
-      .sort((left, right) => left.localeCompare(right));
+    // 两个批次付款时间相同（夹具默认值），先后由发货键（地址）字典序决定。
+    const [earlier, later] = addressOne.localeCompare(addressTwo) < 0
+      ? [zeroAmount, other]
+      : [other, zeroAmount];
 
     const spendingById = workbenchSpending(application);
-    expect(spendingById.get(earlierId)?.repurchaseRank).toBe(1);
-    expect(spendingById.get(laterId)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(earlier.id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(later.id)?.repurchaseRank).toBe(2);
     for (const order of [zeroAmount, other]) {
       expect(spendingById.get(order.id)).toMatchObject({ totalSpendCents: 1_500 });
     }
@@ -389,6 +428,144 @@ describe('收件人累计消费与回购投影', () => {
     expect(workbenchSpending(trashedRefunded).get(order.id)).toMatchObject({
       totalRefundCents: 0,
     });
+  });
+
+  it('同键未发订单同批，建档后新订单开启新批', async () => {
+    const { application, submitRemaining } = await createQueuedApplication([
+      recognition('XY-SPEND-B01', '张三', '13900000091', { amountCents: 1_000 }),
+      recognition('XY-SPEND-B02', '张三', '13900000091', { amountCents: 2_000 }),
+      recognition('XY-SPEND-B03', '张三', '13900000091', { amountCents: 3_000 }),
+      recognition('XY-SPEND-B04', '张三', '13900000091', {
+        amountCents: 500,
+        paidAtOriginal: '2026-08-10 08:00:08',
+        paidAtNormalized: '2026-08-10T08:00:08+08:00',
+      }),
+    ], 3);
+    const first = findOrder(application, 'XY-SPEND-B01');
+    const second = findOrder(application, 'XY-SPEND-B02');
+    const third = findOrder(application, 'XY-SPEND-B03');
+
+    // 未发货：同键未发轮同批，一次买多件的三笔订单都算第一次购买。
+    let spendingById = workbenchSpending(application);
+    expect(spendingById.get(first.id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(second.id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(third.id)?.repurchaseRank).toBe(1);
+
+    confirmShipmentForAll(application);
+    // 建档后批次划分不变。
+    spendingById = workbenchSpending(application);
+    expect(spendingById.get(third.id)?.repurchaseRank).toBe(1);
+
+    // 同键再来一单：进入新的未发轮，成为第二批（回购）。
+    await submitRemaining();
+    const fourth = findOrder(application, 'XY-SPEND-B04');
+    spendingById = workbenchSpending(application);
+    expect(spendingById.get(first.id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(fourth.id)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(fourth.id)).toMatchObject({ totalSpendCents: 6_500 });
+  });
+
+  it('合装档案批次对两个收件人各自计序', async () => {
+    const phone = '13900000101';
+    const address = '广东省深圳市南山区合装一路1号';
+    const otherAddress = '广东省深圳市南山区合装二路2号';
+    const { application, submitRemaining } = await createQueuedApplication([
+      recognition('XY-SPEND-S01', '张三', phone, {
+        amountCents: 800,
+        addressOriginal: address,
+        addressNormalized: address,
+        paidAtOriginal: '2026-08-01 08:00:08',
+        paidAtNormalized: '2026-08-01T08:00:08+08:00',
+      }),
+      recognition('XY-SPEND-S02', '李四', phone, {
+        amountCents: 1_200,
+        addressOriginal: address,
+        addressNormalized: address,
+        paidAtOriginal: '2026-08-01 08:10:08',
+        paidAtNormalized: '2026-08-01T08:10:08+08:00',
+      }),
+      recognition('XY-SPEND-S03', '张三', phone, {
+        amountCents: 300,
+        addressOriginal: address,
+        addressNormalized: address,
+        paidAtOriginal: '2026-08-02 08:00:08',
+        paidAtNormalized: '2026-08-02T08:00:08+08:00',
+      }),
+      recognition('XY-SPEND-S04', '李四', phone, {
+        amountCents: 400,
+        addressOriginal: address,
+        addressNormalized: address,
+        paidAtOriginal: '2026-08-02 08:10:08',
+        paidAtNormalized: '2026-08-02T08:10:08+08:00',
+      }),
+      recognition('XY-SPEND-S05', '张三', phone, {
+        amountCents: 900,
+        addressOriginal: otherAddress,
+        addressNormalized: otherAddress,
+        paidAtOriginal: '2026-08-03 08:00:08',
+        paidAtNormalized: '2026-08-03T08:00:08+08:00',
+      }),
+    ], 2);
+    // 第一轮：张三、李四同键合装，一个发货组档案。
+    confirmShipmentForAll(application);
+    await submitRemaining();
+    // 第二轮：张三、李四再合装发出；张三另一地址的单保持未发。
+    confirmShipmentForAll(application, 'XY-SPEND-S03');
+
+    const spendingById = workbenchSpending(application);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-S01').id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-S02').id)?.repurchaseRank).toBe(1);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-S03').id)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-S04').id)?.repurchaseRank).toBe(2);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-S05').id)?.repurchaseRank).toBe(3);
+    for (const orderNumber of ['XY-SPEND-S01', 'XY-SPEND-S03', 'XY-SPEND-S05']) {
+      expect(spendingById.get(findOrder(application, orderNumber).id)).toMatchObject({
+        totalSpendCents: 2_000,
+      });
+    }
+    for (const orderNumber of ['XY-SPEND-S02', 'XY-SPEND-S04']) {
+      expect(spendingById.get(findOrder(application, orderNumber).id)).toMatchObject({
+        totalSpendCents: 1_600,
+      });
+    }
+  });
+
+  it('合装批次的时间取批内全局最早订单，不按收件人各自聚合', async () => {
+    const phone = '13900000111';
+    const addressA = '广东省深圳市南山区全局一路1号';
+    const addressB = '广东省深圳市南山区全局二路2号';
+    const { application } = await createQueuedApplication([
+      // 张三 8-01 与李四 8-05 同键合装成一批：批次时间应取全局最早的 8-01。
+      recognition('XY-SPEND-G01', '张三', phone, {
+        amountCents: 800,
+        addressOriginal: addressA,
+        addressNormalized: addressA,
+        paidAtOriginal: '2026-08-01 08:00:08',
+        paidAtNormalized: '2026-08-01T08:00:08+08:00',
+      }),
+      recognition('XY-SPEND-G02', '李四', phone, {
+        amountCents: 1_200,
+        addressOriginal: addressA,
+        addressNormalized: addressA,
+        paidAtOriginal: '2026-08-05 08:00:08',
+        paidAtNormalized: '2026-08-05T08:00:08+08:00',
+      }),
+      // 李四自己另一地址的单 8-03：若按收件人各自聚合，合装批（8-05）会排它之后。
+      recognition('XY-SPEND-G03', '李四', phone, {
+        amountCents: 300,
+        addressOriginal: addressB,
+        addressNormalized: addressB,
+        paidAtOriginal: '2026-08-03 08:00:08',
+        paidAtNormalized: '2026-08-03T08:00:08+08:00',
+      }),
+    ], 3);
+    confirmShipmentForAll(application, 'XY-SPEND-G01');
+
+    const spendingById = workbenchSpending(application);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-G02').id)?.repurchaseRank)
+      .toBe(1);
+    expect(spendingById.get(findOrder(application, 'XY-SPEND-G03').id)?.repurchaseRank)
+      .toBe(2);
   });
 
   it('收件信息不完整的订单不参与统计', async () => {
@@ -450,20 +627,33 @@ function findOrder(application: LocalApplication, orderNumber: string): Original
 }
 
 async function createApplication(results: RecognitionResult[]) {
+  return (await createQueuedApplication(results, results.length)).application;
+}
+
+async function createQueuedApplication(
+  results: RecognitionResult[],
+  submitCount: number,
+): Promise<{
+  application: LocalApplication;
+  submitRemaining: () => Promise<void>;
+}> {
   const root = await mkdtemp(join(tmpdir(), 'xianyu-recipient-spending-'));
-  const dataDirectory = join(root, '数据');
   const application = new LocalApplication(new SequenceRecognizer([...results]));
   openedApplications.push(application);
-  application.openDataDirectory(dataDirectory);
-  const sourcePaths: string[] = [];
-  for (const [index] of results.entries()) {
-    const sourcePath = join(root, `订单-${index + 1}.png`);
-    await writeFile(sourcePath, Buffer.from(`recipient-spending-${index + 1}`));
-    sourcePaths.push(sourcePath);
-  }
-  const drafts = (await application.submitRecognitionBatch(sourcePaths)).drafts;
-  for (const draft of drafts) application.confirmDraft(draft);
-  return application;
+  application.openDataDirectory(join(root, '数据'));
+  const submitRange = async (from: number, to: number) => {
+    for (let index = from; index < to; index += 1) {
+      const sourcePath = join(root, `订单-${index + 1}.png`);
+      await writeFile(sourcePath, Buffer.from(`recipient-spending-${index + 1}`));
+      const batch = await application.submitRecognitionBatch([sourcePath]);
+      for (const draft of batch.drafts) application.confirmDraft(draft);
+    }
+  };
+  await submitRange(0, submitCount);
+  return {
+    application,
+    submitRemaining: () => submitRange(submitCount, results.length),
+  };
 }
 
 function backdateAndReopen(
@@ -598,8 +788,12 @@ async function openShippedMergedApplication() {
   return { application, ...confirmShipmentForAll(application) };
 }
 
-function confirmShipmentForAll(application: LocalApplication) {
-  const group = application.queryShipmentGroups().groups[0];
+function confirmShipmentForAll(application: LocalApplication, memberOrderNumber?: string) {
+  const groups = application.queryShipmentGroups().groups;
+  const group = memberOrderNumber === undefined
+    ? groups[0]
+    : groups.find(({ orders }) => orders.some((order) => order.orderNumber === memberOrderNumber));
+  if (!group) throw new Error(`测试发货组不存在：${memberOrderNumber ?? '首个'}`);
   const allItems = group.orders.flatMap((order) => order.items.map((item) => ({
     orderId: order.id,
     orderItemId: item.id,

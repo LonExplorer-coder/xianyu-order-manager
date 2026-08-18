@@ -1468,6 +1468,8 @@ describe('回购与累计消费导出', () => {
         orderNumber: 'XY-REPURCHASE-002',
         paidAtOriginal: '2026-07-29 09:31:00',
         paidAtNormalized: '2026-07-29T09:31:00+08:00',
+        addressOriginal: '上海市浦东新区批次二路2号',
+        addressNormalized: '上海市浦东新区批次二路2号',
       }),
     ]);
     const ordersByNumber = new Map(

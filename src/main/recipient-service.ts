@@ -5,6 +5,7 @@ import {
   shanghaiMonthKey,
   shanghaiYYMM,
 } from '../core/readable-order-numbers';
+import { parseStoredShipmentArchiveOrderIds } from '../core/shipment-archive-storage';
 import type { OrderSpendingView, RecipientSummaryView } from '../core/recipients';
 import { Workspace } from './workspace';
 
@@ -65,11 +66,12 @@ export class RecipientService {
   }
 
   /**
-   * 收件人累计消费、累计退款与回购序号的只读投影。
-   * 有效订单 = 平台交易状态为已付款或未知且生命周期正常；先后按付款时间、
-   * 下单时间、入库时间回退链排序。退款 = 售后实退资金按受影响订单商品小计
-   * 分摊（回收站、永久删除或无法归属的订单份额不计入），加未走售后登记的
-   * 正常整单退款订单按实付金额推断，同一订单不重复计。
+   * 收件人累计消费、累计退款与回购批次的只读投影。
+   * 有效订单 = 平台交易状态为已付款或未知且生命周期正常。回购按购买批次计：
+   * 已进入发货组档案的订单以档案为批次，未入档订单按发货匹配键归入当前未发轮；
+   * 批次按批内最早有效订单时间（付款→下单→入库回退链）排序。退款 = 售后实退
+   * 资金按受影响订单商品小计分摊（回收站、永久删除或无法归属的订单份额不计入），
+   * 加未走售后登记的正常整单退款订单按实付金额推断，同一订单不重复计。
    */
   public spendingProjection(): {
     byOrderId: ReadonlyMap<string, OrderSpendingView>;
@@ -77,8 +79,9 @@ export class RecipientService {
   } {
     const { byId, byPair } = this.recipientIndexes();
     const orderRows = this.workspace.database.prepare(`
-      SELECT id, recipient, phone_normalized, platform_transaction_status,
-        lifecycle_status, amount_cents, paid_at_normalized, ordered_at_normalized, created_at
+      SELECT id, recipient, phone_normalized, address_normalized,
+        platform_transaction_status, lifecycle_status, amount_cents,
+        paid_at_normalized, ordered_at_normalized, created_at
       FROM original_orders
     `).all() as unknown as SqlRow[];
 
@@ -89,6 +92,8 @@ export class RecipientService {
       amountCents: number;
       platformTransactionStatus: string;
       lifecycleStatus: string;
+      phoneNormalized: string;
+      addressNormalized: string;
       rankMillis: number;
     };
     const ordersByRecipient = new Map<string, SpendingOrder[]>();
@@ -114,6 +119,8 @@ export class RecipientService {
         amountCents: Number(row.amount_cents),
         platformTransactionStatus: status,
         lifecycleStatus: lifecycle,
+        phoneNormalized: phone,
+        addressNormalized: asString(row.address_normalized),
         // 平台交易时间带 +08:00、入库时间是 UTC ISO，字符串不可直接比较，统一换成纪元毫秒。
         rankMillis: Date.parse(paidAt || orderedAt || asString(row.created_at)) || 0,
       };
@@ -123,18 +130,62 @@ export class RecipientService {
       ordersByRecipient.set(finalRecipientId, group);
     }
 
+    // 购买批次：已入发货组档案的订单以档案为批次（重叠档案取最早建档），
+    // 未入档订单按发货匹配键归入当前未发轮。
+    const archiveIdByOrderId = new Map<string, string>();
+    const archiveRows = this.workspace.database.prepare(`
+      SELECT id, member_order_ids_json
+      FROM shipment_group_archives
+      ORDER BY created_at, id
+    `).all() as unknown as SqlRow[];
+    for (const archiveRow of archiveRows) {
+      const archiveId = asString(archiveRow.id);
+      for (const orderId of parseStoredShipmentArchiveOrderIds(
+        asString(archiveRow.member_order_ids_json),
+        '数据库发货组档案成员订单格式错误',
+      )) {
+        if (!archiveIdByOrderId.has(orderId)) archiveIdByOrderId.set(orderId, archiveId);
+      }
+    }
+    const batchKeyByOrderId = new Map<string, string>();
+    for (const [orderId, order] of orderById) {
+      batchKeyByOrderId.set(
+        orderId,
+        archiveIdByOrderId.get(orderId)
+          ?? `open|${order.phoneNormalized}|${order.addressNormalized}`,
+      );
+    }
+    // 批次时间取批内全部有效订单（可跨收件人合装）的最早回退链时间。
+    const batchEarliestMillis = new Map<string, number>();
+    for (const order of orderById.values()) {
+      if (!order.valid) continue;
+      const batchKey = batchKeyByOrderId.get(order.id) as string;
+      const earliest = batchEarliestMillis.get(batchKey);
+      if (earliest === undefined || order.rankMillis < earliest) {
+        batchEarliestMillis.set(batchKey, order.rankMillis);
+      }
+    }
+
     const totalSpendByRecipient = new Map<string, number>();
     const rankByOrderId = new Map<string, number>();
     for (const [recipientId, orders] of ordersByRecipient) {
-      const validOrders = orders
-        .filter((order) => order.valid)
-        .sort((left, right) => left.rankMillis - right.rankMillis
-          || left.id.localeCompare(right.id));
-      validOrders.forEach((order, index) => rankByOrderId.set(order.id, index + 1));
+      const validOrders = orders.filter((order) => order.valid);
       totalSpendByRecipient.set(
         recipientId,
         validOrders.reduce((total, order) => total + order.amountCents, 0),
       );
+      const batchKeys = [...new Set(
+        validOrders.map((order) => batchKeyByOrderId.get(order.id) as string),
+      )];
+      batchKeys.sort((left, right) => (
+        (batchEarliestMillis.get(left) ?? 0) - (batchEarliestMillis.get(right) ?? 0)
+          || left.localeCompare(right)
+      ));
+      const batchRankByKey = new Map(batchKeys.map((key, index) => [key, index + 1]));
+      for (const order of validOrders) {
+        const rank = batchRankByKey.get(batchKeyByOrderId.get(order.id) as string);
+        if (rank !== undefined) rankByOrderId.set(order.id, rank);
+      }
     }
 
     const totalRefundByRecipient = new Map<string, number>();
