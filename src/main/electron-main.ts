@@ -279,7 +279,8 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
         ? settings.restoreTargetDirectory
           ?? join(app.getPath('documents'), '闲鱼订单数据-恢复')
         : backupPickerDefaultPath(settings),
-      properties: creatableDirectoryProperties(),
+      // 浏览语义是选择已存在位置；带创建提示会在 Windows 上弹出误导性的建目录确认框。
+      properties: ['openDirectory'],
     });
     if (selection.canceled || selection.filePaths.length === 0) {
       return { kind: 'canceled' };

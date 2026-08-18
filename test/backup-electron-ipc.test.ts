@@ -355,6 +355,10 @@ describe('自动备份设置 Electron IPC', () => {
 
     const selected = await invoke('backup:select-root');
     expect(selected).toEqual({ kind: 'selected', directory: '/Volumes/Backup/闲鱼订单备份' });
+    // 浏览只选已存在位置，不携带新建目录提示（Windows 上会弹误导性确认框）。
+    expect(electronBoundary.showOpenDialog.mock.calls[0][1]).toMatchObject({
+      properties: ['openDirectory'],
+    });
 
     electronBoundary.showOpenDialog.mockResolvedValue(directorySelection(null));
     const canceled = await invoke('backup:select-root');
