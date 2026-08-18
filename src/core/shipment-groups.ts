@@ -56,6 +56,8 @@ export type ShipmentGroupOrder = {
   addressOriginal: string;
   addressNormalized: string;
   amountCents: number;
+  /** 该订单所属购买批次在其收件人批次序列中的 1 基序号；非有效订单或未归属收件人为 null（主进程注入）。 */
+  repurchaseRank: number | null;
   items: ShipmentGroupOrderItem[];
 };
 
@@ -441,6 +443,7 @@ function openShipmentGroup(
       addressOriginal: order.addressOriginal,
       addressNormalized: order.addressNormalized,
       amountCents: order.amountCents,
+      repurchaseRank: null,
       items: order.items.map((item) => ({
         id: item.id,
         sourceTitle: item.sourceTitle,

@@ -62,6 +62,7 @@ function group(input: {
       orderNumber: input.orderNumber,
       sellerAccount: '主账号',
       buyerNickname: '买家',
+      repurchaseRank: null,
       recipient: input.recipient,
       phone: '13800000001',
       phoneNormalized: '13800000001',

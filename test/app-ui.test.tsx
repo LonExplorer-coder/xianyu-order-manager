@@ -347,6 +347,7 @@ function singleShipmentGroupProjection(
         addressOriginal: order.addressOriginal,
         addressNormalized: order.addressNormalized,
         amountCents: order.amountCents,
+        repurchaseRank: null,
         items: order.items.map((item) => ({
           id: item.id,
           sourceTitle: item.sourceTitle,
@@ -771,6 +772,7 @@ describe('订单管理工作台', () => {
             addressOriginal: '广东省深圳市南山区测试路1号',
             addressNormalized: '广东省深圳市南山区测试路1号',
             amountCents: 800,
+            repurchaseRank: null,
             items: [{
               id: 'item-1',
               sourceTitle: '脱敏测试商品',
@@ -791,6 +793,7 @@ describe('订单管理工作台', () => {
             addressOriginal: '广东省深圳市南山区测试路1号',
             addressNormalized: '广东省深圳市南山区测试路1号',
             amountCents: 1_600,
+            repurchaseRank: null,
             items: [{
               id: 'item-2',
               sourceTitle: '脱敏测试商品',
@@ -4456,6 +4459,63 @@ describe('订单管理工作台', () => {
       'aria-current',
       'page',
     );
+  });
+
+  it('发货组待发表展示购买批次并在合装组标注成员各自批次', async () => {
+    const user = userEvent.setup();
+    const single = singleShipmentGroupProjection().groups[0];
+    const repeatGroup: typeof single = {
+      ...single,
+      id: 'shipment-group-repeat00000000000',
+      orders: single.orders.map((order) => ({ ...order, repurchaseRank: 3 })),
+    };
+    const zhangsanOrder = {
+      ...single.orders[0],
+      id: 'order-batch-zhangsan',
+      orderNumber: 'XY-BATCH-0001',
+      recipient: '张三',
+      repurchaseRank: 2,
+    };
+    const lisiOrder = {
+      ...single.orders[0],
+      id: 'order-batch-lisi',
+      orderNumber: 'XY-BATCH-0002',
+      recipient: '李四',
+      repurchaseRank: 1,
+    };
+    const mergedGroup: typeof single = {
+      ...single,
+      id: 'shipment-group-merged00000000000',
+      recipient: '张三',
+      recipients: ['张三', '李四'],
+      recipientConflict: true,
+      orderCount: 2,
+      orders: [zhangsanOrder, lisiOrder],
+    };
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [orderSummary()],
+      }),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      queryShipmentGroups: vi.fn().mockResolvedValue({
+        groups: [repeatGroup, mergedGroup],
+        attentionOrders: [],
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '发货组' }));
+
+    // 单一收件人组：购买批次列直接显示组级标记，成员单号旁不重复标注。
+    expect(screen.getByText('回购（第 3 次购买）')).toBeVisible();
+    expect(screen.queryByText('回购（第 3 次购买）', { selector: 'small' })).toBeNull();
+    // 合装组：组级去重并列标记 + 成员单号旁各自批次。
+    expect(screen.getByText('首次购买 · 回购（第 2 次购买）')).toBeVisible();
+    expect(screen.getByText('回购（第 2 次购买）', { selector: 'small' })).toBeVisible();
+    expect(screen.getByText('首次购买', { selector: 'small' })).toBeVisible();
   });
 
   it('订单当前值变化后自动刷新正在查看的发货组', async () => {

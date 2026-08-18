@@ -132,6 +132,7 @@ import {
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
   projectShipmentGroupTableCell,
+  purchaseBatchLabel,
   tableTemplateCustomFieldDefinitionIds,
   TABLE_TEMPLATE_GRANULARITIES,
   type AvailableTableField,
@@ -2427,16 +2428,23 @@ function ShipmentGroupsWorkspace({
                           && column.field.key === 'member_order_numbers' ? (
                             <span className="shipment-group-orders">
                               {group.orders.map((order) => (
-                                <button
-                                  className="order-link"
-                                  type="button"
-                                  key={order.id}
-                                  aria-label={`查看原始订单 ${order.orderNumber}`}
-                                  onClick={() => onOpenOrder(order.id)}
-                                  disabled={openingOrder}
-                                >
-                                  {order.orderNumber}
-                                </button>
+                                <span className="shipment-group-order" key={order.id}>
+                                  <button
+                                    className="order-link"
+                                    type="button"
+                                    aria-label={`查看原始订单 ${order.orderNumber}`}
+                                    onClick={() => onOpenOrder(order.id)}
+                                    disabled={openingOrder}
+                                  >
+                                    {order.orderNumber}
+                                  </button>
+                                  {(group.recipients.length > 1
+                                    || new Set(group.orders.map((member) => (
+                                      member.repurchaseRank
+                                    ))).size > 1) && (
+                                    <small>{repurchaseStatusLabel(order.repurchaseRank)}</small>
+                                  )}
+                                </span>
                               ))}
                             </span>
                           ) : column.field.kind === 'builtin'
@@ -11565,7 +11573,7 @@ function formatMoney(cents: number | null): string {
 
 function repurchaseStatusLabel(rank: number | null): string {
   if (rank === null) return '不适用';
-  return rank === 1 ? '首次购买' : `回购（第 ${rank} 次购买）`;
+  return purchaseBatchLabel(rank);
 }
 
 function shipmentExceptionEventDescription(

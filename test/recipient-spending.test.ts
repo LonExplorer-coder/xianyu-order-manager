@@ -450,6 +450,9 @@ describe('收件人累计消费与回购投影', () => {
     expect(spendingById.get(first.id)?.repurchaseRank).toBe(1);
     expect(spendingById.get(second.id)?.repurchaseRank).toBe(1);
     expect(spendingById.get(third.id)?.repurchaseRank).toBe(1);
+    expect(application.queryShipmentGroups().groups[0].orders.map((order) => (
+      order.repurchaseRank
+    ))).toEqual([1, 1, 1]);
 
     confirmShipmentForAll(application);
     // 建档后批次划分不变。
@@ -463,6 +466,9 @@ describe('收件人累计消费与回购投影', () => {
     expect(spendingById.get(first.id)?.repurchaseRank).toBe(1);
     expect(spendingById.get(fourth.id)?.repurchaseRank).toBe(2);
     expect(spendingById.get(fourth.id)).toMatchObject({ totalSpendCents: 6_500 });
+    expect(application.queryShipmentGroups().groups[0].orders.map((order) => (
+      order.repurchaseRank
+    ))).toEqual([2]);
   });
 
   it('合装档案批次对两个收件人各自计序', async () => {

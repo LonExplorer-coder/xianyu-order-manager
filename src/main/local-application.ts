@@ -5062,7 +5062,7 @@ export class LocalApplication {
         selectedRecipientOrder,
       }];
     });
-    return buildShipmentGroupProjection(orders, (matchKey, groupOrders) => (
+    const projection = buildShipmentGroupProjection(orders, (matchKey, groupOrders) => (
       `shipment-group-${createHash('sha256')
         .update(JSON.stringify([
           shipmentMatchKeyIdentity(matchKey),
@@ -5076,6 +5076,18 @@ export class LocalApplication {
         .digest('hex')
         .slice(0, 24)}`
     ), manualGroups);
+    const repurchaseRankByOrderId = this.recipientService()
+      .spendingProjection().byOrderId;
+    return {
+      ...projection,
+      groups: projection.groups.map((group) => ({
+        ...group,
+        orders: group.orders.map((order) => ({
+          ...order,
+          repurchaseRank: repurchaseRankByOrderId.get(order.id)?.repurchaseRank ?? null,
+        })),
+      })),
+    };
   }
 
   public queryShipmentGroupWorkbench(

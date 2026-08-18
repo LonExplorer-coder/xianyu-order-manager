@@ -1271,6 +1271,16 @@ select:focus-visible {
   max-width: 240px;
 }
 
+.shipment-group-order {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.shipment-group-order small {
+  color: var(--navy-500);
+}
+
 .shipment-groups-table-frame .order-product-summary {
   gap: 8px;
 }

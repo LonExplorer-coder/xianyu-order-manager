@@ -81,6 +81,7 @@ export type ShipmentGroupBuiltinTableFieldId =
   | 'phone'
   | 'address'
   | 'member_order_numbers'
+  | 'purchase_batch'
   | 'product_summary';
 
 export type BuiltinTableFieldId =
@@ -173,6 +174,7 @@ export const DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS: TableTemplateColumn[] = [
   { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
   { field: { kind: 'builtin', key: 'address' }, displayName: '最终收货地址' },
   { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '成员订单号' },
+  { field: { kind: 'builtin', key: 'purchase_batch' }, displayName: '购买批次' },
   { field: { kind: 'builtin', key: 'product_summary' }, displayName: '商品汇总' },
   {
     field: { kind: 'computed', key: 'shipment_group_order_count' },
@@ -354,6 +356,7 @@ const SHIPMENT_GROUP_BUILTIN_FIELDS = [
   fixedField('shipment_group', 'builtin', 'phone', '手机号', 'text'),
   fixedField('shipment_group', 'builtin', 'address', '最终收货地址', 'text'),
   fixedField('shipment_group', 'builtin', 'member_order_numbers', '成员订单号', 'text'),
+  fixedField('shipment_group', 'builtin', 'purchase_batch', '购买批次', 'text'),
   fixedField('shipment_group', 'builtin', 'product_summary', '商品汇总', 'text'),
 ] as const satisfies readonly FixedTableField[];
 
@@ -705,7 +708,7 @@ export function projectOrderTableCell(
     case 'repurchase': {
       const rank = order.spending?.repurchaseRank;
       if (rank === undefined || rank === null) return null;
-      return rank === 1 ? '首次购买' : `回购（第 ${rank} 次购买）`;
+      return purchaseBatchLabel(rank);
     }
     case 'recipient_total_spend': return order.spending?.totalSpendCents ?? null;
     case 'recipient_total_refund': return order.spending?.totalRefundCents ?? null;
@@ -725,6 +728,11 @@ export function projectOrderTableCell(
     case 'created_at': return order.createdAt;
     default: return null;
   }
+}
+
+/** 购买批次序号的统一展示文案；渲染端与导出共用，保持口径一致。 */
+export function purchaseBatchLabel(rank: number): string {
+  return rank === 1 ? '首次购买' : `回购（第 ${rank} 次购买）`;
 }
 
 export function projectShipmentGroupTableCell(
@@ -751,6 +759,15 @@ export function projectShipmentGroupTableCell(
     case 'phone': return group.phone;
     case 'address': return group.addressOriginal;
     case 'member_order_numbers': return group.orders.map(({ orderNumber }) => orderNumber).join('；');
+    case 'purchase_batch': {
+      const ranks = [...new Set(
+        group.orders
+          .map((order) => order.repurchaseRank)
+          .filter((rank): rank is number => rank !== null),
+      )].sort((left, right) => left - right);
+      if (ranks.length === 0) return null;
+      return ranks.map((rank) => purchaseBatchLabel(rank)).join(' · ');
+    }
     case 'product_summary': return group.items.map((item) => (
       `${item.title}${item.specification ? ` · ${item.specification}` : ''} ×${item.quantity}`
     )).join('；');

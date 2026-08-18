@@ -11,6 +11,7 @@ import {
   availableTableFields,
   createOrderTableProjectionPlan,
   createCustomFieldValueIndex,
+  DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS,
   fieldReferenceKey,
   isDynamicProductTableGroup,
   normalizeCreateTableTemplateInput,
@@ -18,9 +19,11 @@ import {
   projectOrderItemTableCell,
   projectOrderTableProjectionRow,
   projectOrderTableCell,
+  projectShipmentGroupTableCell,
   tableTemplateNameKey,
   type TableTemplateColumn,
 } from '../src/core/table-templates';
+import type { OpenShipmentGroup } from '../src/core/shipment-groups';
 
 const orderField: CustomFieldDefinition = {
   id: 'field-order-note',
@@ -843,6 +846,37 @@ describe('表格模板核心契约', () => {
     expect(index.get('order-1')?.get(orderField.id)).toBe(selectedOrderValue);
   });
 
+  it('发货组购买批次字段按成员去重并列并进入字段目录', () => {
+    const group = shipmentGroupForBatch([
+      { id: 'order-a', orderNumber: 'XY-G1', repurchaseRank: 2 },
+      { id: 'order-b', orderNumber: 'XY-G2', repurchaseRank: 2 },
+      { id: 'order-c', orderNumber: 'XY-G3', repurchaseRank: 1 },
+      { id: 'order-d', orderNumber: 'XY-G4', repurchaseRank: null },
+    ]);
+    expect(projectShipmentGroupTableCell(group, { kind: 'builtin', key: 'purchase_batch' }))
+      .toBe('首次购买 · 回购（第 2 次购买）');
+    const single = shipmentGroupForBatch([
+      { id: 'order-e', orderNumber: 'XY-G5', repurchaseRank: 1 },
+    ]);
+    expect(projectShipmentGroupTableCell(single, { kind: 'builtin', key: 'purchase_batch' }))
+      .toBe('首次购买');
+    const none = shipmentGroupForBatch([
+      { id: 'order-f', orderNumber: 'XY-G6', repurchaseRank: null },
+    ]);
+    expect(projectShipmentGroupTableCell(none, { kind: 'builtin', key: 'purchase_batch' }))
+      .toBeNull();
+
+    expect(availableTableFields('shipment_group', definitions)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reference: { kind: 'builtin', key: 'purchase_batch' },
+        valueType: 'text',
+      }),
+    ]));
+    expect(DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS).toEqual(expect.arrayContaining([
+      { field: { kind: 'builtin', key: 'purchase_batch' }, displayName: '购买批次' },
+    ]));
+  });
+
   it('模板名称唯一键统一全角、空白和大小写', () => {
     expect(tableTemplateNameKey(' ＤＡＩＬＹ ')).toBe('daily');
     expect(tableTemplateNameKey('Daily')).toBe(tableTemplateNameKey(' daily '));
@@ -905,3 +939,38 @@ describe('表格模板核心契约', () => {
     }, definitions)).toThrow('回购筛选格式错误');
   });
 });
+
+function shipmentGroupForBatch(
+  orders: Array<{ id: string; orderNumber: string; repurchaseRank: number | null }>,
+): OpenShipmentGroup {
+  return {
+    id: 'shipment-group-batch000000000000',
+    formation: 'automatic',
+    selectedRecipientOrderId: null,
+    recipient: '张三',
+    phone: '13800000001',
+    phoneNormalized: '13800000001',
+    addressOriginal: '广东省深圳市南山区批次路1号',
+    addressNormalized: '广东省深圳市南山区批次路1号',
+    recipients: ['张三'],
+    recipientConflict: false,
+    orderCount: orders.length,
+    totalQuantity: orders.length,
+    totalAmountCents: orders.length * 1_000,
+    orders: orders.map((order) => ({
+      id: order.id,
+      orderNumber: order.orderNumber,
+      sellerAccount: '主账号',
+      buyerNickname: '买家',
+      recipient: '张三',
+      phone: '13800000001',
+      phoneNormalized: '13800000001',
+      addressOriginal: '广东省深圳市南山区批次路1号',
+      addressNormalized: '广东省深圳市南山区批次路1号',
+      amountCents: 1_000,
+      repurchaseRank: order.repurchaseRank,
+      items: [],
+    })),
+    items: [],
+  };
+}
