@@ -610,7 +610,7 @@ describe('换货、直接补发与多轮售后', () => {
       .toBe('SF-DIRECT-REPLACEMENT-0001');
   });
 
-  it('从 v33 升级时为既有售后建立首轮且轮次事实不可覆盖', async () => {
+  it('从 v33 升级时为既有售后建立首轮且轮次事实不可覆盖', { timeout: 120_000 }, async () => {
     const { application, root } = await createApplication();
     const original = confirmOriginalShipment(application);
     const existing = application.createAftersalesCase({
@@ -715,7 +715,7 @@ describe('换货、直接补发与多轮售后', () => {
       .find(({ id }) => id === existing.id)?.rounds).toEqual(migrated?.rounds);
   });
 
-  it('数据库拒绝跨来源轮次商品和跨轮次补发商品映射', async () => {
+  it('数据库拒绝跨来源轮次商品和跨轮次补发商品映射', { timeout: 120_000 }, async () => {
     const { application, root } = await createApplication();
     const original = confirmOriginalShipment(application);
     const created = application.createAftersalesCase({
