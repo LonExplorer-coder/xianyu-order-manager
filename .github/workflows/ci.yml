@@ -13,7 +13,9 @@ jobs:
   verify:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows 单 worker 全量检查（含打包）实测约 23 分钟：测试本体 ~17.5 分钟，
+    # 预算需覆盖已知的运行器 I/O 争抢波动，20 分钟已被顶爆（见 9fa0d41 首跑）。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
