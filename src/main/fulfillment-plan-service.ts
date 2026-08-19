@@ -21,6 +21,7 @@ import {
   type FulfillmentPlanView,
   type GroupFormationBasis,
 } from '../core/fulfillment-plans';
+import { InventoryLedgerService } from './inventory-ledger-service';
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { Workspace } from './workspace';
 
@@ -206,6 +207,20 @@ export class FulfillmentPlanService {
       ))) {
         throw new Error('已取消或退款的订单不能释放，请先将其退出计划');
       }
+      // 预留即占用：释放前核对可用现货（可销售 − 已预留，未释放成员不占预留）。
+      // 不足默认拒绝、可勾选知悉风险强制放行；已超卖（可用为负）时硬拦不放行，
+      // 补货前不新增任何占用（ADR 0041）。
+      const gate = this.stockShortageForRelease(releasingIds);
+      if (gate.oversold.length > 0) {
+        throw new Error(
+          `已超卖：${gate.oversold.join('、')}；补货前不能释放，超卖状态下不能强制释放`,
+        );
+      }
+      if (gate.shortage.length > 0 && !prepared.acknowledgeStockShortageRisk) {
+        throw new Error(
+          `可用现货不足：${gate.shortage.join('、')}；可补货或到货后释放，或勾选知悉缺货风险强制释放`,
+        );
+      }
       const nextStatus = fulfillmentPlanStatusAfterRelease(
         activeMembers.length,
         releasingIds.length,
@@ -226,6 +241,9 @@ export class FulfillmentPlanService {
         prepared.reason,
         releasingIds,
         now,
+        null,
+        null,
+        gate.shortage.length > 0,
       );
       this.bumpRevision(prepared.planId, now);
     });
@@ -377,6 +395,7 @@ export class FulfillmentPlanService {
       reason: asString(row.reason),
       orderIds: parseStoredOrderIds(asString(row.payload_json)),
       basis: parseStoredFormationBasis(asString(row.payload_json)),
+      stockShortageAcknowledged: parseStoredStockShortageFlag(asString(row.payload_json)),
       occurredAt: asString(row.occurred_at),
       createdAt: asString(row.created_at),
     }));
@@ -470,6 +489,66 @@ export class FulfillmentPlanService {
     `).get(planId, orderId) as SqlRow | undefined;
   }
 
+  // 返回本次释放的核对结果：shortage 为可用现货不足的商品（可强制放行），
+  // oversold 为已超卖的商品（硬拦）；两者皆空表示可用现货足以覆盖本次释放。
+  private stockShortageForRelease(releasingOrderIds: readonly string[]): {
+    shortage: string[];
+    oversold: string[];
+  } {
+    if (releasingOrderIds.length === 0) return { shortage: [], oversold: [] };
+    const ledger = new InventoryLedgerService(this.workspace);
+    const stock = ledger.stockQuantitiesByProduct();
+    const reserved = ledger.reservedQuantitiesByProduct();
+    const availableByProduct = new Map<string, number>();
+    for (const [productId, quantities] of stock) {
+      availableByProduct.set(
+        productId,
+        quantities.sellable - (reserved.get(productId) ?? 0),
+      );
+    }
+    const placeholders = releasingOrderIds.map(() => '?').join(', ');
+    const itemRows = this.workspace.database.prepare(`
+      SELECT oi.standard_product_id AS product_id, oi.id AS item_id, oi.quantity,
+        p.sku, p.name, p.specification
+      FROM order_items oi
+      JOIN standard_products p ON p.id = oi.standard_product_id
+      WHERE oi.order_id IN (${placeholders})
+    `).all(...releasingOrderIds) as unknown as SqlRow[];
+    const refundRows = this.workspace.database.prepare(`
+      SELECT order_item_id, SUM(quantity) AS refunded
+      FROM fulfillment_refund_events
+      GROUP BY order_item_id
+    `).all() as unknown as Array<{ order_item_id: string; refunded: number }>;
+    const refundedByItem = new Map(refundRows.map((row) => [
+      row.order_item_id,
+      Number(row.refunded),
+    ]));
+    const demandByProduct = new Map<string, number>();
+    for (const row of itemRows) {
+      const productId = asString(row.product_id);
+      const net = Number(row.quantity) - (refundedByItem.get(asString(row.item_id)) ?? 0);
+      if (net <= 0) continue;
+      demandByProduct.set(productId, (demandByProduct.get(productId) ?? 0) + net);
+    }
+    const shortage: string[] = [];
+    const oversold: string[] = [];
+    for (const [productId, demand] of demandByProduct) {
+      const available = availableByProduct.get(productId) ?? 0;
+      if (demand <= available) continue;
+      const item = itemRows.find((row) => asString(row.product_id) === productId)!;
+      const spec = asString(item.specification);
+      const label = `${asString(item.name)}（${spec}）`;
+      if (available < 0) {
+        oversold.push(
+          `${label}待发货占用已超过可销售 ${-available} 件（本次释放还需补货 ${demand - available} 件）`,
+        );
+        continue;
+      }
+      shortage.push(`${label}还差 ${demand - available} 件`);
+    }
+    return { shortage, oversold };
+  }
+
   private activeMemberRows(planId: string): SqlRow[] {
     return this.workspace.database.prepare(`
       SELECT members.id, members.order_id, orders.platform_transaction_status
@@ -547,10 +626,12 @@ export class FulfillmentPlanService {
     now: string,
     basis: GroupFormationBasis | null = null,
     activeItemQuantity: number | null = null,
+    stockShortageAcknowledged = false,
   ): void {
     const payload: Record<string, unknown> = { orderIds: [...orderIds] };
     if (basis !== null) payload.basis = basis;
     if (activeItemQuantity !== null) payload.activeItemQuantity = activeItemQuantity;
+    if (stockShortageAcknowledged) payload.stockShortageAcknowledged = true;
     this.workspace.database.prepare(`
       INSERT INTO fulfillment_plan_events (
         id, plan_id, order_id, event_type, reason, payload_json, occurred_at, created_at
@@ -588,6 +669,15 @@ function parseStoredOrderIds(payloadJson: string): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+function parseStoredStockShortageFlag(payloadJson: string): boolean {
+  try {
+    const parsed = JSON.parse(payloadJson) as { stockShortageAcknowledged?: unknown };
+    return parsed.stockShortageAcknowledged === true;
+  } catch {
+    return false;
   }
 }
 

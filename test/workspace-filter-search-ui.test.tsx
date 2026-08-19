@@ -200,6 +200,59 @@ describe('预售需求与采购建议区块', () => {
     });
   });
 
+  it('释放被拒时缺口明细显示在对话框内，勾选强制后可放行', async () => {
+    const user = userEvent.setup();
+    const releaseFulfillmentPlanOrders = vi.fn()
+      .mockRejectedValueOnce(new Error(
+        '可用现货不足：玻璃保鲜盒（1000ml）还差 2 件；可补货或到货后释放，或勾选知悉缺货风险强制释放',
+      ))
+      .mockResolvedValueOnce(plan({ id: 'plan-demand', name: '八月预售' }));
+    renderDemandPlans({ releaseFulfillmentPlanOrders });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    await user.click(screen.getByRole('button', { name: '全部释放' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: /操作原因/ }), '备货完成');
+    await user.click(within(dialog).getByRole('button', { name: '确认释放' }));
+    expect(within(dialog).getByText(/玻璃保鲜盒（1000ml）还差 2 件/)).toBeVisible();
+    expect(within(dialog).getByRole('checkbox', { name: /我知悉可用现货不足/ })).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('checkbox', { name: /我知悉可用现货不足/ }));
+    await user.click(within(dialog).getByRole('button', { name: '确认释放' }));
+    expect(releaseFulfillmentPlanOrders).toHaveBeenLastCalledWith(expect.objectContaining({
+      acknowledgeStockShortageRisk: true,
+    }));
+  });
+
+  it('全部释放经对话框提交并按勾选传递缺货风险确认', async () => {
+    const user = userEvent.setup();
+    const releaseFulfillmentPlanOrders = vi.fn().mockResolvedValue(
+      plan({ id: 'plan-demand', name: '八月预售' }),
+    );
+    renderDemandPlans({ releaseFulfillmentPlanOrders });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    await user.click(screen.getByRole('button', { name: '全部释放' }));
+    const checkbox = screen.getByRole('checkbox', { name: /我知悉可用现货不足的缺货风险/ });
+    expect(checkbox).not.toBeChecked();
+    await user.type(screen.getByRole('textbox', { name: /操作原因/ }), '备货完成');
+    await user.click(screen.getByRole('button', { name: '确认释放' }));
+    expect(releaseFulfillmentPlanOrders).toHaveBeenCalledWith(expect.objectContaining({
+      orderIds: null,
+      reason: '备货完成',
+      acknowledgeStockShortageRisk: false,
+    }));
+
+    await user.click(await screen.findByRole('button', { name: '全部释放' }));
+    await user.click(screen.getByRole('checkbox', { name: /我知悉可用现货不足的缺货风险/ }));
+    await user.type(screen.getByRole('textbox', { name: /操作原因/ }), '买家催发强制释放');
+    await user.click(screen.getByRole('button', { name: '确认释放' }));
+    expect(releaseFulfillmentPlanOrders).toHaveBeenLastCalledWith(expect.objectContaining({
+      reason: '买家催发强制释放',
+      acknowledgeStockShortageRisk: true,
+    }));
+  });
+
   it('已确认建议可转入采购订单：对话框预填数量并提交供应方、单价与原因', async () => {
     const user = userEvent.setup();
     const createPurchaseOrderFromSuggestion = vi.fn().mockResolvedValue({

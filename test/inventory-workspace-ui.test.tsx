@@ -27,6 +27,18 @@ function inventoryFixture(): InventoryView {
         reservedQuantity: 3,
         purchaseInTransitQuantity: 6,
       },
+      {
+        standardProductId: 'product-inv-b',
+        sku: 'SKU-INV-B',
+        name: '硅胶封口夹',
+        specification: '大号',
+        sellableQuantity: 1,
+        awaitingInspectionQuantity: 0,
+        defectiveQuantity: 0,
+        scrappedQuantity: 0,
+        reservedQuantity: 3,
+        purchaseInTransitQuantity: 0,
+      },
     ],
     unmappedPendingShipment: [
       { sourceTitle: '手作发夹', sourceSpec: '蓝色', quantity: 2, orderCount: 1 },
@@ -108,9 +120,12 @@ describe('库存工作区', () => {
 
     const row = within(table).getByRole('row', { name: /玻璃保鲜盒/ });
     const cells = within(row).getAllByRole('cell');
-    expect(cells.slice(2, 8).map((cell) => cell.textContent)).toEqual([
-      '4', '2', '1', '0', '3', '6',
+    expect(cells.slice(2, 9).map((cell) => cell.textContent)).toEqual([
+      '4', '2', '1', '0', '3', '1', '6',
     ]);
+    expect(within(table).getByRole('columnheader', { name: '可用现货' })).toBeVisible();
+    const oversoldRow = within(table).getByRole('row', { name: /硅胶封口夹/ });
+    expect(oversoldRow.textContent).toContain('-2（已超卖）');
 
     expect(screen.getByRole('alert').textContent).toContain('未映射商品');
     expect(screen.getByRole('table', { name: '未映射待发货明细' }).textContent)

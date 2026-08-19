@@ -349,6 +349,13 @@ describe('预售有效需求投影', () => {
 
     const plan = createPresalePlan(application);
     const withMember = addOrders(application, plan, [order.id]);
+    application.recordInventoryAdjustment({
+      standardProductId: productId(application, PRESALE_PRODUCT.sku),
+      quantity: 5,
+      direction: 'in',
+      state: 'sellable',
+      reason: '备货入库',
+    });
     application.releaseFulfillmentPlanOrders({
       planId: plan.id,
       expectedRevision: withMember.revision,

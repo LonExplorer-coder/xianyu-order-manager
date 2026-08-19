@@ -321,6 +321,13 @@ describe('预售与团购履约计划闭环验收', () => {
     expect(application.queryOrders({}).pendingShipmentCount).toBe(1);
 
     // 验收条 4：部分备货只释放已到货订单，另一成员保持未释放。
+    application.recordInventoryAdjustment({
+      standardProductId: presaleProductId,
+      quantity: 4,
+      direction: 'in',
+      state: 'sellable',
+      reason: '首批到货入库',
+    });
     const partiallyReleased = application.releaseFulfillmentPlanOrders({
       planId: groupBuy.id,
       expectedRevision: formed.revision,
@@ -512,6 +519,13 @@ describe('预售与团购履约计划闭环验收', () => {
       }).revision,
       basis: 'quantity',
       reason: '到量成团',
+    });
+    application.recordInventoryAdjustment({
+      standardProductId: presaleProductId,
+      quantity: 4,
+      direction: 'in',
+      state: 'sellable',
+      reason: '备份基线备货入库',
     });
     application.releaseFulfillmentPlanOrders({
       planId: groupBuy.id,

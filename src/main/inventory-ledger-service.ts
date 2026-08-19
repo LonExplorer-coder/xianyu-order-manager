@@ -75,7 +75,22 @@ export class InventoryLedgerService {
       const product = this.requireProduct(prepared.standardProductId);
       if (prepared.direction === 'out') {
         const current = this.stateQuantity(prepared.standardProductId, prepared.state);
-        if (current < prepared.quantity) {
+        // 可销售按「预留即占用」口径防呆：待发货订单占用的数量不能手动动用。
+        const available = current
+          - (prepared.state === 'sellable'
+            ? (this.reservedQuantitiesByProduct().get(prepared.standardProductId) ?? 0)
+            : 0);
+        if (prepared.quantity > available) {
+          if (prepared.state === 'sellable') {
+            throw new Error(this.insufficientAvailableMessage(
+              product,
+              current,
+              current - available,
+              available,
+              '扣减',
+              prepared.quantity,
+            ));
+          }
           throw new Error(this.insufficientMessage(
             product,
             inventoryStateLabel(prepared.state),
@@ -501,13 +516,27 @@ export class InventoryLedgerService {
       FROM supplier_return_items
       WHERE supplier_return_id = ?
     `).all(fact.returnId) as unknown as SqlRow[];
+    const reservedByProduct = this.reservedQuantitiesByProduct();
     for (const row of rows) {
       const productId = asString(row.product_id);
       const state = asString(row.state) as InventoryStateName;
       const quantity = Number(row.quantity);
       const current = this.stateQuantity(productId, state);
-      if (current < quantity) {
+      // 可销售按「预留即占用」口径防呆：待发货订单占用的数量不能退给供应方。
+      const available = current
+        - (state === 'sellable' ? (reservedByProduct.get(productId) ?? 0) : 0);
+      if (quantity > available) {
         const product = this.requireProduct(productId);
+        if (state === 'sellable') {
+          throw new Error(this.insufficientAvailableMessage(
+            product,
+            current,
+            current - available,
+            available,
+            '退给供应方',
+            quantity,
+          ));
+        }
         throw new Error(this.insufficientMessage(
           product,
           inventoryStateLabel(state),
@@ -728,6 +757,22 @@ export class InventoryLedgerService {
       WHERE standard_product_id = ? AND state = ?
     `).get(standardProductId, state) as SqlRow;
     return Number(row?.quantity ?? 0);
+  }
+
+  private insufficientAvailableMessage(
+    product: { name: string; specification: string },
+    sellable: number,
+    reserved: number,
+    available: number,
+    action: string,
+    requested: number,
+  ): string {
+    if (reserved <= 0) {
+      return `${product.name}（${product.specification}）可销售 ${sellable} 件，不够${action} ${requested} 件`;
+    }
+    return `${product.name}（${product.specification}）可销售 ${sellable} 件，`
+      + `其中 ${reserved} 件已被待发货订单占用，可用 ${Math.max(0, available)} 件，`
+      + `不够${action} ${requested} 件`;
   }
 
   private insufficientMessage(

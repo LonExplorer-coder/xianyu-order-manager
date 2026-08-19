@@ -115,6 +115,7 @@ type ReasonPromptState = {
   planId: string;
   orderId: string | null;
   reason: string;
+  forceStockShortage: boolean;
 };
 
 type ClosePromptState = {
@@ -165,6 +166,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   const [addOrders, setAddOrders] = useState<AddOrdersState | null>(null);
   const [delayForm, setDelayForm] = useState<DelayFormState | null>(null);
   const [reasonPrompt, setReasonPrompt] = useState<ReasonPromptState | null>(null);
+  const [promptError, setPromptError] = useState('');
   const [closePrompt, setClosePrompt] = useState<ClosePromptState | null>(null);
   const [planQuery, setPlanQuery] = useState('');
   const [planTypeFilter, setPlanTypeFilter] = useState<'' | FulfillmentPlanType>('');
@@ -320,6 +322,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
     if (!reasonPrompt) return;
     setBusy(true);
     setError('');
+    setPromptError('');
     try {
       if (reasonPrompt.kind === 'release_all' || reasonPrompt.kind === 'release_one') {
         await api.releaseFulfillmentPlanOrders({
@@ -329,6 +332,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
             ? null
             : [reasonPrompt.orderId as string],
           reason: reasonPrompt.reason,
+          acknowledgeStockShortageRisk: reasonPrompt.forceStockShortage,
         });
         setFeedback('已释放，订单可进入开放发货组');
       } else {
@@ -343,7 +347,8 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
       setReasonPrompt(null);
       await refresh();
     } catch (value) {
-      setError(errorMessage(value));
+      // 缺口明细写在对话框内，避免被模态遮罩压暗导致用户看不到被拒原因。
+      setPromptError(errorMessage(value));
     } finally {
       setBusy(false);
     }
@@ -730,6 +735,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                             planId: plan.id,
                             orderId: null,
                             reason: '',
+                            forceStockShortage: false,
                           })}
                         >
                           全部释放
@@ -809,6 +815,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                             planId: plan.id,
                                             orderId: member.orderId,
                                             reason: '',
+                                            forceStockShortage: false,
                                           })}
                                         >
                                           释放
@@ -823,6 +830,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                           planId: plan.id,
                                           orderId: member.orderId,
                                           reason: '',
+                                          forceStockShortage: false,
                                         })}
                                       >
                                         退出
@@ -1221,6 +1229,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                           <small>
                             {formatDateTime(event.occurredAt)} · {event.reason}
                             {event.orderIds.length > 0 ? ` · ${event.orderIds.length} 单` : ''}
+                            {event.stockShortageAcknowledged ? ' · 知悉缺货风险强制释放' : ''}
                           </small>
                         </li>
                       ))}
@@ -1911,8 +1920,8 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
         const plan = plans.find(({ id }) => id === reasonPrompt.planId);
         if (!plan) return null;
         const descriptions: Record<ReasonPromptKind, string> = {
-          release_all: '释放后，计划内全部订单恢复发货资格，可进入开放发货组。',
-          release_one: '释放后，该订单恢复发货资格，可进入开放发货组。',
+          release_all: '释放后，计划内全部订单恢复发货资格，可进入开放发货组。释放前按商品核对可用现货（可销售 − 已预留）；未映射标准商品的明细不参与核对。',
+          release_one: '释放后，该订单恢复发货资格，可进入开放发货组。释放前按商品核对可用现货（可销售 − 已预留）；未映射标准商品的明细不参与核对。',
           remove: '退出后，该订单恢复现货发货资格，不再归属该计划。',
         };
         return (
@@ -1921,12 +1930,27 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
             title={`${REASON_PROMPT_TITLES[reasonPrompt.kind]} · ${plan.name}`}
             description={descriptions[reasonPrompt.kind]}
             busy={busy}
-            onClose={() => setReasonPrompt(null)}
+            onClose={() => { setReasonPrompt(null); setPromptError(''); }}
             onSubmit={(event) => {
               event.preventDefault();
               void submitReasonPrompt(plan);
             }}
           >
+            {promptError && <InlineError message={promptError} />}
+            {reasonPrompt.kind !== 'remove' && (
+              <label className="shared-dialog__check">
+                <input
+                  type="checkbox"
+                  checked={reasonPrompt.forceStockShortage}
+                  disabled={busy}
+                  onChange={(event) => setReasonPrompt({
+                    ...reasonPrompt,
+                    forceStockShortage: event.target.checked,
+                  })}
+                />
+                <span>我知悉可用现货不足的缺货风险，强制释放</span>
+              </label>
+            )}
             <ReasonField
               label="操作原因"
               value={reasonPrompt.reason}

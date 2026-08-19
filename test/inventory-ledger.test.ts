@@ -426,6 +426,12 @@ describe('已预留与采购在途派生', () => {
       reason: '加入预售',
     });
     expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(0);
+    adjust(application, BOX_PRODUCT, {
+      quantity: 2,
+      direction: 'in',
+      state: 'sellable',
+      reason: '备货入库',
+    });
     application.releaseFulfillmentPlanOrders({
       planId: plan.id,
       expectedRevision: withMember.revision,
@@ -464,6 +470,12 @@ describe('已预留与采购在途派生', () => {
       reason: '买家退定 1 件',
     });
     expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(0);
+    adjust(application, BOX_PRODUCT, {
+      quantity: 3,
+      direction: 'in',
+      state: 'sellable',
+      reason: '备货入库',
+    });
     application.releaseFulfillmentPlanOrders({
       planId: plan.id,
       expectedRevision: withMember.revision,
@@ -781,5 +793,341 @@ describe('库存持久化', () => {
     applications.push(second);
     second.openDataDirectory(dataDirectory);
     expect(second.queryInventory()).toEqual(before);
+  });
+});
+
+describe('预留即占用与释放备货闸门', () => {
+  function presaleWithMember(
+    application: LocalApplication,
+    orderId: string,
+  ): FulfillmentPlanView {
+    const plan = application.createFulfillmentPlan({
+      type: 'presale',
+      name: '白露预售',
+      expectedShipAt: '2026-09-30T00:00:00.000Z',
+      reason: '预售开始备货',
+    });
+    return application.addFulfillmentPlanOrders({
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      orderIds: [orderId],
+      reason: '加入预售',
+    });
+  }
+
+  async function seededReleaseApplication(root: string, recognitions: RecognitionResult[]) {
+    const { application, sources } = await openSeededApplication(root, recognitions, [BOX_PRODUCT]);
+    const drafts = (await application.submitRecognitionBatch(sources)).drafts;
+    return { application, orders: drafts.map((draft) => application.confirmDraft(draft)) };
+  }
+
+  it('释放前核对可用现货：不足默认拒绝并显示缺口，勾选知悉风险可强制放行留痕', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-basic-'));
+    const { application, orders } = await seededReleaseApplication(root, [
+      ledgerRecognition('XY-RELEASE-0001', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 5 },
+      ]),
+    ]);
+    const [member] = orders;
+    const withMember = presaleWithMember(application, member.id);
+    application.recordInventoryAdjustment({
+      standardProductId: productOf(application.queryInventory(), BOX_PRODUCT.sku).standardProductId,
+      quantity: 3,
+      direction: 'in',
+      state: 'sellable',
+      reason: '期初入库',
+    });
+
+    expect(() => application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [member.id],
+      reason: '备货完成释放',
+    })).toThrow(
+      '可用现货不足：玻璃保鲜盒（1000ml）还差 2 件；可补货或到货后释放，或勾选知悉缺货风险强制释放',
+    );
+
+    const released = application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [member.id],
+      reason: '买家催发，强制释放',
+      acknowledgeStockShortageRisk: true,
+    });
+    expect(released.releasedOrderCount).toBe(1);
+    const releaseEvent = released.events.find(
+      (event) => event.eventType === 'orders_released',
+    )!;
+    expect(releaseEvent.stockShortageAcknowledged).toBe(true);
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(5);
+  });
+
+  it('计划外待发货订单占用的现货不算可用，多个释放成员按商品合并核对', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-outside-'));
+    const { application, orders } = await seededReleaseApplication(root, [
+      ledgerRecognition('XY-RELEASE-0002', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 4 },
+      ]),
+      ledgerRecognition('XY-RELEASE-0003', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 3 },
+      ]),
+      ledgerRecognition('XY-RELEASE-0004', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 2 },
+      ]),
+    ]);
+    const [outside, memberA, memberB] = orders;
+    const plan = application.createFulfillmentPlan({
+      type: 'presale',
+      name: '处暑预售',
+      expectedShipAt: '2026-09-30T00:00:00.000Z',
+      reason: '预售开始备货',
+    });
+    const withMembers = application.addFulfillmentPlanOrders({
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      orderIds: [memberA.id, memberB.id],
+      reason: '加入预售',
+    });
+    application.recordInventoryAdjustment({
+      standardProductId: productOf(application.queryInventory(), BOX_PRODUCT.sku).standardProductId,
+      quantity: 5,
+      direction: 'in',
+      state: 'sellable',
+      reason: '期初入库',
+    });
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(4);
+
+    expect(() => application.releaseFulfillmentPlanOrders({
+      planId: plan.id,
+      expectedRevision: withMembers.revision,
+      orderIds: null,
+      reason: '全部释放',
+    })).toThrow('可用现货不足：玻璃保鲜盒（1000ml）还差 4 件');
+
+    // 补货 4 件后可用 5，恰好覆盖两名成员合计 5 件，放行。
+    application.recordInventoryAdjustment({
+      standardProductId: productOf(application.queryInventory(), BOX_PRODUCT.sku).standardProductId,
+      quantity: 4,
+      direction: 'in',
+      state: 'sellable',
+      reason: '补货',
+    });
+    const latest = application.queryFulfillmentPlans().find(({ id }) => id === plan.id)!;
+    const released = application.releaseFulfillmentPlanOrders({
+      planId: plan.id,
+      expectedRevision: latest.revision,
+      orderIds: null,
+      reason: '全部释放',
+      acknowledgeStockShortageRisk: true,
+    });
+    expect(released.status).toBe('released');
+    // 无缺口时即使传入强制标记，事件也不留风险痕迹。
+    expect(released.events.find((event) => event.eventType === 'orders_released')!
+      .stockShortageAcknowledged).toBe(false);
+  });
+
+  it('单个释放成员含多个商品时按商品分别核对', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-multi-product-'));
+    const clip = { name: '硅胶封口夹', specification: '大号', sku: 'SKU-INV-B' };
+    const { application, sources } = await openSeededApplication(root, [
+      ledgerRecognition('XY-RELEASE-0010', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 2 },
+        { sourceTitle: clip.name, sourceSpec: clip.specification, quantity: 3 },
+      ]),
+    ], [BOX_PRODUCT, clip]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+    const withMember = presaleWithMember(application, order.id);
+    const inventory = application.queryInventory();
+    const boxId = productOf(inventory, BOX_PRODUCT.sku).standardProductId;
+    const clipId = productOf(inventory, clip.sku).standardProductId;
+    application.recordInventoryAdjustment({
+      standardProductId: boxId,
+      quantity: 2,
+      direction: 'in',
+      state: 'sellable',
+      reason: '保鲜盒备货',
+    });
+    application.recordInventoryAdjustment({
+      standardProductId: clipId,
+      quantity: 1,
+      direction: 'in',
+      state: 'sellable',
+      reason: '封口夹备货不足',
+    });
+
+    expect(() => application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [order.id],
+      reason: '试图释放',
+    })).toThrow('可用现货不足：硅胶封口夹（大号）还差 2 件');
+    application.recordInventoryAdjustment({
+      standardProductId: clipId,
+      quantity: 2,
+      direction: 'in',
+      state: 'sellable',
+      reason: '封口夹补货',
+    });
+    const released = application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [order.id],
+      reason: '备货齐了',
+    });
+    expect(released.releasedOrderCount).toBe(1);
+  });
+
+  it('已超卖时释放一律暂停并显示缺口', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-oversold-'));
+    const { application, orders } = await seededReleaseApplication(root, [
+      ledgerRecognition('XY-RELEASE-0005', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 6 },
+      ]),
+      ledgerRecognition('XY-RELEASE-0006', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 1 },
+      ]),
+    ]);
+    const [outside, member] = orders;
+    const withMember = presaleWithMember(application, member.id);
+    application.recordInventoryAdjustment({
+      standardProductId: productOf(application.queryInventory(), BOX_PRODUCT.sku).standardProductId,
+      quantity: 5,
+      direction: 'in',
+      state: 'sellable',
+      reason: '期初入库',
+    });
+
+    expect(() => application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [member.id],
+      reason: '试图释放',
+    })).toThrow(
+      '已超卖：玻璃保鲜盒（1000ml）待发货占用已超过可销售 1 件（本次释放还需补货 2 件）；'
+      + '补货前不能释放，超卖状态下不能强制释放',
+    );
+    expect(() => application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [member.id],
+      reason: '试图强制释放',
+      acknowledgeStockShortageRisk: true,
+    })).toThrow(/超卖状态下不能强制释放/);
+  });
+
+  it('发货前退款减少释放需求，现货充足直接放行', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-refund-'));
+    const { application, orders } = await seededReleaseApplication(root, [
+      ledgerRecognition('XY-RELEASE-0007', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 5 },
+      ]),
+    ]);
+    const [member] = orders;
+    const withMember = presaleWithMember(application, member.id);
+    application.recordInventoryAdjustment({
+      standardProductId: productOf(application.queryInventory(), BOX_PRODUCT.sku).standardProductId,
+      quantity: 3,
+      direction: 'in',
+      state: 'sellable',
+      reason: '期初入库',
+    });
+    application.registerFulfillmentRefund({
+      planId: withMember.id,
+      orderId: member.id,
+      orderItemId: member.items[0].id,
+      quantity: 2,
+      reason: '买家退定 2 件',
+    });
+
+    const released = application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [member.id],
+      reason: '到货可发',
+    });
+    expect(released.releasedOrderCount).toBe(1);
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(3);
+  });
+
+  it('未映射商品的成员释放不参与可用现货核对', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-release-gate-unmapped-'));
+    const { application, sources } = await openSeededApplication(root, [
+      ledgerRecognition('XY-RELEASE-0009', [
+        { sourceTitle: '未建档手作发夹', sourceSpec: '蓝色', quantity: 2 },
+      ]),
+    ], [BOX_PRODUCT]);
+    const [draft] = (await application.submitRecognitionBatch(sources)).drafts;
+    const order = application.confirmDraft(draft);
+    const withMember = presaleWithMember(application, order.id);
+
+    const released = application.releaseFulfillmentPlanOrders({
+      planId: withMember.id,
+      expectedRevision: withMember.revision,
+      orderIds: [order.id],
+      reason: '未映射商品不进闸门',
+    });
+    expect(released.releasedOrderCount).toBe(1);
+    expect(released.events.find((event) => event.eventType === 'orders_released')!
+      .stockShortageAcknowledged).toBe(false);
+  });
+
+  it('手动出库与供应方退货按可用现货防呆，不动用被占用数量', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-reserved-outbound-'));
+    const { application, orders } = await seededReleaseApplication(root, [
+      ledgerRecognition('XY-RELEASE-0008', [
+        { sourceTitle: BOX_PRODUCT.name, sourceSpec: BOX_PRODUCT.specification, quantity: 3 },
+      ]),
+    ]);
+    const [outside] = orders;
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(3);
+    const product = productOf(application.queryInventory(), BOX_PRODUCT.sku);
+    application.recordInventoryAdjustment({
+      standardProductId: product.standardProductId,
+      quantity: 5,
+      direction: 'in',
+      state: 'sellable',
+      reason: '期初入库',
+    });
+
+    expect(() => application.recordInventoryAdjustment({
+      standardProductId: product.standardProductId,
+      quantity: 4,
+      direction: 'out',
+      state: 'sellable',
+      reason: '试图占用预留出库',
+    })).toThrow('玻璃保鲜盒（1000ml）可销售 5 件，其中 3 件已被待发货订单占用，可用 2 件，不够扣减 4 件');
+    application.recordInventoryAdjustment({
+      standardProductId: product.standardProductId,
+      quantity: 2,
+      direction: 'out',
+      state: 'sellable',
+      reason: '领用样品',
+    });
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).sellableQuantity).toBe(3);
+
+    const purchase = application.createSupplier({ name: '样品供应厂', contact: null, note: null });
+    const supplierId = purchase.suppliers[0].supplierId;
+    expect(() => application.recordSupplierReturn({
+      supplierId,
+      purchaseOrderId: null,
+      reason: '试图退掉被占用的货',
+      occurredAt: '2026-08-19T10:00:00.000Z',
+      items: [{ standardProductId: product.standardProductId, quantity: 4, state: 'sellable' }],
+    })).toThrow('玻璃保鲜盒（1000ml）可销售 3 件，其中 3 件已被待发货订单占用，可用 0 件，不够退给供应方 4 件');
+    application.recordInventoryAdjustment({
+      standardProductId: product.standardProductId,
+      quantity: 2,
+      direction: 'in',
+      state: 'defective',
+      reason: '检查发现的瑕疵品',
+    });
+    application.recordSupplierReturn({
+      supplierId,
+      purchaseOrderId: null,
+      reason: '瑕疵品退供应方',
+      occurredAt: '2026-08-19T10:00:00.000Z',
+      items: [{ standardProductId: product.standardProductId, quantity: 2, state: 'defective' }],
+    });
   });
 });

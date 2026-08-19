@@ -82,6 +82,7 @@ export type FulfillmentPlanEventView = {
   reason: string;
   orderIds: string[];
   basis: GroupFormationBasis | null;
+  stockShortageAcknowledged: boolean;
   occurredAt: string;
   createdAt: string;
 };
@@ -178,6 +179,7 @@ export type ReleaseFulfillmentPlanOrdersInput = {
   expectedRevision: number;
   orderIds: string[] | null;
   reason: string;
+  acknowledgeStockShortageRisk: boolean;
 };
 
 export type UpdateFulfillmentPlanInput = {
@@ -316,7 +318,7 @@ export function normalizeReleaseFulfillmentPlanOrdersInput(
   const record = objectValue(input, '释放履约计划参数无效');
   rejectUnknownKeys(
     record,
-    ['planId', 'expectedRevision', 'orderIds', 'reason'],
+    ['planId', 'expectedRevision', 'orderIds', 'reason', 'acknowledgeStockShortageRisk'],
     '释放履约计划参数无效',
   );
   const orderIds = record.orderIds === undefined || record.orderIds === null
@@ -328,6 +330,7 @@ export function normalizeReleaseFulfillmentPlanOrdersInput(
     expectedRevision: expectedRevision(record.expectedRevision),
     orderIds,
     reason: requiredReason(record.reason),
+    acknowledgeStockShortageRisk: record.acknowledgeStockShortageRisk === true,
   };
 }
 

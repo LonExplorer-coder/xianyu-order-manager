@@ -238,7 +238,7 @@ export function InventoryWorkspace({ api }: { api: DesktopApi }) {
                 <th rowSpan={2}>商品</th>
                 <th rowSpan={2}>SKU</th>
                 <th colSpan={4}>真实库存</th>
-                <th colSpan={2}>参考数</th>
+                <th colSpan={3}>参考数</th>
                 <th rowSpan={2}>操作</th>
               </tr>
               <tr>
@@ -247,6 +247,7 @@ export function InventoryWorkspace({ api }: { api: DesktopApi }) {
                 <th>瑕疵品</th>
                 <th>报废</th>
                 <th>已预留</th>
+                <th>可用现货</th>
                 <th>采购在途</th>
               </tr>
             </thead>
@@ -260,6 +261,11 @@ export function InventoryWorkspace({ api }: { api: DesktopApi }) {
                   <td>{product.defectiveQuantity}</td>
                   <td>{product.scrappedQuantity}</td>
                   <td>{product.reservedQuantity}</td>
+                  <td>
+                    {product.reservedQuantity > product.sellableQuantity
+                      ? <strong>{product.sellableQuantity - product.reservedQuantity}（已超卖）</strong>
+                      : product.sellableQuantity - product.reservedQuantity}
+                  </td>
                   <td>{product.purchaseInTransitQuantity}</td>
                   <td>
                     <button

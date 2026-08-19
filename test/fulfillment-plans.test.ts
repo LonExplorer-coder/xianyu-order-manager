@@ -127,8 +127,19 @@ describe('履约计划输入规范化', () => {
     expect(normalizeReleaseFulfillmentPlanOrdersInput({
       planId: 'plan-1', expectedRevision: 2, reason: '到货可发',
     })).toEqual({
-      planId: 'plan-1', expectedRevision: 2, orderIds: null, reason: '到货可发',
+      planId: 'plan-1',
+      expectedRevision: 2,
+      orderIds: null,
+      reason: '到货可发',
+      acknowledgeStockShortageRisk: false,
     });
+    expect(normalizeReleaseFulfillmentPlanOrdersInput({
+      planId: 'plan-1',
+      expectedRevision: 2,
+      orderIds: ['o1'],
+      reason: '强制释放',
+      acknowledgeStockShortageRisk: true,
+    })).toMatchObject({ acknowledgeStockShortageRisk: true });
     expect(() => normalizeReleaseFulfillmentPlanOrdersInput({
       planId: 'plan-1', expectedRevision: 2, orderIds: ['o1'], reason: ' ',
     })).toThrow('请填写非空原因');
