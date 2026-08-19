@@ -19,6 +19,10 @@ const PORTABLE_SMOKE_AFTERSALES_REASON = '便携版验收登记部分退款';
 const PORTABLE_SMOKE_REFUND_NOTE = '便携版验收确认实际退款';
 const PORTABLE_SMOKE_REQUESTED_REFUND_CENTS = 400;
 const PORTABLE_SMOKE_ACTUAL_REFUND_CENTS = 400;
+const PORTABLE_SMOKE_PLAN_NAME = '便携验收预售';
+const PORTABLE_SMOKE_PLAN_CREATE_REASON = '便携版验收建立预售';
+const PORTABLE_SMOKE_PLAN_JOIN_REASON = '便携版验收加入预售';
+const PORTABLE_SMOKE_PLAN_RELEASE_REASON = '便携版验收备货释放';
 
 export type PortableReleaseSmokeInput = {
   phase: 'write' | 'read';
@@ -35,6 +39,9 @@ export type PortableReleaseSmokeResult = {
   shipmentTimelineEventCount: number;
   aftersalesCaseCount: number;
   aftersalesTimelineEventCount: number;
+  fulfillmentPlanCount: number;
+  fulfillmentPlanEventCount: number;
+  fulfillmentPlanReleasedOrderCount: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -57,6 +64,7 @@ export async function runPortableReleaseDataSmoke(
     if (input.phase === 'write') {
       await importPortableSmokeOrder(session, configDirectory, dataDirectory);
       await session.waitForCurrentRecognitionWork();
+      createPortableSmokeFulfillmentHistory(session);
       createPortableSmokeOperationsHistory(session);
     } else {
       const restored = session.restore();
@@ -172,6 +180,28 @@ export async function runPortableReleaseDataSmoke(
       '实际退款',
     );
 
+    const plans = session.queryFulfillmentPlans();
+    const smokePlan = plans.find(({ name }) => name === PORTABLE_SMOKE_PLAN_NAME);
+    if (
+      plans.length !== 1 ||
+      !smokePlan ||
+      smokePlan.events.map(({ eventType }) => eventType).join(',') !== 'created,orders_added,orders_released' ||
+      smokePlan.releasedOrderCount !== 1 ||
+      smokePlan.members[0]?.releasedReason !== PORTABLE_SMOKE_PLAN_RELEASE_REASON ||
+      smokePlan.events.find(({ eventType }) => eventType === 'orders_released')?.reason
+        !== PORTABLE_SMOKE_PLAN_RELEASE_REASON
+    ) {
+      throw new Error('便携版重启后履约计划历史不完整');
+    }
+    const planDemand = session.queryFulfillmentDemand(smokePlan.id);
+    if (
+      planDemand.conditional ||
+      planDemand.totals.demandQuantity !== 0 ||
+      planDemand.unmapped.length !== 0
+    ) {
+      throw new Error('便携版重启后履约需求视图不完整');
+    }
+
     return {
       phase: input.phase,
       dataDirectory,
@@ -181,10 +211,45 @@ export async function runPortableReleaseDataSmoke(
       shipmentTimelineEventCount: shipmentPackage.timeline.length,
       aftersalesCaseCount: aftersalesCases.length,
       aftersalesTimelineEventCount: aftersalesCase.timeline.length,
+      fulfillmentPlanCount: plans.length,
+      fulfillmentPlanEventCount: smokePlan.events.length,
+      fulfillmentPlanReleasedOrderCount: smokePlan.releasedOrderCount,
     };
   } finally {
     session.close();
   }
+}
+
+function createPortableSmokeFulfillmentHistory(session: DesktopSession): void {
+  const order = session.listOrders()
+    .find(({ orderNumber }) => orderNumber === PORTABLE_SMOKE_ORDER_NUMBER);
+  if (!order) throw new Error('便携版冒烟缺少计划成员订单');
+  const plan = session.createFulfillmentPlan({
+    type: 'presale',
+    name: PORTABLE_SMOKE_PLAN_NAME,
+    expectedShipAt: '2026-12-31T00:00:00.000Z',
+    targetQuantity: null,
+    deadlineAt: null,
+    demandAlertThreshold: null,
+    reason: PORTABLE_SMOKE_PLAN_CREATE_REASON,
+  });
+  const withMember = session.addFulfillmentPlanOrders({
+    planId: plan.id,
+    expectedRevision: plan.revision,
+    orderIds: [order.id],
+    reason: PORTABLE_SMOKE_PLAN_JOIN_REASON,
+  });
+  if (session.queryShipmentGroups().groups.some(({ orders }) => (
+    orders.some(({ id }) => id === order.id)
+  ))) {
+    throw new Error('便携版冒烟未释放成员订单出现在发货组中');
+  }
+  session.releaseFulfillmentPlanOrders({
+    planId: plan.id,
+    expectedRevision: withMember.revision,
+    orderIds: [order.id],
+    reason: PORTABLE_SMOKE_PLAN_RELEASE_REASON,
+  });
 }
 
 function createPortableSmokeOperationsHistory(session: DesktopSession): void {
@@ -286,7 +351,8 @@ async function waitForReviewableItem(
   session: DesktopSession,
   batchId: string,
 ): Promise<RecognitionBatchItem> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  // 600 次 × 25ms ≈ 15 秒：CI 冷启动（尤其 Windows runner）下受控识别偶发超过 5 秒。
+  for (let attempt = 0; attempt < 600; attempt += 1) {
     const item = session
       .listRecognitionBatches()
       .find((batch) => batch.id === batchId)
