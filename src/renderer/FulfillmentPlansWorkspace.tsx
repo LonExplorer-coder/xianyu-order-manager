@@ -826,7 +826,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                               )}
                               {groupBuy && formed && demand.totals.uncoveredQuantity > 0 && (
                                 <p className="fulfillment-plan-progress__hint">
-                                  未覆盖缺口 {demand.totals.uncoveredQuantity} 件：已成团待采购，建议先补足采购在途，备货条件释放由下一任务承接。
+                                  未覆盖缺口 {demand.totals.uncoveredQuantity} 件：已成团待采购，建议先补足采购在途再释放；库存分配的硬闸门由阶段三库存模块接入。
                                 </p>
                               )}
                               {demand.products.length === 0 ? (

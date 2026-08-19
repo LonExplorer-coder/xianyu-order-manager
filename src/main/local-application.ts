@@ -6856,6 +6856,7 @@ export class LocalApplication {
           lifecycle_status = 'active'
           AND fulfillment_status IN ('pending_shipment', 'partially_shipped')
           AND platform_transaction_status NOT IN ('cancelled', 'refunded')
+          AND ${unreleasedPlanMemberGateSql('original_orders.id')}
         ), 0) AS pending_shipment_count
       FROM original_orders
     `).get() as SqlRow;

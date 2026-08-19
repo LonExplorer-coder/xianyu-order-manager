@@ -197,6 +197,15 @@ export class FulfillmentPlanService {
       for (const orderId of releasingIds) {
         if (!activeOrderIds.has(orderId)) throw new Error('订单不在该履约计划中');
       }
+      const releasingStatusById = new Map(activeMembers.map((row) => [
+        asString(row.order_id),
+        asString(row.platform_transaction_status),
+      ]));
+      if (releasingIds.some((orderId) => (
+        ['cancelled', 'refunded'].includes(releasingStatusById.get(orderId) ?? '')
+      ))) {
+        throw new Error('已取消或退款的订单不能释放，请先将其退出计划');
+      }
       const nextStatus = fulfillmentPlanStatusAfterRelease(
         activeMembers.length,
         releasingIds.length,
@@ -463,9 +472,11 @@ export class FulfillmentPlanService {
 
   private activeMemberRows(planId: string): SqlRow[] {
     return this.workspace.database.prepare(`
-      SELECT id, order_id FROM fulfillment_plan_members
-      WHERE plan_id = ? AND released_at IS NULL AND removed_at IS NULL
-      ORDER BY joined_at, id
+      SELECT members.id, members.order_id, orders.platform_transaction_status
+      FROM fulfillment_plan_members AS members
+      JOIN original_orders AS orders ON orders.id = members.order_id
+      WHERE members.plan_id = ? AND members.released_at IS NULL AND members.removed_at IS NULL
+      ORDER BY members.joined_at, members.id
     `).all(planId) as unknown as SqlRow[];
   }
 

@@ -215,6 +215,9 @@ describe('履约计划 Electron IPC', () => {
     expect(finalIds).toContain(orderA.id);
     expect(finalIds).not.toContain(orderB.id);
 
+    const closedWorkbench = await invoke('orders:query', {}) as OrderWorkbenchResult;
+    expect(closedWorkbench.pendingShipmentCount).toBe(1);
+
     const finalPlans = await invoke('fulfillment-plans:query') as FulfillmentPlanView[];
     const finalPresale = finalPlans.find(({ id }) => id === presale.id);
     expect(finalPresale?.events.map(({ eventType }) => eventType)).toEqual([
@@ -886,6 +889,150 @@ describe('履约计划 Electron IPC', () => {
       reason: '预售没有成团',
     })).rejects.toThrow('只有团购计划可以确认成团');
   });
+
+  it('释放进入开放发货组：待发货计数口径、匹配键合并、手工拆分与计划历史不回写', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-fulfillment-release-shipment-'));
+    const dataDirectory = join(root, '数据');
+    const sources = ['释放订单A.png', '释放订单B.png', '现货订单C.png']
+      .map((name) => join(root, name));
+    await Promise.all(sources.map((path, index) => (
+      writeFile(path, Buffer.from(`release-shipment-${index}`))
+    )));
+    const seeder = new LocalApplication(new SequenceRecognizer([
+      recognition('XY-PLAN-RELEASE-0001', 1),
+      recognition('XY-PLAN-RELEASE-0002', 2),
+      recognition('XY-PLAN-RELEASE-0003', 1),
+    ]));
+    seeder.openDataDirectory(dataDirectory);
+    const drafts = (await seeder.submitRecognitionBatch(sources)).drafts;
+    const orderA = seeder.confirmDraft(drafts[0]);
+    const orderB = seeder.confirmDraft(drafts[1]);
+    const orderC = seeder.confirmDraft(drafts[2]);
+    seeder.close();
+
+    openSession(root, dataDirectory);
+
+    const plan = await invoke('fulfillment-plans:create', {
+      type: 'presale',
+      name: '处暑预售',
+      expectedShipAt: '2026-09-20T00:00:00.000Z',
+      reason: '预售开始备货',
+    }) as FulfillmentPlanView;
+    await invoke('fulfillment-plans:add-orders', {
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      orderIds: [orderA.id, orderB.id],
+      reason: '加入预售',
+    });
+
+    const gatedWorkbench = await invoke('orders:query', {}) as OrderWorkbenchResult;
+    expect(gatedWorkbench.pendingShipmentCount).toBe(1);
+    expect(shipmentGroupOrderIdSets(await invoke('shipment-groups:query') as ShipmentGroupProjection))
+      .toEqual(normalizeOrderIdSets([[orderC.id]]));
+
+    const reloaded = await invoke('fulfillment-plans:query') as FulfillmentPlanView[];
+    const withMembers = reloaded.find(({ id }) => id === plan.id);
+    const released = await invoke('fulfillment-plans:release-orders', {
+      planId: plan.id,
+      expectedRevision: withMembers?.revision,
+      orderIds: [orderA.id, orderB.id],
+      reason: '备货齐整到货',
+    }) as FulfillmentPlanView;
+    expect(released).toMatchObject({ status: 'released', releasedOrderCount: 2 });
+    expect(released.members.every((member) => member.releasedReason === '备货齐整到货'))
+      .toBe(true);
+    await expect(invoke('fulfillment-plans:release-orders', {
+      planId: plan.id,
+      expectedRevision: released.revision,
+      orderIds: [orderA.id],
+      reason: '重复释放',
+    })).rejects.toThrow('履约计划已全部释放');
+
+    const releasedWorkbench = await invoke('orders:query', {}) as OrderWorkbenchResult;
+    expect(releasedWorkbench.pendingShipmentCount).toBe(3);
+    expect(shipmentGroupOrderIdSets(await invoke('shipment-groups:query') as ShipmentGroupProjection))
+      .toEqual(normalizeOrderIdSets([[orderA.id, orderB.id, orderC.id]]));
+
+    const mergedGroups = (await invoke('shipment-groups:query') as ShipmentGroupProjection).groups;
+    const merged = mergedGroups.find(
+      (group) => group.orders.some(({ id }) => id === orderA.id),
+    );
+    if (!merged) throw new Error('测试要求存在包含释放订单的发货组');
+    const split = await invoke('shipment-groups:split', {
+      groupId: merged.id,
+      expectedMemberOrderIds: merged.orders.map(({ id }) => id),
+      splitOrderIds: [orderA.id],
+      reason: 'A 先单独发出',
+    }) as { projection: ShipmentGroupProjection };
+    expect(shipmentGroupOrderIdSets(split.projection)).toEqual(
+      normalizeOrderIdSets([[orderA.id], [orderB.id, orderC.id]]),
+    );
+
+    const splitGroups = split.projection.groups;
+    const orderAGroup = splitGroups.find(
+      (group) => group.orders.some(({ id }) => id === orderA.id),
+    );
+    if (!orderAGroup) throw new Error('测试要求拆分后存在 A 独立发货组');
+    const shipment = await invoke('shipment-records:confirm', {
+      groupId: orderAGroup.id,
+      expectedRemainingItems: [{
+        orderId: orderA.id,
+        orderItemId: orderA.items[0].id,
+        quantity: 1,
+      }],
+      packages: [{
+        shippingCarrier: '顺丰速运',
+        trackingNumber: 'SF-PLAN-RELEASE-0001',
+        items: [{
+          orderId: orderA.id,
+          orderItemId: orderA.items[0].id,
+          quantity: 1,
+        }],
+      }],
+    }) as ShipmentConfirmationResult;
+    expect(shipment.record.packages).toHaveLength(1);
+
+    const planAfterShipment = (await invoke('fulfillment-plans:query') as FulfillmentPlanView[])
+      .find(({ id }) => id === plan.id);
+    expect(planAfterShipment?.events.map(({ eventType }) => eventType)).toEqual([
+      'created',
+      'orders_added',
+      'orders_released',
+    ]);
+
+    const secondPlan = await invoke('fulfillment-plans:create', {
+      type: 'presale',
+      name: '秋分预售',
+      expectedShipAt: '2026-09-30T00:00:00.000Z',
+      reason: '预售开始备货',
+    }) as FulfillmentPlanView;
+    const withRefundMember = await invoke('fulfillment-plans:add-orders', {
+      planId: secondPlan.id,
+      expectedRevision: secondPlan.revision,
+      orderIds: [orderC.id],
+      reason: '加入预售',
+    }) as FulfillmentPlanView;
+    await invoke('orders:update-platform-transaction-status', {
+      targets: [{ orderId: orderC.id, expectedRevision: orderC.revision }],
+      patch: { platformTransactionStatus: 'refunded' },
+    });
+    await expect(invoke('fulfillment-plans:release-orders', {
+      planId: secondPlan.id,
+      expectedRevision: withRefundMember.revision,
+      orderIds: null,
+      reason: '整单释放',
+    })).rejects.toThrow('已取消或退款的订单不能释放，请先将其退出计划');
+    const removedRefundMember = await invoke('fulfillment-plans:remove-order', {
+      planId: secondPlan.id,
+      expectedRevision: withRefundMember.revision,
+      orderId: orderC.id,
+      reason: '整单已退款，退出计划',
+    }) as FulfillmentPlanView;
+    expect(removedRefundMember).toMatchObject({ activeOrderCount: 0 });
+
+    const finalWorkbench = await invoke('orders:query', {}) as OrderWorkbenchResult;
+    expect(finalWorkbench.pendingShipmentCount).toBe(1);
+  });
 });
 
 describe('预售需求与采购建议 Electron IPC', () => {
@@ -998,6 +1145,20 @@ async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
   const handler = electronBoundary.handlers.get(channel);
   if (!handler) throw new Error(`IPC 通道未注册：${channel}`);
   return handler({ sender: {} }, ...args);
+}
+
+function shipmentGroupOrderIdSets(
+  projection: ShipmentGroupProjection,
+): string[][] {
+  return normalizeOrderIdSets(
+    projection.groups.map((group) => group.orders.map(({ id }) => id)),
+  );
+}
+
+function normalizeOrderIdSets(groups: string[][]): string[][] {
+  return groups
+    .map((ids) => [...ids].sort())
+    .sort((left, right) => (left[0] ?? '').localeCompare(right[0] ?? ''));
 }
 
 function recognition(
