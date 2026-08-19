@@ -28,6 +28,10 @@ const PORTABLE_SMOKE_PRODUCT_NAME = '便携验收采购商品';
 const PORTABLE_SMOKE_PRODUCT_SKU = 'PORTABLE-SMOKE-SKU-001';
 const PORTABLE_SMOKE_PURCHASE_REASON = '便携版验收采购到货';
 const PORTABLE_SMOKE_PURCHASE_ARRIVAL_REASON = '便携版验收到货入库';
+const PORTABLE_SMOKE_PENDING_REFUND_NOTE = '便携版验收退款待确认';
+const PORTABLE_SMOKE_CONFIRM_REFUND_NOTE = '便携版验收确认退款到账';
+const PORTABLE_SMOKE_SETTLEMENT_CENTS = 360;
+const PORTABLE_SMOKE_SETTLEMENT_NOTE = '便携版验收平台结算到账';
 
 export type PortableReleaseSmokeInput = {
   phase: 'write' | 'read';
@@ -51,6 +55,8 @@ export type PortableReleaseSmokeResult = {
   purchaseArrivalItemCount: number;
   inventorySellableQuantity: number;
   inventoryMovementCount: number;
+  financePendingItemCount: number;
+  financeRecordCount: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -76,6 +82,7 @@ export async function runPortableReleaseDataSmoke(
       createPortableSmokeFulfillmentHistory(session);
       createPortableSmokeOperationsHistory(session);
       createPortableSmokeInventoryHistory(session);
+      createPortableSmokeFundsHistory(session);
     } else {
       const restored = session.restore();
       if (restored.kind !== 'ready' || resolve(restored.dataDirectory) !== dataDirectory) {
@@ -255,6 +262,44 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后库存流水不完整');
     }
 
+    const funds = session.queryFunds();
+    const smokePendingItem = funds.pendingItems.find(({ note }) => (
+      note === PORTABLE_SMOKE_PENDING_REFUND_NOTE
+    ));
+    if (
+      !smokePendingItem ||
+      smokePendingItem.type !== 'refund' ||
+      smokePendingItem.status !== 'pending' ||
+      smokePendingItem.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      smokePendingItem.confirmedCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      smokePendingItem.remainingCents !== 0 ||
+      smokePendingItem.sourceType !== 'aftersales_case' ||
+      smokePendingItem.sourceId !== aftersalesCase.id
+    ) {
+      throw new Error('便携版重启后待确认资金事项不完整');
+    }
+    if (
+      funds.records.length !== 2 ||
+      funds.records[0]?.type !== 'refund' ||
+      funds.records[0]?.direction !== 'expense' ||
+      funds.records[0]?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      funds.records[0]?.pendingItemId !== smokePendingItem.id ||
+      funds.records[1]?.type !== 'platform_settlement' ||
+      funds.records[1]?.direction !== 'income' ||
+      funds.records[1]?.amountCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
+      funds.records[1]?.note !== PORTABLE_SMOKE_SETTLEMENT_NOTE
+    ) {
+      throw new Error('便携版重启后资金记录不完整');
+    }
+    if (
+      funds.totals.incomeCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
+      funds.totals.expenseCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      funds.totals.netCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      funds.totals.pendingRemainingCents !== 0
+    ) {
+      throw new Error('便携版重启后资金汇总不完整');
+    }
+
     return {
       phase: input.phase,
       dataDirectory,
@@ -271,6 +316,8 @@ export async function runPortableReleaseDataSmoke(
       purchaseArrivalItemCount: smokePurchaseOrder.arrivals[0]?.items.length ?? 0,
       inventorySellableQuantity: smokeInventoryProduct?.sellableQuantity ?? 0,
       inventoryMovementCount: inventory.movements.length,
+      financePendingItemCount: funds.pendingItems.length,
+      financeRecordCount: funds.records.length,
     };
   } finally {
     session.close();
@@ -325,6 +372,41 @@ function createPortableSmokeInventoryHistory(session: DesktopSession): void {
       receivedQuantity: 1,
       resellableQuantity: 1,
     }],
+  });
+}
+
+// 便携版验收的资金腿：售后退款先挂待确认事项再人工确认，平台结算直接录入；
+// 验证重启后待确认进度、资金记录与汇总跨平台一致（#73）。
+function createPortableSmokeFundsHistory(session: DesktopSession): void {
+  const shipmentRecordId = session.queryShipmentGroupArchives()[0]?.records[0]?.id;
+  if (!shipmentRecordId) throw new Error('便携版冒烟缺少发货记录');
+  const aftersalesCase = session.queryAftersalesCases({ shipmentRecordId })[0];
+  if (!aftersalesCase) throw new Error('便携版冒烟缺少售后处理单');
+
+  const pending = session.recordPendingFinanceItem({
+    type: 'refund',
+    amountCents: PORTABLE_SMOKE_ACTUAL_REFUND_CENTS,
+    sourceType: 'aftersales_case',
+    sourceId: aftersalesCase.id,
+    note: PORTABLE_SMOKE_PENDING_REFUND_NOTE,
+    occurredAt: new Date().toISOString(),
+  });
+  const pendingItem = pending.pendingItems[0];
+  if (!pendingItem) throw new Error('便携版冒烟没有生成待确认资金事项');
+  const confirmed = session.confirmPendingFinanceItem({
+    pendingItemId: pendingItem.id,
+    amountCents: PORTABLE_SMOKE_ACTUAL_REFUND_CENTS,
+    note: PORTABLE_SMOKE_CONFIRM_REFUND_NOTE,
+  });
+  if (confirmed.pendingItems[0]?.remainingCents !== 0) {
+    throw new Error('便携版冒烟退款确认后仍有剩余待确认金额');
+  }
+  session.recordFinanceRecord({
+    type: 'platform_settlement',
+    direction: 'income',
+    amountCents: PORTABLE_SMOKE_SETTLEMENT_CENTS,
+    occurredAt: new Date().toISOString(),
+    note: PORTABLE_SMOKE_SETTLEMENT_NOTE,
   });
 }
 

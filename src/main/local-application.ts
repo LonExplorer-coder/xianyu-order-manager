@@ -278,8 +278,10 @@ import { AftersalesWorkflowTemplateService } from './aftersales-workflow-templat
 import { FulfillmentDemandService } from './fulfillment-demand-service';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
+import type { FundsView } from '../core/funds';
 import { InventoryLedgerService } from './inventory-ledger-service';
 import { PurchaseOrderService } from './purchase-order-service';
+import { FundsService } from './funds-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
 import type { RecipientSummaryView } from '../core/recipients';
@@ -6184,6 +6186,30 @@ export class LocalApplication {
     return this.purchaseOrderService().view();
   }
 
+  public queryFunds(): FundsView {
+    return this.fundsService().view();
+  }
+
+  public recordPendingFinanceItem(input: unknown): FundsView {
+    return this.fundsService().recordPendingItem(input);
+  }
+
+  public confirmPendingFinanceItem(input: unknown): FundsView {
+    return this.fundsService().confirmPendingItem(input);
+  }
+
+  public cancelPendingFinanceItem(input: unknown): FundsView {
+    return this.fundsService().cancelPendingItem(input);
+  }
+
+  public recordFinanceRecord(input: unknown): FundsView {
+    return this.fundsService().recordDirectRecord(input);
+  }
+
+  public reverseFinanceRecord(input: unknown): FundsView {
+    return this.fundsService().reverseRecord(input);
+  }
+
   public createSupplier(input: unknown): PurchaseView {
     return this.purchaseOrderService().createSupplier(input);
   }
@@ -8126,6 +8152,10 @@ export class LocalApplication {
 
   private purchaseOrderService(): PurchaseOrderService {
     return new PurchaseOrderService(this.requireWorkspace());
+  }
+
+  private fundsService(): FundsService {
+    return new FundsService(this.requireWorkspace());
   }
 
   private recipientService(): RecipientService {

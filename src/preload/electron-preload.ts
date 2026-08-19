@@ -209,6 +209,15 @@ const api: DesktopApi = {
     ipcRenderer.invoke('inventory:record-inspection', input)
   ),
   queryPurchases: () => ipcRenderer.invoke('purchases:view'),
+  queryFunds: () => ipcRenderer.invoke('funds:view'),
+  confirmPendingFinanceItem: (input) => (
+    ipcRenderer.invoke('funds:confirm-pending-item', input)
+  ),
+  cancelPendingFinanceItem: (input) => (
+    ipcRenderer.invoke('funds:cancel-pending-item', input)
+  ),
+  recordFinanceRecord: (input) => ipcRenderer.invoke('funds:record', input),
+  reverseFinanceRecord: (input) => ipcRenderer.invoke('funds:reverse-record', input),
   createSupplier: (input) => ipcRenderer.invoke('purchases:create-supplier', input),
   createPurchaseOrder: (input) => ipcRenderer.invoke('purchases:create-order', input),
   createPurchaseOrderFromSuggestion: (input) => (

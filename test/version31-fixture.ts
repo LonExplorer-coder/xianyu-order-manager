@@ -1,8 +1,44 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v58 建立资金事实双表（待确认资金事项、资金记录）；存在资金数据时拒绝降级。
+export function removeVersion58ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 58',
+  ).get();
+  if (!applied) return;
+  const dataCount = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM finance_pending_items)
+      + (SELECT COUNT(*) FROM finance_records)
+      AS count
+  `).get() as { count: number };
+  if (dataCount.count > 0) {
+    throw new Error('v58 测试降级前必须移除资金数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS finance_records_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS finance_records_are_immutable_on_delete;
+    DROP INDEX IF EXISTS finance_records_by_type;
+    DROP INDEX IF EXISTS finance_records_by_reverses;
+    DROP INDEX IF EXISTS finance_records_by_pending_item;
+    DROP TABLE IF EXISTS finance_records;
+    DROP TRIGGER IF EXISTS finance_pending_items_facts_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS finance_pending_items_are_immutable_on_delete;
+    DROP INDEX IF EXISTS finance_pending_items_by_status;
+    DROP INDEX IF EXISTS finance_pending_items_by_source;
+    DROP TABLE IF EXISTS finance_pending_items;
+    DELETE FROM schema_migrations WHERE version = 58;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v57 连接采购建议与采购订单（建议表 converted 态与订单引用、事件表 converted 类型、订单表计划归属）；
 // 存在转入数据时拒绝降级。
 export function removeVersion57ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion58ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 57',
   ).get();

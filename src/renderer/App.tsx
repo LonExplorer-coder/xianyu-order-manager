@@ -180,6 +180,7 @@ import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTempla
 import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
 import { InventoryWorkspace } from './InventoryWorkspace';
 import { PurchaseWorkspace } from './PurchaseWorkspace';
+import { FundsWorkspace } from './FundsWorkspace';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
@@ -207,7 +208,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'inventory' | 'purchases' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'inventory' | 'purchases' | 'funds' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -1401,6 +1402,8 @@ export function App({ api }: AppProps) {
     workspace = <InventoryWorkspace api={api} />;
   } else if (activePage === 'purchases') {
     workspace = <PurchaseWorkspace api={api} />;
+  } else if (activePage === 'funds') {
+    workspace = <FundsWorkspace api={api} />;
   } else if (activePage === 'recipients') {
     workspace = <RecipientsWorkspace api={api} />;
   } else if (activePage === 'products') {
@@ -1696,6 +1699,16 @@ function AppFrame({
           >
             <Icon name="upload" />
             <span className="nav-label">采购</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'funds' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="资金"
+            aria-current={activePage === 'funds' ? 'page' : undefined}
+            onClick={() => onNavigate('funds')}
+          >
+            <Icon name="funds" />
+            <span className="nav-label">资金</span>
           </button>
           <button
             className={`nav-item${activePage === 'recipients' ? ' is-active' : ''}`}
@@ -11523,7 +11536,8 @@ type IconName =
   | 'history'
   | 'fields'
   | 'settings'
-  | 'user';
+  | 'user'
+  | 'funds';
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
@@ -11543,6 +11557,7 @@ function Icon({ name }: { name: IconName }) {
     history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 7.5V12l3 2" /></>,
     fields: <><path d="M5 5h14v4H5zM5 13h14v6H5z" /><path d="M9 5v4M15 13v6" /></>,
     user: <><circle cx="12" cy="8" r="3.5" /><path d="M4.5 20c1.4-3.6 4.1-5.5 7.5-5.5s6.1 1.9 7.5 5.5" /></>,
+    funds: <><circle cx="12" cy="12" r="8.5" /><path d="M9 7.5l3 3 3-3M12 10.5V16M9.6 12h4.8M9.6 14h4.8" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06-2.76 2.76-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.08 1.65V21H10v-.09A1.8 1.8 0 0 0 8.92 19.3a1.8 1.8 0 0 0-2 .36l-.06.06-2.76-2.76.06-.06a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.91 14H2.8v-4h.11a1.8 1.8 0 0 0 1.61-1.08 1.8 1.8 0 0 0-.36-2l-.06-.06L6.86 4.1l.06.06a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10 2.91V2.8h4v.11a1.8 1.8 0 0 0 1.08 1.61 1.8 1.8 0 0 0 2-.36l.06-.06 2.76 2.76-.06.06a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.09 10h.11v4h-.11A1.8 1.8 0 0 0 19.4 15Z" /></>,
   };
   return (

@@ -214,6 +214,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(55)) migrateToVersion55(database);
   if (!versions.has(56)) migrateToVersion56(database);
   if (!versions.has(57)) migrateToVersion57(database);
+  if (!versions.has(58)) migrateToVersion58(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6873,6 +6874,127 @@ function migrateToVersion57(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+// v58 资金事实：待确认资金事项与资金记录分表保存；记录不可变，冲正靠反向记录不覆盖原记录；
+// 事项金额等事实列不可改写，仅状态与取消留痕列允许更新（ADR 0042、#73）。
+function migrateToVersion58(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE finance_pending_items (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN (
+          'order_transaction', 'platform_settlement', 'platform_fee', 'initial_freight',
+          'return_freight', 'replacement_freight', 'refund', 'interception_fee',
+          'carrier_claim', 'purchase_cost'
+        )),
+        direction TEXT NOT NULL CHECK (direction IN ('income', 'expense')),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        currency TEXT NOT NULL CHECK (currency = 'CNY'),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'cancelled')),
+        source_type TEXT NOT NULL CHECK (source_type IN (
+          'order', 'shipment_record', 'aftersales_case',
+          'purchase_order', 'supplier_return', 'logistics_exception'
+        )),
+        source_id TEXT NOT NULL CHECK (length(trim(source_id)) BETWEEN 1 AND 200),
+        note TEXT NOT NULL CHECK (length(trim(note)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        cancelled_at TEXT,
+        cancel_reason TEXT CHECK (
+          cancel_reason IS NULL OR length(trim(cancel_reason)) BETWEEN 1 AND 500
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK ((status = 'cancelled') = (cancelled_at IS NOT NULL)),
+        CHECK (cancelled_at IS NULL OR cancel_reason IS NOT NULL),
+        UNIQUE (source_type, source_id, type)
+      ) STRICT;
+
+      CREATE INDEX finance_pending_items_by_source
+        ON finance_pending_items (source_type, source_id);
+
+      CREATE INDEX finance_pending_items_by_status
+        ON finance_pending_items (status);
+
+      CREATE TRIGGER finance_pending_items_facts_are_immutable_on_update
+      BEFORE UPDATE ON finance_pending_items
+      WHEN OLD.id != NEW.id
+        OR OLD.type != NEW.type
+        OR OLD.direction != NEW.direction
+        OR OLD.amount_cents != NEW.amount_cents
+        OR OLD.currency != NEW.currency
+        OR OLD.source_type != NEW.source_type
+        OR OLD.source_id != NEW.source_id
+        OR OLD.note != NEW.note
+        OR OLD.occurred_at != NEW.occurred_at
+        OR OLD.created_at != NEW.created_at
+      BEGIN
+        SELECT RAISE(ABORT, 'finance pending item facts are immutable');
+      END;
+
+      CREATE TRIGGER finance_pending_items_are_immutable_on_delete
+      BEFORE DELETE ON finance_pending_items
+      BEGIN
+        SELECT RAISE(ABORT, 'finance pending items cannot be deleted; cancel instead');
+      END;
+
+      CREATE TABLE finance_records (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL CHECK (type IN (
+          'order_transaction', 'platform_settlement', 'platform_fee', 'initial_freight',
+          'return_freight', 'replacement_freight', 'refund', 'interception_fee',
+          'carrier_claim', 'purchase_cost', 'misc_expense'
+        )),
+        direction TEXT NOT NULL CHECK (direction IN ('income', 'expense')),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        currency TEXT NOT NULL CHECK (currency = 'CNY'),
+        confirmed_source TEXT NOT NULL CHECK (confirmed_source = 'manual_confirmation'),
+        occurred_at TEXT NOT NULL,
+        confirmed_at TEXT NOT NULL,
+        pending_item_id TEXT REFERENCES finance_pending_items(id) ON DELETE RESTRICT,
+        source_type TEXT CHECK (source_type IS NULL OR source_type IN (
+          'order', 'shipment_record', 'aftersales_case',
+          'purchase_order', 'supplier_return', 'logistics_exception'
+        )),
+        source_id TEXT CHECK (
+          source_id IS NULL OR (source_type IS NOT NULL AND length(trim(source_id)) BETWEEN 1 AND 200)
+        ),
+        reverses_record_id TEXT REFERENCES finance_records(id) ON DELETE RESTRICT,
+        note TEXT NOT NULL CHECK (length(note) <= 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX finance_records_by_pending_item
+        ON finance_records (pending_item_id);
+
+      CREATE INDEX finance_records_by_reverses
+        ON finance_records (reverses_record_id);
+
+      CREATE INDEX finance_records_by_type
+        ON finance_records (type);
+
+      CREATE TRIGGER finance_records_are_immutable_on_update
+      BEFORE UPDATE ON finance_records
+      BEGIN
+        SELECT RAISE(ABORT, 'finance records are immutable');
+      END;
+
+      CREATE TRIGGER finance_records_are_immutable_on_delete
+      BEFORE DELETE ON finance_records
+      BEGIN
+        SELECT RAISE(ABORT, 'finance records are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (58, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
   }
 }
 

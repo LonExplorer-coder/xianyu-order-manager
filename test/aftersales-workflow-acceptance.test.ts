@@ -466,7 +466,7 @@ describe('可执行售后流程阶段验收', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(verified.prepare(`
         SELECT COUNT(*) AS count FROM sqlite_schema
         WHERE type = 'table' AND name = 'aftersales_case_step_events'

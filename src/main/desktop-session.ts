@@ -121,6 +121,7 @@ import type {
 import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
+import type { FundsView } from '../core/funds';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -893,6 +894,30 @@ export class DesktopSession {
 
   public createPurchaseOrderFromSuggestion(input: unknown): PurchaseView {
     return this.requireApplication().createPurchaseOrderFromSuggestion(input);
+  }
+
+  public queryFunds(): FundsView {
+    return this.requireApplication().queryFunds();
+  }
+
+  public recordPendingFinanceItem(input: unknown): FundsView {
+    return this.requireApplication().recordPendingFinanceItem(input);
+  }
+
+  public confirmPendingFinanceItem(input: unknown): FundsView {
+    return this.requireApplication().confirmPendingFinanceItem(input);
+  }
+
+  public cancelPendingFinanceItem(input: unknown): FundsView {
+    return this.requireApplication().cancelPendingFinanceItem(input);
+  }
+
+  public recordFinanceRecord(input: unknown): FundsView {
+    return this.requireApplication().recordFinanceRecord(input);
+  }
+
+  public reverseFinanceRecord(input: unknown): FundsView {
+    return this.requireApplication().reverseFinanceRecord(input);
   }
 
   public confirmPurchaseOrder(input: unknown): PurchaseView {

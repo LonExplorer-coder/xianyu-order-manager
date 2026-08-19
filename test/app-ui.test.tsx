@@ -631,6 +631,22 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     changePurchaseOrderExpectedDate: vi.fn(),
     recordPurchaseArrival: vi.fn(),
     recordSupplierReturn: vi.fn(),
+    queryFunds: vi.fn().mockResolvedValue({
+      pendingItems: [],
+      records: [],
+      typeTotals: [],
+      pendingTotals: [],
+      totals: {
+        incomeCents: 0,
+        expenseCents: 0,
+        netCents: 0,
+        pendingRemainingCents: 0,
+      },
+    }),
+    confirmPendingFinanceItem: vi.fn(),
+    cancelPendingFinanceItem: vi.fn(),
+    recordFinanceRecord: vi.fn(),
+    reverseFinanceRecord: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     previewOrderExport: vi.fn().mockResolvedValue({
       orderCount: 0,

@@ -157,6 +157,13 @@ import type {
   RecordInventoryInspectionInput,
 } from './inventory-ledger';
 import type {
+  CancelPendingFinanceItemInput,
+  ConfirmPendingFinanceItemInput,
+  FundsView,
+  RecordFinanceRecordInput,
+  ReverseFinanceRecordInput,
+} from './funds';
+import type {
   ChangePurchaseOrderExpectedDateInput,
   ChangePurchaseOrderItemQuantityInput,
   CreatePurchaseOrderFromSuggestionInput,
@@ -342,6 +349,11 @@ export interface DesktopApi {
   queryAftersalesInventoryImpact(caseId: string): Promise<InventoryMovementView[]>;
   recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
   recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
+  queryFunds(): Promise<FundsView>;
+  confirmPendingFinanceItem(input: ConfirmPendingFinanceItemInput): Promise<FundsView>;
+  cancelPendingFinanceItem(input: CancelPendingFinanceItemInput): Promise<FundsView>;
+  recordFinanceRecord(input: RecordFinanceRecordInput): Promise<FundsView>;
+  reverseFinanceRecord(input: ReverseFinanceRecordInput): Promise<FundsView>;
   queryPurchases(): Promise<PurchaseView>;
   createSupplier(input: CreateSupplierInput): Promise<PurchaseView>;
   createPurchaseOrder(input: CreatePurchaseOrderInput): Promise<PurchaseView>;

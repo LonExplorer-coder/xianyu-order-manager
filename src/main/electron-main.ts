@@ -639,6 +639,19 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('purchases:record-supplier-return', (_event, input: unknown) => (
     desktopSession.recordSupplierReturn(input)
   ));
+  ipcMain.handle('funds:view', () => desktopSession.queryFunds());
+  ipcMain.handle('funds:confirm-pending-item', (_event, input: unknown) => (
+    desktopSession.confirmPendingFinanceItem(input)
+  ));
+  ipcMain.handle('funds:cancel-pending-item', (_event, input: unknown) => (
+    desktopSession.cancelPendingFinanceItem(input)
+  ));
+  ipcMain.handle('funds:record', (_event, input: unknown) => (
+    desktopSession.recordFinanceRecord(input)
+  ));
+  ipcMain.handle('funds:reverse-record', (_event, input: unknown) => (
+    desktopSession.reverseFinanceRecord(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

@@ -23,6 +23,7 @@ import {
   removeVersion55ExtensionArtifacts,
   removeVersion56ExtensionArtifacts,
   removeVersion57ExtensionArtifacts,
+  removeVersion58ExtensionArtifacts,
 } from './version31-fixture';
 
 function productMigrationRecognition(): RecognitionResult {
@@ -194,7 +195,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(() => verified.database.prepare(`
         UPDATE order_items
         SET standardization_source = NULL
@@ -248,7 +249,7 @@ describe('数据库升级', () => {
     try {
       expect(repaired.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(repaired.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN ('standard_products', 'product_mappings')
@@ -343,7 +344,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(() => verified.database.prepare(`
         INSERT INTO fulfillment_plan_members (
@@ -457,7 +458,7 @@ describe('数据库升级', () => {
       `).run(recipients[0].id as string)).toThrow(/recipient identity is immutable/);
       expect(migrated.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
     } finally {
       migrated.close();
     }
@@ -528,7 +529,7 @@ describe('数据库升级', () => {
     try {
       expect(verified.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(verified.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       verified.close();
@@ -624,7 +625,7 @@ describe('数据库升级', () => {
       });
       expect(migrated.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(() => migrated.database.prepare(`
         INSERT INTO pending_financial_item_events (
           id, pending_item_id, kind, requested_amount_cents,
@@ -669,7 +670,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(migrated.database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE name IN (
@@ -710,7 +711,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(migrated.database.prepare(`
         SELECT name
         FROM sqlite_schema
@@ -764,7 +765,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(migrated.database.prepare(`
         SELECT name, type
         FROM sqlite_schema
@@ -981,6 +982,7 @@ describe('数据库升级', () => {
       { version: 55 },
       { version: 56 },
       { version: 57 },
+      { version: 58 },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
     try {
@@ -1464,6 +1466,7 @@ describe('数据库升级', () => {
       { version: 55 },
       { version: 56 },
       { version: 57 },
+      { version: 58 },
     ]);
     expect(
       (
@@ -1746,6 +1749,7 @@ describe('数据库升级', () => {
         { version: 55 },
         { version: 56 },
         { version: 57 },
+        { version: 58 },
       ]);
       expect(workspace.database.prepare(`
         SELECT id, draft_id, position, quantity, unit_price_present, quantity_source
@@ -1951,7 +1955,7 @@ describe('数据库升级', () => {
     });
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(database.prepare(`
         SELECT configuration_version, created_at, updated_at
         FROM table_templates
@@ -2065,7 +2069,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       expect(migrated.database.prepare(`
         SELECT id, platform_order_number, recipient, amount_cents, note
         FROM original_orders
@@ -2133,7 +2137,7 @@ describe('数据库升级', () => {
     const migrated = Workspace.open(dataDirectory);
     try {
       expect(migrated.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 57 });
+        .toEqual({ version: 58 });
       const columns = migrated.database
         .prepare('PRAGMA table_info(order_drafts)')
         .all() as unknown as Array<{
@@ -2396,7 +2400,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare(
         'SELECT id FROM fulfillment_plan_events ORDER BY sequence',
       ).all()).toEqual([{ id: 'evt-rebuild-1' }, { id: 'evt-rebuild-2' }]);
@@ -2431,7 +2435,7 @@ describe('数据库升级', () => {
     try {
       expect(workspace.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       workspace.database.prepare(`
         INSERT INTO standard_products (
           id, sku, sku_key, name, specification, name_key, specification_key,
@@ -2495,7 +2499,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare(`
         SELECT COUNT(*) AS count FROM inventory_movements
       `).get()).toEqual({ count: 0 });
@@ -2511,7 +2515,7 @@ describe('数据库升级', () => {
     try {
       expect(workspace.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       workspace.database.prepare(`
         INSERT INTO standard_products (
           id, sku, sku_key, name, specification, name_key, specification_key,
@@ -2602,7 +2606,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare(`
         SELECT id, quantity, direction, state, source_type
         FROM inventory_movements
@@ -2637,7 +2641,7 @@ describe('数据库升级', () => {
     try {
       expect(workspace.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       workspace.database.prepare(`
         INSERT INTO suppliers (id, name, contact, note, created_at)
         VALUES ('supplier-v56', '测试供应方', '13800000000', NULL, ?)
@@ -2726,7 +2730,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare('SELECT COUNT(*) AS count FROM purchase_orders').get())
         .toEqual({ count: 0 });
     } finally {
@@ -2741,7 +2745,7 @@ describe('数据库升级', () => {
     try {
       expect(workspace.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       workspace.database.prepare(`
         INSERT INTO fulfillment_plans (
           id, type, name, status, revision, created_at, updated_at
@@ -2847,7 +2851,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare(
         'SELECT COUNT(*) AS count FROM purchase_suggestions',
       ).get()).toEqual({ count: 0 });
@@ -2863,7 +2867,7 @@ describe('数据库升级', () => {
     try {
       expect(workspace.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       workspace.database.prepare(`
         INSERT INTO fulfillment_plans (
           id, type, name, status, revision, created_at, updated_at
@@ -2918,7 +2922,7 @@ describe('数据库升级', () => {
     try {
       expect(upgraded.database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations',
-      ).get()).toEqual({ version: 57 });
+      ).get()).toEqual({ version: 58 });
       expect(upgraded.database.prepare(`
         SELECT quantity, status, confirmed_at, purchase_order_id
         FROM purchase_suggestions WHERE id = 'sug-keep-2'
@@ -2942,6 +2946,121 @@ describe('数据库升级', () => {
       expect(upgraded.database.prepare(`
         SELECT sequence FROM purchase_suggestion_events WHERE id = 'evt-keep-4'
       `).get()).toEqual({ sequence: 4 });
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it('v58 建立资金事实双表并约束币种、幂等与不可变性', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'xianyu-v58-funds-'));
+    const now = '2026-08-20T08:00:00.000Z';
+    const workspace = Workspace.open(dataDirectory);
+    try {
+      expect(workspace.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 58 });
+      const insertPending = workspace.database.prepare(`
+        INSERT INTO finance_pending_items (
+          id, type, direction, amount_cents, currency, status,
+          source_type, source_id, note, occurred_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'CNY', 'pending', 'order', ?, ?, ?, ?, ?)
+      `);
+      insertPending.run(
+        'pending-v58', 'refund', 'expense', 1000, 'order-v58',
+        '买家申请退款', now, now, now,
+      );
+      expect(() => insertPending.run(
+        'pending-v58-dup', 'refund', 'expense', 1000, 'order-v58',
+        '同一事实重复提交', now, now, now,
+      )).toThrow();
+      expect(() => workspace.database.prepare(`
+        INSERT INTO finance_pending_items (
+          id, type, direction, amount_cents, currency, status,
+          source_type, source_id, note, occurred_at, created_at, updated_at
+        ) VALUES ('pending-v58-bad-type', 'misc_expense', 'expense', 100, 'CNY', 'pending',
+          'order', 'order-v58', '无来源类型', ?, ?, ?)
+      `).run(now, now, now)).toThrow();
+      expect(() => workspace.database.prepare(`
+        INSERT INTO finance_pending_items (
+          id, type, direction, amount_cents, currency, status,
+          source_type, source_id, note, occurred_at, created_at, updated_at
+        ) VALUES ('pending-v58-bad-currency', 'refund', 'expense', 100, 'USD', 'pending',
+          'order', 'order-v58', '外币事项', ?, ?, ?)
+      `).run(now, now, now)).toThrow();
+      expect(() => workspace.database.prepare(`
+        INSERT INTO finance_pending_items (
+          id, type, direction, amount_cents, currency, status,
+          source_type, source_id, note, occurred_at, created_at, updated_at
+        ) VALUES ('pending-v58-bad-cancel', 'refund', 'expense', 100, 'CNY', 'cancelled',
+          'order', 'order-v58', '取消缺时间', ?, NULL, ?, ?)
+      `).run(now, now, now)).toThrow();
+      expect(() => workspace.database.prepare(
+        "UPDATE finance_pending_items SET amount_cents = 999 WHERE id = 'pending-v58'",
+      ).run()).toThrow(/finance pending item facts are immutable/);
+      expect(() => workspace.database.prepare(
+        "DELETE FROM finance_pending_items WHERE id = 'pending-v58'",
+      ).run()).toThrow(/cannot be deleted/);
+
+      workspace.database.prepare(`
+        INSERT INTO finance_records (
+          id, type, direction, amount_cents, currency, confirmed_source,
+          occurred_at, confirmed_at, pending_item_id, source_type, source_id,
+          reverses_record_id, note, created_at
+        ) VALUES (
+          'record-v58', 'refund', 'expense', 400, 'CNY', 'manual_confirmation',
+          ?, ?, 'pending-v58', 'order', 'order-v58', NULL, '平台先退 4 元', ?
+        )
+      `).run(now, now, now);
+      expect(() => workspace.database.prepare(
+        "UPDATE finance_records SET amount_cents = 1 WHERE id = 'record-v58'",
+      ).run()).toThrow(/finance records are immutable/);
+      expect(() => workspace.database.prepare(
+        "DELETE FROM finance_records WHERE id = 'record-v58'",
+      ).run()).toThrow(/finance records are immutable/);
+      expect(() => workspace.database.prepare(`
+        INSERT INTO finance_records (
+          id, type, direction, amount_cents, currency, confirmed_source,
+          occurred_at, confirmed_at, note, created_at
+        ) VALUES (
+          'record-v58-bad-source', 'platform_settlement', 'income', 980, 'CNY', 'platform_bill',
+          ?, ?, '非人工确认来源', ?
+        )
+      `).run(now, now, now)).toThrow(/CHECK/i);
+    } finally {
+      workspace.close();
+    }
+
+    const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
+    const legacy = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    try {
+      expect(() => removeVersion58ExtensionArtifacts(legacy))
+        .toThrow('v58 测试降级前必须移除资金数据');
+      legacy.exec(`
+        DROP TRIGGER finance_records_are_immutable_on_update;
+        DROP TRIGGER finance_records_are_immutable_on_delete;
+        DELETE FROM finance_records;
+        DROP TRIGGER finance_pending_items_are_immutable_on_delete;
+        DELETE FROM finance_pending_items;
+      `);
+      removeVersion58ExtensionArtifacts(legacy);
+      expect(legacy.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 57 });
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = Workspace.open(dataDirectory);
+    try {
+      expect(upgraded.database.prepare(
+        'SELECT MAX(version) AS version FROM schema_migrations',
+      ).get()).toEqual({ version: 58 });
+      expect(upgraded.database.prepare(
+        'SELECT COUNT(*) AS count FROM finance_pending_items',
+      ).get()).toEqual({ count: 0 });
+      expect(upgraded.database.prepare(
+        'SELECT COUNT(*) AS count FROM finance_records',
+      ).get()).toEqual({ count: 0 });
     } finally {
       upgraded.close();
     }
