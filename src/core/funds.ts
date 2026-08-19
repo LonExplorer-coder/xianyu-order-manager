@@ -346,7 +346,11 @@ function identifier(value: unknown, message: string): string {
 }
 
 function positiveMoney(value: unknown, message: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error(message);
+  if (
+    !Number.isSafeInteger(value)
+    || Number(value) <= 0
+    || Number(value) > 100_000_000_000
+  ) throw new Error(message);
   return Number(value);
 }
 

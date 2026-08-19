@@ -236,6 +236,16 @@ describe('资金事实：待确认事项与资金记录', () => {
       note: '采购立账',
       occurredAt: '2026-08-20T09:30:00+08:00',
     })).toThrow('来源记录不存在');
+
+    // 回归：物流异常来源必须走业务校验，而不是因表名错误抛原生 SqliteError。
+    expect(() => application.recordPendingFinanceItem({
+      type: 'carrier_claim',
+      amountCents: 1500,
+      sourceType: 'logistics_exception',
+      sourceId: '不存在的物流异常',
+      note: '丢件理赔立账',
+      occurredAt: '2026-08-20T09:40:00+08:00',
+    })).toThrow('来源记录不存在');
   });
 
   it('确认后资金记录保存类型、方向、金额、币种、时间、确认来源与关联业务', async () => {
@@ -378,6 +388,8 @@ describe('资金事实：待确认事项与资金记录', () => {
       direction: 'income',
       pendingItemId: itemId,
       reversesRecordId: recordId,
+      sourceType: 'order',
+      sourceId: orderIds[0],
     });
     expect(pendingOf(view)).toMatchObject({ confirmedCents: 0, remainingCents: 1000, status: 'pending' });
   });

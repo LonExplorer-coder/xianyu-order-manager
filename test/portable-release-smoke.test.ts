@@ -52,7 +52,7 @@ describe('便携版数据目录冒烟', () => {
       inventorySellableQuantity: 1,
       inventoryMovementCount: 1,
       financePendingItemCount: 1,
-      financeRecordCount: 2,
+      financeRecordCount: 3,
     });
 
     await access(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
@@ -82,7 +82,7 @@ describe('便携版数据目录冒烟', () => {
       inventorySellableQuantity: 1,
       inventoryMovementCount: 1,
       financePendingItemCount: 1,
-      financeRecordCount: 2,
+      financeRecordCount: 3,
     });
   });
 

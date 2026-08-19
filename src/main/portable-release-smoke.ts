@@ -279,15 +279,19 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后待确认资金事项不完整');
     }
     if (
-      funds.records.length !== 2 ||
+      funds.records.length !== 3 ||
       funds.records[0]?.type !== 'refund' ||
       funds.records[0]?.direction !== 'expense' ||
-      funds.records[0]?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      funds.records[0]?.amountCents !== 150 ||
       funds.records[0]?.pendingItemId !== smokePendingItem.id ||
-      funds.records[1]?.type !== 'platform_settlement' ||
-      funds.records[1]?.direction !== 'income' ||
-      funds.records[1]?.amountCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
-      funds.records[1]?.note !== PORTABLE_SMOKE_SETTLEMENT_NOTE
+      funds.records[1]?.type !== 'refund' ||
+      funds.records[1]?.direction !== 'expense' ||
+      funds.records[1]?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150 ||
+      funds.records[1]?.pendingItemId !== smokePendingItem.id ||
+      funds.records[2]?.type !== 'platform_settlement' ||
+      funds.records[2]?.direction !== 'income' ||
+      funds.records[2]?.amountCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
+      funds.records[2]?.note !== PORTABLE_SMOKE_SETTLEMENT_NOTE
     ) {
       throw new Error('便携版重启后资金记录不完整');
     }
@@ -393,9 +397,17 @@ function createPortableSmokeFundsHistory(session: DesktopSession): void {
   });
   const pendingItem = pending.pendingItems[0];
   if (!pendingItem) throw new Error('便携版冒烟没有生成待确认资金事项');
+  const partial = session.confirmPendingFinanceItem({
+    pendingItemId: pendingItem.id,
+    amountCents: 150,
+    note: PORTABLE_SMOKE_CONFIRM_REFUND_NOTE,
+  });
+  if (partial.pendingItems[0]?.remainingCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150) {
+    throw new Error('便携版冒烟部分确认后剩余金额不正确');
+  }
   const confirmed = session.confirmPendingFinanceItem({
     pendingItemId: pendingItem.id,
-    amountCents: PORTABLE_SMOKE_ACTUAL_REFUND_CENTS,
+    amountCents: PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150,
     note: PORTABLE_SMOKE_CONFIRM_REFUND_NOTE,
   });
   if (confirmed.pendingItems[0]?.remainingCents !== 0) {

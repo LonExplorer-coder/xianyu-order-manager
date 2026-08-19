@@ -30,7 +30,7 @@ const SOURCE_TABLES: Record<FinanceSourceTypeName, string> = {
   aftersales_case: 'aftersales_cases',
   purchase_order: 'purchase_orders',
   supplier_return: 'supplier_returns',
-  logistics_exception: 'logistics_exceptions',
+  logistics_exception: 'logistics_exception_matters',
 };
 
 export class FundsService {
@@ -48,11 +48,13 @@ export class FundsService {
     const now = new Date().toISOString();
     this.workspace.transaction(() => {
       this.requireSourceRecord(prepared.sourceType, prepared.sourceId);
+      // 幂等只作用于 (来源类型, 来源标识, 类型) 锚点；其他约束冲突照常抛错，不静默吞掉。
       this.workspace.database.prepare(`
-        INSERT OR IGNORE INTO finance_pending_items (
+        INSERT INTO finance_pending_items (
           id, type, direction, amount_cents, currency, status,
           source_type, source_id, note, occurred_at, created_at, updated_at
         ) VALUES (?, ?, ?, ?, 'CNY', 'pending', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source_type, source_id, type) DO NOTHING
       `).run(
         randomUUID(),
         prepared.type,
@@ -146,13 +148,14 @@ export class FundsService {
   }
 
   // 冲正生成反向记录：类型与原记录一致、方向相反、金额不超过原记录未冲正余额；
-  // 原记录保持不变。经待确认事项确认的记录冲正后，该事项的剩余可确认金额自动回补。
+  // 原记录保持不变，来源与待确认事项归属沿用原记录。经待确认事项确认的记录冲正后，
+  // 该事项的剩余可确认金额自动回补。
   public reverseRecord(input: unknown): FundsView {
     const prepared = normalizeReverseFinanceRecordInput(input);
     const now = new Date().toISOString();
     this.workspace.transaction(() => {
       const original = this.workspace.database.prepare(`
-        SELECT id, type, direction, amount_cents, pending_item_id
+        SELECT id, type, direction, amount_cents, pending_item_id, source_type, source_id
         FROM finance_records WHERE id = ?
       `).get(prepared.recordId) as unknown as SqlRow | undefined;
       if (!original) throw new Error('资金记录不存在');
@@ -176,8 +179,8 @@ export class FundsService {
           : now,
         confirmedAt: now,
         pendingItemId: (original.pending_item_id as string | null) ?? null,
-        sourceType: null,
-        sourceId: null,
+        sourceType: (original.source_type as FinanceSourceTypeName | null) ?? null,
+        sourceId: (original.source_id as string | null) ?? null,
         reversesRecordId: original.id as string,
         note: prepared.note,
         createdAt: now,
@@ -248,13 +251,27 @@ export class FundsService {
   }
 
   private buildView(): FundsView {
+    const signedByPendingItem = new Map<string, number>(
+      (this.workspace.database.prepare(`
+        SELECT pending_item_id,
+          COALESCE(SUM(CASE direction WHEN 'income' THEN amount_cents ELSE -amount_cents END), 0)
+            AS signed
+        FROM finance_records
+        WHERE pending_item_id IS NOT NULL
+        GROUP BY pending_item_id
+      `).all() as unknown as SqlRow[]).map((row) => [String(row.pending_item_id), Number(row.signed)]),
+    );
     const pendingItems = (this.workspace.database.prepare(`
       SELECT id, type, direction, amount_cents, status, source_type, source_id,
         note, occurred_at, cancelled_at, cancel_reason, created_at
       FROM finance_pending_items
       ORDER BY created_at, id
     `).all() as unknown as SqlRow[]).map((row) => {
-      const confirmed = Number(row.amount_cents) - this.remainingCents(row);
+      const sign = row.direction === 'income' ? 1 : -1;
+      const remaining = Math.max(
+        Number(row.amount_cents) - sign * (signedByPendingItem.get(String(row.id)) ?? 0),
+        0,
+      );
       const cancelled = row.status === 'cancelled';
       return {
         id: String(row.id),
@@ -263,8 +280,8 @@ export class FundsService {
         amountCents: Number(row.amount_cents),
         currency: 'CNY' as const,
         status: row.status as 'pending' | 'cancelled',
-        confirmedCents: confirmed,
-        remainingCents: cancelled ? 0 : this.remainingCents(row),
+        confirmedCents: Number(row.amount_cents) - remaining,
+        remainingCents: cancelled ? 0 : remaining,
         sourceType: row.source_type as FinanceSourceTypeName,
         sourceId: String(row.source_id),
         note: String(row.note),
