@@ -139,7 +139,7 @@ describe('预售需求与采购建议区块', () => {
     expect(await screen.findByText('预售需求与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 已分配现货 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
     expect(screen.getByText('玻璃保鲜盒（1000ml）未覆盖 6 件，达到提醒阈值')).toBeVisible();
     expect(screen.getByText('确认采购超过当前需求，多采购风险')).toBeVisible();
@@ -296,7 +296,7 @@ describe('团购成团与条件性需求区块', () => {
     expect(await screen.findByText('条件性团购需求（预测）与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 已分配现货 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
 
     const generateButtons = screen.getAllByRole('button', { name: '生成采购建议' });
@@ -417,7 +417,7 @@ function demandFixture(): FulfillmentDemandView {
       confirmedInTransitQuantity: 4,
       draftSuggestionQuantity: 3,
       uncoveredQuantity: 6,
-      allocatedStockQuantity: 0,
+      sellableCoveredQuantity: 0,
       pendingInspectionQuantity: 0,
       releasedOrderCount: 1,
     },

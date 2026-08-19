@@ -198,6 +198,13 @@ const api: DesktopApi = {
   cancelPurchaseSuggestion: (input) => (
     ipcRenderer.invoke('fulfillment-plans:cancel-purchase-suggestion', input)
   ),
+  queryInventory: () => ipcRenderer.invoke('inventory:view'),
+  recordInventoryAdjustment: (input) => (
+    ipcRenderer.invoke('inventory:record-adjustment', input)
+  ),
+  recordInventoryInspection: (input) => (
+    ipcRenderer.invoke('inventory:record-inspection', input)
+  ),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   exportShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:export', input),

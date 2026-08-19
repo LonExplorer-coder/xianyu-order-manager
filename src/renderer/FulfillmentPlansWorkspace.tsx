@@ -800,7 +800,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                         <p className="fulfillment-plan-progress__hint">
                           {groupBuy && !formed
                             ? '未成团前需求只用于预测，不构成确定采购缺口；提前采购必须勾选确认未成团库存风险。确认成团后同一数据转为确定需求。'
-                            : '有效需求按未释放成员订单实时累计；已分配现货与到货待检查由库存模块提供（尚未接入，按 0 计）。建议确认后计入采购在途，不会自动生成采购订单。'}
+                            : '有效需求按未释放成员订单实时累计；现货可覆盖与待检查由库存流水实时汇总。建议确认后计入采购在途，不会自动生成采购订单。'}
                         </p>
                         {!demandByPlan[plan.id] ? (
                           <p role="status">正在读取需求…</p>
@@ -815,7 +815,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                 {' · '}确认在途 {demand.totals.confirmedInTransitQuantity} 件
                                 {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
                                 {' · '}{groupBuy && !formed ? '预测缺口' : '未覆盖缺口'} <strong>{demand.totals.uncoveredQuantity}</strong> 件
-                                {' · '}已分配现货 {demand.totals.allocatedStockQuantity} 件
+                                {' · '}现货可覆盖 {demand.totals.sellableCoveredQuantity} 件
                                 {' · '}待检查 {demand.totals.pendingInspectionQuantity} 件
                                 {' · '}已释放 {demand.totals.releasedOrderCount} 单
                               </p>

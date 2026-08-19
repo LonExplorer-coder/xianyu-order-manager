@@ -609,6 +609,13 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     confirmPurchaseSuggestion: vi.fn(),
     confirmGroupFormation: vi.fn(),
     cancelPurchaseSuggestion: vi.fn(),
+    queryInventory: vi.fn().mockResolvedValue({
+      products: [],
+      unmappedPendingShipment: [],
+      movements: [],
+    }),
+    recordInventoryAdjustment: vi.fn(),
+    recordInventoryInspection: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     previewOrderExport: vi.fn().mockResolvedValue({
       orderCount: 0,

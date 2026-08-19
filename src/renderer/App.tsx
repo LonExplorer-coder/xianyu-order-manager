@@ -178,6 +178,7 @@ import { ShipmentGroupCustomFieldsDialog } from './ShipmentGroupCustomFieldsDial
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
 import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
+import { InventoryWorkspace } from './InventoryWorkspace';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
@@ -205,7 +206,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'inventory' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -1395,6 +1396,8 @@ export function App({ api }: AppProps) {
     workspace = <AftersalesWorkflowTemplatesWorkspace api={api} />;
   } else if (activePage === 'fulfillment_plans') {
     workspace = <FulfillmentPlansWorkspace api={api} />;
+  } else if (activePage === 'inventory') {
+    workspace = <InventoryWorkspace api={api} />;
   } else if (activePage === 'recipients') {
     workspace = <RecipientsWorkspace api={api} />;
   } else if (activePage === 'products') {
@@ -1670,6 +1673,16 @@ function AppFrame({
           >
             <Icon name="lock" />
             <span className="nav-label">履约计划</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'inventory' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="库存"
+            aria-current={activePage === 'inventory' ? 'page' : undefined}
+            onClick={() => onNavigate('inventory')}
+          >
+            <Icon name="box" />
+            <span className="nav-label">库存</span>
           </button>
           <button
             className={`nav-item${activePage === 'recipients' ? ' is-active' : ''}`}
@@ -11487,6 +11500,7 @@ type IconName =
   | 'folder'
   | 'shield'
   | 'lock'
+  | 'box'
   | 'warning'
   | 'image'
   | 'upload'
@@ -11506,6 +11520,7 @@ function Icon({ name }: { name: IconName }) {
     folder: <path d="M3.5 6.5h6l2-2h9v14h-17z" />,
     shield: <><path d="M12 3.5 19 6v5c0 4.5-2.8 7.8-7 9.5C7.8 18.8 5 15.5 5 11V6z" /><path d="m9 12 2 2 4-4" /></>,
     lock: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+    box: <><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z" /><path d="M4 8l8 4.5L20 8M12 12.5V20" /></>,
     warning: <><path d="m12 3.5 9 16H3z" /><path d="M12 9v4.5M12 17h.01" /></>,
     image: <><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m5.5 17 4.5-4 3 2.5 2.5-2 3 3.5" /></>,
     upload: <><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5" /><path d="M5 14v5h14v-5" /></>,

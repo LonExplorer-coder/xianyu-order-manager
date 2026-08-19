@@ -1,8 +1,33 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v54 建立不可变库存流水表；存在流水数据时拒绝降级。
+export function removeVersion54ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 54',
+  ).get();
+  if (!applied) return;
+  const movementCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM inventory_movements
+  `).get() as { count: number };
+  if (movementCount.count > 0) {
+    throw new Error('v54 测试降级前必须移除库存流水数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS inventory_movements_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS inventory_movements_are_immutable_on_delete;
+    DROP TABLE inventory_movements;
+    DELETE FROM schema_migrations WHERE version = 54;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v53 增加团购成团事实与采购建议风险确认列，并重建事件表加入 formed 类型；
 // 存在成团数据时拒绝降级。
 export function removeVersion53ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion54ExtensionArtifacts(database);
   const planColumns = database.prepare(
     'PRAGMA table_info(fulfillment_plans)',
   ).all() as Array<{ name: string }>;

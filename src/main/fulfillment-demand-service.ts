@@ -14,6 +14,7 @@ import {
   type PurchaseSuggestionView,
 } from '../core/fulfillment-demand';
 import { Workspace } from './workspace';
+import { InventoryLedgerService } from './inventory-ledger-service';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -387,6 +388,8 @@ export class FulfillmentDemandService {
       SELECT COUNT(*) AS released FROM fulfillment_plan_members
       WHERE plan_id = ? AND released_at IS NOT NULL
     `).get(planId) as SqlRow;
+    const stockByProduct = new InventoryLedgerService(this.workspace)
+      .stockQuantitiesByProduct();
     const totals: FulfillmentDemandTotals = {
       demandQuantity: productViews.reduce((total, view) => total + view.demandQuantity, 0),
       refundedOrCancelledQuantity: productViews.reduce(
@@ -405,8 +408,19 @@ export class FulfillmentDemandService {
         (total, view) => total + view.uncoveredQuantity,
         0,
       ),
-      allocatedStockQuantity: 0,
-      pendingInspectionQuantity: 0,
+      sellableCoveredQuantity: productViews.reduce(
+        (total, view) => total + Math.min(
+          view.demandQuantity,
+          stockByProduct.get(view.standardProductId)?.sellable ?? 0,
+        ),
+        0,
+      ),
+      pendingInspectionQuantity: productViews.reduce(
+        (total, view) => (
+          total + (stockByProduct.get(view.standardProductId)?.awaitingInspection ?? 0)
+        ),
+        0,
+      ),
       releasedOrderCount: Number(releasedRow?.released ?? 0),
     };
     return {

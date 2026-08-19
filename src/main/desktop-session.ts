@@ -119,6 +119,7 @@ import type {
   FulfillmentPlanView,
 } from '../core/fulfillment-plans';
 import type { FulfillmentDemandView } from '../core/fulfillment-demand';
+import type { InventoryView } from '../core/inventory-ledger';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -859,6 +860,18 @@ export class DesktopSession {
 
   public cancelPurchaseSuggestion(input: unknown): FulfillmentDemandView {
     return this.requireApplication().cancelPurchaseSuggestion(input);
+  }
+
+  public queryInventory(): InventoryView {
+    return this.requireApplication().queryInventory();
+  }
+
+  public recordInventoryAdjustment(input: unknown): InventoryView {
+    return this.requireApplication().recordInventoryAdjustment(input);
+  }
+
+  public recordInventoryInspection(input: unknown): InventoryView {
+    return this.requireApplication().recordInventoryInspection(input);
   }
 
   public exportOrdersToWorkbook(

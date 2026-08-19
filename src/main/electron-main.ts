@@ -601,6 +601,13 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('fulfillment-plans:cancel-purchase-suggestion', (_event, input: unknown) => (
     desktopSession.cancelPurchaseSuggestion(input)
   ));
+  ipcMain.handle('inventory:view', () => desktopSession.queryInventory());
+  ipcMain.handle('inventory:record-adjustment', (_event, input: unknown) => (
+    desktopSession.recordInventoryAdjustment(input)
+  ));
+  ipcMain.handle('inventory:record-inspection', (_event, input: unknown) => (
+    desktopSession.recordInventoryInspection(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

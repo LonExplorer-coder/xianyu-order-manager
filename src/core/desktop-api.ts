@@ -151,6 +151,11 @@ import type {
   RegisterFulfillmentRefundInput,
 } from './fulfillment-demand';
 import type {
+  InventoryView,
+  RecordInventoryAdjustmentInput,
+  RecordInventoryInspectionInput,
+} from './inventory-ledger';
+import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
@@ -321,6 +326,9 @@ export interface DesktopApi {
   cancelPurchaseSuggestion(
     input: PurchaseSuggestionActionInput,
   ): Promise<FulfillmentDemandView>;
+  queryInventory(): Promise<InventoryView>;
+  recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
+  recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;

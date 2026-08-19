@@ -276,6 +276,8 @@ import {
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { FulfillmentDemandService } from './fulfillment-demand-service';
+import type { InventoryView } from '../core/inventory-ledger';
+import { InventoryLedgerService } from './inventory-ledger-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
 import type { RecipientSummaryView } from '../core/recipients';
@@ -6131,6 +6133,18 @@ export class LocalApplication {
     return this.fulfillmentDemandService().cancelSuggestion(input);
   }
 
+  public queryInventory(): InventoryView {
+    return this.inventoryLedgerService().view();
+  }
+
+  public recordInventoryAdjustment(input: unknown): InventoryView {
+    return this.inventoryLedgerService().recordAdjustment(input);
+  }
+
+  public recordInventoryInspection(input: unknown): InventoryView {
+    return this.inventoryLedgerService().recordInspection(input);
+  }
+
   public queryRecipients(): RecipientView[] {
     return this.recipientService().queryRecipients();
   }
@@ -8018,6 +8032,10 @@ export class LocalApplication {
 
   private fulfillmentDemandService(): FulfillmentDemandService {
     return new FulfillmentDemandService(this.requireWorkspace());
+  }
+
+  private inventoryLedgerService(): InventoryLedgerService {
+    return new InventoryLedgerService(this.requireWorkspace());
   }
 
   private recipientService(): RecipientService {

@@ -49,7 +49,7 @@ export type FulfillmentDemandTotals = {
   confirmedInTransitQuantity: number;
   draftSuggestionQuantity: number;
   uncoveredQuantity: number;
-  allocatedStockQuantity: number;
+  sellableCoveredQuantity: number;
   pendingInspectionQuantity: number;
   releasedOrderCount: number;
 };
