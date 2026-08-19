@@ -21,6 +21,11 @@ import {
   type AftersalesWorkflowStepProjection,
 } from '../core/aftersales-workflow-templates';
 import type { ShipmentRecord } from '../core/shipment-records';
+import {
+  inventoryMovementSourceLabel,
+  inventoryStateLabel,
+  type InventoryMovementView,
+} from '../core/inventory-ledger';
 import { isUnresolvedLogisticsExceptionStage } from '../core/logistics-exceptions';
 import {
   aftersalesHandlingDirectionLabel,
@@ -76,6 +81,30 @@ export function AftersalesCasePanel({
     step: AftersalesWorkflowStepProjection;
     kind: 'completed' | 'skipped';
   } | null>(null);
+  const [inventoryImpactByCase, setInventoryImpactByCase] = useState<Record<
+    string,
+    { movements: InventoryMovementView[]; state: 'loading' | 'ready' | 'error' }
+  >>({});
+  const loadInventoryImpact = (caseId: string): void => {
+    if (inventoryImpactByCase[caseId]) return;
+    setInventoryImpactByCase((previous) => ({
+      ...previous,
+      [caseId]: { movements: [], state: 'loading' },
+    }));
+    api.queryAftersalesInventoryImpact(caseId)
+      .then((movements) => {
+        setInventoryImpactByCase((previous) => ({
+          ...previous,
+          [caseId]: { movements, state: 'ready' },
+        }));
+      })
+      .catch(() => {
+        setInventoryImpactByCase((previous) => ({
+          ...previous,
+          [caseId]: { movements: [], state: 'error' },
+        }));
+      });
+  };
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
@@ -875,6 +904,46 @@ export function AftersalesCasePanel({
               </button>
             </div>
           )}
+          <details
+            className="shipment-record-card__timeline"
+            onToggle={(event) => {
+              if ((event.target as HTMLDetailsElement).open) {
+                loadInventoryImpact(aftersalesCase.id);
+              }
+            }}
+          >
+            <summary>库存影响</summary>
+            {(() => {
+              const impact = inventoryImpactByCase[aftersalesCase.id];
+              if (!impact || impact.state === 'loading') {
+                return <small>正在读取库存影响…</small>;
+              }
+              if (impact.state === 'error') {
+                return <small>库存影响读取失败，请收起后重新展开</small>;
+              }
+              if (impact.movements.length === 0) {
+                return <small>本售后尚未产生库存变化</small>;
+              }
+              return (
+                <ol aria-label="本售后相关的库存流水">
+                  {impact.movements.map((movement) => (
+                    <li key={movement.id}>
+                      <strong>
+                        {movement.direction === 'in' ? '+' : '−'}{movement.quantity} {' '}
+                        {inventoryStateLabel(movement.state)}
+                      </strong>
+                      <span>
+                        {movement.name}{movement.specification ? ` · ${movement.specification}` : ''}
+                        {' · '}{inventoryMovementSourceLabel(movement.sourceType)}
+                        {' · '}{movement.reason}
+                      </span>
+                      <small>{formatDateTime(movement.occurredAt)}</small>
+                    </li>
+                  ))}
+                </ol>
+              );
+            })()}
+          </details>
           <details className="shipment-record-card__timeline">
             <summary>售后处理时间线</summary>
             <ol>

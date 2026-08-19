@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 // v54 建立不可变库存流水表；存在流水数据时拒绝降级。
 export function removeVersion54ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion55ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 54',
   ).get();
@@ -19,6 +20,63 @@ export function removeVersion54ExtensionArtifacts(database: DatabaseSync): void 
     DROP TRIGGER IF EXISTS inventory_movements_are_immutable_on_delete;
     DROP TABLE inventory_movements;
     DELETE FROM schema_migrations WHERE version = 54;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+// v55 重建库存流水表，把来源枚举扩充出未交寄撤销冲正；
+// 存在流水数据时拒绝降级。
+export function removeVersion55ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 55',
+  ).get();
+  if (!applied) return;
+  const movementCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM inventory_movements
+  `).get() as { count: number };
+  if (movementCount.count > 0) {
+    throw new Error('v55 测试降级前必须移除库存流水数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS inventory_movements_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS inventory_movements_are_immutable_on_delete;
+    DROP TABLE inventory_movements;
+    CREATE TABLE inventory_movements (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      standard_product_id TEXT NOT NULL
+        REFERENCES standard_products(id) ON DELETE RESTRICT,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+      state TEXT NOT NULL CHECK (state IN (
+        'sellable', 'awaiting_inspection', 'defective', 'scrapped'
+      )),
+      source_type TEXT NOT NULL CHECK (source_type IN (
+        'manual_adjustment', 'inspection_result', 'shipment_dispatch',
+        'replacement_dispatch', 'return_receipt', 'purchase_arrival', 'supplier_return'
+      )),
+      source_id TEXT NOT NULL CHECK (length(trim(source_id)) BETWEEN 1 AND 100),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (source_type, source_id, state, direction)
+    ) STRICT;
+    CREATE INDEX inventory_movements_by_product
+    ON inventory_movements (standard_product_id, sequence);
+    CREATE TRIGGER inventory_movements_are_immutable_on_update
+    BEFORE UPDATE ON inventory_movements
+    BEGIN
+      SELECT RAISE(ABORT, 'inventory movements are immutable');
+    END;
+    CREATE TRIGGER inventory_movements_are_immutable_on_delete
+    BEFORE DELETE ON inventory_movements
+    BEGIN
+      SELECT RAISE(ABORT, 'inventory movements are immutable');
+    END;
+    DELETE FROM schema_migrations WHERE version = 55;
     COMMIT;
     PRAGMA foreign_keys = ON;
   `);

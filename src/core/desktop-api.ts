@@ -151,6 +151,7 @@ import type {
   RegisterFulfillmentRefundInput,
 } from './fulfillment-demand';
 import type {
+  InventoryMovementView,
   InventoryView,
   RecordInventoryAdjustmentInput,
   RecordInventoryInspectionInput,
@@ -327,6 +328,7 @@ export interface DesktopApi {
     input: PurchaseSuggestionActionInput,
   ): Promise<FulfillmentDemandView>;
   queryInventory(): Promise<InventoryView>;
+  queryAftersalesInventoryImpact(caseId: string): Promise<InventoryMovementView[]>;
   recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
   recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;

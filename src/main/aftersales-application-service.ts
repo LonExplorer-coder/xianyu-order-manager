@@ -58,6 +58,7 @@ import {
 } from '../core/logistics-exceptions';
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
+import { InventoryLedgerService } from './inventory-ledger-service';
 import { Workspace } from './workspace';
 import type { ShipmentRecord } from '../core/shipment-records';
 
@@ -808,15 +809,25 @@ export class AftersalesApplicationService {
         '拦截退回检查时间不能早于实际退回或拦截结果时间',
       );
       this.workspace.transaction(() => {
+        const inspectionEventId = randomUUID();
         this.workspace.database.prepare(`
           INSERT INTO aftersales_intercepted_return_inspection_events (
             id, case_id, shipment_package_id, result, items_json,
             occurred_at, reason, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          randomUUID(), current.id, prepared.packageId, prepared.result,
+          inspectionEventId, current.id, prepared.packageId, prepared.result,
           JSON.stringify(prepared.items), prepared.occurredAt, prepared.reason, now,
         );
+        this.inventoryLedgerService().recordInterceptedReturnFact({
+          inspectionEventId,
+          caseId: current.id,
+          packageId: prepared.packageId,
+          result: prepared.result,
+          occurredAt: prepared.occurredAt,
+          receiptReason: '拦截退回实际收到',
+          inspectionReason: '拦截退回检查结果',
+        });
         this.advanceCase(
           current,
           current.status === 'completed' || current.status === 'cancelled'
@@ -1593,6 +1604,11 @@ export class AftersalesApplicationService {
           prepared.reason,
           now,
         );
+        this.inventoryLedgerService().recordReturnReceiptFact({
+          returnRecordId: returnRecord.id,
+          occurredAt: prepared.occurredAt,
+          reason: '退货实际收到',
+        });
       });
       return this.get(current.id);
     }
@@ -1708,6 +1724,11 @@ export class AftersalesApplicationService {
           prepared.note,
           now,
         );
+        this.inventoryLedgerService().recordReturnInspectionFact({
+          returnRecordId: returnRecord.id,
+          occurredAt: prepared.occurredAt,
+          reason: '退货检查结果',
+        });
       });
       return this.get(current.id);
     }
@@ -2829,6 +2850,12 @@ export class AftersalesApplicationService {
         `).run(randomUUID(), replacementId, item.roundItemId, shipmentItemId, item.quantity);
       }
     }
+    this.inventoryLedgerService().recordShipmentDispatchFact({
+      shipmentRecordId: recordId,
+      sourceType: 'replacement_dispatch',
+      occurredAt: prepared.occurredAt,
+      reason: '售后补发实际发出',
+    });
   }
 
   private getSourcePackageEvidence(caseId: string): AftersalesSourcePackageEvidence[] {
@@ -3524,6 +3551,10 @@ export class AftersalesApplicationService {
 
   private aftersalesWorkflowTemplateService(): AftersalesWorkflowTemplateService {
     return new AftersalesWorkflowTemplateService(this.workspace);
+  }
+
+  private inventoryLedgerService(): InventoryLedgerService {
+    return new InventoryLedgerService(this.workspace);
   }
 
   private advanceCase(

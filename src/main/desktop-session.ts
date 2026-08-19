@@ -119,7 +119,7 @@ import type {
   FulfillmentPlanView,
 } from '../core/fulfillment-plans';
 import type { FulfillmentDemandView } from '../core/fulfillment-demand';
-import type { InventoryView } from '../core/inventory-ledger';
+import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -864,6 +864,10 @@ export class DesktopSession {
 
   public queryInventory(): InventoryView {
     return this.requireApplication().queryInventory();
+  }
+
+  public queryAftersalesInventoryImpact(caseId: string): InventoryMovementView[] {
+    return this.requireApplication().queryAftersalesInventoryImpact(caseId);
   }
 
   public recordInventoryAdjustment(input: unknown): InventoryView {

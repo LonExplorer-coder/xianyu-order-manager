@@ -408,10 +408,11 @@ export class FulfillmentDemandService {
         (total, view) => total + view.uncoveredQuantity,
         0,
       ),
+      // 账面为负说明存在未入账缺口，覆盖按 0 计而不是出现负覆盖。
       sellableCoveredQuantity: productViews.reduce(
         (total, view) => total + Math.min(
           view.demandQuantity,
-          stockByProduct.get(view.standardProductId)?.sellable ?? 0,
+          Math.max(0, stockByProduct.get(view.standardProductId)?.sellable ?? 0),
         ),
         0,
       ),

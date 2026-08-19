@@ -276,7 +276,7 @@ import {
 import { AftersalesApplicationService } from './aftersales-application-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { FulfillmentDemandService } from './fulfillment-demand-service';
-import type { InventoryView } from '../core/inventory-ledger';
+import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import { InventoryLedgerService } from './inventory-ledger-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
@@ -5497,6 +5497,12 @@ export class LocalApplication {
       )))) {
         this.synchronizeShipmentOrderFulfillment(orderId, now);
       }
+      this.inventoryLedgerService().recordShipmentDispatchFact({
+        shipmentRecordId: recordId,
+        sourceType: 'shipment_dispatch',
+        occurredAt: now,
+        reason: '订单实际发出',
+      });
     });
     const record = this.getShipmentRecord(recordId);
     return {
@@ -5678,9 +5684,15 @@ export class LocalApplication {
           id, package_id, reason, created_at
         ) VALUES (?, ?, ?, ?)
       `);
+      const cancellations: Array<{ cancellationEventId: string; packageId: string }> = [];
       for (const shipmentPackage of packages) {
+        const cancellationEventId = randomUUID();
+        cancellations.push({
+          cancellationEventId,
+          packageId: shipmentPackage.id,
+        });
         insertCancellation.run(
-          randomUUID(),
+          cancellationEventId,
           shipmentPackage.id,
           prepared.reason,
           now,
@@ -5731,6 +5743,19 @@ export class LocalApplication {
         prepared.reason,
         now,
       );
+      const isReplacementRecord = workspace.database.prepare(`
+        SELECT 1 FROM aftersales_replacement_shipments WHERE shipment_record_id = ?
+      `).get(record.id) !== undefined;
+      for (const { cancellationEventId, packageId } of cancellations) {
+        this.inventoryLedgerService().recordShipmentVoidFact({
+          cancellationEventId,
+          packageId,
+          shipmentRecordId: record.id,
+          dispatchSourceType: isReplacementRecord ? 'replacement_dispatch' : 'shipment_dispatch',
+          occurredAt: now,
+          reason: '未交寄撤销冲正',
+        });
+      }
     });
     const updatedRecord = this.getShipmentRecord(record.id);
     return {
@@ -6135,6 +6160,10 @@ export class LocalApplication {
 
   public queryInventory(): InventoryView {
     return this.inventoryLedgerService().view();
+  }
+
+  public queryAftersalesInventoryImpact(caseId: string): InventoryMovementView[] {
+    return this.inventoryLedgerService().movementsForAftersalesCase(caseId);
   }
 
   public recordInventoryAdjustment(input: unknown): InventoryView {

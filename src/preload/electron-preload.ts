@@ -199,6 +199,9 @@ const api: DesktopApi = {
     ipcRenderer.invoke('fulfillment-plans:cancel-purchase-suggestion', input)
   ),
   queryInventory: () => ipcRenderer.invoke('inventory:view'),
+  queryAftersalesInventoryImpact: (caseId: string) => (
+    ipcRenderer.invoke('inventory:aftersales-impact', caseId)
+  ),
   recordInventoryAdjustment: (input) => (
     ipcRenderer.invoke('inventory:record-adjustment', input)
   ),

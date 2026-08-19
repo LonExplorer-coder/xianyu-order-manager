@@ -13,7 +13,8 @@ export type InventoryMovementSourceType =
   | 'replacement_dispatch'
   | 'return_receipt'
   | 'purchase_arrival'
-  | 'supplier_return';
+  | 'supplier_return'
+  | 'shipment_void';
 
 export type InventoryProductView = {
   standardProductId: string;
@@ -141,6 +142,7 @@ export function inventoryMovementSourceLabel(source: InventoryMovementSourceType
     return_receipt: '退货签收',
     purchase_arrival: '采购到货',
     supplier_return: '供应方退货',
+    shipment_void: '未交寄撤销',
   };
   return labels[source];
 }

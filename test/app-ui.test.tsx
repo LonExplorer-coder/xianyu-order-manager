@@ -614,6 +614,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       unmappedPendingShipment: [],
       movements: [],
     }),
+    queryAftersalesInventoryImpact: vi.fn().mockResolvedValue([]),
     recordInventoryAdjustment: vi.fn(),
     recordInventoryInspection: vi.fn(),
     exportOrders: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
@@ -2036,12 +2037,32 @@ describe('订单管理工作台', () => {
       queryShipmentGroups: vi.fn().mockResolvedValue({ groups: [], attentionOrders: [] }),
       queryShipmentGroupArchives: vi.fn().mockResolvedValue([archive]),
       queryAftersalesCases: vi.fn().mockResolvedValue([aftersalesCase]),
+      queryAftersalesInventoryImpact: vi.fn().mockResolvedValue([{
+        id: 'movement-ui-1',
+        sequence: 4,
+        standardProductId: 'product-ui-1',
+        sku: 'SKU-UI-1',
+        name: sourceItem.sourceTitle,
+        specification: sourceItem.sourceSpec,
+        quantity: 2,
+        direction: 'in',
+        state: 'awaiting_inspection',
+        sourceType: 'return_receipt',
+        sourceId: 'return-ui-1',
+        reason: '退货实际收到',
+        occurredAt: '2026-08-13T10:30:00+08:00',
+        createdAt: '2026-08-13T02:30:00.000Z',
+      }]),
     });
 
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: '发货组' }));
     const history = await screen.findByRole('region', { name: '发货记录' });
 
+    await user.click(await within(history).findByText('库存影响'));
+    expect(history).toHaveTextContent('+2 待检查');
+    expect(history).toHaveTextContent('退货签收');
+    expect(history).toHaveTextContent('退货实际收到');
     expect(history).toHaveTextContent('售后：等待退回 1');
     expect(history).toHaveTextContent('当前待办：等待买家退回');
     expect(history).toHaveTextContent(sourceItem.sourceTitle);

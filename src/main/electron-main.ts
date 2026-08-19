@@ -602,6 +602,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.cancelPurchaseSuggestion(input)
   ));
   ipcMain.handle('inventory:view', () => desktopSession.queryInventory());
+  ipcMain.handle('inventory:aftersales-impact', (_event, caseId: string) => (
+    desktopSession.queryAftersalesInventoryImpact(caseId)
+  ));
   ipcMain.handle('inventory:record-adjustment', (_event, input: unknown) => (
     desktopSession.recordInventoryAdjustment(input)
   ));

@@ -211,6 +211,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(52)) migrateToVersion52(database);
   if (!versions.has(53)) migrateToVersion53(database);
   if (!versions.has(54)) migrateToVersion54(database);
+  if (!versions.has(55)) migrateToVersion55(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6462,6 +6463,72 @@ function migrateToVersion54(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (54, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion55(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      DROP TRIGGER inventory_movements_are_immutable_on_update;
+      DROP TRIGGER inventory_movements_are_immutable_on_delete;
+
+      CREATE TABLE inventory_movements_v55 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        state TEXT NOT NULL CHECK (state IN (
+          'sellable', 'awaiting_inspection', 'defective', 'scrapped'
+        )),
+        source_type TEXT NOT NULL CHECK (source_type IN (
+          'manual_adjustment', 'inspection_result', 'shipment_dispatch',
+          'replacement_dispatch', 'return_receipt', 'purchase_arrival',
+          'supplier_return', 'shipment_void'
+        )),
+        source_id TEXT NOT NULL CHECK (length(trim(source_id)) BETWEEN 1 AND 100),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (source_type, source_id, standard_product_id, state, direction)
+      ) STRICT;
+
+      INSERT INTO inventory_movements_v55 (
+        sequence, id, standard_product_id, quantity, direction, state,
+        source_type, source_id, reason, occurred_at, created_at
+      )
+      SELECT sequence, id, standard_product_id, quantity, direction, state,
+        source_type, source_id, reason, occurred_at, created_at
+      FROM inventory_movements
+      ORDER BY sequence;
+
+      DROP TABLE inventory_movements;
+      ALTER TABLE inventory_movements_v55 RENAME TO inventory_movements;
+
+      CREATE INDEX inventory_movements_by_product
+      ON inventory_movements (standard_product_id, sequence);
+
+      CREATE TRIGGER inventory_movements_are_immutable_on_update
+      BEFORE UPDATE ON inventory_movements
+      BEGIN
+        SELECT RAISE(ABORT, 'inventory movements are immutable');
+      END;
+
+      CREATE TRIGGER inventory_movements_are_immutable_on_delete
+      BEFORE DELETE ON inventory_movements
+      BEGIN
+        SELECT RAISE(ABORT, 'inventory movements are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (55, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {
