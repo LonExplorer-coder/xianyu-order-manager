@@ -424,6 +424,95 @@ export class InventoryLedgerService {
     return rows.map((row) => this.movementViewFromRow(row));
   }
 
+  // 业务事实钩子：采购到货按检查分流直接进入对应分类，未分类余量进待检查，
+  // 与人工检查入口「只有给出结论的数量离开待检查」的口径一致。
+  public recordPurchaseArrivalFact(fact: {
+    arrivalId: string;
+    occurredAt: string;
+    reason: string;
+  }): void {
+    const rows = this.workspace.database.prepare(`
+      SELECT i.resellable_quantity, i.defective_quantity, i.scrapped_quantity,
+        i.received_quantity, p.standard_product_id AS product_id
+      FROM purchase_arrival_items i
+      JOIN purchase_order_items p ON p.id = i.purchase_order_item_id
+      WHERE i.arrival_id = ?
+    `).all(fact.arrivalId) as unknown as SqlRow[];
+    const lines: InventoryFactLine[] = [];
+    for (const row of rows) {
+      const productId = asString(row.product_id);
+      const classified: Array<[InventoryStateName, number]> = [
+        ['sellable', Number(row.resellable_quantity)],
+        ['defective', Number(row.defective_quantity)],
+        ['scrapped', Number(row.scrapped_quantity)],
+      ];
+      for (const [state, quantity] of classified) {
+        if (quantity <= 0) continue;
+        lines.push({ standardProductId: productId, quantity, direction: 'in', state });
+      }
+      const awaiting = Number(row.received_quantity)
+        - Number(row.resellable_quantity)
+        - Number(row.defective_quantity)
+        - Number(row.scrapped_quantity);
+      if (awaiting > 0) {
+        lines.push({
+          standardProductId: productId,
+          quantity: awaiting,
+          direction: 'in',
+          state: 'awaiting_inspection',
+        });
+      }
+    }
+    this.insertAggregatedMovements(
+      lines,
+      'purchase_arrival',
+      fact.arrivalId,
+      fact.occurredAt,
+      fact.reason,
+    );
+  }
+
+  // 人工库存操作：供应方退货从指定库存状态出库，做余量校验并保留独立流水。
+  public recordSupplierReturnFact(fact: {
+    returnId: string;
+    occurredAt: string;
+    reason: string;
+  }): void {
+    const rows = this.workspace.database.prepare(`
+      SELECT standard_product_id AS product_id, quantity, state
+      FROM supplier_return_items
+      WHERE supplier_return_id = ?
+    `).all(fact.returnId) as unknown as SqlRow[];
+    for (const row of rows) {
+      const productId = asString(row.product_id);
+      const state = asString(row.state) as InventoryStateName;
+      const quantity = Number(row.quantity);
+      const current = this.stateQuantity(productId, state);
+      if (current < quantity) {
+        const product = this.requireProduct(productId);
+        throw new Error(this.insufficientMessage(
+          product,
+          inventoryStateLabel(state),
+          current,
+          '退给供应方',
+          quantity,
+        ));
+      }
+    }
+    this.insertAggregatedMovements(
+      rows.map((row) => ({
+        standardProductId: asString(row.product_id),
+        quantity: Number(row.quantity),
+        direction: 'out' as const,
+        state: asString(row.state) as InventoryStateName,
+      })),
+      'supplier_return',
+      fact.returnId,
+      fact.occurredAt,
+      fact.reason,
+    );
+  }
+
   private stateQuantitiesByProduct(): Map<string, Record<InventoryStateName, number>> {
     const result = new Map<string, Record<InventoryStateName, number>>();
     const rows = this.workspace.database.prepare(`
@@ -465,10 +554,17 @@ export class InventoryLedgerService {
     ]));
 
     const transitRows = this.workspace.database.prepare(`
-      SELECT standard_product_id AS product_id, SUM(quantity) AS quantity
-      FROM purchase_suggestions
-      WHERE status = 'confirmed'
-      GROUP BY standard_product_id
+      SELECT poi.standard_product_id AS product_id,
+        SUM(MAX(poi.quantity - COALESCE(a.received, 0), 0)) AS quantity
+      FROM purchase_order_items poi
+      JOIN purchase_orders po ON po.id = poi.purchase_order_id
+      LEFT JOIN (
+        SELECT purchase_order_item_id, SUM(received_quantity) AS received
+        FROM purchase_arrival_items
+        GROUP BY purchase_order_item_id
+      ) a ON a.purchase_order_item_id = poi.id
+      WHERE po.status = 'confirmed'
+      GROUP BY poi.standard_product_id
     `).all() as unknown as SqlRow[];
     const transitByProduct = new Map(transitRows.map((row) => [
       asString(row.product_id),

@@ -120,6 +120,7 @@ import type {
 } from '../core/fulfillment-plans';
 import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
+import type { PurchaseView } from '../core/purchase-orders';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -876,6 +877,42 @@ export class DesktopSession {
 
   public recordInventoryInspection(input: unknown): InventoryView {
     return this.requireApplication().recordInventoryInspection(input);
+  }
+
+  public queryPurchases(): PurchaseView {
+    return this.requireApplication().queryPurchases();
+  }
+
+  public createSupplier(input: unknown): PurchaseView {
+    return this.requireApplication().createSupplier(input);
+  }
+
+  public createPurchaseOrder(input: unknown): PurchaseView {
+    return this.requireApplication().createPurchaseOrder(input);
+  }
+
+  public confirmPurchaseOrder(input: unknown): PurchaseView {
+    return this.requireApplication().confirmPurchaseOrder(input);
+  }
+
+  public cancelPurchaseOrder(input: unknown): PurchaseView {
+    return this.requireApplication().cancelPurchaseOrder(input);
+  }
+
+  public changePurchaseOrderItemQuantity(input: unknown): PurchaseView {
+    return this.requireApplication().changePurchaseOrderItemQuantity(input);
+  }
+
+  public changePurchaseOrderExpectedDate(input: unknown): PurchaseView {
+    return this.requireApplication().changePurchaseOrderExpectedDate(input);
+  }
+
+  public recordPurchaseArrival(input: unknown): PurchaseView {
+    return this.requireApplication().recordPurchaseArrival(input);
+  }
+
+  public recordSupplierReturn(input: unknown): PurchaseView {
+    return this.requireApplication().recordSupplierReturn(input);
   }
 
   public exportOrdersToWorkbook(

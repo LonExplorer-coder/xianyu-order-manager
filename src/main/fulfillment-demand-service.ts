@@ -357,7 +357,7 @@ export class FulfillmentDemandService {
           specification: asString(info.specification),
           demandQuantity,
           refundedOrCancelledQuantity: refunded,
-          confirmedInTransitQuantity: confirmed,
+          confirmedSuggestionQuantity: confirmed,
           draftSuggestionQuantity: draft,
           uncoveredQuantity,
           overPurchaseRisk: confirmed > demandQuantity,
@@ -396,8 +396,8 @@ export class FulfillmentDemandService {
         (total, view) => total + view.refundedOrCancelledQuantity,
         0,
       ),
-      confirmedInTransitQuantity: productViews.reduce(
-        (total, view) => total + view.confirmedInTransitQuantity,
+      confirmedSuggestionQuantity: productViews.reduce(
+        (total, view) => total + view.confirmedSuggestionQuantity,
         0,
       ),
       draftSuggestionQuantity: productViews.reduce(
@@ -458,7 +458,7 @@ export class FulfillmentDemandService {
     );
     return {
       demandQuantity: product?.demandQuantity ?? 0,
-      confirmedQuantity: product?.confirmedInTransitQuantity ?? 0,
+      confirmedQuantity: product?.confirmedSuggestionQuantity ?? 0,
       draftQuantity: product?.draftSuggestionQuantity ?? 0,
       uncoveredQuantity: product?.uncoveredQuantity ?? 0,
     };

@@ -179,6 +179,7 @@ import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
 import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
 import { InventoryWorkspace } from './InventoryWorkspace';
+import { PurchaseWorkspace } from './PurchaseWorkspace';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
@@ -206,7 +207,7 @@ export type AppProps = {
 };
 
 type BusyAction = 'directory' | 'upload' | 'cancel' | 'confirm' | 'detail' | 'review' | 'retry' | 'custom-fields' | 'templates' | 'order-edit' | 'status-logistics' | null;
-type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'inventory' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
+type AppPage = 'orders' | 'shipments' | 'fulfillment_plans' | 'inventory' | 'purchases' | 'recipients' | 'aftersales_workflows' | 'products' | 'batches' | 'fields' | 'templates' | 'settings';
 type OrdersWorkspaceView = 'orders' | 'order_items';
 type DetailDirtyKind = 'none' | 'custom_fields' | 'order_edit' | 'both';
 type ShipmentFocus = { recordId: string; aftersalesCaseId?: string };
@@ -1398,6 +1399,8 @@ export function App({ api }: AppProps) {
     workspace = <FulfillmentPlansWorkspace api={api} />;
   } else if (activePage === 'inventory') {
     workspace = <InventoryWorkspace api={api} />;
+  } else if (activePage === 'purchases') {
+    workspace = <PurchaseWorkspace api={api} />;
   } else if (activePage === 'recipients') {
     workspace = <RecipientsWorkspace api={api} />;
   } else if (activePage === 'products') {
@@ -1683,6 +1686,16 @@ function AppFrame({
           >
             <Icon name="box" />
             <span className="nav-label">库存</span>
+          </button>
+          <button
+            className={`nav-item${activePage === 'purchases' ? ' is-active' : ''}`}
+            type="button"
+            aria-label="采购"
+            aria-current={activePage === 'purchases' ? 'page' : undefined}
+            onClick={() => onNavigate('purchases')}
+          >
+            <Icon name="upload" />
+            <span className="nav-label">采购</span>
           </button>
           <button
             className={`nav-item${activePage === 'recipients' ? ' is-active' : ''}`}

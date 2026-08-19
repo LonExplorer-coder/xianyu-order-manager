@@ -208,6 +208,21 @@ const api: DesktopApi = {
   recordInventoryInspection: (input) => (
     ipcRenderer.invoke('inventory:record-inspection', input)
   ),
+  queryPurchases: () => ipcRenderer.invoke('purchases:view'),
+  createSupplier: (input) => ipcRenderer.invoke('purchases:create-supplier', input),
+  createPurchaseOrder: (input) => ipcRenderer.invoke('purchases:create-order', input),
+  confirmPurchaseOrder: (input) => ipcRenderer.invoke('purchases:confirm-order', input),
+  cancelPurchaseOrder: (input) => ipcRenderer.invoke('purchases:cancel-order', input),
+  changePurchaseOrderItemQuantity: (input) => (
+    ipcRenderer.invoke('purchases:change-order-item-quantity', input)
+  ),
+  changePurchaseOrderExpectedDate: (input) => (
+    ipcRenderer.invoke('purchases:change-order-expected-date', input)
+  ),
+  recordPurchaseArrival: (input) => ipcRenderer.invoke('purchases:record-arrival', input),
+  recordSupplierReturn: (input) => (
+    ipcRenderer.invoke('purchases:record-supplier-return', input)
+  ),
   exportOrders: (input) => ipcRenderer.invoke('orders:export', input),
   previewOrderExport: (input) => ipcRenderer.invoke('orders:preview-export', input),
   exportShipmentGroups: (input) => ipcRenderer.invoke('shipment-groups:export', input),

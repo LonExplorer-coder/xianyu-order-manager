@@ -139,13 +139,13 @@ describe('预售需求与采购建议区块', () => {
     expect(await screen.findByText('预售需求与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 已确认采购 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
     expect(screen.getByText('玻璃保鲜盒（1000ml）未覆盖 6 件，达到提醒阈值')).toBeVisible();
     expect(screen.getByText('确认采购超过当前需求，多采购风险')).toBeVisible();
     expect(screen.getByText(/未建档手作发夹（蓝色） × 2 · 涉及 1 单/)).toBeVisible();
     expect(screen.getByText(/请先在订单校对中关联标准商品或建立映射/)).toBeVisible();
-    expect(screen.getAllByText(/待确认|已确认（采购在途）/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/待确认|已确认（采购意向）/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: '登记发货前退款' })).toBeVisible();
     expect(screen.getByRole('button', { name: '确认' })).toBeVisible();
   });
@@ -174,7 +174,7 @@ describe('预售需求与采购建议区块', () => {
     });
   });
 
-  it('确认待确认建议需填写原因并计入采购在途', async () => {
+  it('确认待确认建议需填写原因并计入已确认采购', async () => {
     const user = userEvent.setup();
     const confirmPurchaseSuggestion = vi.fn().mockResolvedValue(demandFixture());
     renderDemandPlans({ confirmPurchaseSuggestion });
@@ -296,7 +296,7 @@ describe('团购成团与条件性需求区块', () => {
     expect(await screen.findByText('条件性团购需求（预测）与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 确认在途 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 已确认采购 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
 
     const generateButtons = screen.getAllByRole('button', { name: '生成采购建议' });
@@ -355,7 +355,7 @@ function demandFixture(): FulfillmentDemandView {
       specification: '1000ml',
       demandQuantity: 10,
       refundedOrCancelledQuantity: 2,
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 3,
       uncoveredQuantity: 6,
       overPurchaseRisk: false,
@@ -367,7 +367,7 @@ function demandFixture(): FulfillmentDemandView {
       specification: '大号',
       demandQuantity: 2,
       refundedOrCancelledQuantity: 0,
-      confirmedInTransitQuantity: 5,
+      confirmedSuggestionQuantity: 5,
       draftSuggestionQuantity: 0,
       uncoveredQuantity: 0,
       overPurchaseRisk: true,
@@ -414,7 +414,7 @@ function demandFixture(): FulfillmentDemandView {
     totals: {
       demandQuantity: 10,
       refundedOrCancelledQuantity: 2,
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 3,
       uncoveredQuantity: 6,
       sellableCoveredQuantity: 0,

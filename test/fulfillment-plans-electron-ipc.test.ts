@@ -1095,7 +1095,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
       },
     ) as FulfillmentDemandView;
     expect(confirmed.products[0]).toMatchObject({
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       uncoveredQuantity: 6,
     });
 
@@ -1109,7 +1109,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
     expect(afterRefund.products[0]).toMatchObject({
       demandQuantity: 8,
       refundedOrCancelledQuantity: 2,
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       uncoveredQuantity: 4,
     });
 
@@ -1120,7 +1120,7 @@ describe('预售需求与采购建议 Electron IPC', () => {
     expect(persisted.totals).toMatchObject({
       demandQuantity: 8,
       refundedOrCancelledQuantity: 2,
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
     });
     expect(persisted.suggestions[0]).toMatchObject({
       status: 'confirmed',

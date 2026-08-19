@@ -7169,3 +7169,20 @@ select:focus-visible {
   gap: 0.25rem;
   font-size: 0.8125rem;
 }
+
+.purchase-line-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.purchase-line-row input,
+.purchase-line-row select {
+  min-width: 0;
+  flex: 1 1 8rem;
+}
+
+.purchase-toolbar {
+  margin-bottom: 0.75rem;
+}

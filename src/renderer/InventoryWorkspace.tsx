@@ -171,7 +171,7 @@ export function InventoryWorkspace({ api }: { api: DesktopApi }) {
           <h1>库存</h1>
           <p className="workspace-subtitle">
             四类真实库存（可销售、待检查、瑕疵品、报废）来自不可变流水；
-            已预留与采购在途是参考数，分别来自待发货订单与已确认采购建议。
+            已预留与采购在途是参考数，分别来自待发货订单与已确认采购订单的未到货数量。
           </p>
         </div>
         <div className="toolbar">

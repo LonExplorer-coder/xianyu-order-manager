@@ -465,7 +465,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
       setDemandByPlan((current) => ({ ...current, [suggestionPrompt.planId]: view }));
       setSuggestionPrompt(null);
       setFeedback(suggestionPrompt.kind === 'confirm'
-        ? '已确认采购建议，计入采购在途数量'
+        ? '已确认采购建议，计入需求覆盖'
         : '已取消采购建议');
     } catch (value) {
       setError(errorMessage(value));
@@ -800,7 +800,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                         <p className="fulfillment-plan-progress__hint">
                           {groupBuy && !formed
                             ? '未成团前需求只用于预测，不构成确定采购缺口；提前采购必须勾选确认未成团库存风险。确认成团后同一数据转为确定需求。'
-                            : '有效需求按未释放成员订单实时累计；现货可覆盖与待检查由库存流水实时汇总。建议确认后计入采购在途，不会自动生成采购订单。'}
+                            : '有效需求按未释放成员订单实时累计；现货可覆盖与待检查由库存流水实时汇总。建议确认后计入已确认采购，采购在途以采购订单为准。'}
                         </p>
                         {!demandByPlan[plan.id] ? (
                           <p role="status">正在读取需求…</p>
@@ -812,7 +812,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                               <p className="fulfillment-plan-demand__totals">
                                 {groupBuy && !formed ? '条件性需求' : '有效需求'} {demand.totals.demandQuantity} 件
                                 {' · '}退款/取消 {demand.totals.refundedOrCancelledQuantity} 件
-                                {' · '}确认在途 {demand.totals.confirmedInTransitQuantity} 件
+                                {' · '}已确认采购 {demand.totals.confirmedSuggestionQuantity} 件
                                 {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
                                 {' · '}{groupBuy && !formed ? '预测缺口' : '未覆盖缺口'} <strong>{demand.totals.uncoveredQuantity}</strong> 件
                                 {' · '}现货可覆盖 {demand.totals.sellableCoveredQuantity} 件
@@ -826,7 +826,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                               )}
                               {groupBuy && formed && demand.totals.uncoveredQuantity > 0 && (
                                 <p className="fulfillment-plan-progress__hint">
-                                  未覆盖缺口 {demand.totals.uncoveredQuantity} 件：已成团待采购，建议先补足采购在途再释放；库存分配的硬闸门由阶段三库存模块接入。
+                                  未覆盖缺口 {demand.totals.uncoveredQuantity} 件：已成团待采购，建议先补足已确认采购再释放；库存分配的硬闸门由阶段三库存模块接入。
                                 </p>
                               )}
                               {demand.products.length === 0 ? (
@@ -839,7 +839,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                         <th>标准商品</th>
                                         <th>有效需求</th>
                                         <th>退款/取消</th>
-                                        <th>确认在途</th>
+                                        <th>已确认采购</th>
                                         <th>未确认建议</th>
                                         <th>未覆盖缺口</th>
                                         <th>提示</th>
@@ -857,7 +857,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                           </td>
                                           <td>{product.demandQuantity}</td>
                                           <td>{product.refundedOrCancelledQuantity}</td>
-                                          <td>{product.confirmedInTransitQuantity}</td>
+                                          <td>{product.confirmedSuggestionQuantity}</td>
                                           <td>{product.draftSuggestionQuantity}</td>
                                           <td><strong>{product.uncoveredQuantity}</strong></td>
                                           <td>
@@ -1534,7 +1534,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           <DialogShell
             kicker={plan.type === 'presale' ? '预售计划' : conditional ? '团购计划·未成团' : '团购计划'}
             title={`生成采购建议 · ${plan.name}`}
-            description={`从尚未被采购在途覆盖的需求中选择数量；当前可建议 ${capacity} 件。建议需人工确认后才计入采购在途，不会自动生成采购订单。`}
+            description={`从尚未被已确认采购覆盖的需求中选择数量；当前可建议 ${capacity} 件。建议需人工确认后才计入已确认采购，不会自动生成采购订单。`}
             busy={busy}
             onClose={() => setSuggestionForm(null)}
             onSubmit={(event) => {
@@ -1617,7 +1617,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           title={suggestionPrompt.kind === 'confirm'
             ? '确认采购建议'
             : '取消采购建议'}
-          description={`${suggestionPrompt.label}。${suggestionPrompt.kind === 'confirm' ? '确认后计入采购在途数量，后续转为采购订单。' : '取消需给出原因；已确认建议的取消对应与供应方协商结果。'}`}
+          description={`${suggestionPrompt.label}。${suggestionPrompt.kind === 'confirm' ? '确认后计入已确认采购；实际在途数量以采购订单为准。' : '取消需给出原因；已确认建议的取消对应与供应方协商结果。'}`}
           busy={busy}
           onClose={() => setSuggestionPrompt(null)}
           onSubmit={(event) => {

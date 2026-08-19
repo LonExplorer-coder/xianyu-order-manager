@@ -1,5 +1,40 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v56 建立采购管理九表（供应方、订单、商品行、事件、到货、到货行、退货、退货行、应付）；存在采购数据时拒绝降级。
+export function removeVersion56ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 56',
+  ).get();
+  if (!applied) return;
+  const dataCount = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM suppliers)
+      + (SELECT COUNT(*) FROM purchase_orders)
+      + (SELECT COUNT(*) FROM supplier_returns)
+      + (SELECT COUNT(*) FROM purchase_payables)
+      AS count
+  `).get() as { count: number };
+  if (dataCount.count > 0) {
+    throw new Error('v56 测试降级前必须移除采购数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TABLE IF EXISTS purchase_payables;
+    DROP TABLE IF EXISTS supplier_return_items;
+    DROP TABLE IF EXISTS supplier_returns;
+    DROP TABLE IF EXISTS purchase_arrival_items;
+    DROP TABLE IF EXISTS purchase_arrivals;
+    DROP TABLE IF EXISTS purchase_order_events;
+    DROP TABLE IF EXISTS purchase_order_items;
+    DROP TABLE IF EXISTS purchase_orders;
+    DROP TABLE IF EXISTS suppliers;
+    DELETE FROM schema_migrations WHERE version = 56;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v54 建立不可变库存流水表；存在流水数据时拒绝降级。
 export function removeVersion54ExtensionArtifacts(database: DatabaseSync): void {
   removeVersion55ExtensionArtifacts(database);
@@ -28,6 +63,7 @@ export function removeVersion54ExtensionArtifacts(database: DatabaseSync): void 
 // v55 重建库存流水表，把来源枚举扩充出未交寄撤销冲正；
 // 存在流水数据时拒绝降级。
 export function removeVersion55ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion56ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 55',
   ).get();

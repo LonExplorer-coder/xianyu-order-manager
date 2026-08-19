@@ -13,7 +13,7 @@ export type FulfillmentDemandProductView = {
   specification: string;
   demandQuantity: number;
   refundedOrCancelledQuantity: number;
-  confirmedInTransitQuantity: number;
+  confirmedSuggestionQuantity: number;
   draftSuggestionQuantity: number;
   uncoveredQuantity: number;
   overPurchaseRisk: boolean;
@@ -46,7 +46,7 @@ export type PurchaseSuggestionView = {
 export type FulfillmentDemandTotals = {
   demandQuantity: number;
   refundedOrCancelledQuantity: number;
-  confirmedInTransitQuantity: number;
+  confirmedSuggestionQuantity: number;
   draftSuggestionQuantity: number;
   uncoveredQuantity: number;
   sellableCoveredQuantity: number;
@@ -151,7 +151,7 @@ export function fulfillmentDemandAlerts(view: FulfillmentDemandView): string[] {
 export function purchaseSuggestionStatusLabel(status: PurchaseSuggestionStatus): string {
   const labels: Record<PurchaseSuggestionStatus, string> = {
     draft: '待确认',
-    confirmed: '已确认（采购在途）',
+    confirmed: '已确认（采购意向）',
     cancelled: '已取消',
   };
   return labels[status];

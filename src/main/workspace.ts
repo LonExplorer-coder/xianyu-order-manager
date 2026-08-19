@@ -212,6 +212,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(53)) migrateToVersion53(database);
   if (!versions.has(54)) migrateToVersion54(database);
   if (!versions.has(55)) migrateToVersion55(database);
+  if (!versions.has(56)) migrateToVersion56(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6529,6 +6530,223 @@ function migrateToVersion55(database: DatabaseSync): void {
     `);
     assertForeignKeyIntegrity(database);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (55, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion56(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE suppliers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) BETWEEN 1 AND 100),
+        contact TEXT CHECK (contact IS NULL OR length(trim(contact)) BETWEEN 1 AND 100),
+        note TEXT CHECK (note IS NULL OR length(trim(note)) BETWEEN 1 AND 500),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE purchase_orders (
+        sequence INTEGER NOT NULL UNIQUE CHECK (sequence > 0),
+        id TEXT PRIMARY KEY,
+        supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed', 'cancelled')),
+        expected_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        cancelled_at TEXT,
+        cancel_reason TEXT,
+        CHECK (status != 'draft'
+          OR (confirmed_at IS NULL AND cancelled_at IS NULL AND cancel_reason IS NULL)),
+        CHECK (status != 'confirmed'
+          OR (confirmed_at IS NOT NULL AND cancelled_at IS NULL AND cancel_reason IS NULL)),
+        CHECK (status != 'cancelled' OR (cancelled_at IS NOT NULL AND cancel_reason IS NOT NULL))
+      ) STRICT;
+
+      CREATE INDEX purchase_orders_by_supplier
+        ON purchase_orders (supplier_id, sequence);
+
+      CREATE INDEX purchase_orders_by_status
+        ON purchase_orders (status, sequence);
+
+      CREATE TABLE purchase_order_items (
+        id TEXT PRIMARY KEY,
+        purchase_order_id TEXT NOT NULL
+          REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (purchase_order_id, standard_product_id)
+      ) STRICT;
+
+      CREATE INDEX purchase_order_items_by_product
+        ON purchase_order_items (standard_product_id);
+
+      CREATE TABLE purchase_order_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        purchase_order_id TEXT NOT NULL
+          REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'created', 'confirmed', 'quantity_changed', 'expected_date_changed', 'cancelled'
+        )),
+        item_id TEXT REFERENCES purchase_order_items(id) ON DELETE RESTRICT,
+        quantity INTEGER CHECK (quantity IS NULL OR quantity > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (event_type != 'quantity_changed'
+          OR (item_id IS NOT NULL AND quantity IS NOT NULL)),
+        CHECK (event_type = 'quantity_changed' OR (item_id IS NULL AND quantity IS NULL))
+      ) STRICT;
+
+      CREATE INDEX purchase_order_events_by_order
+        ON purchase_order_events (purchase_order_id, sequence);
+
+      CREATE TRIGGER purchase_order_events_are_immutable_on_update
+      BEFORE UPDATE ON purchase_order_events
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase order events are immutable');
+      END;
+
+      CREATE TRIGGER purchase_order_events_are_immutable_on_delete
+      BEFORE DELETE ON purchase_order_events
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase order events are immutable');
+      END;
+
+      CREATE TABLE purchase_arrivals (
+        id TEXT PRIMARY KEY,
+        purchase_order_id TEXT NOT NULL
+          REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX purchase_arrivals_by_order
+        ON purchase_arrivals (purchase_order_id, occurred_at);
+
+      CREATE TRIGGER purchase_arrivals_are_immutable_on_update
+      BEFORE UPDATE ON purchase_arrivals
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase arrivals are immutable');
+      END;
+
+      CREATE TRIGGER purchase_arrivals_are_immutable_on_delete
+      BEFORE DELETE ON purchase_arrivals
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase arrivals are immutable');
+      END;
+
+      CREATE TABLE purchase_arrival_items (
+        id TEXT PRIMARY KEY,
+        arrival_id TEXT NOT NULL REFERENCES purchase_arrivals(id) ON DELETE RESTRICT,
+        purchase_order_item_id TEXT NOT NULL
+          REFERENCES purchase_order_items(id) ON DELETE RESTRICT,
+        received_quantity INTEGER NOT NULL CHECK (received_quantity > 0),
+        resellable_quantity INTEGER NOT NULL CHECK (resellable_quantity >= 0),
+        defective_quantity INTEGER NOT NULL CHECK (defective_quantity >= 0),
+        scrapped_quantity INTEGER NOT NULL CHECK (scrapped_quantity >= 0),
+        CHECK (
+          resellable_quantity + defective_quantity + scrapped_quantity
+          <= received_quantity
+        ),
+        UNIQUE (arrival_id, purchase_order_item_id)
+      ) STRICT;
+
+      CREATE INDEX purchase_arrival_items_by_order_item
+        ON purchase_arrival_items (purchase_order_item_id);
+
+      CREATE TRIGGER purchase_arrival_items_are_immutable_on_update
+      BEFORE UPDATE ON purchase_arrival_items
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase arrival items are immutable');
+      END;
+
+      CREATE TRIGGER purchase_arrival_items_are_immutable_on_delete
+      BEFORE DELETE ON purchase_arrival_items
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase arrival items are immutable');
+      END;
+
+      CREATE TABLE supplier_returns (
+        id TEXT PRIMARY KEY,
+        supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+        purchase_order_id TEXT REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX supplier_returns_by_supplier
+        ON supplier_returns (supplier_id, occurred_at);
+
+      CREATE INDEX supplier_returns_by_order
+        ON supplier_returns (purchase_order_id);
+
+      CREATE TRIGGER supplier_returns_are_immutable_on_update
+      BEFORE UPDATE ON supplier_returns
+      BEGIN
+        SELECT RAISE(ABORT, 'supplier returns are immutable');
+      END;
+
+      CREATE TRIGGER supplier_returns_are_immutable_on_delete
+      BEFORE DELETE ON supplier_returns
+      BEGIN
+        SELECT RAISE(ABORT, 'supplier returns are immutable');
+      END;
+
+      CREATE TABLE supplier_return_items (
+        id TEXT PRIMARY KEY,
+        supplier_return_id TEXT NOT NULL
+          REFERENCES supplier_returns(id) ON DELETE RESTRICT,
+        standard_product_id TEXT NOT NULL
+          REFERENCES standard_products(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        state TEXT NOT NULL CHECK (state IN (
+          'sellable', 'awaiting_inspection', 'defective', 'scrapped'
+        )),
+        UNIQUE (supplier_return_id, standard_product_id, state)
+      ) STRICT;
+
+      CREATE INDEX supplier_return_items_by_product
+        ON supplier_return_items (standard_product_id);
+
+      CREATE TRIGGER supplier_return_items_are_immutable_on_update
+      BEFORE UPDATE ON supplier_return_items
+      BEGIN
+        SELECT RAISE(ABORT, 'supplier return items are immutable');
+      END;
+
+      CREATE TRIGGER supplier_return_items_are_immutable_on_delete
+      BEFORE DELETE ON supplier_return_items
+      BEGIN
+        SELECT RAISE(ABORT, 'supplier return items are immutable');
+      END;
+
+      CREATE TABLE purchase_payables (
+        id TEXT PRIMARY KEY,
+        purchase_order_id TEXT NOT NULL UNIQUE
+          REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        status TEXT NOT NULL CHECK (status = 'pending'),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX purchase_payables_by_supplier
+        ON purchase_payables (supplier_id, status);
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (56, ?)')
       .run(new Date().toISOString());
     database.exec('COMMIT;');
   } catch (error) {

@@ -277,7 +277,9 @@ import { AftersalesApplicationService } from './aftersales-application-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { FulfillmentDemandService } from './fulfillment-demand-service';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
+import type { PurchaseView } from '../core/purchase-orders';
 import { InventoryLedgerService } from './inventory-ledger-service';
+import { PurchaseOrderService } from './purchase-order-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
 import type { RecipientSummaryView } from '../core/recipients';
@@ -6174,6 +6176,42 @@ export class LocalApplication {
     return this.inventoryLedgerService().recordInspection(input);
   }
 
+  public queryPurchases(): PurchaseView {
+    return this.purchaseOrderService().view();
+  }
+
+  public createSupplier(input: unknown): PurchaseView {
+    return this.purchaseOrderService().createSupplier(input);
+  }
+
+  public createPurchaseOrder(input: unknown): PurchaseView {
+    return this.purchaseOrderService().createOrder(input);
+  }
+
+  public confirmPurchaseOrder(input: unknown): PurchaseView {
+    return this.purchaseOrderService().confirmOrder(input);
+  }
+
+  public cancelPurchaseOrder(input: unknown): PurchaseView {
+    return this.purchaseOrderService().cancelOrder(input);
+  }
+
+  public changePurchaseOrderItemQuantity(input: unknown): PurchaseView {
+    return this.purchaseOrderService().changeOrderItemQuantity(input);
+  }
+
+  public changePurchaseOrderExpectedDate(input: unknown): PurchaseView {
+    return this.purchaseOrderService().changeOrderExpectedDate(input);
+  }
+
+  public recordPurchaseArrival(input: unknown): PurchaseView {
+    return this.purchaseOrderService().recordArrival(input);
+  }
+
+  public recordSupplierReturn(input: unknown): PurchaseView {
+    return this.purchaseOrderService().recordSupplierReturn(input);
+  }
+
   public queryRecipients(): RecipientView[] {
     return this.recipientService().queryRecipients();
   }
@@ -8065,6 +8103,10 @@ export class LocalApplication {
 
   private inventoryLedgerService(): InventoryLedgerService {
     return new InventoryLedgerService(this.requireWorkspace());
+  }
+
+  private purchaseOrderService(): PurchaseOrderService {
+    return new PurchaseOrderService(this.requireWorkspace());
   }
 
   private recipientService(): RecipientService {

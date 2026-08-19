@@ -199,7 +199,7 @@ describe('预售有效需求投影', () => {
     expect(demand.totals).toMatchObject({
       demandQuantity: 6,
       refundedOrCancelledQuantity: 0,
-      confirmedInTransitQuantity: 0,
+      confirmedSuggestionQuantity: 0,
       draftSuggestionQuantity: 0,
       uncoveredQuantity: 6,
       releasedOrderCount: 0,
@@ -551,7 +551,7 @@ describe('分批采购建议', () => {
     return { application, plan, order };
   }
 
-  it('建议受未覆盖需求约束，确认后计入采购在途并支持多批次', async () => {
+  it('建议受未覆盖需求约束，确认后计入已确认采购并支持多批次', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-batches-'));
     const { application, plan } = await seededPlanWithDemand(root, 10);
 
@@ -564,7 +564,7 @@ describe('分批采购建议', () => {
     expect(first.products[0]).toMatchObject({
       demandQuantity: 10,
       draftSuggestionQuantity: 4,
-      confirmedInTransitQuantity: 0,
+      confirmedSuggestionQuantity: 0,
       uncoveredQuantity: 10,
     });
     expect(first.suggestions).toHaveLength(1);
@@ -591,12 +591,12 @@ describe('分批采购建议', () => {
       reason: '确认第1批',
     });
     expect(confirmed.products[0]).toMatchObject({
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 6,
       uncoveredQuantity: 6,
     });
     expect(confirmed.suggestions[0]).toMatchObject({ status: 'confirmed' });
-    expect(confirmed.totals.confirmedInTransitQuantity).toBe(4);
+    expect(confirmed.totals.confirmedSuggestionQuantity).toBe(4);
   });
 
   it('发货前退款收缩未确认建议、不改写已确认并给出多采购风险', async () => {
@@ -628,14 +628,14 @@ describe('分批采购建议', () => {
     const afterFirstRefund = registerRefund(application, plan, order, 0, 25, '退款25件');
     expect(afterFirstRefund.products[0]).toMatchObject({
       demandQuantity: 75,
-      confirmedInTransitQuantity: 40,
+      confirmedSuggestionQuantity: 40,
       draftSuggestionQuantity: 30,
     });
 
     const afterSecondRefund = registerRefund(application, plan, order, 0, 20, '退款20件');
     expect(afterSecondRefund.products[0]).toMatchObject({
       demandQuantity: 55,
-      confirmedInTransitQuantity: 40,
+      confirmedSuggestionQuantity: 40,
       draftSuggestionQuantity: 15,
       uncoveredQuantity: 15,
     });
@@ -646,7 +646,7 @@ describe('分批采购建议', () => {
     const afterThirdRefund = registerRefund(application, plan, order, 0, 30, '退款30件');
     expect(afterThirdRefund.products[0]).toMatchObject({
       demandQuantity: 25,
-      confirmedInTransitQuantity: 40,
+      confirmedSuggestionQuantity: 40,
       draftSuggestionQuantity: 0,
       uncoveredQuantity: 0,
       overPurchaseRisk: true,
@@ -692,7 +692,7 @@ describe('分批采购建议', () => {
     const demand = application.queryFulfillmentDemand(plan.id);
     expect(demand.products[0]).toMatchObject({
       demandQuantity: 0,
-      confirmedInTransitQuantity: 4,
+      confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 0,
       overPurchaseRisk: true,
     });
@@ -707,7 +707,7 @@ describe('分批采购建议', () => {
     )).toMatchObject({ status: 'confirmed', quantity: 4 });
   });
 
-  it('人工取消已确认建议需原因并释放采购在途数量', async () => {
+  it('人工取消已确认建议需原因并释放已确认采购数量', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-cancel-'));
     const { application, plan } = await seededPlanWithDemand(root, 10);
 
@@ -729,7 +729,7 @@ describe('分批采购建议', () => {
       reason: '供应方取消',
     });
     expect(cancelled.products[0]).toMatchObject({
-      confirmedInTransitQuantity: 0,
+      confirmedSuggestionQuantity: 0,
       demandQuantity: 10,
       uncoveredQuantity: 10,
     });

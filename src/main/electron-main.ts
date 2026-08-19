@@ -611,6 +611,31 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('inventory:record-inspection', (_event, input: unknown) => (
     desktopSession.recordInventoryInspection(input)
   ));
+  ipcMain.handle('purchases:view', () => desktopSession.queryPurchases());
+  ipcMain.handle('purchases:create-supplier', (_event, input: unknown) => (
+    desktopSession.createSupplier(input)
+  ));
+  ipcMain.handle('purchases:create-order', (_event, input: unknown) => (
+    desktopSession.createPurchaseOrder(input)
+  ));
+  ipcMain.handle('purchases:confirm-order', (_event, input: unknown) => (
+    desktopSession.confirmPurchaseOrder(input)
+  ));
+  ipcMain.handle('purchases:cancel-order', (_event, input: unknown) => (
+    desktopSession.cancelPurchaseOrder(input)
+  ));
+  ipcMain.handle('purchases:change-order-item-quantity', (_event, input: unknown) => (
+    desktopSession.changePurchaseOrderItemQuantity(input)
+  ));
+  ipcMain.handle('purchases:change-order-expected-date', (_event, input: unknown) => (
+    desktopSession.changePurchaseOrderExpectedDate(input)
+  ));
+  ipcMain.handle('purchases:record-arrival', (_event, input: unknown) => (
+    desktopSession.recordPurchaseArrival(input)
+  ));
+  ipcMain.handle('purchases:record-supplier-return', (_event, input: unknown) => (
+    desktopSession.recordSupplierReturn(input)
+  ));
   ipcMain.handle('orders:export', async (event, input: unknown) => {
     const normalized = normalizeOrderExportInput(input);
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();

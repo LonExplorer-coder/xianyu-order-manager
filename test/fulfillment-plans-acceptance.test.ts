@@ -185,7 +185,7 @@ describe('预售与团购履约计划闭环验收', () => {
       reason: '想提前采购',
     })).toThrow('未成团计划的需求只用于预测，提前采购需勾选确认未成团库存风险');
 
-    // 验收条 2：预售进行中多批采购建议，确认后形成采购在途。
+    // 验收条 2：预售进行中多批采购建议，确认后形成已确认采购。
     const presaleProductId = application.queryFulfillmentDemand(presale.id)
       .products.find(({ sku }) => sku === PRESALE_PRODUCT.sku)!.standardProductId;
     const firstBatch = application.createPurchaseSuggestion({
@@ -213,7 +213,7 @@ describe('预售与团购履约计划闭环验收', () => {
     });
     expect(bothConfirmed.totals).toMatchObject({
       demandQuantity: 10,
-      confirmedInTransitQuantity: 6,
+      confirmedSuggestionQuantity: 6,
       uncoveredQuantity: 4,
     });
 
@@ -227,7 +227,7 @@ describe('预售与团购履约计划闭环验收', () => {
     });
     expect(afterRefund.totals).toMatchObject({
       demandQuantity: 9,
-      confirmedInTransitQuantity: 6,
+      confirmedSuggestionQuantity: 6,
       uncoveredQuantity: 3,
     });
     expect(afterRefund.suggestions.filter(({ status }) => status === 'confirmed'))
@@ -258,7 +258,7 @@ describe('预售与团购履约计划闭环验收', () => {
     expect(firmDemand.conditional).toBe(false);
     expect(firmDemand.totals).toMatchObject({ demandQuantity: 6, uncoveredQuantity: 6 });
 
-    // 例四第 3-4 条：成团后形成确定采购需求，人工确认后计入采购在途。
+    // 例四第 3-4 条：成团后形成确定采购需求，人工确认后计入已确认采购。
     const groupBatch = application.createPurchaseSuggestion({
       planId: groupBuy.id,
       standardProductId: groupProductId,
@@ -272,7 +272,7 @@ describe('预售与团购履约计划闭环验收', () => {
     });
     expect(groupConfirmed.totals).toMatchObject({
       demandQuantity: 6,
-      confirmedInTransitQuantity: 6,
+      confirmedSuggestionQuantity: 6,
       uncoveredQuantity: 0,
     });
 

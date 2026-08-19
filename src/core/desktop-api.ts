@@ -157,6 +157,16 @@ import type {
   RecordInventoryInspectionInput,
 } from './inventory-ledger';
 import type {
+  ChangePurchaseOrderExpectedDateInput,
+  ChangePurchaseOrderItemQuantityInput,
+  CreatePurchaseOrderInput,
+  CreateSupplierInput,
+  PurchaseOrderActionInput,
+  PurchaseView,
+  RecordPurchaseArrivalInput,
+  RecordSupplierReturnInput,
+} from './purchase-orders';
+import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
@@ -331,6 +341,19 @@ export interface DesktopApi {
   queryAftersalesInventoryImpact(caseId: string): Promise<InventoryMovementView[]>;
   recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
   recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
+  queryPurchases(): Promise<PurchaseView>;
+  createSupplier(input: CreateSupplierInput): Promise<PurchaseView>;
+  createPurchaseOrder(input: CreatePurchaseOrderInput): Promise<PurchaseView>;
+  confirmPurchaseOrder(input: PurchaseOrderActionInput): Promise<PurchaseView>;
+  cancelPurchaseOrder(input: PurchaseOrderActionInput): Promise<PurchaseView>;
+  changePurchaseOrderItemQuantity(
+    input: ChangePurchaseOrderItemQuantityInput,
+  ): Promise<PurchaseView>;
+  changePurchaseOrderExpectedDate(
+    input: ChangePurchaseOrderExpectedDateInput,
+  ): Promise<PurchaseView>;
+  recordPurchaseArrival(input: RecordPurchaseArrivalInput): Promise<PurchaseView>;
+  recordSupplierReturn(input: RecordSupplierReturnInput): Promise<PurchaseView>;
   exportOrders(input: OrderExportInput): Promise<OrderExportResult>;
   previewOrderExport(input: OrderExportInput): Promise<OrderExportPreviewResult>;
   exportShipmentGroups(input: ShipmentGroupExportInput): Promise<ShipmentGroupExportResult>;

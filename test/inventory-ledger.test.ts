@@ -502,7 +502,7 @@ describe('已预留与采购在途派生', () => {
     expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).reservedQuantity).toBe(0);
   });
 
-  it('已确认采购建议形成采购在途，草稿与取消不算', async () => {
+  it('采购在途只来自已确认采购订单，已确认建议不再计入', async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-inventory-transit-'));
     const { application, sources } = await openSeededApplication(root, [
       ledgerRecognition('XY-INV-0006', [
@@ -558,8 +558,27 @@ describe('已预留与采购在途派生', () => {
       reason: '改用现货',
     });
     const view = application.queryInventory();
-    expect(productOf(view, BOX_PRODUCT.sku).purchaseInTransitQuantity).toBe(6);
+    expect(productOf(view, BOX_PRODUCT.sku).purchaseInTransitQuantity).toBe(0);
     expect(productOf(view, CLIP_PRODUCT.sku).purchaseInTransitQuantity).toBe(0);
+
+    const supplier = application.createSupplier({
+      name: '在途口径供应方',
+      contact: null,
+      note: null,
+    }).suppliers[0];
+    const createdOrder = application.createPurchaseOrder({
+      supplierId: supplier.supplierId,
+      expectedAt: '2026-09-01T00:00:00+08:00',
+      reason: '按缺口下单',
+      items: [{ standardProductId: boxId, quantity: 6, unitPriceCents: 500 }],
+    });
+    const purchaseOrder = createdOrder.orders[0];
+    application.confirmPurchaseOrder({
+      orderId: purchaseOrder.id,
+      reason: '供应方已接单',
+    });
+    expect(productOf(application.queryInventory(), BOX_PRODUCT.sku).purchaseInTransitQuantity)
+      .toBe(6);
   });
 
   it('未映射待发货明细进入提醒清单，已发完该商品的订单不计入涉及订单数', async () => {
