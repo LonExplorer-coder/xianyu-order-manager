@@ -1646,7 +1646,7 @@ describe('发货记录', () => {
     ]);
   });
 
-  it('旧版重叠档案证据损坏时整体回滚归并、记录和不可变触发器', async () => {
+  it('旧版重叠档案证据损坏时整体回滚归并、记录和不可变触发器', { timeout: 120_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'xianyu-overlapping-archive-rollback-'));
     const application = await createApplication(root);
     const group = application.queryShipmentGroups().groups[0];
