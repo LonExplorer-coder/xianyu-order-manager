@@ -23,6 +23,11 @@ const PORTABLE_SMOKE_PLAN_NAME = '便携验收预售';
 const PORTABLE_SMOKE_PLAN_CREATE_REASON = '便携版验收建立预售';
 const PORTABLE_SMOKE_PLAN_JOIN_REASON = '便携版验收加入预售';
 const PORTABLE_SMOKE_PLAN_RELEASE_REASON = '便携版验收备货释放';
+const PORTABLE_SMOKE_SUPPLIER_NAME = '便携验收供应方';
+const PORTABLE_SMOKE_PRODUCT_NAME = '便携验收采购商品';
+const PORTABLE_SMOKE_PRODUCT_SKU = 'PORTABLE-SMOKE-SKU-001';
+const PORTABLE_SMOKE_PURCHASE_REASON = '便携版验收采购到货';
+const PORTABLE_SMOKE_PURCHASE_ARRIVAL_REASON = '便携版验收到货入库';
 
 export type PortableReleaseSmokeInput = {
   phase: 'write' | 'read';
@@ -42,6 +47,10 @@ export type PortableReleaseSmokeResult = {
   fulfillmentPlanCount: number;
   fulfillmentPlanEventCount: number;
   fulfillmentPlanReleasedOrderCount: number;
+  purchaseOrderCount: number;
+  purchaseArrivalItemCount: number;
+  inventorySellableQuantity: number;
+  inventoryMovementCount: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -66,6 +75,7 @@ export async function runPortableReleaseDataSmoke(
       await session.waitForCurrentRecognitionWork();
       createPortableSmokeFulfillmentHistory(session);
       createPortableSmokeOperationsHistory(session);
+      createPortableSmokeInventoryHistory(session);
     } else {
       const restored = session.restore();
       if (restored.kind !== 'ready' || resolve(restored.dataDirectory) !== dataDirectory) {
@@ -202,6 +212,49 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后履约需求视图不完整');
     }
 
+    const purchases = session.queryPurchases();
+    const smokeSupplier = purchases.suppliers.find(({ name }) => (
+      name === PORTABLE_SMOKE_SUPPLIER_NAME
+    ));
+    const smokePurchaseOrder = purchases.orders.find(({ supplierName, items }) => (
+      supplierName === PORTABLE_SMOKE_SUPPLIER_NAME
+        && items.length === 1
+        && items[0]?.name === PORTABLE_SMOKE_PRODUCT_NAME
+    ));
+    if (
+      !smokeSupplier ||
+      !smokePurchaseOrder ||
+      smokePurchaseOrder.status !== 'confirmed' ||
+      smokePurchaseOrder.items[0]?.quantity !== 1 ||
+      smokePurchaseOrder.items[0]?.receivedQuantity !== 1 ||
+      smokePurchaseOrder.arrivals.length !== 1 ||
+      smokePurchaseOrder.arrivals[0]?.items[0]?.resellableQuantity !== 1
+    ) {
+      throw new Error('便携版重启后采购与到货历史不完整');
+    }
+
+    const inventory = session.queryInventory();
+    const smokeInventoryProduct = inventory.products.find(({ sku }) => (
+      sku === PORTABLE_SMOKE_PRODUCT_SKU
+    ));
+    if (
+      !smokeInventoryProduct ||
+      smokeInventoryProduct.sellableQuantity !== 1 ||
+      smokeInventoryProduct.awaitingInspectionQuantity !== 0 ||
+      smokeInventoryProduct.reservedQuantity !== 0
+    ) {
+      throw new Error('便携版重启后库存数量不完整');
+    }
+    if (
+      inventory.movements.length !== 1 ||
+      inventory.movements[0]?.sourceType !== 'purchase_arrival' ||
+      inventory.movements[0]?.sourceId !== smokePurchaseOrder.arrivals[0]?.id ||
+      inventory.movements[0]?.direction !== 'in' ||
+      inventory.movements[0]?.quantity !== 1
+    ) {
+      throw new Error('便携版重启后库存流水不完整');
+    }
+
     return {
       phase: input.phase,
       dataDirectory,
@@ -214,10 +267,65 @@ export async function runPortableReleaseDataSmoke(
       fulfillmentPlanCount: plans.length,
       fulfillmentPlanEventCount: smokePlan.events.length,
       fulfillmentPlanReleasedOrderCount: smokePlan.releasedOrderCount,
+      purchaseOrderCount: purchases.orders.length,
+      purchaseArrivalItemCount: smokePurchaseOrder.arrivals[0]?.items.length ?? 0,
+      inventorySellableQuantity: smokeInventoryProduct?.sellableQuantity ?? 0,
+      inventoryMovementCount: inventory.movements.length,
     };
   } finally {
     session.close();
   }
+}
+
+// 便携版验收的库存与采购腿：标准商品 → 供应方 → 采购订单 → 确认 → 到货入库，
+// 重启后数量与流水必须原样读回。
+function createPortableSmokeInventoryHistory(session: DesktopSession): void {
+  const product = session.createStandardProduct({
+    name: PORTABLE_SMOKE_PRODUCT_NAME,
+    specification: '标准款',
+    sku: PORTABLE_SMOKE_PRODUCT_SKU,
+    defaultOrderPriceCents: 800,
+    priceChangeReason: '首次定价',
+  });
+  const purchases = session.createSupplier({
+    name: PORTABLE_SMOKE_SUPPLIER_NAME,
+    contact: null,
+    note: null,
+  });
+  const supplier = purchases.suppliers.find(({ name }) => name === PORTABLE_SMOKE_SUPPLIER_NAME);
+  if (!supplier) throw new Error('便携版冒烟缺少供应方');
+  const created = session.createPurchaseOrder({
+    supplierId: supplier.supplierId,
+    expectedAt: '2026-12-31T00:00:00.000Z',
+    reason: PORTABLE_SMOKE_PURCHASE_REASON,
+    items: [{
+      standardProductId: product.id,
+      quantity: 1,
+      unitPriceCents: 500,
+    }],
+  });
+  const order = created.orders.at(-1);
+  if (!order) throw new Error('便携版冒烟没有生成采购订单');
+  const confirmed = session.confirmPurchaseOrder({
+    orderId: order.id,
+    reason: PORTABLE_SMOKE_PURCHASE_REASON,
+  });
+  const confirmedOrder = confirmed.orders.find(({ id }) => id === order.id);
+  if (!confirmedOrder || confirmedOrder.status !== 'confirmed') {
+    throw new Error('便携版冒烟采购订单确认失败');
+  }
+  const orderItem = confirmedOrder.items[0];
+  if (!orderItem) throw new Error('便携版冒烟采购订单商品行不完整');
+  session.recordPurchaseArrival({
+    orderId: order.id,
+    occurredAt: new Date().toISOString(),
+    reason: PORTABLE_SMOKE_PURCHASE_ARRIVAL_REASON,
+    items: [{
+      orderItemId: orderItem.id,
+      receivedQuantity: 1,
+      resellableQuantity: 1,
+    }],
+  });
 }
 
 function createPortableSmokeFulfillmentHistory(session: DesktopSession): void {

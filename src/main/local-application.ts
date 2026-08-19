@@ -5028,7 +5028,11 @@ export class LocalApplication {
       const order = this.getOrder(asString(row.id)).order;
       const items = order.items.flatMap((item) => {
         const shippedQuantity = this.activeShippedQuantity(item.id);
-        const remainingQuantity = Math.max(item.quantity - shippedQuantity, 0);
+        const refundedQuantity = this.preShipmentRefundedQuantity(item.id);
+        const remainingQuantity = Math.max(
+          item.quantity - shippedQuantity - refundedQuantity,
+          0,
+        );
         return remainingQuantity > 0
           ? [{
             ...item,
@@ -6439,6 +6443,17 @@ export class LocalApplication {
       WHERE items.source_order_item_id = ?
         AND cancellations.id IS NULL
         AND replacements.id IS NULL
+    `).get(orderItemId) as SqlRow;
+    return asNumber(row.quantity);
+  }
+
+  // 发货前逐项退款扣减可发数量：与已预留、需求投影同用净额口径，避免部分退款后超发。
+  private preShipmentRefundedQuantity(orderItemId: string): number {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database.prepare(`
+      SELECT COALESCE(SUM(quantity), 0) AS quantity
+      FROM fulfillment_refund_events
+      WHERE order_item_id = ?
     `).get(orderItemId) as SqlRow;
     return asNumber(row.quantity);
   }

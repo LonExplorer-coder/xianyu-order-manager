@@ -47,6 +47,10 @@ describe('便携版数据目录冒烟', () => {
       fulfillmentPlanCount: 1,
       fulfillmentPlanEventCount: 3,
       fulfillmentPlanReleasedOrderCount: 1,
+      purchaseOrderCount: 1,
+      purchaseArrivalItemCount: 1,
+      inventorySellableQuantity: 1,
+      inventoryMovementCount: 1,
     });
 
     await access(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
@@ -71,6 +75,10 @@ describe('便携版数据目录冒烟', () => {
       fulfillmentPlanCount: 1,
       fulfillmentPlanEventCount: 3,
       fulfillmentPlanReleasedOrderCount: 1,
+      purchaseOrderCount: 1,
+      purchaseArrivalItemCount: 1,
+      inventorySellableQuantity: 1,
+      inventoryMovementCount: 1,
     });
   });
 
