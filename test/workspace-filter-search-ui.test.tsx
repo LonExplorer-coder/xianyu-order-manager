@@ -2,7 +2,7 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -139,10 +139,16 @@ describe('预售需求与采购建议区块', () => {
     expect(await screen.findByText('预售需求与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '有效需求 10 件 · 退款/取消 2 件 · 已确认采购 4 件 · 未确认建议 3 件 · 未覆盖缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '有效需求 12 件 · 退款/取消 2 件 · 现货可覆盖 0 件 · 采购在途 3 件 · 已到货 2 件 · 已确认建议 4 件 · 未确认建议 3 件 · 剩余缺口 6 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
     expect(screen.getByText('玻璃保鲜盒（1000ml）未覆盖 6 件，达到提醒阈值')).toBeVisible();
-    expect(screen.getByText('确认采购超过当前需求，多采购风险')).toBeVisible();
+    expect(screen.getByText(/已确认采购超过当前需求 1 件/)).toBeVisible();
+    expect(screen.getByRole('table', { name: '计划关联的采购订单' })).toBeVisible();
+    expect(
+      within(screen.getByRole('table', { name: '计划关联的采购订单' }))
+        .getByRole('row', { name: /#3 样品供应厂 已确认 5 2/ }),
+    ).toBeVisible();
+    expect(screen.getByText('已转采购订单')).toBeVisible();
     expect(screen.getByText(/未建档手作发夹（蓝色） × 2 · 涉及 1 单/)).toBeVisible();
     expect(screen.getByText(/请先在订单校对中关联标准商品或建立映射/)).toBeVisible();
     expect(screen.getAllByText(/待确认|已确认（采购意向）/).length).toBeGreaterThan(0);
@@ -191,6 +197,41 @@ describe('预售需求与采购建议区块', () => {
       planId: 'plan-demand',
       suggestionId: 'suggestion-draft',
       reason: '联系供应方下单',
+    });
+  });
+
+  it('已确认建议可转入采购订单：对话框预填数量并提交供应方、单价与原因', async () => {
+    const user = userEvent.setup();
+    const createPurchaseOrderFromSuggestion = vi.fn().mockResolvedValue({
+      suppliers: [],
+      orders: [],
+      supplierReturns: [],
+    });
+    renderDemandPlans({ createPurchaseOrderFromSuggestion });
+
+    await user.click(await screen.findByRole('button', { name: '订单与记录' }));
+    await screen.findByText('预售需求与采购建议');
+    await user.click(screen.getByRole('button', { name: '转入采购订单' }));
+    expect(await screen.findByText(/转入采购订单 · 八月预售/)).toBeVisible();
+    await user.clear(screen.getByRole('spinbutton', { name: '采购数量' }));
+    await user.type(screen.getByRole('spinbutton', { name: '采购数量' }), '4');
+    await user.type(screen.getByRole('textbox', { name: '采购单价' }), '12.50');
+    await user.type(
+      screen.getByRole('textbox', { name: /转入原因/ }),
+      '第一批下单',
+    );
+    const submit = screen.getByRole('button', { name: '创建采购订单草稿' });
+    expect(submit).toBeDisabled();
+    await user.type(screen.getByLabelText('交期'), '2026-09-10T10:00');
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(createPurchaseOrderFromSuggestion).toHaveBeenCalledWith({
+      suggestionId: 'suggestion-confirmed',
+      supplierId: 'supplier-1',
+      quantity: 4,
+      unitPriceCents: 1250,
+      expectedAt: '2026-09-10T10:00',
+      reason: '第一批下单',
     });
   });
 });
@@ -296,7 +337,7 @@ describe('团购成团与条件性需求区块', () => {
     expect(await screen.findByText('条件性团购需求（预测）与采购建议')).toBeVisible();
     expect(screen.getByText((_, element) => (
       element?.className === 'fulfillment-plan-demand__totals'
-      && element.textContent === '条件性需求 10 件 · 退款/取消 2 件 · 已确认采购 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 现货可覆盖 0 件 · 待检查 0 件 · 已释放 1 单'
+      && element.textContent === '条件性需求 12 件 · 退款/取消 2 件 · 现货可覆盖 0 件 · 采购在途 3 件 · 已到货 2 件 · 已确认建议 4 件 · 未确认建议 3 件 · 预测缺口 6 件 · 待检查 0 件 · 已释放 1 单'
     ))).toBeVisible();
 
     const generateButtons = screen.getAllByRole('button', { name: '生成采购建议' });
@@ -355,6 +396,9 @@ function demandFixture(): FulfillmentDemandView {
       specification: '1000ml',
       demandQuantity: 10,
       refundedOrCancelledQuantity: 2,
+      sellableCoveredQuantity: 0,
+      confirmedInTransitQuantity: 0,
+      arrivedQuantity: 0,
       confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 3,
       uncoveredQuantity: 6,
@@ -367,7 +411,10 @@ function demandFixture(): FulfillmentDemandView {
       specification: '大号',
       demandQuantity: 2,
       refundedOrCancelledQuantity: 0,
-      confirmedSuggestionQuantity: 5,
+      sellableCoveredQuantity: 0,
+      confirmedInTransitQuantity: 3,
+      arrivedQuantity: 2,
+      confirmedSuggestionQuantity: 0,
       draftSuggestionQuantity: 0,
       uncoveredQuantity: 0,
       overPurchaseRisk: true,
@@ -394,6 +441,7 @@ function demandFixture(): FulfillmentDemandView {
         cancelledAt: null,
         cancelReason: null,
         riskAcknowledgedAt: null,
+        purchaseOrderId: null,
       },
       {
         id: 'suggestion-draft',
@@ -409,15 +457,43 @@ function demandFixture(): FulfillmentDemandView {
         cancelledAt: null,
         cancelReason: null,
         riskAcknowledgedAt: null,
+        purchaseOrderId: null,
+      },
+      {
+        id: 'suggestion-converted',
+        planId: 'plan-demand',
+        standardProductId: 'product-2',
+        sku: 'SKU-DEMAND-B',
+        name: '硅胶封口夹',
+        specification: '大号',
+        quantity: 5,
+        status: 'converted',
+        createdAt: '2026-08-13T08:00:00.000Z',
+        confirmedAt: '2026-08-13T08:10:00.000Z',
+        cancelledAt: null,
+        cancelReason: null,
+        riskAcknowledgedAt: null,
+        purchaseOrderId: 'order-purchase-1',
       },
     ],
+    linkedPurchaseOrders: [{
+      orderId: 'order-purchase-1',
+      sequence: 3,
+      status: 'confirmed',
+      supplierName: '样品供应厂',
+      expectedAt: '2026-08-20T08:00:00.000Z',
+      orderedQuantity: 5,
+      arrivedQuantity: 2,
+    }],
     totals: {
-      demandQuantity: 10,
+      demandQuantity: 12,
       refundedOrCancelledQuantity: 2,
+      sellableCoveredQuantity: 0,
+      confirmedInTransitQuantity: 3,
+      arrivedQuantity: 2,
       confirmedSuggestionQuantity: 4,
       draftSuggestionQuantity: 3,
       uncoveredQuantity: 6,
-      sellableCoveredQuantity: 0,
       pendingInspectionQuantity: 0,
       releasedOrderCount: 1,
     },
@@ -464,6 +540,22 @@ function renderDemandPlans(overrides: Record<string, unknown> = {}): void {
     createPurchaseSuggestion: vi.fn(),
     confirmPurchaseSuggestion: vi.fn(),
     cancelPurchaseSuggestion: vi.fn(),
+    queryPurchases: vi.fn().mockResolvedValue({
+      suppliers: [{
+        supplierId: 'supplier-1',
+        name: '样品供应厂',
+        contact: null,
+        note: null,
+        createdAt: '2026-08-10T08:00:00.000Z',
+      }],
+      orders: [],
+      supplierReturns: [],
+    }),
+    createPurchaseOrderFromSuggestion: vi.fn().mockResolvedValue({
+      suppliers: [],
+      orders: [],
+      supplierReturns: [],
+    }),
     ...overrides,
   } as unknown as DesktopApi;
   render(<FulfillmentPlansWorkspace api={api} />);

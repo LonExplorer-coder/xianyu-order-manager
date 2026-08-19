@@ -1,7 +1,121 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v57 连接采购建议与采购订单（建议表 converted 态与订单引用、事件表 converted 类型、订单表计划归属）；
+// 存在转入数据时拒绝降级。
+export function removeVersion57ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 57',
+  ).get();
+  if (!applied) return;
+  const suggestionColumns = database.prepare(
+    'PRAGMA table_info(purchase_suggestions)',
+  ).all() as Array<{ name: string }>;
+  const hasOrderColumn = suggestionColumns.some(({ name }) => name === 'purchase_order_id');
+  const orderColumns = database.prepare(
+    'PRAGMA table_info(purchase_orders)',
+  ).all() as Array<{ name: string }>;
+  const hasPlanColumn = orderColumns.some(({ name }) => name === 'plan_id');
+  if (!hasOrderColumn && !hasPlanColumn) return;
+  const convertedCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM purchase_suggestions WHERE status = 'converted'
+  `).get() as { count: number };
+  const convertedEventCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM purchase_suggestion_events WHERE event_type = 'converted'
+  `).get() as { count: number };
+  const linkedOrderCount = database.prepare(`
+    SELECT COUNT(*) AS count FROM purchase_orders WHERE plan_id IS NOT NULL
+  `).get() as { count: number };
+  if (convertedCount.count > 0 || convertedEventCount.count > 0 || linkedOrderCount.count > 0) {
+    throw new Error('v57 测试降级前必须移除建议转入采购订单数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS purchase_suggestion_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS purchase_suggestion_events_are_immutable_on_delete;
+    ALTER TABLE purchase_suggestion_events RENAME TO purchase_suggestion_events_v57;
+    CREATE TABLE purchase_suggestion_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      suggestion_id TEXT NOT NULL REFERENCES purchase_suggestions(id) ON DELETE RESTRICT,
+      plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+      event_type TEXT NOT NULL CHECK (
+        event_type IN ('created', 'confirmed', 'cancelled', 'reduced')
+      ),
+      quantity INTEGER CHECK (quantity IS NULL OR quantity > 0),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (event_type != 'reduced' OR quantity IS NOT NULL),
+      CHECK (event_type = 'reduced' OR quantity IS NULL)
+    ) STRICT;
+    INSERT INTO purchase_suggestion_events (
+      sequence, id, suggestion_id, plan_id, event_type, quantity, reason,
+      occurred_at, created_at
+    )
+    SELECT sequence, id, suggestion_id, plan_id, event_type, quantity, reason,
+      occurred_at, created_at
+    FROM purchase_suggestion_events_v57
+    ORDER BY sequence;
+    DROP TABLE purchase_suggestion_events_v57;
+    CREATE INDEX purchase_suggestion_events_by_plan
+      ON purchase_suggestion_events (plan_id, sequence);
+    CREATE INDEX purchase_suggestion_events_by_suggestion
+      ON purchase_suggestion_events (suggestion_id, sequence);
+    CREATE TRIGGER purchase_suggestion_events_are_immutable_on_update
+    BEFORE UPDATE ON purchase_suggestion_events
+    BEGIN
+      SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+    END;
+    CREATE TRIGGER purchase_suggestion_events_are_immutable_on_delete
+    BEFORE DELETE ON purchase_suggestion_events
+    BEGIN
+      SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+    END;
+
+    CREATE TABLE purchase_suggestions_v56 (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+      standard_product_id TEXT NOT NULL REFERENCES standard_products(id) ON DELETE RESTRICT,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed', 'cancelled')),
+      created_at TEXT NOT NULL,
+      confirmed_at TEXT,
+      cancelled_at TEXT,
+      cancel_reason TEXT,
+      risk_acknowledged_at TEXT,
+      CHECK (status != 'draft' OR (confirmed_at IS NULL AND cancelled_at IS NULL)),
+      CHECK (status != 'draft' OR cancel_reason IS NULL),
+      CHECK (status != 'confirmed' OR confirmed_at IS NOT NULL),
+      CHECK (status != 'confirmed' OR (cancelled_at IS NULL AND cancel_reason IS NULL)),
+      CHECK ((status = 'cancelled') = (cancelled_at IS NOT NULL)),
+      CHECK (cancelled_at IS NULL OR cancel_reason IS NOT NULL)
+    ) STRICT;
+    INSERT INTO purchase_suggestions_v56 (
+      id, plan_id, standard_product_id, quantity, status, created_at, confirmed_at,
+      cancelled_at, cancel_reason, risk_acknowledged_at
+    )
+    SELECT id, plan_id, standard_product_id, quantity, status, created_at, confirmed_at,
+      cancelled_at, cancel_reason, risk_acknowledged_at
+    FROM purchase_suggestions;
+    DROP TABLE purchase_suggestions;
+    ALTER TABLE purchase_suggestions_v56 RENAME TO purchase_suggestions;
+    CREATE INDEX purchase_suggestions_by_plan
+      ON purchase_suggestions (plan_id, created_at, id);
+    CREATE INDEX purchase_suggestions_by_product
+      ON purchase_suggestions (standard_product_id, status);
+
+    DROP INDEX IF EXISTS purchase_orders_by_plan;
+    ALTER TABLE purchase_orders DROP COLUMN plan_id;
+    DELETE FROM schema_migrations WHERE version = 57;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v56 建立采购管理九表（供应方、订单、商品行、事件、到货、到货行、退货、退货行、应付）；存在采购数据时拒绝降级。
 export function removeVersion56ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion57ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 56',
   ).get();

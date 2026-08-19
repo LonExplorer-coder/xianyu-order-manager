@@ -6188,6 +6188,10 @@ export class LocalApplication {
     return this.purchaseOrderService().createOrder(input);
   }
 
+  public createPurchaseOrderFromSuggestion(input: unknown): PurchaseView {
+    return this.purchaseOrderService().createOrderFromSuggestion(input);
+  }
+
   public confirmPurchaseOrder(input: unknown): PurchaseView {
     return this.purchaseOrderService().confirmOrder(input);
   }

@@ -618,6 +618,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('purchases:create-order', (_event, input: unknown) => (
     desktopSession.createPurchaseOrder(input)
   ));
+  ipcMain.handle('purchases:create-order-from-suggestion', (_event, input: unknown) => (
+    desktopSession.createPurchaseOrderFromSuggestion(input)
+  ));
   ipcMain.handle('purchases:confirm-order', (_event, input: unknown) => (
     desktopSession.confirmPurchaseOrder(input)
   ));

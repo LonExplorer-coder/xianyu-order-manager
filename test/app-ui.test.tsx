@@ -624,6 +624,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     }),
     createSupplier: vi.fn(),
     createPurchaseOrder: vi.fn(),
+    createPurchaseOrderFromSuggestion: vi.fn(),
     confirmPurchaseOrder: vi.fn(),
     cancelPurchaseOrder: vi.fn(),
     changePurchaseOrderItemQuantity: vi.fn(),

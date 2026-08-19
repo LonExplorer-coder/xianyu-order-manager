@@ -211,6 +211,9 @@ const api: DesktopApi = {
   queryPurchases: () => ipcRenderer.invoke('purchases:view'),
   createSupplier: (input) => ipcRenderer.invoke('purchases:create-supplier', input),
   createPurchaseOrder: (input) => ipcRenderer.invoke('purchases:create-order', input),
+  createPurchaseOrderFromSuggestion: (input) => (
+    ipcRenderer.invoke('purchases:create-order-from-suggestion', input)
+  ),
   confirmPurchaseOrder: (input) => ipcRenderer.invoke('purchases:confirm-order', input),
   cancelPurchaseOrder: (input) => ipcRenderer.invoke('purchases:cancel-order', input),
   changePurchaseOrderItemQuantity: (input) => (

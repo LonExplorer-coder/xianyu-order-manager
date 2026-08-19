@@ -159,6 +159,7 @@ import type {
 import type {
   ChangePurchaseOrderExpectedDateInput,
   ChangePurchaseOrderItemQuantityInput,
+  CreatePurchaseOrderFromSuggestionInput,
   CreatePurchaseOrderInput,
   CreateSupplierInput,
   PurchaseOrderActionInput,
@@ -344,6 +345,9 @@ export interface DesktopApi {
   queryPurchases(): Promise<PurchaseView>;
   createSupplier(input: CreateSupplierInput): Promise<PurchaseView>;
   createPurchaseOrder(input: CreatePurchaseOrderInput): Promise<PurchaseView>;
+  createPurchaseOrderFromSuggestion(
+    input: CreatePurchaseOrderFromSuggestionInput,
+  ): Promise<PurchaseView>;
   confirmPurchaseOrder(input: PurchaseOrderActionInput): Promise<PurchaseView>;
   cancelPurchaseOrder(input: PurchaseOrderActionInput): Promise<PurchaseView>;
   changePurchaseOrderItemQuantity(

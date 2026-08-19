@@ -1,10 +1,11 @@
-export type PurchaseSuggestionStatus = 'draft' | 'confirmed' | 'cancelled';
+export type PurchaseSuggestionStatus = 'draft' | 'confirmed' | 'cancelled' | 'converted';
 
 export type PurchaseSuggestionEventType =
   | 'created'
   | 'confirmed'
   | 'cancelled'
-  | 'reduced';
+  | 'reduced'
+  | 'converted';
 
 export type FulfillmentDemandProductView = {
   standardProductId: string;
@@ -13,6 +14,9 @@ export type FulfillmentDemandProductView = {
   specification: string;
   demandQuantity: number;
   refundedOrCancelledQuantity: number;
+  sellableCoveredQuantity: number;
+  confirmedInTransitQuantity: number;
+  arrivedQuantity: number;
   confirmedSuggestionQuantity: number;
   draftSuggestionQuantity: number;
   uncoveredQuantity: number;
@@ -41,17 +45,30 @@ export type PurchaseSuggestionView = {
   cancelledAt: string | null;
   cancelReason: string | null;
   riskAcknowledgedAt: string | null;
+  purchaseOrderId: string | null;
 };
 
 export type FulfillmentDemandTotals = {
   demandQuantity: number;
   refundedOrCancelledQuantity: number;
+  sellableCoveredQuantity: number;
+  confirmedInTransitQuantity: number;
+  arrivedQuantity: number;
   confirmedSuggestionQuantity: number;
   draftSuggestionQuantity: number;
   uncoveredQuantity: number;
-  sellableCoveredQuantity: number;
   pendingInspectionQuantity: number;
   releasedOrderCount: number;
+};
+
+export type FulfillmentDemandLinkedOrderView = {
+  orderId: string;
+  sequence: number;
+  status: 'draft' | 'confirmed' | 'cancelled';
+  supplierName: string;
+  expectedAt: string;
+  orderedQuantity: number;
+  arrivedQuantity: number;
 };
 
 export type FulfillmentDemandView = {
@@ -62,6 +79,7 @@ export type FulfillmentDemandView = {
   products: FulfillmentDemandProductView[];
   unmapped: FulfillmentDemandUnmappedView[];
   suggestions: PurchaseSuggestionView[];
+  linkedPurchaseOrders: FulfillmentDemandLinkedOrderView[];
   totals: FulfillmentDemandTotals;
 };
 
@@ -153,6 +171,7 @@ export function purchaseSuggestionStatusLabel(status: PurchaseSuggestionStatus):
     draft: '待确认',
     confirmed: '已确认（采购意向）',
     cancelled: '已取消',
+    converted: '已转采购订单',
   };
   return labels[status];
 }

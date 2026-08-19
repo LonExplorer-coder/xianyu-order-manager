@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   normalizeChangePurchaseOrderExpectedDateInput,
   normalizeChangePurchaseOrderItemQuantityInput,
+  normalizeCreatePurchaseOrderFromSuggestionInput,
   normalizeCreatePurchaseOrderInput,
   normalizeCreateSupplierInput,
   normalizePurchaseOrderActionInput,
@@ -25,7 +26,8 @@ import { InventoryLedgerService } from './inventory-ledger-service';
 type SqlRow = Record<string, string | number | null>;
 
 // 采购模块与库存模块职责分离：订单、到货与退货事实在本服务落库，
-// 库存腿通过库存账本服务写入；建议（采购需求）完全独立，本服务不读写。
+// 库存腿通过库存账本服务写入。建议生命周期归履约需求服务管理，
+// 「已确认建议转入采购订单」是两侧唯一的交接点：本服务落订单并改写建议为 converted。
 export class PurchaseOrderService {
   public constructor(private readonly workspace: Workspace) {}
 
@@ -94,6 +96,85 @@ export class PurchaseOrderService {
         );
       }
       this.recordOrderEvent(orderId, 'created', null, null, prepared.reason, now);
+    });
+    return this.buildView();
+  }
+
+  // 预售/团购建议转入采购订单：创建关联该计划的草稿订单并把建议转为 converted，
+  // 覆盖口径随订单走（建议不再计数）；订单确认后才形成在途与应付。
+  public createOrderFromSuggestion(input: unknown): PurchaseView {
+    const prepared = normalizeCreatePurchaseOrderFromSuggestionInput(input);
+    const now = new Date().toISOString();
+    this.workspace.transaction(() => {
+      const suggestion = this.workspace.database.prepare(`
+        SELECT s.id, s.plan_id, s.standard_product_id, s.status, p.status AS plan_status
+        FROM purchase_suggestions s
+        JOIN fulfillment_plans p ON p.id = s.plan_id
+        WHERE s.id = ?
+      `).get(prepared.suggestionId) as SqlRow | undefined;
+      if (!suggestion) throw new Error('未找到该采购建议');
+      if (asString(suggestion.status) !== 'confirmed') {
+        throw new Error('只有已确认的采购建议可以转入采购订单');
+      }
+      const planStatus = asString(suggestion.plan_status);
+      if (planStatus === 'closed') throw new Error('履约计划已关闭，不能转入采购订单');
+      if (planStatus === 'released') throw new Error('履约计划已全部释放，不能转入采购订单');
+      const supplier = this.workspace.database.prepare(`
+        SELECT id FROM suppliers WHERE id = ?
+      `).get(prepared.supplierId) as SqlRow | undefined;
+      if (!supplier) throw new Error('未找到供应方');
+      const product = this.workspace.database.prepare(`
+        SELECT id FROM standard_products WHERE id = ?
+      `).get(asString(suggestion.standard_product_id)) as SqlRow | undefined;
+      if (!product) throw new Error('未找到标准商品');
+      const orderId = randomUUID();
+      const sequenceRow = this.workspace.database.prepare(`
+        SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM purchase_orders
+      `).get() as SqlRow;
+      this.workspace.database.prepare(`
+        INSERT INTO purchase_orders (
+          sequence, id, supplier_id, plan_id, status, expected_at,
+          created_at, confirmed_at, cancelled_at, cancel_reason
+        ) VALUES (?, ?, ?, ?, 'draft', ?, ?, NULL, NULL, NULL)
+      `).run(
+        Number(sequenceRow.next),
+        orderId,
+        prepared.supplierId,
+        asString(suggestion.plan_id),
+        prepared.expectedAt,
+        now,
+      );
+      this.workspace.database.prepare(`
+        INSERT INTO purchase_order_items (
+          id, purchase_order_id, standard_product_id, quantity, unit_price_cents, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        orderId,
+        asString(suggestion.standard_product_id),
+        prepared.quantity,
+        prepared.unitPriceCents,
+        now,
+      );
+      this.recordOrderEvent(orderId, 'created', null, null, prepared.reason, now);
+      this.workspace.database.prepare(`
+        UPDATE purchase_suggestions
+        SET status = 'converted', purchase_order_id = ?
+        WHERE id = ?
+      `).run(orderId, prepared.suggestionId);
+      this.workspace.database.prepare(`
+        INSERT INTO purchase_suggestion_events (
+          id, suggestion_id, plan_id, event_type, quantity, reason, occurred_at, created_at
+        ) VALUES (?, ?, ?, 'converted', ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        prepared.suggestionId,
+        asString(suggestion.plan_id),
+        prepared.quantity,
+        prepared.reason,
+        now,
+        now,
+      );
     });
     return this.buildView();
   }
@@ -445,10 +526,12 @@ export class PurchaseOrderService {
     ]));
 
     const orderRows = this.workspace.database.prepare(`
-      SELECT sequence, id, supplier_id, status, expected_at, created_at,
-        confirmed_at, cancelled_at, cancel_reason
-      FROM purchase_orders
-      ORDER BY sequence
+      SELECT po.sequence, po.id, po.supplier_id, po.status, po.expected_at, po.created_at,
+        po.confirmed_at, po.cancelled_at, po.cancel_reason, po.plan_id,
+        fp.name AS plan_name
+      FROM purchase_orders po
+      LEFT JOIN fulfillment_plans fp ON fp.id = po.plan_id
+      ORDER BY po.sequence
     `).all() as unknown as SqlRow[];
     const itemRows = this.workspace.database.prepare(`
       SELECT id, purchase_order_id, standard_product_id, quantity, unit_price_cents
@@ -566,6 +649,10 @@ export class PurchaseOrderService {
         sequence: Number(row.sequence),
         supplierId: asString(row.supplier_id),
         supplierName: supplierNameById.get(asString(row.supplier_id)) ?? '',
+        planId: row.plan_id === null ? null : asString(row.plan_id),
+        planName: row.plan_name === null || row.plan_name === undefined
+          ? null
+          : asString(row.plan_name),
         status: asString(row.status) as PurchaseOrderView['status'],
         expectedAt: asString(row.expected_at),
         createdAt: asString(row.created_at),

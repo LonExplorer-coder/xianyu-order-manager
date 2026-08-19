@@ -827,6 +827,355 @@ describe('分批采购建议', () => {
       cancelReason: '订单整单退款后重算未确认建议',
     });
   });
+
+  function sampleSupplierId(application: LocalApplication): string {
+    const view = application.createSupplier({ name: '样品供应厂', contact: null, note: null });
+    return view.suppliers[0].supplierId;
+  }
+
+  function confirmedSuggestionOf(
+    application: LocalApplication,
+    plan: FulfillmentPlanView,
+    quantity: number,
+  ): string {
+    const view = application.createPurchaseSuggestion({
+      planId: plan.id,
+      standardProductId: productId(application, PRESALE_PRODUCT.sku),
+      quantity,
+      reason: `${quantity} 件采购建议`,
+    });
+    const suggestion = view.suggestions.at(-1)!;
+    if (suggestion.status !== 'draft') throw new Error('预期新建建议为待确认');
+    const suggestionId = suggestion.id;
+    application.confirmPurchaseSuggestion({
+      planId: plan.id,
+      suggestionId,
+      reason: '确认采购',
+    });
+    return suggestionId;
+  }
+
+  function convertSuggestion(
+    application: LocalApplication,
+    suggestionId: string,
+    supplierId: string,
+    quantity: number,
+  ) {
+    return application.createPurchaseOrderFromSuggestion({
+      suggestionId,
+      supplierId,
+      quantity,
+      unitPriceCents: 500,
+      expectedAt: '2026-09-10T00:00:00.000Z',
+      reason: '转入采购订单',
+    });
+  }
+
+  it('已确认建议转入采购订单：订单关联计划、建议转态留痕、确认后在途与到货重算缺口', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-convert-'));
+    const { application, plan } = await seededPlanWithDemand(root, 100);
+    const supplierId = sampleSupplierId(application);
+    const product = productId(application, PRESALE_PRODUCT.sku);
+    const suggestionId = confirmedSuggestionOf(application, plan, 40);
+
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 40);
+    const order = purchases.orders[0];
+    expect(order).toMatchObject({
+      status: 'draft',
+      planId: plan.id,
+      planName: '八月预售',
+      supplierId,
+    });
+    expect(order.items).toMatchObject([
+      { standardProductId: product, quantity: 40, unitPriceCents: 500 },
+    ]);
+
+    const afterConvert = application.queryFulfillmentDemand(plan.id);
+    expect(afterConvert.linkedPurchaseOrders).toEqual([
+      expect.objectContaining({
+        orderId: order.id,
+        sequence: 1,
+        status: 'draft',
+        supplierName: '样品供应厂',
+        orderedQuantity: 40,
+        arrivedQuantity: 0,
+      }),
+    ]);
+    expect(afterConvert.suggestions[0]).toMatchObject({
+      status: 'converted',
+      purchaseOrderId: order.id,
+    });
+    // 转入后覆盖以订单为准：建议不再计数，草稿订单尚未形成在途，缺口暂时回到需求全额。
+    expect(afterConvert.products[0]).toMatchObject({
+      demandQuantity: 100,
+      confirmedSuggestionQuantity: 0,
+      confirmedInTransitQuantity: 0,
+      uncoveredQuantity: 100,
+    });
+    expect(purchaseSuggestionStatusLabel('converted')).toBe('已转采购订单');
+
+    application.confirmPurchaseOrder({ orderId: order.id, reason: '向供应方下单' });
+    const afterConfirm = application.queryFulfillmentDemand(plan.id);
+    expect(afterConfirm.products[0]).toMatchObject({
+      confirmedInTransitQuantity: 40,
+      uncoveredQuantity: 60,
+    });
+    expect(afterConfirm.totals.confirmedInTransitQuantity).toBe(40);
+
+    const secondSuggestionId = confirmedSuggestionOf(application, plan, 20);
+    const secondPurchases = convertSuggestion(application, secondSuggestionId, supplierId, 20);
+    const secondOrder = secondPurchases.orders.find((entry) => entry.id !== order.id)!;
+    application.confirmPurchaseOrder({ orderId: secondOrder.id, reason: '第二批下单' });
+    const afterSecond = application.queryFulfillmentDemand(plan.id);
+    expect(afterSecond.products[0]).toMatchObject({
+      confirmedInTransitQuantity: 60,
+      uncoveredQuantity: 40,
+    });
+
+    application.recordPurchaseArrival({
+      orderId: order.id,
+      occurredAt: '2026-09-05T10:00:00.000Z',
+      reason: '第一批到货 10 件',
+      items: [{
+        orderItemId: order.items[0].id,
+        receivedQuantity: 10,
+        resellableQuantity: 8,
+        defectiveQuantity: 2,
+      }],
+    });
+    const afterArrival = application.queryFulfillmentDemand(plan.id);
+    expect(afterArrival.linkedPurchaseOrders).toEqual([
+      expect.objectContaining({
+        orderId: order.id,
+        status: 'confirmed',
+        orderedQuantity: 40,
+        arrivedQuantity: 10,
+      }),
+      expect.objectContaining({
+        orderId: secondOrder.id,
+        status: 'confirmed',
+        orderedQuantity: 20,
+        arrivedQuantity: 0,
+      }),
+    ]);
+    expect(afterArrival.products[0]).toMatchObject({
+      confirmedInTransitQuantity: 50,
+      arrivedQuantity: 10,
+      sellableCoveredQuantity: 8,
+      uncoveredQuantity: 42,
+    });
+    expect(afterArrival.totals.arrivedQuantity).toBe(10);
+  });
+
+  it('发货前退款只收缩未确认建议，已确认订单不被改写并提示多采购风险', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-refund-order-'));
+    const { application, plan, order } = await seededPlanWithDemand(root, 100);
+    const supplierId = sampleSupplierId(application);
+    const product = productId(application, PRESALE_PRODUCT.sku);
+    const suggestionId = confirmedSuggestionOf(application, plan, 60);
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 60);
+    const purchaseOrder = purchases.orders[0];
+    application.confirmPurchaseOrder({ orderId: purchaseOrder.id, reason: '向供应方下单' });
+    application.createPurchaseSuggestion({
+      planId: plan.id,
+      standardProductId: product,
+      quantity: 30,
+      reason: '第 2 批建议',
+    });
+
+    const afterRefund = registerRefund(application, plan, order, 0, 12, '退款 12 件');
+    expect(afterRefund.products[0]).toMatchObject({
+      demandQuantity: 88,
+      draftSuggestionQuantity: 28,
+      confirmedInTransitQuantity: 60,
+      overPurchaseRisk: false,
+      uncoveredQuantity: 28,
+    });
+
+    const afterSecondRefund = registerRefund(application, plan, order, 0, 40, '再退 40 件');
+    expect(afterSecondRefund.products[0]).toMatchObject({
+      demandQuantity: 48,
+      draftSuggestionQuantity: 0,
+      confirmedInTransitQuantity: 60,
+      overPurchaseRisk: true,
+      uncoveredQuantity: 0,
+    });
+    const untouched = application.queryPurchases().orders.find(
+      (entry) => entry.id === purchaseOrder.id,
+    )!;
+    expect(untouched.items[0]).toMatchObject({ quantity: 60 });
+    expect(untouched.events.map((event) => event.eventType)).toEqual(['created', 'confirmed']);
+    expect(untouched.payable).toMatchObject({ amountCents: 30000 });
+    expect(application.queryFulfillmentDemand(plan.id).suggestions[0]).toMatchObject({
+      status: 'converted',
+      quantity: 60,
+    });
+  });
+
+  it('缺口扣除现货与在途，建议容量与退款收缩使用同一口径', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-gap-formula-'));
+    const { application, plan, order } = await seededPlanWithDemand(root, 20);
+    const supplierId = sampleSupplierId(application);
+    const product = productId(application, PRESALE_PRODUCT.sku);
+    application.recordInventoryAdjustment({
+      standardProductId: product,
+      quantity: 6,
+      direction: 'in',
+      state: 'sellable',
+      reason: '现货入库',
+    });
+    expect(application.queryFulfillmentDemand(plan.id).products[0]).toMatchObject({
+      sellableCoveredQuantity: 6,
+      uncoveredQuantity: 14,
+    });
+    expect(() => application.createPurchaseSuggestion({
+      planId: plan.id,
+      standardProductId: product,
+      quantity: 15,
+      reason: '超出缺口',
+    })).toThrow('采购建议数量超过未覆盖需求（当前可建议 14 件）');
+
+    const suggestionId = confirmedSuggestionOf(application, plan, 8);
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 8);
+    application.confirmPurchaseOrder({ orderId: purchases.orders[0].id, reason: '向供应方下单' });
+    application.createPurchaseSuggestion({
+      planId: plan.id,
+      standardProductId: product,
+      quantity: 6,
+      reason: '第 2 批建议',
+    });
+
+    const afterRefund = registerRefund(application, plan, order, 0, 4, '退款 4 件');
+    expect(afterRefund.products[0]).toMatchObject({
+      demandQuantity: 16,
+      sellableCoveredQuantity: 6,
+      confirmedInTransitQuantity: 8,
+      draftSuggestionQuantity: 2,
+      uncoveredQuantity: 2,
+    });
+  });
+
+  it('转入守卫：只有已确认建议可转入，已转建议不能重复转入或取消，计划关闭不能转入', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-convert-guard-'));
+    const { application, plan } = await seededPlanWithDemand(root, 20);
+    const supplierId = sampleSupplierId(application);
+    const product = productId(application, PRESALE_PRODUCT.sku);
+
+    const withDraft = application.createPurchaseSuggestion({
+      planId: plan.id,
+      standardProductId: product,
+      quantity: 4,
+      reason: '草稿建议',
+    });
+    expect(() => convertSuggestion(application, withDraft.suggestions[0].id, supplierId, 4))
+      .toThrow('只有已确认的采购建议可以转入采购订单');
+
+    const suggestionId = confirmedSuggestionOf(application, plan, 6);
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 6);
+    expect(() => convertSuggestion(application, suggestionId, supplierId, 6))
+      .toThrow('只有已确认的采购建议可以转入采购订单');
+    expect(() => application.cancelPurchaseSuggestion({
+      planId: plan.id,
+      suggestionId,
+      reason: '想撤销转入',
+    })).toThrow('已转采购订单的建议由采购订单承接，不能取消');
+    expect(purchases.orders[0].status).toBe('draft');
+
+    const closedTargetId = confirmedSuggestionOf(application, plan, 4);
+    const latest = application.queryFulfillmentPlans().find(({ id }) => id === plan.id)!;
+    application.closeFulfillmentPlan({
+      planId: plan.id,
+      expectedRevision: latest.revision,
+      reason: '预售结束',
+    });
+    expect(() => convertSuggestion(application, closedTargetId, supplierId, 4))
+      .toThrow('履约计划已关闭，不能转入采购订单');
+  });
+
+  it('现货覆盖扣除计划外待发货订单的占用，多采购风险计入现货叠加', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-reserved-stock-'));
+    const { application, sources } = await openSeededApplication(root, [
+      demandRecognition('XY-SUGGEST-RES-0001', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 10 },
+      ]),
+      demandRecognition('XY-SUGGEST-RES-0002', [
+        { sourceTitle: PRESALE_PRODUCT.name, sourceSpec: PRESALE_PRODUCT.specification, quantity: 4 },
+      ]),
+    ], [PRESALE_PRODUCT]);
+    const [draftInPlan, draftOutside] = (await application.submitRecognitionBatch(sources)).drafts;
+    const orderInPlan = application.confirmDraft(draftInPlan);
+    application.confirmDraft(draftOutside);
+    const created = createPresalePlan(application);
+    const plan = addOrders(application, created, [orderInPlan.id]);
+    const product = productId(application, PRESALE_PRODUCT.sku);
+    application.recordInventoryAdjustment({
+      standardProductId: product,
+      quantity: 6,
+      direction: 'in',
+      state: 'sellable',
+      reason: '现货入库',
+    });
+
+    const demand = application.queryFulfillmentDemand(plan.id);
+    expect(demand.products[0]).toMatchObject({
+      demandQuantity: 10,
+      sellableCoveredQuantity: 2,
+      uncoveredQuantity: 8,
+    });
+    expect(application.queryInventory().products.find(
+      (entry) => entry.sku === PRESALE_PRODUCT.sku,
+    )).toMatchObject({
+      sellableQuantity: 6,
+      reservedQuantity: 4,
+    });
+
+    const supplierId = sampleSupplierId(application);
+    const suggestionId = confirmedSuggestionOf(application, plan, 8);
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 8);
+    application.confirmPurchaseOrder({ orderId: purchases.orders[0].id, reason: '向供应方下单' });
+    const covered = application.queryFulfillmentDemand(plan.id);
+    expect(covered.products[0]).toMatchObject({
+      sellableCoveredQuantity: 2,
+      confirmedInTransitQuantity: 8,
+      uncoveredQuantity: 0,
+      overPurchaseRisk: false,
+    });
+
+    const afterRefund = registerRefund(application, plan, orderInPlan, 0, 3, '退款 3 件');
+    expect(afterRefund.products[0]).toMatchObject({
+      demandQuantity: 7,
+      sellableCoveredQuantity: 2,
+      confirmedInTransitQuantity: 8,
+      uncoveredQuantity: 0,
+      overPurchaseRisk: true,
+    });
+  });
+
+  it('取消已确认采购订单后缺口回升，已转建议保持转态历史', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-suggestion-order-cancel-'));
+    const { application, plan } = await seededPlanWithDemand(root, 100);
+    const supplierId = sampleSupplierId(application);
+    const suggestionId = confirmedSuggestionOf(application, plan, 40);
+    const purchases = convertSuggestion(application, suggestionId, supplierId, 40);
+    const order = purchases.orders[0];
+    application.confirmPurchaseOrder({ orderId: order.id, reason: '向供应方下单' });
+    expect(application.queryFulfillmentDemand(plan.id).products[0]).toMatchObject({
+      confirmedInTransitQuantity: 40,
+      uncoveredQuantity: 60,
+    });
+
+    application.cancelPurchaseOrder({ orderId: order.id, reason: '供应方无法交货' });
+    const afterCancel = application.queryFulfillmentDemand(plan.id);
+    expect(afterCancel.products[0]).toMatchObject({
+      confirmedInTransitQuantity: 0,
+      uncoveredQuantity: 100,
+      overPurchaseRisk: false,
+    });
+    expect(afterCancel.suggestions[0]).toMatchObject({
+      status: 'converted',
+      purchaseOrderId: order.id,
+    });
+  });
 });
 
 describe('需求提醒阈值', () => {

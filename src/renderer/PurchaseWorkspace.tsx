@@ -365,6 +365,9 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                     <span className="status-chip">
                       {purchaseOrderStatusLabel(order.status)}
                     </span>
+                    {order.planName && (
+                      <span>计划：{order.planName}</span>
+                    )}
                     <span>交期 {formatTime(order.expectedAt)}</span>
                     {order.payable && (
                       <span>待确认应付 {formatMoney(order.payable.amountCents)}</span>

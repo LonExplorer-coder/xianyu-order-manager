@@ -891,6 +891,10 @@ export class DesktopSession {
     return this.requireApplication().createPurchaseOrder(input);
   }
 
+  public createPurchaseOrderFromSuggestion(input: unknown): PurchaseView {
+    return this.requireApplication().createPurchaseOrderFromSuggestion(input);
+  }
+
   public confirmPurchaseOrder(input: unknown): PurchaseView {
     return this.requireApplication().confirmPurchaseOrder(input);
   }

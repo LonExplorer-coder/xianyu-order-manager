@@ -213,6 +213,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(54)) migrateToVersion54(database);
   if (!versions.has(55)) migrateToVersion55(database);
   if (!versions.has(56)) migrateToVersion56(database);
+  if (!versions.has(57)) migrateToVersion57(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6752,6 +6753,126 @@ function migrateToVersion56(database: DatabaseSync): void {
   } catch (error) {
     rollbackQuietly(database);
     throw error;
+  }
+}
+
+// v57 连接采购建议与采购订单：建议表加 converted 态与订单引用、事件表加 converted 类型、
+// 订单表加计划归属列。重建建议表全程关闭外键并按「建新表→拷贝→删旧→改名」顺序，
+// 使最终表名与事件表外键引用的表名保持一致（不受改名重写行为影响），结束时以外键检查收口。
+function migrateToVersion57(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  try {
+    database.exec('BEGIN IMMEDIATE;');
+    database.exec(`
+      ALTER TABLE purchase_orders
+        ADD COLUMN plan_id TEXT REFERENCES fulfillment_plans(id) ON DELETE RESTRICT;
+
+      CREATE INDEX purchase_orders_by_plan
+        ON purchase_orders (plan_id);
+
+      CREATE TABLE purchase_suggestions_v57 (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        standard_product_id TEXT NOT NULL REFERENCES standard_products(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed', 'cancelled', 'converted')),
+        created_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        cancelled_at TEXT,
+        cancel_reason TEXT,
+        risk_acknowledged_at TEXT,
+        purchase_order_id TEXT REFERENCES purchase_orders(id) ON DELETE RESTRICT,
+        CHECK (status != 'draft' OR (confirmed_at IS NULL AND cancelled_at IS NULL)),
+        CHECK (status != 'draft' OR cancel_reason IS NULL),
+        CHECK (status != 'draft' OR purchase_order_id IS NULL),
+        CHECK (status != 'confirmed' OR confirmed_at IS NOT NULL),
+        CHECK (status != 'confirmed' OR (cancelled_at IS NULL AND cancel_reason IS NULL)),
+        CHECK (status != 'confirmed' OR purchase_order_id IS NULL),
+        CHECK ((status = 'cancelled') = (cancelled_at IS NOT NULL)),
+        CHECK (cancelled_at IS NULL OR cancel_reason IS NOT NULL),
+        CHECK (status != 'cancelled' OR purchase_order_id IS NULL),
+        CHECK (status != 'converted'
+          OR (confirmed_at IS NOT NULL AND cancelled_at IS NULL AND cancel_reason IS NULL)),
+        CHECK (status != 'converted' OR purchase_order_id IS NOT NULL),
+        CHECK (status = 'converted' OR purchase_order_id IS NULL)
+      ) STRICT;
+
+      INSERT INTO purchase_suggestions_v57 (
+        id, plan_id, standard_product_id, quantity, status, created_at, confirmed_at,
+        cancelled_at, cancel_reason, risk_acknowledged_at, purchase_order_id
+      )
+      SELECT id, plan_id, standard_product_id, quantity, status, created_at, confirmed_at,
+        cancelled_at, cancel_reason, risk_acknowledged_at, NULL
+      FROM purchase_suggestions;
+
+      DROP TABLE purchase_suggestions;
+      ALTER TABLE purchase_suggestions_v57 RENAME TO purchase_suggestions;
+
+      CREATE INDEX purchase_suggestions_by_plan
+        ON purchase_suggestions (plan_id, created_at, id);
+
+      CREATE INDEX purchase_suggestions_by_product
+        ON purchase_suggestions (standard_product_id, status);
+
+      DROP TRIGGER purchase_suggestion_events_are_immutable_on_update;
+      DROP TRIGGER purchase_suggestion_events_are_immutable_on_delete;
+
+      ALTER TABLE purchase_suggestion_events RENAME TO purchase_suggestion_events_v56;
+
+      CREATE TABLE purchase_suggestion_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        suggestion_id TEXT NOT NULL REFERENCES purchase_suggestions(id) ON DELETE RESTRICT,
+        plan_id TEXT NOT NULL REFERENCES fulfillment_plans(id) ON DELETE RESTRICT,
+        event_type TEXT NOT NULL CHECK (
+          event_type IN ('created', 'confirmed', 'cancelled', 'reduced', 'converted')
+        ),
+        quantity INTEGER CHECK (quantity IS NULL OR quantity > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (event_type NOT IN ('reduced', 'converted') OR quantity IS NOT NULL),
+        CHECK (event_type IN ('reduced', 'converted') OR quantity IS NULL)
+      ) STRICT;
+
+      INSERT INTO purchase_suggestion_events (
+        sequence, id, suggestion_id, plan_id, event_type, quantity, reason,
+        occurred_at, created_at
+      )
+      SELECT sequence, id, suggestion_id, plan_id, event_type, quantity, reason,
+        occurred_at, created_at
+      FROM purchase_suggestion_events_v56
+      ORDER BY sequence;
+
+      DROP TABLE purchase_suggestion_events_v56;
+
+      CREATE INDEX purchase_suggestion_events_by_plan
+        ON purchase_suggestion_events (plan_id, sequence);
+
+      CREATE INDEX purchase_suggestion_events_by_suggestion
+        ON purchase_suggestion_events (suggestion_id, sequence);
+
+      CREATE TRIGGER purchase_suggestion_events_are_immutable_on_update
+      BEFORE UPDATE ON purchase_suggestion_events
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+      END;
+
+      CREATE TRIGGER purchase_suggestion_events_are_immutable_on_delete
+      BEFORE DELETE ON purchase_suggestion_events
+      BEGIN
+        SELECT RAISE(ABORT, 'purchase suggestion events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (57, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

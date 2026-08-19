@@ -17,11 +17,15 @@ import {
   type FulfillmentPlanView,
   type GroupFormationBasis,
 } from '../core/fulfillment-plans';
-import type { FulfillmentDemandView } from '../core/fulfillment-demand';
+import type {
+  FulfillmentDemandView,
+  PurchaseSuggestionView,
+} from '../core/fulfillment-demand';
 import {
   fulfillmentDemandAlerts,
   purchaseSuggestionStatusLabel,
 } from '../core/fulfillment-demand';
+import { purchaseOrderStatusLabel, type SupplierView } from '../core/purchase-orders';
 import { shipmentLogisticsStatusLabel } from '../core/order-operations-projection';
 import {
   ConfirmDangerDialog,
@@ -83,6 +87,19 @@ type FormationFormState = {
 
 type SuggestionPromptKind = 'confirm' | 'cancel';
 
+type ConvertFormState = {
+  planId: string;
+  suggestionId: string;
+  label: string;
+  supplierId: string;
+  quantity: string;
+  unitPriceYuan: string;
+  expectedAt: string;
+  reason: string;
+  suppliers: SupplierView[];
+  loading: boolean;
+};
+
 type SuggestionPromptState = {
   kind: SuggestionPromptKind;
   planId: string;
@@ -142,6 +159,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
   const [refundForm, setRefundForm] = useState<RefundFormState | null>(null);
   const [suggestionForm, setSuggestionForm] = useState<SuggestionFormState | null>(null);
   const [suggestionPrompt, setSuggestionPrompt] = useState<SuggestionPromptState | null>(null);
+  const [convertForm, setConvertForm] = useState<ConvertFormState | null>(null);
   const [formationForm, setFormationForm] = useState<FormationFormState | null>(null);
   const [readableNumbers, setReadableNumbers] = useState<Record<string, string | null>>({});
   const [addOrders, setAddOrders] = useState<AddOrdersState | null>(null);
@@ -442,6 +460,63 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
       setDemandByPlan((current) => ({ ...current, [suggestionForm.planId]: view }));
       setSuggestionForm(null);
       setFeedback('已生成待确认采购建议');
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openConvert(
+    plan: FulfillmentPlanView,
+    suggestion: PurchaseSuggestionView,
+  ): Promise<void> {
+    setConvertForm({
+      planId: plan.id,
+      suggestionId: suggestion.id,
+      label: `${suggestion.sku} · ${suggestion.name}${suggestion.specification ? `（${suggestion.specification}）` : ''} × ${suggestion.quantity}`,
+      supplierId: '',
+      quantity: String(suggestion.quantity),
+      unitPriceYuan: '',
+      expectedAt: '',
+      reason: '',
+      suppliers: [],
+      loading: true,
+    });
+    setError('');
+    try {
+      const purchases = await api.queryPurchases();
+      setConvertForm((current) => current
+        ? {
+          ...current,
+          suppliers: purchases.suppliers,
+          supplierId: purchases.suppliers[0]?.supplierId ?? '',
+          loading: false,
+        }
+        : current);
+    } catch (value) {
+      setConvertForm(null);
+      setError(errorMessage(value));
+    }
+  }
+
+  async function submitConvert(): Promise<void> {
+    if (!convertForm) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.createPurchaseOrderFromSuggestion({
+        suggestionId: convertForm.suggestionId,
+        supplierId: convertForm.supplierId,
+        quantity: Number(convertForm.quantity),
+        unitPriceCents: Math.round(Number(convertForm.unitPriceYuan || '0') * 100),
+        expectedAt: convertForm.expectedAt,
+        reason: convertForm.reason,
+      });
+      const view = await api.queryFulfillmentDemand(convertForm.planId);
+      setDemandByPlan((current) => ({ ...current, [convertForm.planId]: view }));
+      setConvertForm(null);
+      setFeedback('已创建采购订单草稿并关联该计划；在采购页确认订单后形成采购在途');
     } catch (value) {
       setError(errorMessage(value));
     } finally {
@@ -800,7 +875,7 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                         <p className="fulfillment-plan-progress__hint">
                           {groupBuy && !formed
                             ? '未成团前需求只用于预测，不构成确定采购缺口；提前采购必须勾选确认未成团库存风险。确认成团后同一数据转为确定需求。'
-                            : '有效需求按未释放成员订单实时累计；现货可覆盖与待检查由库存流水实时汇总。建议确认后计入已确认采购，采购在途以采购订单为准。'}
+                            : '有效需求按未释放成员订单实时累计。剩余缺口 = 有效需求 − 现货可覆盖 − 采购在途 − 已确认建议；已确认建议可转入关联本计划的采购订单，确认订单后形成在途。'}
                         </p>
                         {!demandByPlan[plan.id] ? (
                           <p role="status">正在读取需求…</p>
@@ -812,10 +887,12 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                               <p className="fulfillment-plan-demand__totals">
                                 {groupBuy && !formed ? '条件性需求' : '有效需求'} {demand.totals.demandQuantity} 件
                                 {' · '}退款/取消 {demand.totals.refundedOrCancelledQuantity} 件
-                                {' · '}已确认采购 {demand.totals.confirmedSuggestionQuantity} 件
-                                {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
-                                {' · '}{groupBuy && !formed ? '预测缺口' : '未覆盖缺口'} <strong>{demand.totals.uncoveredQuantity}</strong> 件
                                 {' · '}现货可覆盖 {demand.totals.sellableCoveredQuantity} 件
+                                {' · '}采购在途 {demand.totals.confirmedInTransitQuantity} 件
+                                {' · '}已到货 {demand.totals.arrivedQuantity} 件
+                                {' · '}已确认建议 {demand.totals.confirmedSuggestionQuantity} 件
+                                {' · '}未确认建议 {demand.totals.draftSuggestionQuantity} 件
+                                {' · '}{groupBuy && !formed ? '预测缺口' : '剩余缺口'} <strong>{demand.totals.uncoveredQuantity}</strong> 件
                                 {' · '}待检查 {demand.totals.pendingInspectionQuantity} 件
                                 {' · '}已释放 {demand.totals.releasedOrderCount} 单
                               </p>
@@ -839,9 +916,12 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                         <th>标准商品</th>
                                         <th>有效需求</th>
                                         <th>退款/取消</th>
-                                        <th>已确认采购</th>
+                                        <th>现货可覆盖</th>
+                                        <th>采购在途</th>
+                                        <th>已到货</th>
+                                        <th>已确认建议</th>
                                         <th>未确认建议</th>
-                                        <th>未覆盖缺口</th>
+                                        <th>剩余缺口</th>
                                         <th>提示</th>
                                         <th>操作</th>
                                       </tr>
@@ -857,12 +937,20 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                           </td>
                                           <td>{product.demandQuantity}</td>
                                           <td>{product.refundedOrCancelledQuantity}</td>
+                                          <td>{product.sellableCoveredQuantity}</td>
+                                          <td>{product.confirmedInTransitQuantity}</td>
+                                          <td>{product.arrivedQuantity}</td>
                                           <td>{product.confirmedSuggestionQuantity}</td>
                                           <td>{product.draftSuggestionQuantity}</td>
                                           <td><strong>{product.uncoveredQuantity}</strong></td>
                                           <td>
                                             {product.overPurchaseRisk
-                                              ? '确认采购超过当前需求，多采购风险'
+                                              ? `已确认采购超过当前需求 ${
+                                                product.sellableCoveredQuantity
+                                                + product.confirmedInTransitQuantity
+                                                + product.confirmedSuggestionQuantity
+                                                - product.demandQuantity
+                                              } 件：可在采购页减少数量、取消未到货部分，或到货后办供应方退货／保留为普通库存`
                                               : product.draftExceedsUncovered
                                                 ? '未确认建议超过当前缺口'
                                                 : '—'}
@@ -894,6 +982,41 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                     </tbody>
                                   </table>
                                 </div>
+                              )}
+                              {demand.linkedPurchaseOrders.length > 0 && (
+                                <div className="table-frame table-frame--embedded">
+                                  <table aria-label="计划关联的采购订单">
+                                    <thead>
+                                      <tr>
+                                        <th>采购订单</th>
+                                        <th>供应方</th>
+                                        <th>状态</th>
+                                        <th>数量</th>
+                                        <th>已到货</th>
+                                        <th>交期</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {demand.linkedPurchaseOrders.map((entry) => (
+                                        <tr key={entry.orderId}>
+                                          <td>#{entry.sequence}</td>
+                                          <td>{entry.supplierName}</td>
+                                          <td>{purchaseOrderStatusLabel(entry.status)}</td>
+                                          <td>{entry.orderedQuantity}</td>
+                                          <td>{entry.arrivedQuantity}</td>
+                                          <td>{formatDateTime(entry.expectedAt)}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                              {demand.linkedPurchaseOrders.some((entry) => entry.status === 'draft') && (
+                                <p className="fulfillment-plan-progress__hint">
+                                  已有
+                                  {demand.linkedPurchaseOrders.filter((entry) => entry.status === 'draft').length}
+                                  张草稿采购订单待在采购页确认，确认后才形成采购在途；确认前缺口暂不按其扣减，请勿对同一需求重复下单。
+                                </p>
                               )}
                               {demand.unmapped.length > 0 && (
                                 <div className="fulfillment-plan-demand__unmapped">
@@ -959,6 +1082,16 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
                                               })}
                                             >
                                               确认
+                                            </button>
+                                          )}
+                                          {open && suggestion.status === 'confirmed' && (
+                                            <button
+                                              className="button button--quiet"
+                                              type="button"
+                                              disabled={busy}
+                                              onClick={() => void openConvert(plan, suggestion)}
+                                            >
+                                              转入采购订单
                                             </button>
                                           )}
                                           {open && (suggestion.status === 'draft'
@@ -1650,6 +1783,129 @@ export function FulfillmentPlansWorkspace({ api }: { api: DesktopApi }) {
           </footer>
         </DialogShell>
       )}
+
+      {convertForm && (() => {
+        const plan = plans.find(({ id }) => id === convertForm.planId);
+        if (!plan) return null;
+        const quantityValid = /^\d+$/.test(convertForm.quantity.trim())
+          && Number(convertForm.quantity.trim()) > 0;
+        const priceValid = /^\d+(\.\d{1,2})?$/.test(convertForm.unitPriceYuan.trim());
+        return (
+          <DialogShell
+            kicker={plan.type === 'presale' ? '预售计划' : '团购计划'}
+            title={`转入采购订单 · ${plan.name}`}
+            description="从已确认建议创建关联该计划的采购订单草稿；订单仍需在采购页人工确认后才形成采购在途与待确认应付。转入数量可以小于建议数量，剩余部分需要时重新生成建议；超过建议数量会形成多采购风险提示。"
+            busy={busy}
+            onClose={() => setConvertForm(null)}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitConvert();
+            }}
+          >
+            <p>{convertForm.label}</p>
+            {convertForm.loading ? (
+              <p role="status">正在读取供应方…</p>
+            ) : convertForm.suppliers.length === 0 ? (
+              <div className="settings-notice settings-notice--warning" role="alert">
+                尚未登记供应方：请先在采购页登记供应方，再转入采购订单。
+              </div>
+            ) : (
+              <label>
+                <span>供应方</span>
+                <select
+                  aria-label="供应方"
+                  value={convertForm.supplierId}
+                  disabled={busy}
+                  onChange={(event) => setConvertForm({
+                    ...convertForm,
+                    supplierId: event.target.value,
+                  })}
+                >
+                  {convertForm.suppliers.map((supplier) => (
+                    <option key={supplier.supplierId} value={supplier.supplierId}>
+                      {supplier.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label>
+              <span>采购数量（件）</span>
+              <input
+                aria-label="采购数量"
+                type="number"
+                min="1"
+                value={convertForm.quantity}
+                disabled={busy}
+                onChange={(event) => setConvertForm({
+                  ...convertForm,
+                  quantity: event.target.value,
+                })}
+              />
+            </label>
+            <label>
+              <span>采购单价（元）</span>
+              <input
+                aria-label="采购单价"
+                type="text"
+                inputMode="decimal"
+                placeholder="例如 12.50"
+                value={convertForm.unitPriceYuan}
+                disabled={busy}
+                onChange={(event) => setConvertForm({
+                  ...convertForm,
+                  unitPriceYuan: event.target.value,
+                })}
+              />
+            </label>
+            <label>
+              <span>交期</span>
+              <input
+                aria-label="交期"
+                type="datetime-local"
+                value={convertForm.expectedAt}
+                disabled={busy}
+                onChange={(event) => setConvertForm({
+                  ...convertForm,
+                  expectedAt: event.target.value,
+                })}
+              />
+            </label>
+            <ReasonField
+              label="转入原因"
+              value={convertForm.reason}
+              saving={busy}
+              onChange={(reason) => setConvertForm({ ...convertForm, reason })}
+            />
+            <footer>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={busy}
+                onClick={() => setConvertForm(null)}
+              >
+                取消
+              </button>
+              <button
+                className="button button--primary"
+                type="submit"
+                disabled={
+                  busy
+                  || convertForm.loading
+                  || convertForm.suppliers.length === 0
+                  || !convertForm.supplierId
+                  || !quantityValid
+                  || !priceValid
+                  || convertForm.expectedAt === ''
+                  || convertForm.reason.trim() === ''
+                }
+              >
+                创建采购订单草稿
+              </button>
+            </footer>
+          </DialogShell>
+        );
+      })()}
 
       {reasonPrompt && (() => {
         const plan = plans.find(({ id }) => id === reasonPrompt.planId);

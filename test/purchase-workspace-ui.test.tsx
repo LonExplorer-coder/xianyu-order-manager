@@ -27,6 +27,8 @@ function purchaseFixture(): PurchaseView {
       sequence: 1,
       supplierId: 'supplier-po-1',
       supplierName: '深圳塑料制品厂',
+      planId: null,
+      planName: null,
       status: 'confirmed',
       expectedAt: '2026-09-01T00:00:00+08:00',
       createdAt: '2026-08-18T09:30:00.000Z',

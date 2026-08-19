@@ -171,6 +171,24 @@ export class InventoryLedgerService {
     return result;
   }
 
+  // 已预留只统计计划外与已释放的待发货订单；未释放计划成员不占预留（其需求由履约计划承接）。
+  public reservedQuantitiesByProduct(): Map<string, number> {
+    const rows = this.workspace.database.prepare(`
+      SELECT oi.standard_product_id AS product_id,
+        SUM(MAX(
+          oi.quantity - COALESCE(r.refunded, 0) - COALESCE(s.shipped, 0),
+          0
+        )) AS reserved
+      ${RESERVED_ITEM_FACTS_SQL}
+        AND oi.standard_product_id IS NOT NULL
+      GROUP BY oi.standard_product_id
+    `).all() as unknown as SqlRow[];
+    return new Map(rows.map((row) => [
+      asString(row.product_id),
+      Number(row.reserved),
+    ]));
+  }
+
   // 业务事实钩子：发货（原订单或补发）实际发出时扣减可销售库存。
   // 事实记录真实实物流转，不做账面余量校验；未映射商品静默跳过，由未映射提醒承接。
   public recordShipmentDispatchFact(fact: {
@@ -537,21 +555,7 @@ export class InventoryLedgerService {
 
   private buildView(): InventoryView {
     const bucketsByProduct = this.stateQuantitiesByProduct();
-
-    const reservedRows = this.workspace.database.prepare(`
-      SELECT oi.standard_product_id AS product_id,
-        SUM(MAX(
-          oi.quantity - COALESCE(r.refunded, 0) - COALESCE(s.shipped, 0),
-          0
-        )) AS reserved
-      ${RESERVED_ITEM_FACTS_SQL}
-        AND oi.standard_product_id IS NOT NULL
-      GROUP BY oi.standard_product_id
-    `).all() as unknown as SqlRow[];
-    const reservedByProduct = new Map(reservedRows.map((row) => [
-      asString(row.product_id),
-      Number(row.reserved),
-    ]));
+    const reservedByProduct = this.reservedQuantitiesByProduct();
 
     const transitRows = this.workspace.database.prepare(`
       SELECT poi.standard_product_id AS product_id,

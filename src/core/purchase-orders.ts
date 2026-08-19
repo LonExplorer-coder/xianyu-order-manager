@@ -69,6 +69,8 @@ export type PurchaseOrderView = {
   sequence: number;
   supplierId: string;
   supplierName: string;
+  planId: string | null;
+  planName: string | null;
   status: PurchaseOrderStatus;
   expectedAt: string;
   createdAt: string;
@@ -123,6 +125,15 @@ export type CreatePurchaseOrderInput = {
     quantity: number;
     unitPriceCents: number;
   }>;
+};
+
+export type CreatePurchaseOrderFromSuggestionInput = {
+  suggestionId: string;
+  supplierId: string;
+  quantity: number;
+  unitPriceCents: number;
+  expectedAt: string;
+  reason: string;
 };
 
 export type PurchaseOrderActionInput = {
@@ -211,6 +222,25 @@ export function normalizeCreatePurchaseOrderInput(
     expectedAt: requiredTime(record.expectedAt, '交期无效'),
     reason: requiredReason(record.reason),
     items,
+  };
+}
+
+export function normalizeCreatePurchaseOrderFromSuggestionInput(
+  input: unknown,
+): CreatePurchaseOrderFromSuggestionInput {
+  const record = objectValue(input, '建议转入采购订单参数无效');
+  rejectUnknownKeys(
+    record,
+    ['suggestionId', 'supplierId', 'quantity', 'unitPriceCents', 'expectedAt', 'reason'],
+    '建议转入采购订单参数无效',
+  );
+  return {
+    suggestionId: identifier(record.suggestionId, '采购建议标识无效'),
+    supplierId: identifier(record.supplierId, '供应方标识无效'),
+    quantity: positiveQuantity(record.quantity, '采购数量无效'),
+    unitPriceCents: nonNegativeQuantity(record.unitPriceCents, '采购单价无效'),
+    expectedAt: requiredTime(record.expectedAt, '交期无效'),
+    reason: requiredReason(record.reason),
   };
 }
 

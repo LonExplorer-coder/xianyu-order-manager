@@ -175,6 +175,9 @@ export class FulfillmentDemandService {
       if (asString(suggestion.status) === 'cancelled') {
         throw new Error('采购建议已取消');
       }
+      if (asString(suggestion.status) === 'converted') {
+        throw new Error('已转采购订单的建议由采购订单承接，不能取消');
+      }
       this.workspace.database.prepare(`
         UPDATE purchase_suggestions
         SET status = 'cancelled', cancelled_at = ?, cancel_reason = ?
@@ -321,7 +324,7 @@ export class FulfillmentDemandService {
     const suggestionRows = this.workspace.database.prepare(`
       SELECT s.id, s.plan_id, s.standard_product_id, s.quantity, s.status,
         s.created_at, s.confirmed_at, s.cancelled_at, s.cancel_reason,
-        s.risk_acknowledged_at,
+        s.risk_acknowledged_at, s.purchase_order_id,
         p.sku, p.name, p.specification
       FROM purchase_suggestions s
       JOIN standard_products p ON p.id = s.standard_product_id
@@ -332,15 +335,52 @@ export class FulfillmentDemandService {
     const draftByProduct = new Map<string, number>();
     for (const row of suggestionRows) {
       const productId = asString(row.standard_product_id);
-      const bucket = asString(row.status) === 'confirmed' ? confirmedByProduct : draftByProduct;
-      if (asString(row.status) === 'cancelled') continue;
+      const status = asString(row.status);
+      // converted 建议的覆盖由其采购订单承接，不再按建议重复计数。
+      if (status === 'cancelled' || status === 'converted') continue;
+      const bucket = status === 'confirmed' ? confirmedByProduct : draftByProduct;
       bucket.set(productId, (bucket.get(productId) ?? 0) + Number(row.quantity));
     }
 
+    // 计划关联订单的采购在途（已确认且尚未到货）与已到货数量。
+    const transitByProduct = new Map<string, number>(
+      (this.workspace.database.prepare(`
+        SELECT poi.standard_product_id AS product_id,
+          SUM(MAX(poi.quantity - COALESCE(a.received, 0), 0)) AS quantity
+        FROM purchase_order_items poi
+        JOIN purchase_orders po ON po.id = poi.purchase_order_id
+        LEFT JOIN (
+          SELECT purchase_order_item_id, SUM(received_quantity) AS received
+          FROM purchase_arrival_items
+          GROUP BY purchase_order_item_id
+        ) a ON a.purchase_order_item_id = poi.id
+        WHERE po.status = 'confirmed' AND po.plan_id = ?
+        GROUP BY poi.standard_product_id
+      `).all(planId) as unknown as Array<{ product_id: string; quantity: number }>)
+        .map((row) => [row.product_id, Number(row.quantity)]),
+    );
+    const arrivedByProduct = new Map<string, number>(
+      (this.workspace.database.prepare(`
+        SELECT poi.standard_product_id AS product_id, SUM(ai.received_quantity) AS quantity
+        FROM purchase_arrival_items ai
+        JOIN purchase_order_items poi ON poi.id = ai.purchase_order_item_id
+        JOIN purchase_orders po ON po.id = poi.purchase_order_id
+        WHERE po.plan_id = ?
+        GROUP BY poi.standard_product_id
+      `).all(planId) as unknown as Array<{ product_id: string; quantity: number }>)
+        .map((row) => [row.product_id, Number(row.quantity)]),
+    );
+
+    const stockByProduct = new InventoryLedgerService(this.workspace)
+      .stockQuantitiesByProduct();
+    const reservedByProduct = new InventoryLedgerService(this.workspace)
+      .reservedQuantitiesByProduct();
     const productIdsWithDemand = new Set<string>([
       ...products.keys(),
       ...confirmedByProduct.keys(),
       ...draftByProduct.keys(),
+      ...transitByProduct.keys(),
+      ...arrivedByProduct.keys(),
     ]);
     const productViews: FulfillmentDemandProductView[] = [...productIdsWithDemand]
       .map((productId) => {
@@ -349,7 +389,21 @@ export class FulfillmentDemandService {
         const refunded = products.get(productId)?.refundedOrCancelledQuantity ?? 0;
         const confirmed = confirmedByProduct.get(productId) ?? 0;
         const draft = draftByProduct.get(productId) ?? 0;
-        const uncoveredQuantity = Math.max(0, demandQuantity - confirmed);
+        // 现货口径是「已分配」近似：可销售先扣除计划外待发货订单的已预留数量
+        // （未释放计划成员不占预留，其需求就是本计划需求，不会重复扣减）；
+        // 跨计划共享同批现货仍是已知限制，按商品分配归后续库存分配机制。
+        const availableSellable = Math.max(
+          0,
+          (stockByProduct.get(productId)?.sellable ?? 0)
+            - (reservedByProduct.get(productId) ?? 0),
+        );
+        const sellableCovered = Math.min(demandQuantity, availableSellable);
+        const inTransit = transitByProduct.get(productId) ?? 0;
+        // 采购缺口 = 有效需求 - 可用现货 - 已确认采购在途 - 已确认建议（未转单）。
+        const uncoveredQuantity = Math.max(
+          0,
+          demandQuantity - sellableCovered - inTransit - confirmed,
+        );
         return {
           standardProductId: productId,
           sku: asString(info.sku),
@@ -357,10 +411,14 @@ export class FulfillmentDemandService {
           specification: asString(info.specification),
           demandQuantity,
           refundedOrCancelledQuantity: refunded,
+          sellableCoveredQuantity: sellableCovered,
+          confirmedInTransitQuantity: inTransit,
+          arrivedQuantity: arrivedByProduct.get(productId) ?? 0,
           confirmedSuggestionQuantity: confirmed,
           draftSuggestionQuantity: draft,
           uncoveredQuantity,
-          overPurchaseRisk: confirmed > demandQuantity,
+          // 多采购风险与缺口公式同一覆盖口径：现货、在途与建议合计超出需求即预警。
+          overPurchaseRisk: sellableCovered + inTransit + confirmed > demandQuantity,
           draftExceedsUncovered: draft > uncoveredQuantity,
         };
       })
@@ -382,18 +440,58 @@ export class FulfillmentDemandService {
       riskAcknowledgedAt: row.risk_acknowledged_at === null
         ? null
         : asString(row.risk_acknowledged_at),
+      purchaseOrderId: row.purchase_order_id === null
+        ? null
+        : asString(row.purchase_order_id),
     }));
 
     const releasedRow = this.workspace.database.prepare(`
       SELECT COUNT(*) AS released FROM fulfillment_plan_members
       WHERE plan_id = ? AND released_at IS NOT NULL
     `).get(planId) as SqlRow;
-    const stockByProduct = new InventoryLedgerService(this.workspace)
-      .stockQuantitiesByProduct();
+    const linkedOrderRows = this.workspace.database.prepare(`
+      SELECT po.id, po.sequence, po.status, po.expected_at,
+        s.name AS supplier_name,
+        COALESCE((
+          SELECT SUM(poi.quantity) FROM purchase_order_items poi
+          WHERE poi.purchase_order_id = po.id
+        ), 0) AS ordered_quantity,
+        COALESCE((
+          SELECT SUM(ai.received_quantity)
+          FROM purchase_arrival_items ai
+          JOIN purchase_order_items poi ON poi.id = ai.purchase_order_item_id
+          WHERE poi.purchase_order_id = po.id
+        ), 0) AS arrived_quantity
+      FROM purchase_orders po
+      JOIN suppliers s ON s.id = po.supplier_id
+      WHERE po.plan_id = ?
+      ORDER BY po.sequence
+    `).all(planId) as unknown as SqlRow[];
+    const linkedPurchaseOrders = linkedOrderRows.map((row) => ({
+      orderId: asString(row.id),
+      sequence: Number(row.sequence),
+      status: asString(row.status) as 'draft' | 'confirmed' | 'cancelled',
+      supplierName: asString(row.supplier_name),
+      expectedAt: asString(row.expected_at),
+      orderedQuantity: Number(row.ordered_quantity),
+      arrivedQuantity: Number(row.arrived_quantity),
+    }));
     const totals: FulfillmentDemandTotals = {
       demandQuantity: productViews.reduce((total, view) => total + view.demandQuantity, 0),
       refundedOrCancelledQuantity: productViews.reduce(
         (total, view) => total + view.refundedOrCancelledQuantity,
+        0,
+      ),
+      sellableCoveredQuantity: productViews.reduce(
+        (total, view) => total + view.sellableCoveredQuantity,
+        0,
+      ),
+      confirmedInTransitQuantity: productViews.reduce(
+        (total, view) => total + view.confirmedInTransitQuantity,
+        0,
+      ),
+      arrivedQuantity: productViews.reduce(
+        (total, view) => total + view.arrivedQuantity,
         0,
       ),
       confirmedSuggestionQuantity: productViews.reduce(
@@ -406,14 +504,6 @@ export class FulfillmentDemandService {
       ),
       uncoveredQuantity: productViews.reduce(
         (total, view) => total + view.uncoveredQuantity,
-        0,
-      ),
-      // 账面为负说明存在未入账缺口，覆盖按 0 计而不是出现负覆盖。
-      sellableCoveredQuantity: productViews.reduce(
-        (total, view) => total + Math.min(
-          view.demandQuantity,
-          Math.max(0, stockByProduct.get(view.standardProductId)?.sellable ?? 0),
-        ),
         0,
       ),
       pendingInspectionQuantity: productViews.reduce(
@@ -439,6 +529,7 @@ export class FulfillmentDemandService {
           || left.sourceSpec.localeCompare(right.sourceSpec)
         )),
       suggestions,
+      linkedPurchaseOrders,
       totals,
     };
   }
@@ -447,8 +538,6 @@ export class FulfillmentDemandService {
     planId: string,
     productId: string,
   ): {
-    demandQuantity: number;
-    confirmedQuantity: number;
     draftQuantity: number;
     uncoveredQuantity: number;
   } {
@@ -457,8 +546,6 @@ export class FulfillmentDemandService {
       (candidate) => candidate.standardProductId === productId,
     );
     return {
-      demandQuantity: product?.demandQuantity ?? 0,
-      confirmedQuantity: product?.confirmedSuggestionQuantity ?? 0,
       draftQuantity: product?.draftSuggestionQuantity ?? 0,
       uncoveredQuantity: product?.uncoveredQuantity ?? 0,
     };
@@ -472,10 +559,8 @@ export class FulfillmentDemandService {
   ): void {
     for (const productId of productIds) {
       const snapshot = this.productDemandSnapshot(planId, productId);
-      const allowedDraft = Math.max(
-        0,
-        snapshot.demandQuantity - snapshot.confirmedQuantity,
-      );
+      // 与缺口公式同一口径：现货、在途与已确认建议覆盖掉的需求不再保留待确认建议。
+      const allowedDraft = Math.max(0, snapshot.uncoveredQuantity);
       const draftRows = this.workspace.database.prepare(`
         SELECT id, quantity FROM purchase_suggestions
         WHERE plan_id = ? AND standard_product_id = ? AND status = 'draft'
