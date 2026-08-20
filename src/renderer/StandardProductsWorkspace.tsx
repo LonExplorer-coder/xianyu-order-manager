@@ -2,6 +2,12 @@ import { useEffect, useState, type FormEvent } from 'react';
 
 import type { DesktopApi } from '../core/desktop-api';
 import type {
+  ProductCatalogColumnMapping,
+  ProductCatalogDuplicateSkuResolution,
+  ProductCatalogImportPreview,
+  ProductCatalogWorkbookInspection,
+} from '../core/product-catalog';
+import type {
   ProductMappingEvent,
   ProductMappingHistoryCandidatePreview,
   ProductMappingOrigin,
@@ -61,6 +67,16 @@ const EMPTY_MAPPING_FORM: MappingForm = {
   reason: '',
 };
 
+type CatalogImportEditor = {
+  sessionId: string;
+  fileName: string;
+  inspection: ProductCatalogWorkbookInspection;
+  columnMapping: ProductCatalogColumnMapping;
+  duplicateSkuResolutions: ProductCatalogDuplicateSkuResolution[];
+  mappingUpdateReason: string;
+  preview: ProductCatalogImportPreview | null;
+};
+
 export function StandardProductsWorkspace({
   api,
   onOpenLinkedOrderItems,
@@ -94,6 +110,8 @@ export function StandardProductsWorkspace({
   const [historyReason, setHistoryReason] = useState('');
   const [historySaving, setHistorySaving] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [catalogImport, setCatalogImport] = useState<CatalogImportEditor | null>(null);
+  const [catalogBusy, setCatalogBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -368,6 +386,138 @@ export function StandardProductsWorkspace({
     }
   }
 
+  async function selectCatalogImport() {
+    if (catalogBusy) return;
+    setCatalogBusy(true);
+    setFeedback(null);
+    try {
+      const selected = await api.selectProductCatalogImport();
+      if (selected.kind === 'canceled') return;
+      const editor: CatalogImportEditor = {
+        sessionId: selected.sessionId,
+        fileName: selected.fileName,
+        inspection: selected.inspection,
+        columnMapping: selected.inspection.suggestedColumnMapping,
+        duplicateSkuResolutions: [],
+        mappingUpdateReason: '',
+        preview: null,
+      };
+      const preview = await api.previewProductCatalogImport(selected.sessionId, {
+        columnMapping: editor.columnMapping,
+        duplicateSkuResolutions: [],
+      });
+      setCatalogImport({ ...editor, preview });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+
+  async function exportCatalog() {
+    if (catalogBusy) return;
+    setCatalogBusy(true);
+    setFeedback(null);
+    try {
+      const outcome = await api.exportProductCatalog();
+      if (outcome.kind === 'saved') {
+        setFeedback({ kind: 'success', message: `商品目录已导出：${outcome.fileName}` });
+      }
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+
+  function updateCatalogColumnMapping(
+    update: (current: ProductCatalogColumnMapping) => ProductCatalogColumnMapping,
+  ) {
+    setCatalogImport((current) => current ? {
+      ...current,
+      columnMapping: update(current.columnMapping),
+      duplicateSkuResolutions: [],
+      mappingUpdateReason: '',
+      preview: null,
+    } : current);
+  }
+
+  async function previewCatalogImport(
+    duplicateSkuResolutions?: ProductCatalogDuplicateSkuResolution[],
+  ) {
+    if (!catalogImport || catalogBusy) return;
+    const resolutions = duplicateSkuResolutions ?? catalogImport.duplicateSkuResolutions;
+    setCatalogBusy(true);
+    setFeedback(null);
+    try {
+      const preview = await api.previewProductCatalogImport(catalogImport.sessionId, {
+        columnMapping: catalogImport.columnMapping,
+        duplicateSkuResolutions: resolutions,
+      });
+      setCatalogImport((current) => current?.sessionId === catalogImport.sessionId
+        ? { ...current, duplicateSkuResolutions: resolutions, preview }
+        : current);
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+
+  async function selectDuplicateSkuRow(skuKey: string, selectedRowNumber: number) {
+    if (!catalogImport) return;
+    const next = [
+      ...catalogImport.duplicateSkuResolutions.filter((entry) => entry.skuKey !== skuKey),
+      { skuKey, selectedRowNumber },
+    ];
+    await previewCatalogImport(next);
+  }
+
+  async function confirmCatalogImport() {
+    if (!catalogImport?.preview || catalogBusy) return;
+    if (catalogImport.preview.duplicateSkus.some(({ selectedRowNumber }) => (
+      selectedRowNumber === null
+    ))) return;
+    setCatalogBusy(true);
+    setFeedback(null);
+    try {
+      const result = await api.confirmProductCatalogImport(catalogImport.sessionId, {
+        columnMapping: catalogImport.columnMapping,
+        duplicateSkuResolutions: catalogImport.duplicateSkuResolutions,
+        previewToken: catalogImport.preview.previewToken,
+        mappingUpdateReason: catalogImport.mappingUpdateReason,
+      });
+      setHistoryEditor(null);
+      setHistorySelectedIds(new Set());
+      setHistoryReason('');
+      setHistoryError('');
+      setMappingEditor(null);
+      setMappings([]);
+      setMappingStats(null);
+      setMappingEvents([]);
+      const refreshedProducts = await api.listStandardProducts();
+      setProducts(refreshedProducts);
+      if (editing) {
+        const refreshedEditing = refreshedProducts.find(({ id }) => id === editing.id);
+        if (refreshedEditing) {
+          beginEdit(refreshedEditing);
+          await refreshMappings(refreshedEditing.id);
+        } else {
+          resetForm();
+        }
+      }
+      setCatalogImport(null);
+      setFeedback({
+        kind: 'success',
+        message: `商品目录已确认：已新增 ${result.createdProductCount} 个标准商品，更新 ${result.updatedProductCount} 个；新增 ${result.createdMappingCount} 条商品映射，更新 ${result.updatedMappingCount} 条；跳过 ${result.skippedErrorRowCount} 条错误行。`,
+      });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+
   return (
     <section className="fields-workspace workspace-enter">
       <header className="workspace-header">
@@ -376,7 +526,269 @@ export function StandardProductsWorkspace({
           <h1>标准商品</h1>
           <p>维护内部统一的 SKU、商品名和规格；订单截图原文始终单独保留。</p>
         </div>
+        <div className="form-actions">
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={catalogBusy}
+            onClick={() => void selectCatalogImport()}
+          >
+            {catalogBusy && !catalogImport ? '正在读取…' : '导入商品目录'}
+          </button>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={catalogBusy}
+            onClick={() => void exportCatalog()}
+          >
+            导出商品目录
+          </button>
+        </div>
       </header>
+
+      {catalogImport && (
+        <section className="fields-panel" aria-label="商品目录导入预览">
+          <div className="fields-panel__heading">
+            <div>
+              <span className="section-kicker">确认前预览</span>
+              <h2>商品目录导入</h2>
+              <p>{catalogImport.fileName}</p>
+            </div>
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={catalogBusy}
+              onClick={() => setCatalogImport(null)}
+            >
+              取消导入
+            </button>
+          </div>
+          <p>先核对工作表与列映射；预览不会写入，确认后只应用有效行。</p>
+
+          <div className="fields-layout">
+            <div className="field-definition-card">
+              <strong>标准商品列映射</strong>
+              <label className="field">
+                <span className="field-label">标准商品工作表</span>
+                <select
+                  aria-label="标准商品工作表"
+                  disabled={catalogBusy}
+                  value={catalogImport.columnMapping.productWorksheet}
+                  onChange={(event) => updateCatalogColumnMapping((current) => ({
+                    ...current,
+                    productWorksheet: event.target.value,
+                  }))}
+                >
+                  {catalogImport.inspection.worksheets.map((worksheet) => (
+                    <option key={worksheet.name} value={worksheet.name}>{worksheet.name}</option>
+                  ))}
+                </select>
+              </label>
+              {([
+                ['sku', 'SKU 列'],
+                ['name', '标准商品名列'],
+                ['specification', '标准规格列'],
+              ] as const).map(([field, label]) => (
+                <label className="field" key={field}>
+                  <span className="field-label">{label}</span>
+                  <select
+                    aria-label={label}
+                    disabled={catalogBusy}
+                    value={catalogImport.columnMapping.productColumns[field]}
+                    onChange={(event) => updateCatalogColumnMapping((current) => ({
+                      ...current,
+                      productColumns: {
+                        ...current.productColumns,
+                        [field]: Number(event.target.value),
+                      },
+                    }))}
+                  >
+                    {catalogWorksheetHeaders(
+                      catalogImport.inspection,
+                      catalogImport.columnMapping.productWorksheet,
+                    ).map((header, index) => (
+                      <option key={`${index + 1}-${header}`} value={index + 1}>
+                        {index + 1} · {header || '未命名列'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+
+            <div className="field-definition-card">
+              <strong>商品映射列映射</strong>
+              <label className="field">
+                <span className="field-label">商品映射工作表</span>
+                <select
+                  aria-label="商品映射工作表"
+                  disabled={catalogBusy}
+                  value={catalogImport.columnMapping.mappingWorksheet ?? ''}
+                  onChange={(event) => updateCatalogColumnMapping((current) => ({
+                    ...current,
+                    mappingWorksheet: event.target.value || null,
+                  }))}
+                >
+                  <option value="">不导入商品映射</option>
+                  {catalogImport.inspection.worksheets.map((worksheet) => (
+                    <option key={worksheet.name} value={worksheet.name}>{worksheet.name}</option>
+                  ))}
+                </select>
+              </label>
+              {catalogImport.columnMapping.mappingWorksheet && ([
+                ['sku', '商品映射 SKU 列', false],
+                ['sourceTitle', '原始商品标题列', false],
+                ['sourceSpec', '原始规格列', true],
+                ['scope', '适用范围列', true],
+                ['platform', '平台列', true],
+                ['sellerAccount', '卖家账号列', true],
+              ] as const).map(([field, label, optional]) => (
+                <label className="field" key={field}>
+                  <span className="field-label">{label}</span>
+                  <select
+                    aria-label={label}
+                    disabled={catalogBusy}
+                    value={catalogImport.columnMapping.mappingColumns[field] ?? ''}
+                    onChange={(event) => updateCatalogColumnMapping((current) => ({
+                      ...current,
+                      mappingColumns: {
+                        ...current.mappingColumns,
+                        [field]: event.target.value ? Number(event.target.value) : null,
+                      },
+                    }))}
+                  >
+                    {optional && <option value="">未提供</option>}
+                    {catalogWorksheetHeaders(
+                      catalogImport.inspection,
+                      catalogImport.columnMapping.mappingWorksheet,
+                    ).map((header, index) => (
+                      <option key={`${index + 1}-${header}`} value={index + 1}>
+                        {index + 1} · {header || '未命名列'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="form-actions">
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={catalogBusy}
+              onClick={() => void previewCatalogImport()}
+            >
+              {catalogBusy ? '正在预览…' : '按当前列映射重新预览'}
+            </button>
+          </div>
+
+          {catalogImport.preview && (
+            <>
+              <div className="field-definition-card__meta" aria-label="商品目录导入统计">
+                <span>新增标准商品 {catalogImport.preview.summary.createProductCount}</span>
+                <span>更新标准商品 {catalogImport.preview.summary.updateProductCount}</span>
+                <span>不变标准商品 {catalogImport.preview.summary.unchangedProductCount}</span>
+                <span>新增商品映射 {catalogImport.preview.summary.createMappingCount}</span>
+                <span>更新商品映射 {catalogImport.preview.summary.updateMappingCount}</span>
+                <span>不变商品映射 {catalogImport.preview.summary.unchangedMappingCount}</span>
+                <span>错误行 {catalogImport.preview.summary.errorRowCount}</span>
+              </div>
+
+              {catalogImport.preview.duplicateSkus.map((duplicate) => (
+                <fieldset className="field-definition-card" key={duplicate.skuKey}>
+                  <legend>重复 SKU {duplicate.skuKey}</legend>
+                  <p>必须明确选择一行；其他重复行不会写入。</p>
+                  {duplicate.rowNumbers.map((rowNumber) => {
+                    const row = catalogImport.preview?.productRows.find((candidate) => (
+                      candidate.rowNumber === rowNumber
+                    ));
+                    return (
+                      <label className="fields-check-row" key={rowNumber}>
+                        <input
+                          type="radio"
+                          name={`catalog-duplicate-${duplicate.skuKey}`}
+                          disabled={catalogBusy}
+                          checked={duplicate.selectedRowNumber === rowNumber}
+                          onChange={() => void selectDuplicateSkuRow(duplicate.skuKey, rowNumber)}
+                        />
+                        <span>
+                          保留第 {rowNumber} 行 · {row?.name || '未命名'} · {row?.specification || '无规格'}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </fieldset>
+              ))}
+
+              <div className="field-definition-list" aria-label="标准商品导入行">
+                {catalogImport.preview.productRows.map((row) => (
+                  <article className="field-definition-card" key={row.rowNumber}>
+                    <div>
+                      <strong>第 {row.rowNumber} 行 · {row.sku || '无 SKU'}</strong>
+                      <span>{row.name || '无商品名'} · {row.specification || '无规格'}</span>
+                    </div>
+                    <div className="field-definition-card__meta">
+                      <span>{catalogProductActionLabel(row.action)}</span>
+                      {row.errors.map((error) => <span key={error}>{error}</span>)}
+                    </div>
+                  </article>
+                ))}
+              </div>
+              {catalogImport.preview.mappingRows.length > 0 && (
+                <div className="field-definition-list" aria-label="商品映射导入行">
+                  {catalogImport.preview.mappingRows.map((row) => (
+                    <article className="field-definition-card" key={row.rowNumber}>
+                      <div>
+                        <strong>商品映射第 {row.rowNumber} 行 · {row.sku || '无 SKU'}</strong>
+                        <span>{row.sourceTitle || '无原始商品标题'} / {row.sourceSpec || '无规格'}</span>
+                      </div>
+                      <div className="field-definition-card__meta">
+                        <span>{catalogMappingActionLabel(row.action)}</span>
+                        {row.errors.map((error) => <span key={error}>{error}</span>)}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+              {catalogImport.preview.summary.updateMappingCount > 0 && (
+                <label className="field">
+                  <span className="field-label">
+                    商品映射更新原因
+                    <i aria-hidden="true">*</i>
+                  </span>
+                  <input
+                    aria-label="商品映射更新原因"
+                    disabled={catalogBusy}
+                    maxLength={500}
+                    value={catalogImport.mappingUpdateReason}
+                    onChange={(event) => setCatalogImport((current) => current ? {
+                      ...current,
+                      mappingUpdateReason: event.target.value,
+                    } : current)}
+                  />
+                  <span>更改标题别名归属会留下商品映射变更事件。</span>
+                </label>
+              )}
+              <div className="form-actions">
+                <button
+                  className="button button--primary"
+                  type="button"
+                  disabled={catalogBusy || catalogImport.preview.duplicateSkus.some(
+                    ({ selectedRowNumber }) => selectedRowNumber === null,
+                  ) || (
+                    catalogImport.preview.summary.updateMappingCount > 0 &&
+                    !catalogImport.mappingUpdateReason.trim()
+                  )}
+                  onClick={() => void confirmCatalogImport()}
+                >
+                  {catalogBusy ? '正在导入…' : '确认导入有效行'}
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       <div className="fields-layout">
         <section className="fields-panel fields-panel--list" aria-labelledby="standard-product-list-heading">
@@ -937,6 +1349,33 @@ function mappingEventTypeLabel(eventType: ProductMappingEvent['eventType']): str
   if (eventType === 'corrected') return '更正';
   if (eventType === 'disabled') return '停用';
   return '删除';
+}
+
+function catalogWorksheetHeaders(
+  inspection: ProductCatalogWorkbookInspection,
+  worksheetName: string | null,
+): string[] {
+  if (!worksheetName) return [];
+  return inspection.worksheets.find(({ name }) => name === worksheetName)?.headers ?? [];
+}
+
+function catalogProductActionLabel(
+  action: ProductCatalogImportPreview['productRows'][number]['action'],
+): string {
+  if (action === 'create') return '候选新增';
+  if (action === 'update') return '候选更新';
+  if (action === 'unchanged') return '内容不变';
+  if (action === 'duplicate') return '重复 SKU 待选择';
+  return '错误行';
+}
+
+function catalogMappingActionLabel(
+  action: ProductCatalogImportPreview['mappingRows'][number]['action'],
+): string {
+  if (action === 'create') return '候选新增';
+  if (action === 'update') return '候选更新';
+  if (action === 'unchanged') return '内容不变';
+  return '错误行';
 }
 
 function formatMoney(cents: number | null): string {

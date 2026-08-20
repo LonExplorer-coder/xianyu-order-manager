@@ -60,6 +60,14 @@ const api: DesktopApi = {
     )
   ),
   listStandardProducts: () => ipcRenderer.invoke('products:list'),
+  selectProductCatalogImport: () => ipcRenderer.invoke('products:select-catalog-import'),
+  previewProductCatalogImport: (sessionId, input) => (
+    ipcRenderer.invoke('products:preview-catalog-import', sessionId, input)
+  ),
+  confirmProductCatalogImport: (sessionId, input) => (
+    ipcRenderer.invoke('products:confirm-catalog-import', sessionId, input)
+  ),
+  exportProductCatalog: () => ipcRenderer.invoke('products:export-catalog'),
   createStandardProduct: (input) => ipcRenderer.invoke('products:create', input),
   updateStandardProduct: (productId, input) => (
     ipcRenderer.invoke('products:update', productId, input)

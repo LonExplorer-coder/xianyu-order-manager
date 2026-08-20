@@ -1,5 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 
 import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
@@ -36,6 +38,10 @@ import type {
 import { formatBackupStamp } from './backup-service';
 import { normalizeOrderExportInput } from '../core/order-export';
 import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
+import {
+  normalizeProductCatalogImportConfirmationInput,
+  normalizeProductCatalogImportInput,
+} from '../core/product-catalog';
 import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
@@ -73,6 +79,7 @@ import {
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
+const PRODUCT_CATALOG_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -124,6 +131,11 @@ function backupPickerDefaultPath(settings: BackupSettingsView): string {
 }
 
 export function registerIpcHandlers(desktopSession: DesktopSession): void {
+  let productCatalogImportSession: {
+    id: string;
+    buffer: Buffer;
+  } | null = null;
+
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
   ipcMain.handle('app:retry-data-directory', () => desktopSession.retryDataDirectory());
 
@@ -385,6 +397,81 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
   ipcMain.handle('products:list', () => desktopSession.listStandardProducts());
+  ipcMain.handle('products:select-catalog-import', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showOpenDialog(window, {
+      title: '选择商品目录工作簿',
+      buttonLabel: '读取并预览',
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      properties: ['openFile'],
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { kind: 'canceled' as const };
+    }
+    const filePath = selection.filePaths[0];
+    if (extname(filePath).toLowerCase() !== '.xlsx') {
+      throw new Error('商品目录导入只支持 .xlsx 文件');
+    }
+    if ((await stat(filePath)).size > PRODUCT_CATALOG_MAX_WORKBOOK_BYTES) {
+      throw new Error('商品目录工作簿不能超过 10 MB');
+    }
+    const buffer = await readFile(filePath);
+    const inspection = await desktopSession.inspectProductCatalogWorkbook(buffer);
+    const id = randomUUID();
+    productCatalogImportSession = { id, buffer };
+    return {
+      kind: 'selected' as const,
+      sessionId: id,
+      fileName: basename(filePath),
+      inspection,
+    };
+  });
+  ipcMain.handle(
+    'products:preview-catalog-import',
+    (_event, sessionId: unknown, input: unknown) => {
+      const current = requireProductCatalogImportSession(
+        productCatalogImportSession,
+        sessionId,
+      );
+      return desktopSession.previewProductCatalogImport(
+        current.buffer,
+        normalizeProductCatalogImportInput(input),
+      );
+    },
+  );
+  ipcMain.handle(
+    'products:confirm-catalog-import',
+    async (_event, sessionId: unknown, input: unknown) => {
+      const current = requireProductCatalogImportSession(
+        productCatalogImportSession,
+        sessionId,
+      );
+      const result = await desktopSession.confirmProductCatalogImport(
+        current.buffer,
+        normalizeProductCatalogImportConfirmationInput(input),
+      );
+      productCatalogImportSession = null;
+      return result;
+    },
+  );
+  ipcMain.handle('products:export-catalog', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showSaveDialog(window, {
+      title: '导出商品目录工作簿',
+      buttonLabel: '保存 Excel',
+      defaultPath: defaultProductCatalogExportFileName(new Date()),
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      properties: ['showOverwriteConfirmation', 'createDirectory'],
+    });
+    if (selection.canceled || !selection.filePath) return { kind: 'cancelled' as const };
+    const filePath = xlsxFilePath(selection.filePath);
+    await writeFile(filePath, await desktopSession.createProductCatalogWorkbook());
+    return {
+      kind: 'saved' as const,
+      fileName: basename(filePath),
+      filePath,
+    };
+  });
   ipcMain.handle('products:create', (_event, input: unknown) => (
     desktopSession.createStandardProduct(normalizeStandardProductInput(input))
   ));
@@ -1361,6 +1448,11 @@ function defaultOrderExportFileName(now: Date): string {
   return `闲鱼订单-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
 }
 
+function defaultProductCatalogExportFileName(now: Date): string {
+  const part = (value: number): string => String(value).padStart(2, '0');
+  return `商品目录-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
+}
+
 function defaultShipmentGroupExportFileName(now: Date): string {
   const part = (value: number): string => String(value).padStart(2, '0');
   return `合并发货-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
@@ -1368,6 +1460,16 @@ function defaultShipmentGroupExportFileName(now: Date): string {
 
 function xlsxFilePath(value: string): string {
   return extname(value).toLowerCase() === '.xlsx' ? value : `${value}.xlsx`;
+}
+
+function requireProductCatalogImportSession(
+  session: { id: string; buffer: Buffer } | null,
+  sessionId: unknown,
+): { id: string; buffer: Buffer } {
+  if (typeof sessionId !== 'string' || !session || session.id !== sessionId) {
+    throw new Error('商品目录导入会话已失效，请重新选择文件');
+  }
+  return session;
 }
 
 void app.whenReady().then(async () => {

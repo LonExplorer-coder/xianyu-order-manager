@@ -149,6 +149,15 @@ import {
   type StandardProductPriceEvent,
 } from '../core/product-standardization';
 import {
+  normalizeProductCatalogImportConfirmationInput,
+  normalizeProductCatalogImportInput,
+  type ProductCatalogImportConfirmationInput,
+  type ProductCatalogImportInput,
+  type ProductCatalogImportPreview,
+  type ProductCatalogImportResult,
+  type ProductCatalogWorkbookInspection,
+} from '../core/product-catalog';
+import {
   assessAutomaticImport,
   isOrderReviewIssueCode,
   normalizeOrderReviewIssues,
@@ -268,6 +277,11 @@ import {
   type OrderExportWorkbookPlan,
   writeOrderExportWorkbook,
 } from './order-export-workbook';
+import {
+  createProductCatalogWorkbook as buildProductCatalogWorkbook,
+  inspectProductCatalogWorkbook as inspectCatalogWorkbook,
+  previewProductCatalogWorkbook,
+} from './product-catalog-workbook';
 import {
   shanghaiDateKey,
   systemOrderNumberForSequence,
@@ -4066,6 +4080,144 @@ export class LocalApplication {
       FROM standard_products
       ORDER BY sku_key, id
     `).all() as unknown as SqlRow[]).map(parseStandardProductRow);
+  }
+
+  public inspectProductCatalogWorkbook(
+    buffer: Buffer,
+  ): Promise<ProductCatalogWorkbookInspection> {
+    this.requireWorkspace();
+    return inspectCatalogWorkbook(buffer);
+  }
+
+  public async previewProductCatalogImport(
+    buffer: Buffer,
+    input: ProductCatalogImportInput | unknown,
+  ): Promise<ProductCatalogImportPreview> {
+    this.requireWorkspace();
+    const normalized = normalizeProductCatalogImportInput(input);
+    const existingProducts = this.listStandardProducts();
+    const existingMappings = this.listActiveProductMappings();
+    const stateToken = productCatalogStateToken(existingProducts, existingMappings);
+    const preview = await previewProductCatalogWorkbook({
+      buffer,
+      columnMapping: normalized.columnMapping,
+      duplicateSkuResolutions: normalized.duplicateSkuResolutions,
+      existingProducts,
+      existingMappings,
+    });
+    if (stateToken !== productCatalogStateToken(
+      this.listStandardProducts(),
+      this.listActiveProductMappings(),
+    )) {
+      throw new Error('商品目录状态已变化，请重新预览');
+    }
+    return preview;
+  }
+
+  public async confirmProductCatalogImport(
+    buffer: Buffer,
+    input: ProductCatalogImportConfirmationInput | unknown,
+  ): Promise<ProductCatalogImportResult> {
+    const workspace = this.requireWorkspace();
+    const normalized = normalizeProductCatalogImportConfirmationInput(input);
+    const preview = await this.previewProductCatalogImport(buffer, {
+      columnMapping: normalized.columnMapping,
+      duplicateSkuResolutions: normalized.duplicateSkuResolutions,
+    });
+    if (preview.previewToken !== normalized.previewToken) {
+      throw new Error('商品目录预览已过期，请重新预览');
+    }
+    if (preview.duplicateSkus.some(({ selectedRowNumber }) => selectedRowNumber === null)) {
+      throw new Error('重复 SKU 必须全部明确选择保留行');
+    }
+    if (preview.summary.updateMappingCount > 0 && !normalized.mappingUpdateReason) {
+      throw new Error('商品映射更新必须填写原因');
+    }
+
+    return workspace.transaction(() => {
+      let createdProductCount = 0;
+      let updatedProductCount = 0;
+      let createdMappingCount = 0;
+      let updatedMappingCount = 0;
+      const productsBySku = new Map(this.listStandardProducts().map((product) => (
+        [normalizeSkuKey(product.sku), product] as const
+      )));
+      for (const row of preview.productRows) {
+        if (row.action === 'create') {
+          const created = this.createStandardProduct({
+            sku: row.sku,
+            name: row.name,
+            specification: row.specification,
+          });
+          productsBySku.set(row.skuKey, created);
+          createdProductCount += 1;
+        } else if (row.action === 'update') {
+          const current = productsBySku.get(row.skuKey);
+          if (!current) throw new Error('商品目录预览已过期，请重新预览');
+          const updated = this.updateStandardProduct(current.id, {
+            sku: row.sku,
+            name: row.name,
+            specification: row.specification,
+            defaultOrderPriceCents: current.defaultOrderPriceCents,
+            expectedRevision: current.revision,
+          });
+          productsBySku.set(row.skuKey, updated);
+          updatedProductCount += 1;
+        }
+      }
+
+      for (const row of preview.mappingRows) {
+        if (row.action !== 'create' && row.action !== 'update') continue;
+        const product = productsBySku.get(row.skuKey);
+        if (!product) throw new Error('商品目录预览已过期，请重新预览');
+        if (row.action === 'create') {
+          this.createProductMapping(product.id, {
+            sourceTitle: row.sourceTitle,
+            sourceSpec: row.sourceSpec,
+            scope: row.scope,
+            platform: row.platform,
+            sellerAccount: row.sellerAccount,
+          });
+          createdMappingCount += 1;
+        } else {
+          if (!row.existingMappingId) throw new Error('商品目录预览已过期，请重新预览');
+          this.correctProductMapping(row.existingMappingId, {
+            standardProductId: product.id,
+            reason: normalized.mappingUpdateReason,
+          });
+          updatedMappingCount += 1;
+        }
+      }
+      return {
+        createdProductCount,
+        updatedProductCount,
+        createdMappingCount,
+        updatedMappingCount,
+        skippedErrorRowCount: preview.summary.errorRowCount,
+      };
+    });
+  }
+
+  public createProductCatalogWorkbook(): Promise<Buffer> {
+    this.requireWorkspace();
+    return buildProductCatalogWorkbook({
+      products: this.listStandardProducts(),
+      mappings: this.listActiveProductMappings(),
+    });
+  }
+
+  private listActiveProductMappings(): ProductMappingView[] {
+    const workspace = this.requireWorkspace();
+    const hitSummaries = this.projectProductMappingHits();
+    return (workspace.database.prepare(`
+      SELECT mappings.*, products.sku AS target_sku, products.name AS target_name
+      FROM product_mappings AS mappings
+      JOIN standard_products AS products ON products.id = mappings.standard_product_id
+      WHERE mappings.status = 'active'
+      ORDER BY products.sku_key, mappings.created_at, mappings.id
+    `).all() as unknown as SqlRow[]).map((row) => (
+      parseProductMappingViewRow(row, hitSummaries)
+    ));
   }
 
   public updateStandardProduct(productId: string, input: unknown): StandardProduct {
@@ -9836,6 +9988,31 @@ function sameTextSet(left: readonly string[], right: readonly string[]): boolean
   if (left.length !== right.length) return false;
   const rightSet = new Set(right);
   return rightSet.size === right.length && left.every((value) => rightSet.has(value));
+}
+
+function productCatalogStateToken(
+  products: readonly StandardProduct[],
+  mappings: readonly ProductMappingView[],
+): string {
+  return createHash('sha256').update(JSON.stringify({
+    products: products.map((product) => ({
+      id: product.id,
+      sku: product.sku,
+      name: product.name,
+      specification: product.specification,
+      revision: product.revision,
+    })),
+    mappings: mappings.map((mapping) => ({
+      id: mapping.id,
+      standardProductId: mapping.standardProductId,
+      sourceTitle: mapping.sourceTitle,
+      sourceSpec: mapping.sourceSpec,
+      scope: mapping.scope,
+      platform: mapping.platform,
+      sellerAccount: mapping.sellerAccount,
+      status: mapping.status,
+    })),
+  })).digest('hex');
 }
 
 function asOptionalStoredMoney(

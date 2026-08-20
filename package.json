@@ -1,7 +1,7 @@
 {
   "name": "xianyu-order-manager",
   "productName": "闲鱼订单管理",
-  "version": "0.2.62",
+  "version": "0.2.63",
   "description": "本机优先的闲鱼来源截图识别与订单管理工具",
   "main": ".vite/build/electron-main.js",
   "private": true,
@@ -33,7 +33,8 @@
     "@napi-rs/keyring": "1.3.0",
     "exceljs": "4.4.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "yauzl": "3.3.1"
   },
   "devDependencies": {
     "@electron-forge/cli": "7.11.2",
@@ -55,8 +56,7 @@
     "jsdom": "30.0.0",
     "typescript": "7.0.2",
     "vite": "8.1.5",
-    "vitest": "4.1.10",
-    "yauzl": "3.3.1"
+    "vitest": "4.1.10"
   },
   "pnpm": {
     "overrides": {

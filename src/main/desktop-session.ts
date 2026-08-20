@@ -56,6 +56,13 @@ import type {
   UpdateOrderItemStandardizationInput,
   UpdateStandardProductInput,
 } from '../core/product-standardization';
+import type {
+  ProductCatalogImportConfirmationInput,
+  ProductCatalogImportInput,
+  ProductCatalogImportPreview,
+  ProductCatalogImportResult,
+  ProductCatalogWorkbookInspection,
+} from '../core/product-catalog';
 import { createHash, randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
@@ -554,6 +561,32 @@ export class DesktopSession {
 
   public listStandardProducts(): StandardProduct[] {
     return this.requireApplication().listStandardProducts();
+  }
+
+  public inspectProductCatalogWorkbook(
+    buffer: Buffer,
+  ): Promise<ProductCatalogWorkbookInspection> {
+    return this.requireApplication().inspectProductCatalogWorkbook(buffer);
+  }
+
+  public previewProductCatalogImport(
+    buffer: Buffer,
+    input: ProductCatalogImportInput,
+  ): Promise<ProductCatalogImportPreview> {
+    return this.requireApplication().previewProductCatalogImport(buffer, input);
+  }
+
+  public async confirmProductCatalogImport(
+    buffer: Buffer,
+    input: ProductCatalogImportConfirmationInput,
+  ): Promise<ProductCatalogImportResult> {
+    const result = await this.requireApplication().confirmProductCatalogImport(buffer, input);
+    this.refreshOrders();
+    return result;
+  }
+
+  public createProductCatalogWorkbook(): Promise<Buffer> {
+    return this.requireApplication().createProductCatalogWorkbook();
   }
 
   public createStandardProduct(input: CreateStandardProductInput): StandardProduct {

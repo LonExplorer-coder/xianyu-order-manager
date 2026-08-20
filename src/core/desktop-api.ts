@@ -178,6 +178,14 @@ import type {
   RecordSupplierReturnInput,
 } from './purchase-orders';
 import type {
+  ProductCatalogExportOutcome,
+  ProductCatalogImportConfirmationInput,
+  ProductCatalogImportInput,
+  ProductCatalogImportPreview,
+  ProductCatalogImportResult,
+  ProductCatalogImportSelectionOutcome,
+} from './product-catalog';
+import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
@@ -224,6 +232,16 @@ export interface DesktopApi {
     productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): Promise<OrderUpdateConfirmation>;
   listStandardProducts(): Promise<StandardProduct[]>;
+  selectProductCatalogImport(): Promise<ProductCatalogImportSelectionOutcome>;
+  previewProductCatalogImport(
+    sessionId: string,
+    input: ProductCatalogImportInput,
+  ): Promise<ProductCatalogImportPreview>;
+  confirmProductCatalogImport(
+    sessionId: string,
+    input: ProductCatalogImportConfirmationInput,
+  ): Promise<ProductCatalogImportResult>;
+  exportProductCatalog(): Promise<ProductCatalogExportOutcome>;
   createStandardProduct(input: CreateStandardProductInput): Promise<StandardProduct>;
   updateStandardProduct(
     productId: string,
