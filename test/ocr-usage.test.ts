@@ -124,17 +124,20 @@ describe('OCR 用量监控', () => {
   it('按本地时区自然月统计，不跨月串号', () => {
     const repository = new MemoryUsageSettingsRepository();
     const store = new MemoryUsageEventStore();
-    const now = new Date('2026-08-01T00:30:00+08:00');
+    // 月中时刻，任何系统时区下都落在 8 月。
+    const now = new Date('2026-08-15T10:00:00+08:00');
     const service = new OcrUsageService(repository, () => now);
     service.bindEventStore(store);
+    // 8 月 1 日 12:00 UTC：对全球任意时区都落在本地 8 月（UTC+14 最早、UTC-12 最晚）。
+    // 月边界换算（如北京 8 月 1 日 00:30 = UTC 7 月 31 日 16:30）由 monthRangeAt 负责，
+    // 此处只验证事件能按本地月正确归类。
     service.recordCall({
       kind: 'recognition',
       outcome: 'success',
       provider: 'aliyun-bailian',
       model: 'qwen3.5-ocr',
-      occurredAt: '2026-08-01T00:30:00+08:00',
+      occurredAt: '2026-08-01T12:00:00.000Z',
     });
-    // 北京 8 月 1 日 00:30 对应 UTC 7 月 31 日 16:30；按本地月统计应计入 8 月。
     expect(service.getView().usage.totalCalls).toBe(1);
   });
 
@@ -264,7 +267,7 @@ describe('OCR 用量监控', () => {
     expect(repository.read().pausedMonth).toBeNull();
     expect(() => service.assertCanProceed()).not.toThrow();
 
-    // 跨月后累计费用仍超额度，重新进入暂停。
+    // 跨月后累计费用仍超额度，重新进入暂停（9 月 15 日对任何时区都落在 9 月）。
     for (let index = 0; index < 20; index += 1) {
       store.recordOcrUsageEvent({
         id: `september-event-${index}`,
@@ -276,7 +279,7 @@ describe('OCR 用量监控', () => {
         estimatedCents: 5,
       });
     }
-    const nextMonth = new Date('2026-09-01T00:00:00+08:00');
+    const nextMonth = new Date('2026-09-15T10:00:00+08:00');
     const secondService = new OcrUsageService(repository, () => nextMonth);
     secondService.bindEventStore(store);
     expect(() => secondService.assertCanProceed()).toThrow(/硬暂停额度/u);
