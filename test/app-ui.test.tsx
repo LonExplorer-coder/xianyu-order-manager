@@ -208,6 +208,7 @@ const sourceScreenshot = {
 const sourceSnapshot: SourceSnapshot = {
   id: 'snapshot-1',
   createdAt: draft.createdAt,
+  confirmedAt: '2026-07-27T11:24:00.000Z',
   recognition: { ...draft, fulfillmentStatus: 'pending_shipment' },
   confirmed: {
     ...draft,
@@ -222,6 +223,8 @@ const orderDetails: OrderDetails = {
   sourceSnapshot,
   sources: [{ recognitionStatus: 'imported', sourceScreenshot, sourceSnapshot }],
   changeEvents: [],
+  shipmentGroupAdjustmentEvents: [],
+  lifecycleEvents: [],
   customFieldDefinitions: [],
   customFieldValues: [],
   operations: {
@@ -7609,7 +7612,17 @@ describe('订单管理工作台', () => {
       ...sourceSnapshot,
       id: 'snapshot-earlier-source',
       createdAt: earlierScreenshot.createdAt,
-      confirmed: { ...draft, fulfillmentStatus: 'pending_shipment' as const },
+      confirmedAt: '2026-07-27T11:23:00.000Z',
+      recognition: {
+        ...draft,
+        recipient: 'OCR 首次收件人',
+        fulfillmentStatus: 'pending_shipment' as const,
+      },
+      confirmed: {
+        ...draft,
+        recipient: '首次收件人',
+        fulfillmentStatus: 'pending_shipment' as const,
+      },
     };
     const latestScreenshot = {
       ...sourceScreenshot,
@@ -7622,6 +7635,7 @@ describe('订单管理工作台', () => {
       ...sourceSnapshot,
       id: 'snapshot-latest-source',
       createdAt: latestScreenshot.createdAt,
+      confirmedAt: '2026-07-27T11:42:00.000Z',
     };
     const detailsWithHistory: OrderDetails = {
       ...orderDetails,
@@ -7664,6 +7678,50 @@ describe('订单管理工作台', () => {
             after: null,
           },
         ],
+      }, {
+        id: 'event-manual-edit',
+        sourceSnapshotId: null,
+        source: 'manual_edit',
+        baseRevision: 2,
+        resultRevision: 3,
+        createdAt: '2026-07-27T11:50:00.000Z',
+        changes: [{
+          path: 'note',
+          before: '',
+          after: '人工补充备注',
+        }],
+      }],
+      shipmentGroupAdjustmentEvents: [{
+        id: 'group-adjustment-history',
+        operation: 'split',
+        reason: '其中一笔需要单独包装',
+        sourceGroupIds: ['group-before'],
+        sourceOrderIds: [confirmedOrder.id, 'order-2'],
+        targetGroupId: 'group-after',
+        targetOrderIds: [confirmedOrder.id],
+        selectedRecipientOrderId: null,
+        createdAt: '2026-07-27T12:00:00.000Z',
+      }],
+      lifecycleEvents: [{
+        id: 'lifecycle-restored',
+        orderId: confirmedOrder.id,
+        action: 'restored',
+        initiator: 'user',
+        beforeStatus: 'trashed',
+        afterStatus: 'active',
+        baseRevision: 4,
+        resultRevision: 5,
+        createdAt: '2026-07-27T12:20:00.000Z',
+      }, {
+        id: 'lifecycle-trashed',
+        orderId: confirmedOrder.id,
+        action: 'moved_to_trash',
+        initiator: 'user',
+        beforeStatus: 'active',
+        afterStatus: 'trashed',
+        baseRevision: 3,
+        resultRevision: 4,
+        createdAt: '2026-07-27T12:10:00.000Z',
       }],
     };
     const getScreenshotDataUrl = vi.fn(async (screenshotId: string) => (
@@ -7686,8 +7744,10 @@ describe('订单管理工作台', () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole('button', { name: `查看订单 ${confirmedOrder.orderNumber}` }));
 
-    const history = await screen.findByRole('region', { name: '来源与修改记录' });
-    expect(history).toHaveTextContent('2 份来源 · 1 次更新');
+    const history = await screen.findByRole('region', {
+      name: '来源证据与订单历史时间线',
+    });
+    expect(history).toHaveTextContent('2 份来源 · 9 条历史');
     expect(history).toHaveTextContent('更新订单截图.png');
     expect(history).toHaveTextContent('首次订单截图.png');
     expect(history).toHaveTextContent('v1 → v2');
@@ -7696,6 +7756,27 @@ describe('订单管理工作台', () => {
     expect(within(history).getByRole('button', {
       name: '查看修改来源 更新订单截图.png',
     })).toBeVisible();
+    const timeline = within(history).getByRole('list', { name: '订单历史时间线' });
+    expect(timeline).toHaveTextContent('恢复订单');
+    expect(timeline).toHaveTextContent('移入回收站');
+    expect(timeline).toHaveTextContent('拆分发货组');
+    expect(timeline).toHaveTextContent('其中一笔需要单独包装');
+    expect(timeline).toHaveTextContent('人工修改');
+    expect(within(timeline).getAllByRole('listitem').map((item) => (
+      item.querySelector('strong')?.textContent
+    ))).toEqual([
+      '恢复订单',
+      '移入回收站',
+      '拆分发货组',
+      'v2 → v3',
+      '校对确认',
+      'v1 → v2',
+      'OCR 识别来源',
+      '校对确认',
+      'OCR 识别来源',
+    ]);
+    expect(within(history).queryByRole('button', { name: /回滚|恢复此版本/u }))
+      .not.toBeInTheDocument();
 
     await user.click(within(history).getByRole('button', { name: '查看来源 首次订单截图.png' }));
 
@@ -7706,7 +7787,13 @@ describe('订单管理工作台', () => {
     expect(screen.getByText('首次订单截图.png', { selector: 'figcaption span' })).toBeVisible();
     expect(screen.getByRole('region', { name: '订单状态' }))
       .toHaveTextContent('当前来源识别状态重复跳过');
-    expect(screen.queryByText(/已在本次来源确认时修正/)).not.toBeInTheDocument();
+    expect(screen.getByText(/已在本次来源确认时修正/)).toBeVisible();
+    const comparison = within(history).getByRole('table', { name: '来源值对照' });
+    expect(comparison).toHaveTextContent('OCR 识别值');
+    expect(comparison).toHaveTextContent('规范化值');
+    expect(comparison).toHaveTextContent('校对确认值');
+    expect(comparison).toHaveTextContent('订单当前值');
+    expect(comparison).toHaveTextContent('收件人OCR 首次收件人首次收件人人工修正收件人');
   });
 
   it('订单列表、详情和修改记录正确显示由发货同步产生的已收货', async () => {
@@ -7755,7 +7842,7 @@ describe('订单管理工作台', () => {
     }));
 
     expect(await screen.findByText('已付款 · 已收货')).toBeVisible();
-    const history = screen.getByRole('region', { name: '来源与修改记录' });
+    const history = screen.getByRole('region', { name: '来源证据与订单历史时间线' });
     expect(history).toHaveTextContent('履约状态已发货→已收货');
   });
 
@@ -7804,7 +7891,7 @@ describe('订单管理工作台', () => {
     }));
 
     expect(await screen.findByText('已付款 · 部分发货')).toBeVisible();
-    const history = screen.getByRole('region', { name: '来源与修改记录' });
+    const history = screen.getByRole('region', { name: '来源证据与订单历史时间线' });
     expect(history).toHaveTextContent('发货同步');
     expect(history).toHaveTextContent('履约状态待发货→部分发货');
   });

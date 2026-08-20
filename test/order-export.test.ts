@@ -39,7 +39,7 @@ class SequenceRecognizer implements Recognizer {
         model: 'controlled',
         requestId: '',
         schemaVersion: 1,
-        rawResponse: JSON.stringify(result),
+        rawResponse: JSON.stringify({ result, privateAuditToken: 'OCR_RAW_RESPONSE_ONLY' }),
       }],
     };
   }
@@ -760,6 +760,14 @@ describe('默认脱敏的订单工作簿导出', () => {
     ]);
     expect(rowValues(customItems, 2)).toEqual(['人工商品一', '人工规格一', 3]);
     expect(rowValues(customItems, 3)).toEqual(['人工商品二', '人工规格二', 1]);
+    for (const workbook of [defaultWorkbook, customWorkbook]) {
+      const exportedText = workbook.worksheets.flatMap((worksheet) => (
+        worksheet.getSheetValues().flat(Infinity).map(String)
+      )).join('\n');
+      expect(exportedText).not.toContain('OCR_RAW_RESPONSE_ONLY');
+      expect(exportedText).not.toContain('来源商品一');
+      expect(exportedText).not.toContain('来源规格一');
+    }
   });
 
   it('当前结果完整展开并留空短订单尾列，所选订单只按自身宽度导出', async () => {

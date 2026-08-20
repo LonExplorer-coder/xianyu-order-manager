@@ -173,6 +173,7 @@ const sourceScreenshot = {
 const sourceSnapshot = {
   id: 'snapshot-1',
   createdAt,
+  confirmedAt: null,
   recognition: {
     id: 'draft-1',
     batchId: 'batch-1',
@@ -287,6 +288,8 @@ function details(
       sourceSnapshot,
     }],
     changeEvents: [],
+    shipmentGroupAdjustmentEvents: [],
+    lifecycleEvents: [],
     customFieldDefinitions: definitions,
     customFieldValues: values,
     operations: {

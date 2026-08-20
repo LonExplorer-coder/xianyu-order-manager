@@ -94,6 +94,38 @@ afterEach(() => {
 });
 
 describe('订单生命周期操作', () => {
+  it('订单详情汇总相关的发货组调整记录和订单生命周期操作', async () => {
+    const { application, orders } = await createApplication([
+      recognition('XY-HISTORY-001'),
+      recognition('XY-HISTORY-002'),
+    ]);
+    const initialGroup = application.queryShipmentGroups().groups[0];
+    const adjustment = application.splitShipmentGroup({
+      groupId: initialGroup.id,
+      expectedMemberOrderIds: initialGroup.orders.map(({ id }) => id),
+      splitOrderIds: [orders[0].id],
+      reason: '订单历史时间线验证拆分原因',
+    });
+    const trashed = application.moveOrderToTrash({
+      orderId: orders[0].id,
+      expectedRevision: orders[0].revision,
+    }, '2026-08-21T00:00:00.000Z');
+    application.restoreOrderFromTrash({
+      orderId: orders[0].id,
+      expectedRevision: trashed.order.revision,
+    }, '2026-08-21T01:00:00.000Z');
+
+    const details = application.getOrder(orders[0].id);
+    expect(details.shipmentGroupAdjustmentEvents).toEqual([adjustment.event]);
+    expect(details.lifecycleEvents.map(({ action }) => action)).toEqual([
+      'restored',
+      'moved_to_trash',
+    ]);
+    expect(application.getOrder(orders[1].id).shipmentGroupAdjustmentEvents)
+      .toEqual([adjustment.event]);
+    expect(application.getOrder(orders[1].id).lifecycleEvents).toEqual([]);
+  });
+
   it('移入回收站后排除正常工作流，恢复时保留商品、来源和合并关系', async () => {
     const { application, orders } = await createApplication([
       recognition('XY-TRASH-001'),

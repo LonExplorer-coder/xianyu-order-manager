@@ -15,6 +15,8 @@ import type {
   OrderOperationsOverview,
   OrderOperationsProjection,
 } from './order-operations-projection';
+import type { OrderLifecycleEvent } from './order-lifecycle';
+import type { ShipmentGroupAdjustmentEvent } from './shipment-group-adjustments';
 
 export type RecognitionItem = {
   sourceTitle: string;
@@ -359,6 +361,7 @@ export type ConfirmedOrderSnapshot = Omit<RecognitionResult, 'fulfillmentStatus'
 export type SourceSnapshot = {
   id: string;
   createdAt: string;
+  confirmedAt: string | null;
   sourceType?: 'screenshot' | 'historical_import';
   sourceName?: string | null;
   sourceRowNumbers?: number[];
@@ -417,6 +420,8 @@ export type OrderDetails = {
   sourceSnapshot: SourceSnapshot;
   sources: OrderSource[];
   changeEvents: OrderChangeEvent[];
+  shipmentGroupAdjustmentEvents: ShipmentGroupAdjustmentEvent[];
+  lifecycleEvents: OrderLifecycleEvent[];
   lastManualEditAt?: string | null;
   customFieldDefinitions: CustomFieldDefinition[];
   customFieldValues: CustomFieldValueRecord[];

@@ -5507,6 +5507,41 @@ select:focus-visible {
   line-height: 1.55;
 }
 
+.evidence-comparison-frame {
+  overflow-x: auto;
+}
+
+.evidence-comparison-frame table {
+  min-width: 760px;
+}
+
+.evidence-comparison-frame th,
+.evidence-comparison-frame td {
+  padding: 9px 10px;
+  font-size: 9px;
+  line-height: 1.45;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.evidence-comparison-frame tbody td:first-child {
+  color: #78828c;
+  white-space: nowrap;
+}
+
+.evidence-comparison-frame tbody td:last-child {
+  color: var(--navy-950);
+  font-weight: 650;
+}
+
+.evidence-comparison-note {
+  margin: 10px 0 0;
+  color: #7d8791;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
 .change-event {
   padding: 13px;
   border: 1px solid var(--line-soft);
@@ -5605,6 +5640,19 @@ select:focus-visible {
 .change-event dd strong {
   color: var(--navy-950);
   font-weight: 650;
+}
+
+.order-history-event__source {
+  margin-top: 10px;
+}
+
+.order-history-event__detail {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  color: #5f6a75;
+  font-size: 9px;
+  line-height: 1.55;
 }
 
 .settings-workspace {

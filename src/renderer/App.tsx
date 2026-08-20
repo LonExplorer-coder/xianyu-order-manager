@@ -70,6 +70,10 @@ import {
   orderTrashExpiresAt,
 } from '../core/order-lifecycle';
 import {
+  buildOrderHistoryTimeline,
+  buildOrderSourceValueRows,
+} from '../core/order-history';
+import {
   isQuantitySource,
   quantitySourceFromLegacy,
   quantitySourceLabel,
@@ -9654,6 +9658,22 @@ function orderChangeFieldLabel(path: string): string {
   if (removedItemMatch) {
     return `原商品 ${Number(removedItemMatch[1]) + 1} · 已移除`;
   }
+  const unmatchedItemMatch = /^items\.(sourceSnapshotOnly|currentOrderOnly)\[(\d+)\]\.(.+)$/u
+    .exec(path);
+  if (unmatchedItemMatch) {
+    const [, side, rawPosition, field] = unmatchedItemMatch;
+    const label = ({
+      sourceTitle: '标题',
+      sourceSpec: '规格',
+      unitPriceCents: '单价',
+      quantity: '数量',
+    } as Record<string, string>)[field] ?? field;
+    return `${side === 'sourceSnapshotOnly'
+      ? '来源快照中的订单商品明细'
+      : '订单当前值中的订单商品明细'} ${
+      Number(rawPosition) + 1
+    } · ${label}`;
+  }
   const itemMatch = /^items\[(\d+)\](?:\.(.+))?$/u.exec(path);
   if (!itemMatch) return path;
   const position = Number(itemMatch[1]) + 1;
@@ -10888,6 +10908,8 @@ function DetailWorkspace({
   ) ?? details.sources[0];
   const sourceScreenshot = selectedSource?.sourceScreenshot ?? details.sourceScreenshot;
   const sourceSnapshot = selectedSource?.sourceSnapshot ?? details.sourceSnapshot;
+  const sourceValueRows = buildOrderSourceValueRows(sourceSnapshot, order);
+  const orderHistoryTimeline = buildOrderHistoryTimeline(details);
   const recipientChanged = sourceSnapshot.confirmed !== null &&
     sourceSnapshot.recognition.recipient !== sourceSnapshot.confirmed.recipient;
 
@@ -11623,10 +11645,10 @@ function DetailWorkspace({
             </section>
           )}
 
-          <section className="detail-section" aria-label="来源与修改记录">
+          <section className="detail-section" aria-label="来源证据与订单历史时间线">
             <div className="detail-section-title">
-              <h2>来源与修改记录</h2>
-              <span>{details.sources.length} 份来源 · {details.changeEvents.length} 次更新</span>
+              <h2>来源证据与订单历史时间线</h2>
+              <span>{details.sources.length} 份来源 · {orderHistoryTimeline.length} 条历史</span>
             </div>
 
             <div className="evidence-block">
@@ -11634,7 +11656,7 @@ function DetailWorkspace({
               <ol className="evidence-source-list" aria-label="来源证据">
                 {details.sources.map(({ sourceScreenshot: source, sourceSnapshot: snapshot }) => {
                   const selected = snapshot.id === sourceSnapshot.id;
-                  const currentValueSource = snapshot.id === details.sourceSnapshot.id;
+                  const latestSourceSnapshot = snapshot.id === details.sourceSnapshot.id;
                   const sourceLabel = source?.originalName ?? snapshot.sourceName ?? '历史导入';
                   return (
                     <li key={snapshot.id}>
@@ -11656,7 +11678,7 @@ function DetailWorkspace({
                           </small>
                         </span>
                         <span className="evidence-source__status">
-                          {currentValueSource ? '当前值来源' : '历史来源'}
+                          {latestSourceSnapshot ? '最新来源快照' : '较早来源快照'}
                         </span>
                       </button>
                     </li>
@@ -11665,61 +11687,178 @@ function DetailWorkspace({
               </ol>
             </div>
 
+            <div className="evidence-block evidence-block--comparison">
+              <h3>来源值对照</h3>
+              <div className="table-frame evidence-comparison-frame">
+                <table aria-label="来源值对照">
+                  <thead>
+                    <tr>
+                      <th>值类型</th>
+                      <th>字段</th>
+                      <th>{sourceSnapshot.sourceType === 'historical_import'
+                        ? '历史导入值'
+                        : 'OCR 识别值'}</th>
+                      <th>校对确认值</th>
+                      <th>订单当前值</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sourceValueRows.map((row) => (
+                      <tr key={row.path}>
+                        <td>{row.kind === 'normalized_value' ? '规范化值' : '来源原值'}</td>
+                        <th scope="row">{orderChangeFieldLabel(row.path)}</th>
+                        <td>{formatOrderChangeValue(row.path, row.recognition)}</td>
+                        <td>{formatOrderChangeValue(row.path, row.confirmed)}</td>
+                        <td>{formatOrderChangeValue(row.path, row.current)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="evidence-comparison-note">
+                这里只读取来源快照与订单当前值；识别原文和完整审计记录不会进入普通业务导出。
+              </p>
+            </div>
+
             <div className="evidence-block evidence-block--history">
-              <h3>修改记录</h3>
-              {details.changeEvents.length === 0 ? (
-                <p className="evidence-empty">暂无修改记录，当前订单仍为首次确认值。</p>
-              ) : (
-                <ol className="change-event-list" aria-label="修改记录">
-                  {details.changeEvents.map((event) => {
-                    const eventSource = details.sources.find(({ sourceSnapshot: snapshot }) => (
-                      snapshot.id === event.sourceSnapshotId
-                    ));
+              <h3>订单历史时间线</h3>
+              <ol className="change-event-list" aria-label="订单历史时间线">
+                {orderHistoryTimeline.map((entry) => {
+                  if (entry.kind === 'source') {
                     return (
-                      <li className="change-event" key={event.id}>
+                      <li className="change-event order-history-event" key={entry.id}>
                         <header>
                           <span>
-                            <strong>v{event.baseRevision} → v{event.resultRevision}</strong>
+                            <strong>{entry.sourceType === 'historical_import'
+                              ? '历史导入来源'
+                              : 'OCR 识别来源'}</strong>
                             <small>
-                              {{
-                                source_update: '来源确认更新',
-                                manual_edit: '手动修改',
-                                shipment_sync: '发货同步',
-                              }[event.source]}
-                              {' · '}
-                              {eventSource ? (
-                                <button
-                                  className="change-event__source"
-                                  type="button"
-                                  aria-label={`查看修改来源 ${eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}`}
-                                  disabled={sourceLoading}
-                                  onClick={() => onSelectSource(eventSource.sourceSnapshot.id)}
-                                >
-                                  {eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}
-                                </button>
-                              ) : '无来源快照'}
-                              {' · '}{formatDateTime(event.createdAt)}
+                              {entry.sourceName}
+                              {' · '}{recognitionStatusLabel(entry.recognitionStatus)}
+                              {' · '}{formatDateTime(entry.occurredAt)}
                             </small>
                           </span>
-                          <em>{event.changes.length} 个字段</em>
+                          <em>{entry.latestSourceSnapshot ? '最新来源快照' : '较早来源快照'}</em>
                         </header>
-                        <dl>
-                          {event.changes.map((change) => (
-                            <div key={change.path}>
-                              <dt>{orderChangeFieldLabel(change.path)}</dt>
-                              <dd>
-                                <span>{formatOrderChangeValue(change.path, change.before)}</span>
-                                <b aria-hidden="true">→</b>
-                                <strong>{formatOrderChangeValue(change.path, change.after)}</strong>
-                              </dd>
-                            </div>
-                          ))}
-                        </dl>
+                        <button
+                          className="change-event__source order-history-event__source"
+                          type="button"
+                          disabled={sourceLoading}
+                          onClick={() => onSelectSource(entry.sourceSnapshotId)}
+                        >
+                          查看对应来源快照
+                        </button>
                       </li>
                     );
-                  })}
-                </ol>
-              )}
+                  }
+                  if (entry.kind === 'source_confirmation') {
+                    return (
+                      <li className="change-event order-history-event" key={entry.id}>
+                        <header>
+                          <span>
+                            <strong>{entry.sourceType === 'historical_import'
+                              ? '历史导入确认'
+                              : '校对确认'}</strong>
+                            <small>{entry.sourceName} · {formatDateTime(entry.occurredAt)}</small>
+                          </span>
+                          <em>来源快照已确认</em>
+                        </header>
+                        <button
+                          className="change-event__source order-history-event__source"
+                          type="button"
+                          disabled={sourceLoading}
+                          onClick={() => onSelectSource(entry.sourceSnapshotId)}
+                        >
+                          查看对应来源快照
+                        </button>
+                      </li>
+                    );
+                  }
+                  if (entry.kind === 'shipment_group_adjustment') {
+                    return (
+                      <li className="change-event order-history-event" key={entry.id}>
+                        <header>
+                          <span>
+                            <strong>{entry.operation === 'split'
+                              ? '拆分发货组'
+                              : '重新组合发货组'}</strong>
+                            <small>{formatDateTime(entry.occurredAt)}</small>
+                          </span>
+                          <em>涉及 {new Set([
+                            ...entry.sourceOrderIds,
+                            ...entry.targetOrderIds,
+                          ]).size} 笔订单</em>
+                        </header>
+                        <p className="order-history-event__detail">{entry.reason}</p>
+                      </li>
+                    );
+                  }
+                  if (entry.kind === 'lifecycle') {
+                    return (
+                      <li className="change-event order-history-event" key={entry.id}>
+                        <header>
+                          <span>
+                            <strong>{orderLifecycleHistoryActionLabel(entry.action)}</strong>
+                            <small>
+                              {entry.initiator === 'system' ? '系统发起' : '用户发起'}
+                              {' · '}{formatDateTime(entry.occurredAt)}
+                            </small>
+                          </span>
+                          <em>v{entry.baseRevision} → v{entry.resultRevision}</em>
+                        </header>
+                        <p className="order-history-event__detail">
+                          {lifecycleStatusLabel(entry.beforeStatus)} → {lifecycleStatusLabel(entry.afterStatus)}
+                        </p>
+                      </li>
+                    );
+                  }
+                  const eventSource = details.sources.find(({ sourceSnapshot: snapshot }) => (
+                    snapshot.id === entry.sourceSnapshotId
+                  ));
+                  return (
+                    <li className="change-event order-history-event" key={entry.id}>
+                      <header>
+                        <span>
+                          <strong>v{entry.baseRevision} → v{entry.resultRevision}</strong>
+                          <small>
+                            {{
+                              source_update: '来源确认更新',
+                              manual_edit: '人工修改',
+                              shipment_sync: '发货同步',
+                            }[entry.source]}
+                            {' · '}
+                            {eventSource ? (
+                              <button
+                                className="change-event__source"
+                                type="button"
+                                aria-label={`查看修改来源 ${eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}`}
+                                disabled={sourceLoading}
+                                onClick={() => onSelectSource(eventSource.sourceSnapshot.id)}
+                              >
+                                {eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}
+                              </button>
+                            ) : '无来源快照'}
+                            {' · '}{formatDateTime(entry.occurredAt)}
+                          </small>
+                        </span>
+                        <em>{entry.changes.length} 个字段</em>
+                      </header>
+                      <dl>
+                        {entry.changes.map((change) => (
+                          <div key={change.path}>
+                            <dt>{orderChangeFieldLabel(change.path)}</dt>
+                            <dd>
+                              <span>{formatOrderChangeValue(change.path, change.before)}</span>
+                              <b aria-hidden="true">→</b>
+                              <strong>{formatOrderChangeValue(change.path, change.after)}</strong>
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ol>
             </div>
           </section>
         </div>
@@ -12177,6 +12316,17 @@ function lifecycleStatusLabel(status: OrderSummary['lifecycleStatus']): string {
     trashed: '回收站',
     deleted: '已删除',
   }[status];
+}
+
+function orderLifecycleHistoryActionLabel(
+  action: OrderDetails['lifecycleEvents'][number]['action'],
+): string {
+  return {
+    moved_to_trash: '移入回收站',
+    restored: '恢复订单',
+    permanently_deleted: '永久删除',
+    retention_expired: '回收站保留期到期',
+  }[action];
 }
 
 function requiredOrderRevision(order: Pick<OrderSummary, 'revision'>): number {

@@ -1103,7 +1103,7 @@ export class LocalApplication {
     const currentOrder = this.getOrder(asString(row.matched_order_id)).order;
     const snapshotRow = workspace.database
       .prepare(`
-        SELECT id, recognition_json, confirmed_json, created_at
+        SELECT id, recognition_json, confirmed_json, created_at, resolved_at
         FROM source_snapshots
         WHERE draft_id = ?
       `)
@@ -1119,6 +1119,9 @@ export class LocalApplication {
       sourceSnapshot: {
         id: asString(snapshotRow.id),
         createdAt: asString(snapshotRow.created_at),
+        confirmedAt: snapshotRow.resolved_at === null
+          ? null
+          : asString(snapshotRow.resolved_at),
         recognition: parseStoredRecognition(asString(snapshotRow.recognition_json)),
         confirmed: snapshotRow.confirmed_json === null
           ? null
@@ -7430,6 +7433,26 @@ export class LocalApplication {
     return rows.map(parseShipmentGroupAdjustmentEvent);
   }
 
+  private listShipmentGroupAdjustmentEventsForOrder(
+    orderId: string,
+  ): ShipmentGroupAdjustmentEvent[] {
+    const rows = this.requireWorkspace().database.prepare(`
+      SELECT events.*
+      FROM shipment_group_adjustment_events AS events
+      WHERE EXISTS (
+        SELECT 1
+        FROM json_each(events.source_order_ids_json) AS source_orders
+        WHERE source_orders.value = ?
+      ) OR EXISTS (
+        SELECT 1
+        FROM json_each(events.target_order_ids_json) AS target_orders
+        WHERE target_orders.value = ?
+      )
+      ORDER BY events.sequence DESC
+    `).all(orderId, orderId) as unknown as SqlRow[];
+    return rows.map(parseShipmentGroupAdjustmentEvent);
+  }
+
   private insertShipmentGroupAdjustmentEvent(
     event: ShipmentGroupAdjustmentEvent,
   ): ShipmentGroupProjection {
@@ -8226,6 +8249,7 @@ export class LocalApplication {
           snapshots.recognition_json,
           snapshots.confirmed_json,
           snapshots.created_at AS snapshot_created_at,
+          snapshots.resolved_at AS snapshot_resolved_at,
           source_items.status AS recognition_status
         FROM source_snapshots AS snapshots
         LEFT JOIN source_screenshots AS screenshots ON screenshots.id = snapshots.screenshot_id
@@ -8263,6 +8287,9 @@ export class LocalApplication {
         sourceSnapshot: {
           id: asString(sourceRow.snapshot_id),
           createdAt: asString(sourceRow.snapshot_created_at),
+          confirmedAt: sourceRow.snapshot_resolved_at === null
+            ? null
+            : asString(sourceRow.snapshot_resolved_at),
           sourceType,
           sourceName: sourceRow.source_name === null ? null : asString(sourceRow.source_name),
           sourceRowNumbers: sourceRow.source_row_numbers_json === null
@@ -8338,6 +8365,8 @@ export class LocalApplication {
       sourceSnapshot: latestSource.sourceSnapshot,
       sources,
       changeEvents: [...eventsById.values()],
+      shipmentGroupAdjustmentEvents: this.listShipmentGroupAdjustmentEventsForOrder(orderId),
+      lifecycleEvents: this.listOrderLifecycleEvents(orderId),
       lastManualEditAt: [...eventsById.values()]
         .find((event) => event.source === 'manual_edit')?.createdAt ?? null,
       customFieldDefinitions: this.listCustomFieldDefinitions(),
