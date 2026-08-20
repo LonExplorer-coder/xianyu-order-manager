@@ -14,9 +14,42 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   PORTABLE_SMOKE_ORDER_NUMBER,
   runPortableReleaseDataSmoke,
+  type PortableReleaseSmokeResult,
 } from '../src/main/portable-release-smoke';
 
 const testRoots: string[] = [];
+
+function expectedPortableSmokeResult(
+  phase: PortableReleaseSmokeResult['phase'],
+  dataDirectory: string,
+): PortableReleaseSmokeResult {
+  return {
+    phase,
+    dataDirectory,
+    orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
+    orderCount: 1,
+    shipmentRecordCount: 1,
+    shipmentTimelineEventCount: 1,
+    aftersalesCaseCount: 1,
+    aftersalesTimelineEventCount: 2,
+    fulfillmentPlanCount: 1,
+    fulfillmentPlanEventCount: 3,
+    fulfillmentPlanReleasedOrderCount: 1,
+    purchaseOrderCount: 1,
+    purchaseArrivalItemCount: 1,
+    inventorySellableQuantity: 0,
+    inventoryMovementCount: 2,
+    financePendingItemCount: 1,
+    financeRecordCount: 2,
+    financeIncomeCents: 360,
+    financeExpenseCents: 150,
+    financeNetCents: 210,
+    financePendingRemainingCents: 250,
+    profitOrderCount: 1,
+    profitTotalProfitCents: -290,
+    profitPendingRemainingCents: -250,
+  };
+}
 
 afterEach(async () => {
   await Promise.all(testRoots.splice(0).map((root) => (
@@ -35,27 +68,7 @@ describe('便携版数据目录冒烟', () => {
       phase: 'write',
       configDirectory,
       dataDirectory,
-    })).resolves.toEqual({
-      phase: 'write',
-      dataDirectory,
-      orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
-      orderCount: 1,
-      shipmentRecordCount: 1,
-      shipmentTimelineEventCount: 1,
-      aftersalesCaseCount: 1,
-      aftersalesTimelineEventCount: 2,
-      fulfillmentPlanCount: 1,
-      fulfillmentPlanEventCount: 3,
-      fulfillmentPlanReleasedOrderCount: 1,
-      purchaseOrderCount: 1,
-      purchaseArrivalItemCount: 1,
-      inventorySellableQuantity: 1,
-      inventoryMovementCount: 1,
-      financePendingItemCount: 1,
-      financeRecordCount: 3,
-      profitOrderCount: 1,
-      profitTotalProfitCents: -40,
-    });
+    })).resolves.toEqual(expectedPortableSmokeResult('write', dataDirectory));
 
     await access(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
     const bootstrap = JSON.parse(
@@ -67,27 +80,7 @@ describe('便携版数据目录冒烟', () => {
       phase: 'read',
       configDirectory,
       dataDirectory,
-    })).resolves.toEqual({
-      phase: 'read',
-      dataDirectory,
-      orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
-      orderCount: 1,
-      shipmentRecordCount: 1,
-      shipmentTimelineEventCount: 1,
-      aftersalesCaseCount: 1,
-      aftersalesTimelineEventCount: 2,
-      fulfillmentPlanCount: 1,
-      fulfillmentPlanEventCount: 3,
-      fulfillmentPlanReleasedOrderCount: 1,
-      purchaseOrderCount: 1,
-      purchaseArrivalItemCount: 1,
-      inventorySellableQuantity: 1,
-      inventoryMovementCount: 1,
-      financePendingItemCount: 1,
-      financeRecordCount: 3,
-      profitOrderCount: 1,
-      profitTotalProfitCents: -40,
-    });
+    })).resolves.toEqual(expectedPortableSmokeResult('read', dataDirectory));
   });
 
   it('读回阶段拒绝空目录，避免把未执行验收误报为通过', async () => {

@@ -24,7 +24,7 @@ const PORTABLE_SMOKE_PLAN_CREATE_REASON = '便携版验收建立预售';
 const PORTABLE_SMOKE_PLAN_JOIN_REASON = '便携版验收加入预售';
 const PORTABLE_SMOKE_PLAN_RELEASE_REASON = '便携版验收备货释放';
 const PORTABLE_SMOKE_SUPPLIER_NAME = '便携验收供应方';
-const PORTABLE_SMOKE_PRODUCT_NAME = '便携验收采购商品';
+const PORTABLE_SMOKE_PRODUCT_NAME = '便携版验收商品';
 const PORTABLE_SMOKE_PRODUCT_SKU = 'PORTABLE-SMOKE-SKU-001';
 const PORTABLE_SMOKE_PURCHASE_REASON = '便携版验收采购到货';
 const PORTABLE_SMOKE_PURCHASE_ARRIVAL_REASON = '便携版验收到货入库';
@@ -56,8 +56,13 @@ export type PortableReleaseSmokeResult = {
   inventoryMovementCount: number;
   financePendingItemCount: number;
   financeRecordCount: number;
+  financeIncomeCents: number;
+  financeExpenseCents: number;
+  financeNetCents: number;
+  financePendingRemainingCents: number;
   profitOrderCount: number;
   profitTotalProfitCents: number;
+  profitPendingRemainingCents: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -80,9 +85,9 @@ export async function runPortableReleaseDataSmoke(
     if (input.phase === 'write') {
       await importPortableSmokeOrder(session, configDirectory, dataDirectory);
       await session.waitForCurrentRecognitionWork();
+      createPortableSmokeInventoryHistory(session);
       createPortableSmokeFulfillmentHistory(session);
       createPortableSmokeOperationsHistory(session);
-      createPortableSmokeInventoryHistory(session);
       createPortableSmokeFundsHistory(session);
     } else {
       const restored = session.restore();
@@ -247,18 +252,28 @@ export async function runPortableReleaseDataSmoke(
     ));
     if (
       !smokeInventoryProduct ||
-      smokeInventoryProduct.sellableQuantity !== 1 ||
+      smokeInventoryProduct.sellableQuantity !== 0 ||
       smokeInventoryProduct.awaitingInspectionQuantity !== 0 ||
       smokeInventoryProduct.reservedQuantity !== 0
     ) {
       throw new Error('便携版重启后库存数量不完整');
     }
+    const arrivalMovement = inventory.movements.find(({ sourceType }) => (
+      sourceType === 'purchase_arrival'
+    ));
+    const shipmentMovement = inventory.movements.find(({ sourceType }) => (
+      sourceType === 'shipment_dispatch'
+    ));
     if (
-      inventory.movements.length !== 1 ||
-      inventory.movements[0]?.sourceType !== 'purchase_arrival' ||
-      inventory.movements[0]?.sourceId !== smokePurchaseOrder.arrivals[0]?.id ||
-      inventory.movements[0]?.direction !== 'in' ||
-      inventory.movements[0]?.quantity !== 1
+      inventory.movements.length !== 2 ||
+      !arrivalMovement ||
+      arrivalMovement.sourceId !== smokePurchaseOrder.arrivals[0]?.id ||
+      arrivalMovement.direction !== 'in' ||
+      arrivalMovement.quantity !== 1 ||
+      !shipmentMovement ||
+      shipmentMovement.sourceId !== shipmentRecords[0]?.id ||
+      shipmentMovement.direction !== 'out' ||
+      shipmentMovement.quantity !== 1
     ) {
       throw new Error('便携版重启后库存流水不完整');
     }
@@ -269,8 +284,8 @@ export async function runPortableReleaseDataSmoke(
       !smokePendingItem ||
       smokePendingItem.status !== 'pending' ||
       smokePendingItem.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      smokePendingItem.confirmedCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      smokePendingItem.remainingCents !== 0 ||
+      smokePendingItem.confirmedCents !== 150 ||
+      smokePendingItem.remainingCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150 ||
       smokePendingItem.sourceType !== 'aftersales_case' ||
       !smokePendingItem.sourceId ||
       smokePendingItem.sourceId === aftersalesCase.id
@@ -278,27 +293,23 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后待确认资金事项不完整');
     }
     if (
-      funds.records.length !== 3 ||
+      funds.records.length !== 2 ||
       funds.records[0]?.type !== 'refund' ||
       funds.records[0]?.direction !== 'expense' ||
       funds.records[0]?.amountCents !== 150 ||
       funds.records[0]?.pendingItemId !== smokePendingItem.id ||
-      funds.records[1]?.type !== 'refund' ||
-      funds.records[1]?.direction !== 'expense' ||
-      funds.records[1]?.amountCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150 ||
-      funds.records[1]?.pendingItemId !== smokePendingItem.id ||
-      funds.records[2]?.type !== 'platform_settlement' ||
-      funds.records[2]?.direction !== 'income' ||
-      funds.records[2]?.amountCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
-      funds.records[2]?.note !== PORTABLE_SMOKE_SETTLEMENT_NOTE
+      funds.records[1]?.type !== 'platform_settlement' ||
+      funds.records[1]?.direction !== 'income' ||
+      funds.records[1]?.amountCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
+      funds.records[1]?.note !== PORTABLE_SMOKE_SETTLEMENT_NOTE
     ) {
       throw new Error('便携版重启后资金记录不完整');
     }
     if (
       funds.totals.incomeCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
-      funds.totals.expenseCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      funds.totals.netCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      funds.totals.pendingRemainingCents !== 0
+      funds.totals.expenseCents !== 150 ||
+      funds.totals.netCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS - 150 ||
+      funds.totals.pendingRemainingCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150
     ) {
       throw new Error('便携版重启后资金汇总不完整');
     }
@@ -312,16 +323,20 @@ export async function runPortableReleaseDataSmoke(
       !smokeProfitOrder ||
       smokeProfitOrder.transactionAmountCents !== 800 ||
       smokeProfitOrder.settlementNetCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
-      smokeProfitOrder.refundNetCents !== -PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      smokeProfitOrder.purchaseCostCents !== 0 ||
+      smokeProfitOrder.refundNetCents !== -150 ||
+      smokeProfitOrder.purchaseCostCents !== 500 ||
       smokeProfitOrder.profitCents
-        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      smokeProfitOrder.pendingRemainingCents !== 0 ||
-      profit.unmapped.allocatedNetCents
-        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - 150 - 500 ||
+      smokeProfitOrder.pendingRemainingCents !== -(PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150) ||
+      profit.products.length !== 1 ||
+      profit.products[0]?.sku !== PORTABLE_SMOKE_PRODUCT_SKU ||
+      profit.products[0]?.avgUnitCostCents !== 500 ||
+      profit.products[0]?.dispatchedCostCents !== 500 ||
+      profit.products[0]?.marginCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS - 150 - 500 ||
+      profit.unmapped.allocatedNetCents !== 0 ||
       profit.totals.profitCents
-        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
-      profit.totals.pendingRemainingCents !== 0
+        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - 150 - 500 ||
+      profit.totals.pendingRemainingCents !== -(PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150)
     ) {
       throw new Error('便携版重启后利润视图不完整');
     }
@@ -344,8 +359,13 @@ export async function runPortableReleaseDataSmoke(
       inventoryMovementCount: inventory.movements.length,
       financePendingItemCount: funds.pendingItems.length,
       financeRecordCount: funds.records.length,
+      financeIncomeCents: funds.totals.incomeCents,
+      financeExpenseCents: funds.totals.expenseCents,
+      financeNetCents: funds.totals.netCents,
+      financePendingRemainingCents: funds.totals.pendingRemainingCents,
       profitOrderCount: profit.orders.length,
       profitTotalProfitCents: profit.totals.profitCents,
+      profitPendingRemainingCents: profit.totals.pendingRemainingCents,
     };
   } finally {
     session.close();
@@ -355,13 +375,10 @@ export async function runPortableReleaseDataSmoke(
 // 便携版验收的库存与采购腿：标准商品 → 供应方 → 采购订单 → 确认 → 到货入库，
 // 重启后数量与流水必须原样读回。
 function createPortableSmokeInventoryHistory(session: DesktopSession): void {
-  const product = session.createStandardProduct({
-    name: PORTABLE_SMOKE_PRODUCT_NAME,
-    specification: '标准款',
-    sku: PORTABLE_SMOKE_PRODUCT_SKU,
-    defaultOrderPriceCents: 800,
-    priceChangeReason: '首次定价',
-  });
+  const product = session.queryInventory().products.find(({ sku }) => (
+    sku === PORTABLE_SMOKE_PRODUCT_SKU
+  ));
+  if (!product) throw new Error('便携版冒烟缺少标准商品');
   const purchases = session.createSupplier({
     name: PORTABLE_SMOKE_SUPPLIER_NAME,
     contact: null,
@@ -374,7 +391,7 @@ function createPortableSmokeInventoryHistory(session: DesktopSession): void {
     expectedAt: '2026-12-31T00:00:00.000Z',
     reason: PORTABLE_SMOKE_PURCHASE_REASON,
     items: [{
-      standardProductId: product.id,
+      standardProductId: product.standardProductId,
       quantity: 1,
       unitPriceCents: 500,
     }],
@@ -404,7 +421,7 @@ function createPortableSmokeInventoryHistory(session: DesktopSession): void {
 }
 
 // 便携版验收的资金腿：售后实际退款由业务钩子自动立待确认事项（#74），
-// 人工两段确认后直接录入平台结算；验证重启后待确认进度、资金记录与汇总跨平台一致。
+// 人工只确认一部分后直接录入平台结算；验证重启后非零待确认余额、资金记录与汇总跨平台一致。
 function createPortableSmokeFundsHistory(session: DesktopSession): void {
   const shipmentRecordId = session.queryShipmentGroupArchives()[0]?.records[0]?.id;
   if (!shipmentRecordId) throw new Error('便携版冒烟缺少发货记录');
@@ -424,14 +441,6 @@ function createPortableSmokeFundsHistory(session: DesktopSession): void {
   });
   if (partial.pendingItems[0]?.remainingCents !== PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150) {
     throw new Error('便携版冒烟部分确认后剩余金额不正确');
-  }
-  const confirmed = session.confirmPendingFinanceItem({
-    pendingItemId: pendingItem.id,
-    amountCents: PORTABLE_SMOKE_ACTUAL_REFUND_CENTS - 150,
-    note: PORTABLE_SMOKE_CONFIRM_REFUND_NOTE,
-  });
-  if (confirmed.pendingItems[0]?.remainingCents !== 0) {
-    throw new Error('便携版冒烟退款确认后仍有剩余待确认金额');
   }
   const settlementOrder = session.listOrders()
     .find(({ orderNumber }) => orderNumber === PORTABLE_SMOKE_ORDER_NUMBER);
@@ -557,6 +566,13 @@ async function importPortableSmokeOrder(
   if (selected.kind !== 'ready' || selected.orders.length !== 0) {
     throw new Error('便携版首次选择订单数据目录失败或目录并非空目录');
   }
+  session.createStandardProduct({
+    name: PORTABLE_SMOKE_PRODUCT_NAME,
+    specification: '标准款',
+    sku: PORTABLE_SMOKE_PRODUCT_SKU,
+    defaultOrderPriceCents: 800,
+    priceChangeReason: '首次定价',
+  });
 
   await mkdir(configDirectory, { recursive: true });
   const sourcePath = join(configDirectory, 'portable-release-smoke.png');
