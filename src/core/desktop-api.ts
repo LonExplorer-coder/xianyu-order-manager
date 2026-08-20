@@ -74,6 +74,10 @@ import type {
   OrderWorkbenchResult,
 } from './order-workbench';
 import type {
+  OrderLifecycleActionInput,
+  PermanentlyDeleteOrderInput,
+} from './order-lifecycle';
+import type {
   OrderExportInput,
   OrderExportPreviewResult,
   OrderExportResult,
@@ -299,6 +303,9 @@ export interface DesktopApi {
     input: ProductMappingHistoryCorrectionInput,
   ): Promise<ProductMappingHistoryCorrectionResult>;
   listOrders(): Promise<OrderSummary[]>;
+  moveOrderToTrash(input: OrderLifecycleActionInput): Promise<OrderDetails>;
+  restoreOrderFromTrash(input: OrderLifecycleActionInput): Promise<OrderDetails>;
+  permanentlyDeleteOrder(input: PermanentlyDeleteOrderInput): Promise<OrderDetails>;
   queryOrders(
     query: OrderWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],

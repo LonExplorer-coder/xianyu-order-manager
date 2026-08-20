@@ -58,6 +58,15 @@ import {
   diffOrderPlatformTransactionStatus,
   prepareOrderPlatformTransactionStatusUpdate,
 } from '../core/order-platform-transaction-status';
+import {
+  ORDER_TRASH_RETENTION_DAYS,
+  normalizeOrderLifecycleActionInput,
+  normalizePermanentlyDeleteOrderInput,
+  type OrderLifecycleActionInput,
+  type OrderLifecycleEvent,
+  type OrderLifecycleEventAction,
+  type OrderLifecycleEventInitiator,
+} from '../core/order-lifecycle';
 import { isFulfillmentStatus } from '../core/fulfillment-status';
 import { orderOperationsOverview } from '../core/order-operations-projection';
 import type {
@@ -392,7 +401,15 @@ export class LocalApplication {
     if (this.workspace) {
       throw new Error('请先关闭当前数据目录');
     }
-    this.workspace = Workspace.open(dataDirectory);
+    const workspace = Workspace.open(dataDirectory);
+    this.workspace = workspace;
+    try {
+      this.expireTrashedOrders();
+    } catch (error) {
+      this.workspace = undefined;
+      workspace.close();
+      throw error;
+    }
   }
 
   public get dataDirectory(): string {
@@ -4002,6 +4019,161 @@ export class LocalApplication {
     return this.queryOrders({}, []).orders;
   }
 
+  public moveOrderToTrash(
+    input: unknown,
+    occurredAt = new Date().toISOString(),
+  ): OrderDetails {
+    return this.changeOrderLifecycle(
+      normalizeOrderLifecycleActionInput(input),
+      'moved_to_trash',
+      'user',
+      'active',
+      'trashed',
+      normalizeLifecycleOccurredAt(occurredAt),
+    );
+  }
+
+  public restoreOrderFromTrash(
+    input: unknown,
+    occurredAt = new Date().toISOString(),
+  ): OrderDetails {
+    this.expireTrashedOrders(occurredAt);
+    return this.changeOrderLifecycle(
+      normalizeOrderLifecycleActionInput(input),
+      'restored',
+      'user',
+      'trashed',
+      'active',
+      normalizeLifecycleOccurredAt(occurredAt),
+    );
+  }
+
+  public permanentlyDeleteOrder(
+    input: unknown,
+    occurredAt = new Date().toISOString(),
+  ): OrderDetails {
+    const normalized = normalizePermanentlyDeleteOrderInput(input);
+    this.expireTrashedOrders(occurredAt);
+    return this.changeOrderLifecycle(
+      normalized,
+      'permanently_deleted',
+      'user',
+      'trashed',
+      'deleted',
+      normalizeLifecycleOccurredAt(occurredAt),
+    );
+  }
+
+  public expireTrashedOrders(occurredAt = new Date().toISOString()): number {
+    const now = normalizeLifecycleOccurredAt(occurredAt);
+    const cutoff = new Date(
+      Date.parse(now) - ORDER_TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    const workspace = this.requireWorkspace();
+    const expiredRows = workspace.database.prepare(`
+      SELECT orders.id, orders.revision
+      FROM original_orders AS orders
+      JOIN order_lifecycle_events AS events ON events.sequence = (
+        SELECT MAX(latest.sequence)
+        FROM order_lifecycle_events AS latest
+        WHERE latest.order_id = orders.id
+      )
+      WHERE orders.lifecycle_status = 'trashed'
+        AND events.action = 'moved_to_trash'
+        AND events.created_at <= ?
+      ORDER BY events.sequence
+    `).all(cutoff) as unknown as SqlRow[];
+    if (expiredRows.length === 0) return 0;
+    return workspace.transaction(() => {
+      for (const row of expiredRows) {
+        this.changeOrderLifecycle(
+          {
+            orderId: asString(row.id),
+            expectedRevision: asNumber(row.revision),
+          },
+          'retention_expired',
+          'system',
+          'trashed',
+          'deleted',
+          now,
+        );
+      }
+      return expiredRows.length;
+    });
+  }
+
+  public listOrderLifecycleEvents(orderId: unknown): OrderLifecycleEvent[] {
+    const normalizedOrderId = normalizeOrderLifecycleActionInput({
+      orderId,
+      expectedRevision: 1,
+    }).orderId;
+    const rows = this.requireWorkspace().database.prepare(`
+      SELECT *
+      FROM order_lifecycle_events
+      WHERE order_id = ?
+      ORDER BY sequence DESC
+    `).all(normalizedOrderId) as unknown as SqlRow[];
+    return rows.map(parseOrderLifecycleEventRow);
+  }
+
+  private changeOrderLifecycle(
+    input: OrderLifecycleActionInput,
+    action: OrderLifecycleEventAction,
+    initiator: OrderLifecycleEventInitiator,
+    beforeStatus: OriginalOrder['lifecycleStatus'],
+    afterStatus: OriginalOrder['lifecycleStatus'],
+    occurredAt: string,
+  ): OrderDetails {
+    const workspace = this.requireWorkspace();
+    return workspace.transaction(() => {
+      const current = workspace.database.prepare(`
+        SELECT lifecycle_status, revision
+        FROM original_orders
+        WHERE id = ?
+      `).get(input.orderId) as SqlRow | undefined;
+      if (!current) throw new Error('未找到原始订单');
+      const currentStatus = asLifecycleStatus(current.lifecycle_status);
+      const currentRevision = asNumber(current.revision);
+      if (currentRevision !== input.expectedRevision) {
+        throw new Error('订单已被修改，请刷新后重试');
+      }
+      if (currentStatus !== beforeStatus) {
+        if (currentStatus === 'deleted') throw new Error('永久删除的订单不能恢复或再次操作');
+        if (beforeStatus === 'active') throw new Error('只有正常订单可以移入回收站');
+        throw new Error('只有回收站订单可以执行此操作');
+      }
+      const updated = workspace.database.prepare(`
+        UPDATE original_orders
+        SET lifecycle_status = ?, revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ? AND lifecycle_status = ?
+      `).run(
+        afterStatus,
+        occurredAt,
+        input.orderId,
+        input.expectedRevision,
+        beforeStatus,
+      );
+      if (updated.changes !== 1) throw new Error('订单已变化，请刷新后重试');
+      workspace.database.prepare(`
+        INSERT INTO order_lifecycle_events (
+          id, order_id, action, initiator, before_status, after_status,
+          base_revision, result_revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        input.orderId,
+        action,
+        initiator,
+        beforeStatus,
+        afterStatus,
+        input.expectedRevision,
+        input.expectedRevision + 1,
+        occurredAt,
+      );
+      return this.getOrder(input.orderId);
+    });
+  }
+
   public createStandardProduct(input: unknown): StandardProduct {
     const workspace = this.requireWorkspace();
     const normalized = normalizeStandardProductInput(input);
@@ -7300,6 +7472,7 @@ export class LocalApplication {
     scopedOrderIds?: readonly string[],
     options?: { excludeReleasedPlanMembers?: boolean },
   ): OrderWorkbenchResult {
+    this.expireTrashedOrders();
     const workspace = this.requireWorkspace();
     const where = [
       query.lifecycleStatus === 'all'
@@ -9430,6 +9603,39 @@ function asLifecycleStatus(
     throw new Error('数据库生命周期状态格式错误');
   }
   return value;
+}
+
+function normalizeLifecycleOccurredAt(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error('订单生命周期操作时间无效');
+  return new Date(timestamp).toISOString();
+}
+
+function parseOrderLifecycleEventRow(row: SqlRow): OrderLifecycleEvent {
+  const action = asString(row.action);
+  if (
+    action !== 'moved_to_trash'
+    && action !== 'restored'
+    && action !== 'permanently_deleted'
+    && action !== 'retention_expired'
+  ) {
+    throw new Error('数据库订单生命周期操作类型无效');
+  }
+  const initiator = asString(row.initiator);
+  if (initiator !== 'user' && initiator !== 'system') {
+    throw new Error('数据库订单生命周期操作发起方无效');
+  }
+  return {
+    id: asString(row.id),
+    orderId: asString(row.order_id),
+    action,
+    initiator,
+    beforeStatus: asLifecycleStatus(row.before_status),
+    afterStatus: asLifecycleStatus(row.after_status),
+    baseRevision: asNumber(row.base_revision),
+    resultRevision: asNumber(row.result_revision),
+    createdAt: normalizeLifecycleOccurredAt(asString(row.created_at)),
+  };
 }
 
 function asRecognitionBatchItemStatus(

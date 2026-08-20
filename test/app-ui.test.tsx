@@ -594,6 +594,9 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     }),
     relinkProductMappingHistoryCandidates: vi.fn(),
     listOrders: vi.fn().mockResolvedValue([]),
+    moveOrderToTrash: vi.fn(),
+    restoreOrderFromTrash: vi.fn(),
+    permanentlyDeleteOrder: vi.fn(),
     queryOrders,
     queryOrderItems: vi.fn().mockResolvedValue({ items: [], customFieldValues: [] }),
     queryShipmentGroups,
@@ -6641,6 +6644,88 @@ describe('订单管理工作台', () => {
 
     expect(await screen.findByRole('button', { name: '查看订单 XY-ONLY-TRASHED' })).toBeVisible();
     expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 1 笔');
+  });
+
+  it('订单表以确认对话框移入回收站，并仅为回收站订单提供恢复与永久删除', async () => {
+    const user = userEvent.setup();
+    const active = orderSummary(confirmedOrder, {
+      id: 'order-lifecycle-active',
+      orderNumber: 'XY-LIFECYCLE-ACTIVE',
+      revision: 7,
+      updatedAt: '2026-08-20T00:00:00.000Z',
+    });
+    const trashed = orderSummary(confirmedOrder, {
+      id: 'order-lifecycle-trashed',
+      orderNumber: 'XY-LIFECYCLE-TRASHED',
+      revision: 9,
+      lifecycleStatus: 'trashed',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    });
+    const deleted = orderSummary(confirmedOrder, {
+      id: 'order-lifecycle-deleted',
+      orderNumber: 'XY-LIFECYCLE-DELETED',
+      revision: 11,
+      lifecycleStatus: 'deleted',
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    });
+    const moveOrderToTrash = vi.fn().mockResolvedValue(orderDetails);
+    const restoreOrderFromTrash = vi.fn().mockResolvedValue(orderDetails);
+    const permanentlyDeleteOrder = vi.fn().mockResolvedValue(orderDetails);
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [active],
+      }),
+      listOrders: vi.fn().mockResolvedValue([active]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult(
+        [active, trashed, deleted],
+        { activeOrderCount: 1, allLifecycleOrderCount: 3 },
+      )),
+      moveOrderToTrash,
+      restoreOrderFromTrash,
+      permanentlyDeleteOrder,
+    });
+
+    render(<App api={api} />);
+
+    await user.click(await screen.findByRole('button', { name: '移入回收站' }));
+    const trashDialog = screen.getByRole('alertdialog', { name: '将订单移入回收站？' });
+    expect(trashDialog).toHaveTextContent('30 天内可从回收站恢复');
+    expect(trashDialog).toHaveTextContent('商品、来源截图、发货与修改历史保持不变');
+    await user.click(within(trashDialog).getByRole('button', { name: '确认移入回收站' }));
+    expect(moveOrderToTrash).toHaveBeenCalledWith({
+      orderId: active.id,
+      expectedRevision: 7,
+    });
+
+    await user.click(screen.getByRole('button', { name: '恢复' }));
+    expect(restoreOrderFromTrash).toHaveBeenCalledWith({
+      orderId: trashed.id,
+      expectedRevision: 9,
+    });
+
+    await user.click(screen.getByRole('button', { name: '永久删除' }));
+    const deleteDialog = screen.getByRole('alertdialog', { name: '永久删除这笔订单？' });
+    expect(deleteDialog).toHaveTextContent('无法恢复为正常订单');
+    expect(deleteDialog).toHaveTextContent('永久退出正常工作流');
+    await user.click(within(deleteDialog).getByRole('button', { name: '确认永久删除' }));
+    expect(permanentlyDeleteOrder).toHaveBeenCalledWith({
+      orderId: trashed.id,
+      expectedRevision: 9,
+      confirmation: '永久删除',
+    });
+
+    const deletedRow = screen.getByRole('button', {
+      name: '查看订单 XY-LIFECYCLE-DELETED',
+    }).closest('tr');
+    expect(deletedRow).not.toBeNull();
+    expect(within(deletedRow as HTMLTableRowElement).queryByRole('button', {
+      name: '永久删除',
+    })).not.toBeInTheDocument();
+    expect(within(deletedRow as HTMLTableRowElement).queryByRole('button', {
+      name: /维护订单平台交易状态/,
+    })).not.toBeInTheDocument();
   });
 
   it('回购筛选组合查询并在订单详情展示回购与累计金额', async () => {

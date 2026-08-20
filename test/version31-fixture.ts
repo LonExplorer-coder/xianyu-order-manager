@@ -1,7 +1,29 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v60 建立订单生命周期事件；有事件时拒绝测试降级。
+export function removeVersion60ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 60',
+  ).get();
+  if (!applied) return;
+  const eventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM order_lifecycle_events',
+  ).get() as { count: number };
+  if (eventCount.count > 0) {
+    throw new Error('v60 测试降级前必须移除订单生命周期事件');
+  }
+  database.exec(`
+    DROP TRIGGER IF EXISTS order_lifecycle_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS order_lifecycle_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS order_lifecycle_events_by_order;
+    DROP TABLE IF EXISTS order_lifecycle_events;
+    DELETE FROM schema_migrations WHERE version = 60;
+  `);
+}
+
 // v59 允许历史导入不依赖截图、识别批次和订单草稿；存在历史导入数据时拒绝测试降级。
 export function removeVersion59ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion60ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 59',
   ).get();

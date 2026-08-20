@@ -50,6 +50,10 @@ import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
 } from '../core/order-workbench';
+import {
+  normalizeOrderLifecycleActionInput,
+  normalizePermanentlyDeleteOrderInput,
+} from '../core/order-lifecycle';
 import { FULFILLMENT_STATUSES } from '../core/fulfillment-status';
 import { QUANTITY_SOURCES } from '../core/quantity-source';
 import {
@@ -643,6 +647,15 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     (_event, draft: OrderDraft) => desktopSession.previewDraftProductStandardizations(draft),
   );
   ipcMain.handle('orders:list', () => desktopSession.listOrders());
+  ipcMain.handle('orders:move-to-trash', (_event, input: unknown) => (
+    desktopSession.moveOrderToTrash(normalizeOrderLifecycleActionInput(input))
+  ));
+  ipcMain.handle('orders:restore-from-trash', (_event, input: unknown) => (
+    desktopSession.restoreOrderFromTrash(normalizeOrderLifecycleActionInput(input))
+  ));
+  ipcMain.handle('orders:permanently-delete', (_event, input: unknown) => (
+    desktopSession.permanentlyDeleteOrder(normalizePermanentlyDeleteOrderInput(input))
+  ));
   ipcMain.handle('orders:query', (_event, input: unknown, definitionIds: unknown) => (
     desktopSession.queryOrders(
       parseOrderWorkbenchQuery(input),

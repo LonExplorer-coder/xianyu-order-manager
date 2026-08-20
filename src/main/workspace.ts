@@ -216,6 +216,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(57)) migrateToVersion57(database);
   if (!versions.has(58)) migrateToVersion58(database);
   if (!versions.has(59)) migrateToVersion59(database);
+  if (!versions.has(60)) migrateToVersion60(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -7212,6 +7213,63 @@ function migrateToVersion59(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+// v60 以不可变事件记录订单移入回收站、恢复和永久删除。
+function migrateToVersion60(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE order_lifecycle_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        order_id TEXT NOT NULL REFERENCES original_orders(id) ON DELETE RESTRICT,
+        action TEXT NOT NULL CHECK (action IN (
+          'moved_to_trash', 'restored', 'permanently_deleted', 'retention_expired'
+        )),
+        initiator TEXT NOT NULL CHECK (initiator IN ('user', 'system')),
+        before_status TEXT NOT NULL
+          CHECK (before_status IN ('active', 'trashed', 'deleted')),
+        after_status TEXT NOT NULL
+          CHECK (after_status IN ('active', 'trashed', 'deleted')),
+        base_revision INTEGER NOT NULL CHECK (base_revision >= 1),
+        result_revision INTEGER NOT NULL CHECK (result_revision = base_revision + 1),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (action = 'moved_to_trash' AND initiator = 'user'
+            AND before_status = 'active' AND after_status = 'trashed')
+          OR (action = 'restored' AND initiator = 'user'
+            AND before_status = 'trashed' AND after_status = 'active')
+          OR (action = 'permanently_deleted' AND initiator = 'user'
+            AND before_status = 'trashed' AND after_status = 'deleted')
+          OR (action = 'retention_expired' AND initiator = 'system'
+            AND before_status = 'trashed' AND after_status = 'deleted')
+        )
+      ) STRICT;
+
+      CREATE INDEX order_lifecycle_events_by_order
+      ON order_lifecycle_events (order_id, sequence DESC);
+
+      CREATE TRIGGER order_lifecycle_events_are_immutable_on_update
+      BEFORE UPDATE ON order_lifecycle_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order lifecycle events are immutable');
+      END;
+
+      CREATE TRIGGER order_lifecycle_events_are_immutable_on_delete
+      BEFORE DELETE ON order_lifecycle_events
+      BEGIN
+        SELECT RAISE(ABORT, 'order lifecycle events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (60, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
   }
 }
 

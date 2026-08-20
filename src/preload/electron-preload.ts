@@ -119,6 +119,9 @@ const api: DesktopApi = {
     ipcRenderer.invoke('products:preview-draft-standardizations', draft)
   ),
   listOrders: () => ipcRenderer.invoke('orders:list'),
+  moveOrderToTrash: (input) => ipcRenderer.invoke('orders:move-to-trash', input),
+  restoreOrderFromTrash: (input) => ipcRenderer.invoke('orders:restore-from-trash', input),
+  permanentlyDeleteOrder: (input) => ipcRenderer.invoke('orders:permanently-delete', input),
   queryOrders: (query, customFieldDefinitionIds) => (
     ipcRenderer.invoke('orders:query', query, customFieldDefinitionIds)
   ),

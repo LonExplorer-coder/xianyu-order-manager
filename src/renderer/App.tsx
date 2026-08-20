@@ -66,6 +66,10 @@ import type {
   OrderWorkbenchResult,
 } from '../core/order-workbench';
 import {
+  PERMANENT_DELETE_CONFIRMATION,
+  orderTrashExpiresAt,
+} from '../core/order-lifecycle';
+import {
   isQuantitySource,
   quantitySourceFromLegacy,
   quantitySourceLabel,
@@ -196,6 +200,7 @@ import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
 import { OrderItemStandardizationBatchDialog } from './OrderItemStandardizationBatchDialog';
+import { ConfirmDangerDialog } from './DialogShell';
 import type {
   DraftItemProductStandardization,
   ProductMappingScope,
@@ -4988,6 +4993,11 @@ type OrdersWorkspaceProps = {
   onPreviewExport: (input: OrderExportInput) => Promise<OrderExportPreviewResult>;
 };
 
+type OrderLifecycleDialogState = {
+  action: 'move_to_trash' | 'permanently_delete';
+  order: OrderSummary;
+};
+
 function OrdersWorkspace({
   api,
   orders,
@@ -5046,6 +5056,10 @@ function OrdersWorkspace({
   const [historicalImportSelecting, setHistoricalImportSelecting] = useState(false);
   const [historicalImportError, setHistoricalImportError] = useState('');
   const [historicalImportFeedback, setHistoricalImportFeedback] = useState('');
+  const [lifecycleDialog, setLifecycleDialog] = useState<OrderLifecycleDialogState | null>(null);
+  const [lifecycleBusyOrderId, setLifecycleBusyOrderId] = useState('');
+  const [lifecycleError, setLifecycleError] = useState('');
+  const [lifecycleFeedback, setLifecycleFeedback] = useState('');
   const selectAllOrdersRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
@@ -5113,6 +5127,52 @@ function OrdersWorkspace({
       setHistoricalImportError(errorMessage(selectionError));
     } finally {
       setHistoricalImportSelecting(false);
+    }
+  }
+
+  async function restoreFromTrash(order: OrderSummary) {
+    setLifecycleBusyOrderId(order.id);
+    setLifecycleError('');
+    setLifecycleFeedback('');
+    try {
+      await api.restoreOrderFromTrash({
+        orderId: order.id,
+        expectedRevision: requiredOrderRevision(order),
+      });
+      setLifecycleFeedback(`订单 ${order.orderNumber} 已恢复。`);
+    } catch (restoreError) {
+      setLifecycleError(errorMessage(restoreError));
+    } finally {
+      setLifecycleBusyOrderId('');
+    }
+  }
+
+  async function confirmLifecycleAction() {
+    if (!lifecycleDialog) return;
+    const { action, order } = lifecycleDialog;
+    setLifecycleBusyOrderId(order.id);
+    setLifecycleError('');
+    setLifecycleFeedback('');
+    try {
+      const target = {
+        orderId: order.id,
+        expectedRevision: requiredOrderRevision(order),
+      };
+      if (action === 'move_to_trash') {
+        await api.moveOrderToTrash(target);
+        setLifecycleFeedback(`订单 ${order.orderNumber} 已移入回收站。`);
+      } else {
+        await api.permanentlyDeleteOrder({
+          ...target,
+          confirmation: PERMANENT_DELETE_CONFIRMATION,
+        });
+        setLifecycleFeedback(`订单 ${order.orderNumber} 已永久删除。`);
+      }
+      setLifecycleDialog(null);
+    } catch (lifecycleActionError) {
+      setLifecycleError(errorMessage(lifecycleActionError));
+    } finally {
+      setLifecycleBusyOrderId('');
     }
   }
 
@@ -5593,7 +5653,9 @@ function OrdersWorkspace({
           <span><strong>{formatMoney(orders.reduce((total, order) => total + order.amountCents, 0))}</strong> 成交总额</span>
         </div>
         <div className="table-toolbar__actions">
-          {selectedOrders.length > 0 && (
+          {selectedOrders.length > 0 && selectedOrders.every(
+            ({ lifecycleStatus }) => lifecycleStatus === 'active',
+          ) && (
             <button
               className="button button--primary"
               type="button"
@@ -5630,8 +5692,13 @@ function OrdersWorkspace({
           {statusLogisticsFeedback}
         </p>
       )}
+      {lifecycleFeedback && (
+        <p className="status-logistics-feedback" role="status" aria-label="订单生命周期操作结果">
+          {lifecycleFeedback}
+        </p>
+      )}
 
-      <InlineError message={orderProjection.error} />
+      <InlineError message={lifecycleError || orderProjection.error} />
 
       {orderProjection.error ? null : orders.length === 0 ? (
         <div className="order-no-results">
@@ -5719,18 +5786,20 @@ function OrdersWorkspace({
                 })}
                 <td>
                   <div className="order-row-actions">
-                    <button
-                      className="order-link"
-                      type="button"
-                      aria-label={`维护订单平台交易状态 ${order.orderNumber}`}
-                      onClick={() => {
-                        setStatusLogisticsFeedback('');
-                        setStatusLogisticsOrders([order]);
-                      }}
-                      disabled={statusLogisticsSaving}
-                    >
-                      交易状态
-                    </button>
+                    {order.lifecycleStatus === 'active' && (
+                      <button
+                        className="order-link"
+                        type="button"
+                        aria-label={`维护订单平台交易状态 ${order.orderNumber}`}
+                        onClick={() => {
+                          setStatusLogisticsFeedback('');
+                          setStatusLogisticsOrders([order]);
+                        }}
+                        disabled={statusLogisticsSaving}
+                      >
+                        交易状态
+                      </button>
+                    )}
                     <button
                       className="order-link"
                       type="button"
@@ -5740,6 +5809,42 @@ function OrdersWorkspace({
                     >
                       详情
                     </button>
+                    {order.lifecycleStatus === 'active' && (
+                      <button
+                        className="text-button text-button--danger"
+                        type="button"
+                        disabled={lifecycleBusyOrderId === order.id}
+                        onClick={() => {
+                          setLifecycleError('');
+                          setLifecycleDialog({ action: 'move_to_trash', order });
+                        }}
+                      >
+                        移入回收站
+                      </button>
+                    )}
+                    {order.lifecycleStatus === 'trashed' && (
+                      <>
+                        <button
+                          className="order-link"
+                          type="button"
+                          disabled={lifecycleBusyOrderId === order.id}
+                          onClick={() => void restoreFromTrash(order)}
+                        >
+                          恢复
+                        </button>
+                        <button
+                          className="text-button text-button--danger"
+                          type="button"
+                          disabled={lifecycleBusyOrderId === order.id}
+                          onClick={() => {
+                            setLifecycleError('');
+                            setLifecycleDialog({ action: 'permanently_delete', order });
+                          }}
+                        >
+                          永久删除
+                        </button>
+                      </>
+                    )}
                     {order.lastManualEditAt && (
                       <span className="manual-edit-marker">
                         <strong>已修改</strong>
@@ -5789,6 +5894,28 @@ function OrdersWorkspace({
             setStatusLogisticsFeedback(`已更新 ${updatedCount} 笔订单。`);
           }}
         />
+      )}
+      {lifecycleDialog && (
+        <ConfirmDangerDialog
+          kicker="订单生命周期"
+          title={lifecycleDialog.action === 'move_to_trash'
+            ? '将订单移入回收站？'
+            : '永久删除这笔订单？'}
+          description={lifecycleDialog.action === 'move_to_trash'
+            ? '订单会从正常工作台和开放发货组移除，商品、来源截图、发货与修改历史保持不变；30 天内可从回收站恢复。'
+            : `此操作后无法恢复为正常订单。为保持已发货与审计事实可追溯，商品、来源证据和历史关联仍会保留，但订单将永久退出正常工作流。该订单原定于 ${orderTrashExpirationLabel(lifecycleDialog.order)} 结束保留期。`}
+          busy={lifecycleBusyOrderId === lifecycleDialog.order.id}
+          confirmLabel={lifecycleDialog.action === 'move_to_trash'
+            ? '确认移入回收站'
+            : '确认永久删除'}
+          onClose={() => {
+            setLifecycleError('');
+            setLifecycleDialog(null);
+          }}
+          onConfirm={() => void confirmLifecycleAction()}
+        >
+          <InlineError message={lifecycleError} />
+        </ConfirmDangerDialog>
       )}
         </div>
       ) : (
@@ -10853,30 +10980,34 @@ function DetailWorkspace({
           <span className="status-chip status-chip--large">
             {platformTransactionStatusLabel(order.platformTransactionStatus)} · {fulfillmentStatusLabel(order.fulfillmentStatus)}
           </span>
-          <button
-            className="button button--quiet"
-            type="button"
-            disabled={customFieldsDirty || customFieldsSaving || statusLogisticsSaving}
-            title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
-            onClick={() => {
-              setStatusLogisticsFeedback('');
-              setMaintainingStatusAndLogistics(true);
-            }}
-          >
-            交易状态
-          </button>
-          <button
-            className="button button--primary"
-            type="button"
-            disabled={customFieldsDirty || customFieldsSaving}
-            title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
-            onClick={() => {
-              setOrderEditDirty(false);
-              setEditing(true);
-            }}
-          >
-            编辑订单
-          </button>
+          {order.lifecycleStatus === 'active' && (
+            <>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={customFieldsDirty || customFieldsSaving || statusLogisticsSaving}
+                title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
+                onClick={() => {
+                  setStatusLogisticsFeedback('');
+                  setMaintainingStatusAndLogistics(true);
+                }}
+              >
+                交易状态
+              </button>
+              <button
+                className="button button--primary"
+                type="button"
+                disabled={customFieldsDirty || customFieldsSaving}
+                title={customFieldsDirty ? '请先保存或放弃自定义字段修改' : undefined}
+                onClick={() => {
+                  setOrderEditDirty(false);
+                  setEditing(true);
+                }}
+              >
+                编辑订单
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -12046,6 +12177,23 @@ function lifecycleStatusLabel(status: OrderSummary['lifecycleStatus']): string {
     trashed: '回收站',
     deleted: '已删除',
   }[status];
+}
+
+function requiredOrderRevision(order: Pick<OrderSummary, 'revision'>): number {
+  if (!Number.isSafeInteger(order.revision) || (order.revision ?? 0) < 1) {
+    throw new Error('订单版本缺失，请刷新后重试');
+  }
+  return order.revision as number;
+}
+
+function orderTrashExpirationLabel(
+  order: Pick<OrderSummary, 'updatedAt' | 'createdAt'>,
+): string {
+  try {
+    return formatDateTime(orderTrashExpiresAt(order.updatedAt ?? order.createdAt));
+  } catch {
+    return '未知时间';
+  }
 }
 
 function displayValue(value?: string): string {

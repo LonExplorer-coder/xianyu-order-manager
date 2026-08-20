@@ -713,6 +713,24 @@ export class DesktopSession {
     return this.requireApplication().listOrders();
   }
 
+  public moveOrderToTrash(input: unknown): OrderDetails {
+    const details = this.requireApplication().moveOrderToTrash(input);
+    this.refreshOrders();
+    return details;
+  }
+
+  public restoreOrderFromTrash(input: unknown): OrderDetails {
+    const details = this.requireApplication().restoreOrderFromTrash(input);
+    this.refreshOrders();
+    return details;
+  }
+
+  public permanentlyDeleteOrder(input: unknown): OrderDetails {
+    const details = this.requireApplication().permanentlyDeleteOrder(input);
+    this.refreshOrders();
+    return details;
+  }
+
   public queryOrders(
     query: OrderWorkbenchQuery,
     customFieldDefinitionIds?: readonly string[],
