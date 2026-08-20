@@ -2,20 +2,23 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
 import type { DesktopApi } from '../core/desktop-api';
 import {
-  FINANCE_RECORD_TYPES,
   financeConfirmedSourceLabel,
   financeDirectionLabel,
-  financeDirectionOfType,
   financePendingStatusLabel,
   financeRecordTypeLabel,
   financeSourceLabel,
-  type FinanceDirectionName,
   type FinancePendingItemView,
   type FinanceRecordTypeName,
   type FinanceRecordView,
   type FundsView,
 } from '../core/funds';
 import { DialogShell, EmptyState, InlineError, ReasonField } from './DialogShell';
+import {
+  FinanceRecordDialog,
+  formatMoney,
+  formatTime,
+  parseMoneyToCents,
+} from './FinanceFacts';
 
 type DialogKind =
   | { kind: 'record' }
@@ -32,11 +35,6 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
   const [formError, setFormError] = useState('');
   const [typeFilter, setTypeFilter] = useState<FinanceRecordTypeName | ''>('');
 
-  const [recordType, setRecordType] = useState<FinanceRecordTypeName>('replacement_freight');
-  const [recordDirection, setRecordDirection] = useState<FinanceDirectionName>('expense');
-  const [recordAmountYuan, setRecordAmountYuan] = useState('');
-  const [recordOccurredAt, setRecordOccurredAt] = useState('');
-  const [recordNote, setRecordNote] = useState('');
   const [confirmAmountYuan, setConfirmAmountYuan] = useState('');
   const [confirmNote, setConfirmNote] = useState('');
   const [cancelReason, setCancelReason] = useState('');
@@ -86,12 +84,6 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
   );
 
   function openRecordDialog() {
-    setRecordType('replacement_freight');
-    setRecordDirection(financeDirectionOfType('replacement_freight'));
-    setRecordAmountYuan('');
-    setRecordOccurredAt('');
-    setRecordNote('');
-    setFormError('');
     setDialog({ kind: 'record' });
   }
 
@@ -129,24 +121,6 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
       .finally(() => {
         setSaving(false);
       });
-  };
-
-  const submitRecord = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const amountCents = parseMoneyToCents(recordAmountYuan);
-    if (amountCents === null) {
-      setFormError('请填写大于零的金额');
-      return;
-    }
-    submit(() => api.recordFinanceRecord({
-      type: recordType,
-      direction: recordDirection,
-      amountCents,
-      occurredAt: recordOccurredAt
-        ? new Date(recordOccurredAt).toISOString()
-        : new Date().toISOString(),
-      note: recordNote.trim(),
-    }));
   };
 
   const submitConfirm = (event: FormEvent<HTMLFormElement>) => {
@@ -403,88 +377,12 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
       )}
 
       {dialog?.kind === 'record' && (
-        <DialogShell
-          kicker="资金·直接录入"
-          title="录入资金记录"
-          description="已经实际发生的收入或支出（如自付运费、平台结算到账）；不确定的钱先走待确认事项。"
-          busy={saving}
+        <FinanceRecordDialog
+          api={api}
+          preset={null}
           onClose={() => setDialog(null)}
-          onSubmit={submitRecord}
-        >
-          <label>
-            <span>类型</span>
-            <select
-              aria-label="资金类型"
-              value={recordType}
-              disabled={saving}
-              onChange={(event) => {
-                const next = event.target.value as FinanceRecordTypeName;
-                setRecordType(next);
-                setRecordDirection(financeDirectionOfType(next));
-              }}
-            >
-              {FINANCE_RECORD_TYPES.map((type) => (
-                <option key={type} value={type}>{financeRecordTypeLabel(type)}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>收支方向{recordType !== 'misc_expense' ? '（按类型固定）' : ''}</span>
-            <select
-              aria-label="收支方向"
-              value={recordDirection}
-              disabled={saving || recordType !== 'misc_expense'}
-              onChange={(event) => setRecordDirection(
-                event.target.value === 'income' ? 'income' : 'expense',
-              )}
-            >
-              <option value="income">收入</option>
-              <option value="expense">支出</option>
-            </select>
-          </label>
-          <label>
-            <span>金额（元）</span>
-            <input
-              aria-label="金额（元）"
-              type="number"
-              min={0.01}
-              step={0.01}
-              value={recordAmountYuan}
-              disabled={saving}
-              onChange={(event) => setRecordAmountYuan(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>发生时间（留空为现在）</span>
-            <input
-              type="datetime-local"
-              aria-label="发生时间"
-              value={recordOccurredAt}
-              disabled={saving}
-              onChange={(event) => setRecordOccurredAt(event.target.value)}
-            />
-          </label>
-          <ReasonField
-            label="说明（必填）"
-            value={recordNote}
-            saving={saving}
-            onChange={setRecordNote}
-          />
-          <InlineError message={formError} />
-          <footer>
-            <button
-              className="button button--quiet"
-              type="button"
-              disabled={saving}
-              onClick={() => setDialog(null)}
-            >
-              取消
-            </button>
-            <button className="button button--primary" type="submit" disabled={saving}>
-              {saving ? '正在保存…' : '保存资金记录'}
-            </button>
-          </footer>
-        </DialogShell>
+          onSaved={setView}
+        />
       )}
 
       {dialog?.kind === 'confirm' && (
@@ -641,24 +539,6 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
       </section>
     );
   }
-}
-
-function formatMoney(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  return `${sign}¥${(Math.abs(cents) / 100).toFixed(2)}`;
-}
-
-function formatTime(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString('zh-CN', { hour12: false });
-}
-
-function parseMoneyToCents(value: string): number | null {
-  if (!/^\d+(\.\d{1,2})?$/u.test(value.trim())) return null;
-  const cents = Math.round(Number(value) * 100);
-  if (!Number.isSafeInteger(cents) || cents <= 0) return null;
-  return cents;
 }
 
 function errorMessage(value: unknown): string {

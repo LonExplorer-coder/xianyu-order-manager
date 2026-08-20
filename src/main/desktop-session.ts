@@ -121,7 +121,7 @@ import type {
 import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
-import type { FundsView } from '../core/funds';
+import type { FundsView, FinanceFactsForSource, FinanceSourceTypeName } from '../core/funds';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -900,8 +900,15 @@ export class DesktopSession {
     return this.requireApplication().queryFunds();
   }
 
-  public recordPendingFinanceItem(input: unknown): FundsView {
-    return this.requireApplication().recordPendingFinanceItem(input);
+  public queryFinanceFactsForSource(
+    sourceType: FinanceSourceTypeName,
+    sourceId: string,
+  ): FinanceFactsForSource {
+    return this.requireApplication().queryFinanceFactsForSource(sourceType, sourceId);
+  }
+
+  public queryFinanceFactsForAftersalesCase(caseId: string): FinanceFactsForSource {
+    return this.requireApplication().queryFinanceFactsForAftersalesCase(caseId);
   }
 
   public confirmPendingFinanceItem(input: unknown): FundsView {

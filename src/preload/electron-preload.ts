@@ -210,6 +210,12 @@ const api: DesktopApi = {
   ),
   queryPurchases: () => ipcRenderer.invoke('purchases:view'),
   queryFunds: () => ipcRenderer.invoke('funds:view'),
+  queryFinanceFactsForSource: (sourceType: string, sourceId: string) => (
+    ipcRenderer.invoke('funds:facts-for-source', sourceType, sourceId)
+  ),
+  queryFinanceFactsForAftersalesCase: (caseId: string) => (
+    ipcRenderer.invoke('funds:facts-for-aftersales-case', caseId)
+  ),
   confirmPendingFinanceItem: (input) => (
     ipcRenderer.invoke('funds:confirm-pending-item', input)
   ),

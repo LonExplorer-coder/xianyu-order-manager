@@ -88,6 +88,11 @@ export type FundsView = {
   };
 };
 
+export type FinanceFactsForSource = {
+  pendingItems: FinancePendingItemView[];
+  records: FinanceRecordView[];
+};
+
 export type RecordPendingFinanceItemInput = {
   type: FinanceRecordTypeName;
   amountCents: number;
@@ -115,6 +120,8 @@ export type RecordFinanceRecordInput = {
   amountCents: number;
   occurredAt: string;
   note: string;
+  sourceType?: FinanceSourceTypeName;
+  sourceId?: string;
 };
 
 export type ReverseFinanceRecordInput = {
@@ -148,6 +155,12 @@ export function financeDirectionOfType(type: FinanceRecordTypeName): FinanceDire
     return 'income';
   }
   return 'expense';
+}
+
+// 固定方向类型之外的双向类型：其他人工费用或补偿（收付皆可）、
+// 商品采购成本（支出=付款，收入=供应方退款/冲回，采购净成本按类型净额）。
+function isBidirectionalType(type: FinanceRecordTypeName): boolean {
+  return type === 'misc_expense' || type === 'purchase_cost';
 }
 
 export function normalizeRecordPendingFinanceItemInput(
@@ -207,15 +220,20 @@ export function normalizeRecordFinanceRecordInput(
   const record = objectValue(input, '资金记录参数无效');
   rejectUnknownKeys(
     record,
-    ['type', 'direction', 'amountCents', 'occurredAt', 'note'],
+    ['type', 'direction', 'amountCents', 'occurredAt', 'note', 'sourceType', 'sourceId'],
     '资金记录参数无效',
   );
   const type = financeRecordType(record.type, '资金记录参数无效');
   const direction = financeDirection(record.direction, '收支方向无效');
-  if (type !== 'misc_expense' && financeDirectionOfType(type) !== direction) {
+  if (!isBidirectionalType(type) && financeDirectionOfType(type) !== direction) {
     throw new Error(`${financeRecordTypeLabel(type)}的收支方向只能是${
       financeDirectionLabel(financeDirectionOfType(type))
     }`);
+  }
+  const hasSourceType = record.sourceType !== undefined;
+  const hasSourceId = record.sourceId !== undefined;
+  if (hasSourceType !== hasSourceId) {
+    throw new Error('资金记录来源类型与来源标识必须成对提供');
   }
   return {
     type,
@@ -223,6 +241,10 @@ export function normalizeRecordFinanceRecordInput(
     amountCents: positiveMoney(record.amountCents, '资金金额无效'),
     occurredAt: requiredTime(record.occurredAt, '资金发生时间无效'),
     note: requiredNote(record.note, '请填写资金记录说明'),
+    sourceType: hasSourceType
+      ? financeSource(record.sourceType, '来源类型无效')
+      : undefined,
+    sourceId: hasSourceId ? identifier(record.sourceId, '来源标识无效') : undefined,
   };
 }
 

@@ -130,13 +130,21 @@ function inventoryFixture(): InventoryView {
 function renderPurchase(overrides: {
   queryPurchases?: ReturnType<typeof vi.fn>;
   recordPurchaseArrival?: ReturnType<typeof vi.fn>;
+  recordFinanceRecord?: ReturnType<typeof vi.fn>;
+  queryFinanceFactsForSource?: ReturnType<typeof vi.fn>;
 } = {}): {
   queryPurchases: ReturnType<typeof vi.fn>;
   recordPurchaseArrival: ReturnType<typeof vi.fn>;
+  recordFinanceRecord: ReturnType<typeof vi.fn>;
+  queryFinanceFactsForSource: ReturnType<typeof vi.fn>;
 } {
   const queryPurchases = overrides.queryPurchases
     ?? vi.fn().mockResolvedValue(purchaseFixture());
   const recordPurchaseArrival = overrides.recordPurchaseArrival ?? vi.fn();
+  const recordFinanceRecord = overrides.recordFinanceRecord
+    ?? vi.fn().mockResolvedValue(purchaseFixture());
+  const queryFinanceFactsForSource = overrides.queryFinanceFactsForSource
+    ?? vi.fn().mockResolvedValue({ pendingItems: [], records: [] });
   const api = {
     queryPurchases,
     queryInventory: vi.fn().mockResolvedValue(inventoryFixture()),
@@ -148,9 +156,11 @@ function renderPurchase(overrides: {
     changePurchaseOrderExpectedDate: vi.fn(),
     recordPurchaseArrival,
     recordSupplierReturn: vi.fn(),
+    recordFinanceRecord,
+    queryFinanceFactsForSource,
   } as unknown as DesktopApi;
   render(<PurchaseWorkspace api={api} />);
-  return { queryPurchases, recordPurchaseArrival };
+  return { queryPurchases, recordPurchaseArrival, recordFinanceRecord, queryFinanceFactsForSource };
 }
 
 describe('采购工作区', () => {
@@ -218,5 +228,66 @@ describe('采购工作区', () => {
     expect(await within(dialog).findByText(/检查分类数量不能超过到货数量/))
       .toBeVisible();
     expect(recordPurchaseArrival).not.toHaveBeenCalled();
+  });
+
+  it('登记付款把采购付款关联到采购订单并锁定默认类型', async () => {
+    const user = userEvent.setup();
+    const { recordFinanceRecord } = renderPurchase();
+
+    await user.click(await screen.findByRole('button', { name: '登记付款 / 退款' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByLabelText('资金类型')).toHaveValue('purchase_cost');
+    expect(within(dialog).getAllByText(/第 1 号采购订单 · 深圳塑料制品厂/).length)
+      .toBeGreaterThan(0);
+    await user.type(within(dialog).getByLabelText('金额（元）'), '50');
+    await user.type(within(dialog).getByLabelText('资金说明'), '支付采购全款');
+    await user.click(within(dialog).getByRole('button', { name: '保存资金记录' }));
+
+    await waitFor(() => expect(recordFinanceRecord).toHaveBeenCalledTimes(1));
+    expect(recordFinanceRecord.mock.calls[0][0]).toMatchObject({
+      type: 'purchase_cost',
+      direction: 'expense',
+      amountCents: 5_000,
+      note: '支付采购全款',
+      sourceType: 'purchase_order',
+      sourceId: 'order-po-1',
+    });
+  });
+
+  it('展开资金详情懒加载付款与供应方退款记录', async () => {
+    const user = userEvent.setup();
+    const paymentRecord = {
+      id: 'record-po-funds-1',
+      sequence: 1,
+      type: 'purchase_cost',
+      direction: 'expense',
+      amountCents: 5_000,
+      currency: 'CNY',
+      confirmedSource: 'manual_confirmation',
+      confirmedAt: '2026-08-20T05:00:00.000Z',
+      occurredAt: '2026-08-20T05:00:00.000Z',
+      pendingItemId: null,
+      sourceType: 'purchase_order',
+      sourceId: 'order-po-1',
+      reversesRecordId: null,
+      note: '支付采购全款',
+      createdAt: '2026-08-20T05:00:00.000Z',
+    };
+    const queryFinanceFactsForSource = vi.fn(
+      (_sourceType: string, sourceId: string) => Promise.resolve(
+        sourceId === 'order-po-1'
+          ? { pendingItems: [], records: [paymentRecord] }
+          : { pendingItems: [], records: [] },
+      ),
+    );
+    const { queryFinanceFactsForSource: queried } = renderPurchase({
+      queryFinanceFactsForSource,
+    });
+
+    await user.click(await screen.findByText('资金（付款与退款）'));
+    expect(await screen.findByText('支付采购全款')).toBeVisible();
+    expect(screen.getByText(/采购净支出 ¥50\.00/)).toBeVisible();
+    expect(queried).toHaveBeenCalledWith('purchase_order', 'order-po-1');
+    expect(queried).toHaveBeenCalledWith('supplier_return', 'return-po-1');
   });
 });

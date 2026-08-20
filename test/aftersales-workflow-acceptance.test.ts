@@ -16,7 +16,7 @@ import {
   projectAftersalesWorkflowSteps,
 } from '../src/core/aftersales-workflow-templates';
 import { LocalApplication } from '../src/main/local-application';
-import { removeVersion50ExtensionArtifacts } from './version31-fixture';
+import { clearVersion58FundsData, removeVersion50ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
 
@@ -430,6 +430,7 @@ describe('可执行售后流程阶段验收', () => {
     const databasePath = join(dataDirectory, 'xianyu-order-manager.sqlite3');
     const legacy = new DatabaseSync(databasePath);
     try {
+      clearVersion58FundsData(legacy);
       removeVersion50ExtensionArtifacts(legacy);
       expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
         .toEqual({ version: 49 });

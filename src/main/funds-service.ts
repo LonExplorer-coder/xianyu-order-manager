@@ -12,6 +12,7 @@ import {
 } from '../core/funds';
 import type {
   FinanceDirectionName,
+  FinanceFactsForSource,
   FinancePendingItemView,
   FinanceRecordTypeName,
   FinanceRecordView,
@@ -38,6 +39,50 @@ export class FundsService {
 
   public view(): FundsView {
     return this.buildView();
+  }
+
+  public factsForSource(sourceType: FinanceSourceTypeName, sourceId: string): FinanceFactsForSource {
+    const view = this.buildView();
+    return {
+      pendingItems: view.pendingItems.filter((item) => (
+        item.sourceType === sourceType && item.sourceId === sourceId
+      )),
+      records: view.records.filter((record) => (
+        record.sourceType === sourceType && record.sourceId === sourceId
+      )),
+    };
+  }
+
+  // 售后处理单的资金聚合：直接挂单的事项/记录，加上按事实级锚点立账的
+  // 实际退款（legacy financial_records 逐笔）与承运索赔同意（carrier_claims）。
+  public factsForAftersalesCase(caseId: string): FinanceFactsForSource {
+    const caseSourceIds = new Set<string>([caseId]);
+    for (const row of this.workspace.database.prepare(`
+      SELECT id FROM financial_records WHERE aftersales_case_id = ?
+    `).all(caseId) as unknown as SqlRow[]) {
+      caseSourceIds.add(String(row.id));
+    }
+    const claimIds = new Set<string>((
+      this.workspace.database.prepare(`
+        SELECT c.id AS id
+        FROM carrier_claims c
+        JOIN aftersales_return_records r ON r.id = c.return_record_id
+        WHERE r.aftersales_case_id = ?
+      `).all(caseId) as unknown as SqlRow[]
+    ).map((row) => String(row.id)));
+
+    const view = this.buildView();
+    const belongs = (sourceType: FinanceSourceTypeName, sourceId: string | null): boolean => (
+      sourceId !== null
+      && ((sourceType === 'aftersales_case' && caseSourceIds.has(sourceId))
+        || (sourceType === 'logistics_exception' && claimIds.has(sourceId)))
+    );
+    return {
+      pendingItems: view.pendingItems.filter((item) => belongs(item.sourceType, item.sourceId)),
+      records: view.records.filter((record) => (
+        record.sourceType !== null && belongs(record.sourceType, record.sourceId)
+      )),
+    };
   }
 
   // 业务事实产生待确认资金事项（ADR 0042：业务完成不冒充资金已发生）。
@@ -125,11 +170,47 @@ export class FundsService {
     return this.buildView();
   }
 
-  // 直接录入已确认的资金记录（如自付运费、人工费用）；没有待确认阶段。
+  // 业务事实钩子：在业务事务内幂等立账待确认事项（#74）。
+  // 与人工入口不同：来源存在性由调用方的事实真实性保证，不重复校验；
+  // 重复提交同一事实被唯一锚点吞掉。业务完成到这里为止，绝不生成资金记录。
+  public recordBusinessPendingFact(fact: {
+    type: FinanceRecordTypeName;
+    amountCents: number;
+    sourceType: FinanceSourceTypeName;
+    sourceId: string;
+    note: string;
+    occurredAt: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.workspace.database.prepare(`
+      INSERT INTO finance_pending_items (
+        id, type, direction, amount_cents, currency, status,
+        source_type, source_id, note, occurred_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'CNY', 'pending', ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (source_type, source_id, type) DO NOTHING
+    `).run(
+      randomUUID(),
+      fact.type,
+      financeDirectionOfType(fact.type),
+      fact.amountCents,
+      fact.sourceType,
+      fact.sourceId,
+      fact.note,
+      fact.occurredAt,
+      now,
+      now,
+    );
+  }
+
+  // 直接录入已确认的资金记录（如自付运费、人工费用、采购付款）；来源可选，
+  // 提供时必须指向真实业务记录（校验存在），确认后记录永久关联该来源。
   public recordDirectRecord(input: unknown): FundsView {
     const prepared = normalizeRecordFinanceRecordInput(input);
     const now = new Date().toISOString();
     this.workspace.transaction(() => {
+      if (prepared.sourceType !== undefined && prepared.sourceId !== undefined) {
+        this.requireSourceRecord(prepared.sourceType, prepared.sourceId);
+      }
       this.insertRecord({
         type: prepared.type,
         direction: prepared.direction,
@@ -137,8 +218,8 @@ export class FundsService {
         occurredAt: prepared.occurredAt,
         confirmedAt: now,
         pendingItemId: null,
-        sourceType: null,
-        sourceId: null,
+        sourceType: prepared.sourceType ?? null,
+        sourceId: prepared.sourceId ?? null,
         reversesRecordId: null,
         note: prepared.note,
         createdAt: now,

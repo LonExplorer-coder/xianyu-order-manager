@@ -48,6 +48,12 @@ import {
   logisticsExceptionStageLabel,
   logisticsExceptionTypeLabel,
 } from './logistics-presentation';
+import {
+  FinanceFactsSummary,
+  FinanceRecordDialog,
+  type FinanceRecordDialogPreset,
+} from './FinanceFacts';
+import type { FinanceFactsForSource } from '../core/funds';
 
 export function AftersalesCasePanel({
   api,
@@ -105,6 +111,34 @@ export function AftersalesCasePanel({
         }));
       });
   };
+  const [fundsByCase, setFundsByCase] = useState<Record<
+    string,
+    { facts: FinanceFactsForSource | null; state: 'loading' | 'ready' | 'error' }
+  >>({});
+  const loadFundsImpact = (caseId: string): void => {
+    if (fundsByCase[caseId]) return;
+    setFundsByCase((previous) => ({
+      ...previous,
+      [caseId]: { facts: null, state: 'loading' },
+    }));
+    api.queryFinanceFactsForAftersalesCase(caseId)
+      .then((facts) => {
+        setFundsByCase((previous) => ({
+          ...previous,
+          [caseId]: { facts, state: 'ready' },
+        }));
+      })
+      .catch(() => {
+        setFundsByCase((previous) => ({
+          ...previous,
+          [caseId]: { facts: null, state: 'error' },
+        }));
+      });
+  };
+  const [recordFundsTarget, setRecordFundsTarget] = useState<{
+    caseId: string;
+    preset: FinanceRecordDialogPreset;
+  } | null>(null);
   if (aftersalesCases.length === 0) return null;
   return (
     <div className="shipment-record-card__aftersales" aria-label="售后处理单">
@@ -944,6 +978,45 @@ export function AftersalesCasePanel({
               );
             })()}
           </details>
+          <details
+            className="shipment-record-card__timeline"
+            onToggle={(event) => {
+              if ((event.target as HTMLDetailsElement).open) {
+                loadFundsImpact(aftersalesCase.id);
+              }
+            }}
+          >
+            <summary>资金影响</summary>
+            {(() => {
+              const impact = fundsByCase[aftersalesCase.id];
+              if (!impact || impact.state === 'loading') {
+                return <small>正在读取资金影响…</small>;
+              }
+              if (impact.state === 'error') {
+                return <small>资金影响读取失败，请收起后重新展开</small>;
+              }
+              return (
+                <>
+                  <FinanceFactsSummary facts={impact.facts} />
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setRecordFundsTarget({
+                      caseId: aftersalesCase.id,
+                      preset: {
+                        sourceType: 'aftersales_case',
+                        sourceId: aftersalesCase.id,
+                        sourceLabel: `售后处理单 · ${aftersalesCase.reason}`,
+                        defaultType: 'return_freight',
+                      },
+                    })}
+                  >
+                    记运费 / 拦截费
+                  </button>
+                </>
+              );
+            })()}
+          </details>
           <details className="shipment-record-card__timeline">
             <summary>售后处理时间线</summary>
             <ol>
@@ -1073,6 +1146,21 @@ export function AftersalesCasePanel({
           kind={stepEventTarget.kind}
           onRecorded={onRecordStepEvent}
           onClose={() => setStepEventTarget(null)}
+        />
+      )}
+      {recordFundsTarget && (
+        <FinanceRecordDialog
+          api={api}
+          preset={recordFundsTarget.preset}
+          onClose={() => setRecordFundsTarget(null)}
+          onSaved={() => {
+            setFundsByCase((previous) => {
+              const next = { ...previous };
+              delete next[recordFundsTarget.caseId];
+              return next;
+            });
+            loadFundsImpact(recordFundsTarget.caseId);
+          }}
         />
       )}
     </div>

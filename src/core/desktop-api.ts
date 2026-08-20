@@ -159,6 +159,8 @@ import type {
 import type {
   CancelPendingFinanceItemInput,
   ConfirmPendingFinanceItemInput,
+  FinanceFactsForSource,
+  FinanceSourceTypeName,
   FundsView,
   RecordFinanceRecordInput,
   ReverseFinanceRecordInput,
@@ -350,6 +352,11 @@ export interface DesktopApi {
   recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
   recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
   queryFunds(): Promise<FundsView>;
+  queryFinanceFactsForSource(
+    sourceType: FinanceSourceTypeName,
+    sourceId: string,
+  ): Promise<FinanceFactsForSource>;
+  queryFinanceFactsForAftersalesCase(caseId: string): Promise<FinanceFactsForSource>;
   confirmPendingFinanceItem(input: ConfirmPendingFinanceItemInput): Promise<FundsView>;
   cancelPendingFinanceItem(input: CancelPendingFinanceItemInput): Promise<FundsView>;
   recordFinanceRecord(input: RecordFinanceRecordInput): Promise<FundsView>;

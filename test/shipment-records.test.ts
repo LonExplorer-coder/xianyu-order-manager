@@ -17,6 +17,7 @@ import type {
 import { LocalApplication } from '../src/main/local-application';
 import { aftersalesCaseOperationsCoordination } from '../src/renderer/aftersales-presentation';
 import {
+  clearVersion58FundsData,
   removeVersion31ExtensionArtifacts,
   removeVersion32ExtensionArtifacts,
 } from './version31-fixture';
@@ -5503,6 +5504,7 @@ describe('退货物流与承运索赔', () => {
     const databasePath = join(root, '数据', 'xianyu-order-manager.sqlite3');
     const database = new DatabaseSync(databasePath);
     try {
+      clearVersion58FundsData(database);
       removeVersion31ExtensionArtifacts(database);
       database.exec(`
         PRAGMA foreign_keys = OFF;

@@ -181,6 +181,12 @@ import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
 import { InventoryWorkspace } from './InventoryWorkspace';
 import { PurchaseWorkspace } from './PurchaseWorkspace';
 import { FundsWorkspace } from './FundsWorkspace';
+import {
+  FinanceFactsSummary,
+  FinanceRecordDialog,
+  type FinanceRecordDialogPreset,
+} from './FinanceFacts';
+import type { FinanceFactsForSource } from '../core/funds';
 import { RecipientsWorkspace } from './RecipientsWorkspace';
 import { StandardProductsWorkspace } from './StandardProductsWorkspace';
 import { UpdateOrderItemStandardizationDialog } from './UpdateOrderItemStandardizationDialog';
@@ -3414,6 +3420,34 @@ function ShipmentRecordsSection({
   ) => Promise<void>;
   embedded?: boolean;
 }) {
+  const [fundsByRecord, setFundsByRecord] = useState<Record<
+    string,
+    { facts: FinanceFactsForSource | null; state: 'loading' | 'ready' | 'error' }
+  >>({});
+  const [recordFundsTarget, setRecordFundsTarget] = useState<{
+    preset: FinanceRecordDialogPreset;
+    recordId: string;
+  } | null>(null);
+  function loadFundsForRecord(recordId: string): void {
+    if (fundsByRecord[recordId]) return;
+    setFundsByRecord((previous) => ({
+      ...previous,
+      [recordId]: { facts: null, state: 'loading' },
+    }));
+    api.queryFinanceFactsForSource('shipment_record', recordId)
+      .then((facts) => {
+        setFundsByRecord((previous) => ({
+          ...previous,
+          [recordId]: { facts, state: 'ready' },
+        }));
+      })
+      .catch(() => {
+        setFundsByRecord((previous) => ({
+          ...previous,
+          [recordId]: { facts: null, state: 'error' },
+        }));
+      });
+  }
   const content = records.length === 0 ? (
     <div className="shipment-records-empty">尚无发货记录</div>
   ) : (
@@ -3455,6 +3489,45 @@ function ShipmentRecordsSection({
               )).join('；')}
             </p>
           )}
+          <details
+            className="shipment-record-card__timeline"
+            onToggle={(event) => {
+              if ((event.target as HTMLDetailsElement).open) {
+                loadFundsForRecord(record.id);
+              }
+            }}
+          >
+            <summary>资金（首发运费等）</summary>
+            {(() => {
+              const funds = fundsByRecord[record.id];
+              if (!funds || funds.state === 'loading') {
+                return <small>正在读取资金记录…</small>;
+              }
+              if (funds.state === 'error') {
+                return <small>资金记录读取失败，请收起后重新展开</small>;
+              }
+              return (
+                <>
+                  <FinanceFactsSummary facts={funds.facts} />
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => setRecordFundsTarget({
+                      preset: {
+                        sourceType: 'shipment_record',
+                        sourceId: record.id,
+                        sourceLabel: `发货记录 · ${record.recipient}`,
+                        defaultType: 'initial_freight',
+                      },
+                      recordId: record.id,
+                    })}
+                  >
+                    记首发运费
+                  </button>
+                </>
+              );
+            })()}
+          </details>
           {operationsCoordination.secondaryTodoCount > 0 && (
             <details className="order-coordination-secondary shipment-records-secondary-todos">
               <summary>另有 {operationsCoordination.secondaryTodoCount} 项</summary>
@@ -3703,23 +3776,59 @@ function ShipmentRecordsSection({
     </div>
   );
   if (embedded) {
-    return <div className="shipment-records-embedded" role="region" aria-label="发货记录">{content}</div>;
+    return (
+      <>
+        <div className="shipment-records-embedded" role="region" aria-label="发货记录">{content}</div>
+        {recordFundsTarget && (
+          <FinanceRecordDialog
+            api={api}
+            preset={recordFundsTarget.preset}
+            onClose={() => setRecordFundsTarget(null)}
+            onSaved={() => {
+              setFundsByRecord((previous) => {
+                const next = { ...previous };
+                delete next[recordFundsTarget.recordId];
+                return next;
+              });
+              loadFundsForRecord(recordFundsTarget.recordId);
+            }}
+          />
+        )}
+      </>
+    );
   }
   return (
-    <section
-      className="shipment-groups-section shipment-records-section"
-      aria-labelledby="shipment-records-title"
-      aria-label="发货记录"
-    >
-      <div className="shipment-groups-section__heading">
-        <div>
-          <h2 id="shipment-records-title">发货记录</h2>
-          <p>实际发出后形成独立记录；包裹与订单商品、数量始终可以相互追溯。</p>
+    <>
+      <section
+        className="shipment-groups-section shipment-records-section"
+        aria-labelledby="shipment-records-title"
+        aria-label="发货记录"
+      >
+        <div className="shipment-groups-section__heading">
+          <div>
+            <h2 id="shipment-records-title">发货记录</h2>
+            <p>实际发出后形成独立记录；包裹与订单商品、数量始终可以相互追溯。</p>
+          </div>
+          <span>{records.length} 条记录</span>
         </div>
-        <span>{records.length} 条记录</span>
-      </div>
-      {content}
-    </section>
+        {content}
+      </section>
+      {recordFundsTarget && (
+        <FinanceRecordDialog
+          api={api}
+          preset={recordFundsTarget.preset}
+          onClose={() => setRecordFundsTarget(null)}
+          onSaved={() => {
+            setFundsByRecord((previous) => {
+              const next = { ...previous };
+              delete next[recordFundsTarget.recordId];
+              return next;
+            });
+            loadFundsForRecord(recordFundsTarget.recordId);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -10478,6 +10587,29 @@ function DetailWorkspace({
     message: string;
   } | null>(null);
   const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
+  const [orderFunds, setOrderFunds] = useState<FinanceFactsForSource | null>(null);
+  const [orderFundsError, setOrderFundsError] = useState(false);
+  const [recordFundsOpen, setRecordFundsOpen] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setOrderFunds(null);
+    setOrderFundsError(false);
+    api.queryFinanceFactsForSource('order', details.order.id)
+      .then((facts) => {
+        if (!cancelled) setOrderFunds(facts);
+      })
+      .catch(() => {
+        if (!cancelled) setOrderFundsError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, details.order.id]);
+  const reloadOrderFunds = () => {
+    api.queryFinanceFactsForSource('order', details.order.id)
+      .then(setOrderFunds)
+      .catch(() => setOrderFundsError(true));
+  };
   useEffect(() => {
     setCustomValues(details.customFieldValues ?? []);
     setCustomFieldValidity({});
@@ -11056,6 +11188,23 @@ function DetailWorkspace({
 
           <section className="detail-section">
             <div className="detail-section-title">
+              <h2>资金</h2>
+              <span>成交金额在订单上，结算与费用分别记账</span>
+            </div>
+            {orderFundsError
+              ? <p className="workspace-subtitle">资金读取失败，请稍后重试</p>
+              : <FinanceFactsSummary facts={orderFunds} />}
+            <button
+              className="button button--quiet"
+              type="button"
+              onClick={() => setRecordFundsOpen(true)}
+            >
+              记平台结算 / 服务费
+            </button>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
               <h2>交易时间</h2>
               <span>原文与规范化值</span>
             </div>
@@ -11347,6 +11496,19 @@ function DetailWorkspace({
             setMaintainingStatusAndLogistics(false);
             setStatusLogisticsFeedback('已更新 1 笔订单。');
           }}
+        />
+      )}
+      {recordFundsOpen && (
+        <FinanceRecordDialog
+          api={api}
+          preset={{
+            sourceType: 'order',
+            sourceId: order.id,
+            sourceLabel: `订单 ${order.orderNumber}`,
+            defaultType: 'platform_settlement',
+          }}
+          onClose={() => setRecordFundsOpen(false)}
+          onSaved={reloadOrderFunds}
         />
       )}
     </section>

@@ -59,6 +59,7 @@ import {
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { AftersalesWorkflowTemplateService } from './aftersales-workflow-template-service';
 import { InventoryLedgerService } from './inventory-ledger-service';
+import { FundsService } from './funds-service';
 import { Workspace } from './workspace';
 import type { ShipmentRecord } from '../core/shipment-records';
 
@@ -1857,6 +1858,16 @@ export class AftersalesApplicationService {
           prepared.note,
           now,
         );
+        // 业务资金钩子（#74）：每笔实际退款自动立一条退款待确认事项，
+        // 锚点是本笔退款记录；确认到账仍由资金模块人工完成，状态变化不静默确认。
+        this.fundsService().recordBusinessPendingFact({
+          type: 'refund',
+          amountCents: prepared.actualRefundCents,
+          sourceType: 'aftersales_case',
+          sourceId: financialRecordId,
+          note: prepared.note,
+          occurredAt: prepared.occurredAt,
+        });
         if (outboundRefundSupported) {
           this.workspace.database.prepare(`
             INSERT INTO aftersales_outbound_exception_refund_links (
@@ -3555,6 +3566,10 @@ export class AftersalesApplicationService {
 
   private inventoryLedgerService(): InventoryLedgerService {
     return new InventoryLedgerService(this.workspace);
+  }
+
+  private fundsService(): FundsService {
+    return new FundsService(this.workspace);
   }
 
   private advanceCase(

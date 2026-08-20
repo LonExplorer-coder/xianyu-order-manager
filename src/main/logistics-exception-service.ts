@@ -15,6 +15,7 @@ import {
   type LogisticsExceptionType,
 } from '../core/logistics-exceptions';
 import { Workspace } from './workspace';
+import { FundsService } from './funds-service';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -25,6 +26,10 @@ export type LogisticsSubject = {
 
 export class LogisticsExceptionService {
   public constructor(private readonly workspace: Workspace) {}
+
+  private fundsService(): FundsService {
+    return new FundsService(this.workspace);
+  }
 
   public openException(input: {
     subject: LogisticsSubject;
@@ -257,6 +262,18 @@ export class LogisticsExceptionService {
         input.approvedAmountCents,
         now,
       );
+      // 业务资金钩子（#74）：承运方同意赔付只立待确认事项，锚点是本索赔；
+      // 实际到账前保持待确认，确认实际赔付不自动生成资金记录。
+      if (input.outcome === 'approved' && input.approvedAmountCents !== null) {
+        this.fundsService().recordBusinessPendingFact({
+          type: 'carrier_claim',
+          amountCents: input.approvedAmountCents,
+          sourceType: 'logistics_exception',
+          sourceId: claim.id,
+          note: input.reason,
+          occurredAt: input.occurredAt,
+        });
+      }
     });
     return this.requireClaim(input.subject);
   }

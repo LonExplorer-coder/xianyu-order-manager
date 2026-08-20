@@ -13,7 +13,7 @@ import type {
 } from '../src/core/contracts';
 import { projectAftersalesWorkflowSteps } from '../src/core/aftersales-workflow-templates';
 import { LocalApplication } from '../src/main/local-application';
-import { removeVersion49ExtensionArtifacts } from './version31-fixture';
+import { clearVersion58FundsData, removeVersion49ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
 const unusedRecognizer: Recognizer = {
@@ -719,6 +719,7 @@ describe('售后退款事实模型（规格 3.6 判断表）', () => {
       enableForeignKeyConstraints: true,
     });
     try {
+      clearVersion58FundsData(legacy);
       removeVersion49ExtensionArtifacts(legacy);
     } finally {
       legacy.close();

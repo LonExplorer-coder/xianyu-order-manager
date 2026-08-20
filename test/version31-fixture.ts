@@ -1,5 +1,19 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// 迁移旅程测试降级前的资金数据清理：业务钩子（#74）会在旅程中生成待确认资金事项，
+// 降级守卫会拒绝带走资金数据；测试里显式清空（先摘删除触发器再复原）。
+export function clearVersion58FundsData(database: DatabaseSync): void {
+  database.exec(`
+    DROP TRIGGER IF EXISTS finance_pending_items_are_immutable_on_delete;
+    DELETE FROM finance_pending_items;
+    CREATE TRIGGER finance_pending_items_are_immutable_on_delete
+    BEFORE DELETE ON finance_pending_items
+    BEGIN
+      SELECT RAISE(ABORT, 'finance pending items cannot be deleted; cancel instead');
+    END;
+  `);
+}
+
 // v58 建立资金事实双表（待确认资金事项、资金记录）；存在资金数据时拒绝降级。
 export function removeVersion58ExtensionArtifacts(database: DatabaseSync): void {
   const applied = database.prepare(

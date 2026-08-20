@@ -16,6 +16,13 @@ import {
   type RecordSupplierReturnInput,
 } from '../core/purchase-orders';
 import { DialogShell, EmptyState, InlineError, ReasonField } from './DialogShell';
+import {
+  FinanceFactsSummary,
+  FinanceRecordDialog,
+  financeFactsNetCents,
+  type FinanceRecordDialogPreset,
+} from './FinanceFacts';
+import type { FinanceFactsForSource } from '../core/funds';
 
 type OrderLineDraft = {
   standardProductId: string;
@@ -103,6 +110,14 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
   const [returnLines, setReturnLines] = useState<ReturnLineDraft[]>([
     { standardProductId: '', quantity: '', state: 'defective' },
   ]);
+  const [fundsByOrder, setFundsByOrder] = useState<Record<
+    string,
+    { facts: FinanceFactsForSource | null; state: 'loading' | 'ready' | 'error' }
+  >>({});
+  const [recordFundsTarget, setRecordFundsTarget] = useState<{
+    preset: FinanceRecordDialogPreset;
+    reloadOrderIds: readonly string[];
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,6 +149,51 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
   const suppliers = view?.suppliers ?? [];
   const orders = view?.orders ?? [];
   const supplierReturns = view?.supplierReturns ?? [];
+
+  // 采购的资金影响按订单懒加载：付款挂采购订单、供应方退款挂退货记录，展示时合并。
+  function loadFundsForOrder(orderId: string): void {
+    if (fundsByOrder[orderId]) return;
+    setFundsByOrder((previous) => ({
+      ...previous,
+      [orderId]: { facts: null, state: 'loading' },
+    }));
+    const relatedReturns = supplierReturns.filter((record) => (
+      record.purchaseOrderId === orderId
+    ));
+    Promise.all([
+      api.queryFinanceFactsForSource('purchase_order', orderId),
+      ...relatedReturns.map((record) => (
+        api.queryFinanceFactsForSource('supplier_return', record.id)
+      )),
+    ])
+      .then((parts) => {
+        setFundsByOrder((previous) => ({
+          ...previous,
+          [orderId]: {
+            facts: {
+              pendingItems: parts.flatMap((part) => part.pendingItems),
+              records: parts.flatMap((part) => part.records),
+            },
+            state: 'ready',
+          },
+        }));
+      })
+      .catch(() => {
+        setFundsByOrder((previous) => ({
+          ...previous,
+          [orderId]: { facts: null, state: 'error' },
+        }));
+      });
+  }
+
+  function reloadFundsForOrders(orderIds: readonly string[]): void {
+    setFundsByOrder((previous) => {
+      const next = { ...previous };
+      for (const orderId of orderIds) delete next[orderId];
+      return next;
+    });
+    for (const orderId of orderIds) loadFundsForOrder(orderId);
+  }
 
   const openDialog = (next: OrderDialogKind) => {
     setFormError('');
@@ -436,6 +496,20 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                         </button>
                       </>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setRecordFundsTarget({
+                        preset: {
+                          sourceType: 'purchase_order',
+                          sourceId: order.id,
+                          sourceLabel: `第 ${order.sequence} 号采购订单 · ${order.supplierName}`,
+                          defaultType: 'purchase_cost',
+                        },
+                        reloadOrderIds: [order.id],
+                      })}
+                    >
+                      登记付款 / 退款
+                    </button>
                     {order.status === 'cancelled' && order.cancelReason && (
                       <span>取消原因：{order.cancelReason}</span>
                     )}
@@ -471,6 +545,37 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                       ))}
                     </ul>
                   </details>
+                  <details
+                    onToggle={(event) => {
+                      if ((event.target as HTMLDetailsElement).open) {
+                        loadFundsForOrder(order.id);
+                      }
+                    }}
+                  >
+                    <summary>资金（付款与退款）</summary>
+                    {(() => {
+                      const funds = fundsByOrder[order.id];
+                      if (!funds || funds.state === 'loading') {
+                        return <small>正在读取资金记录…</small>;
+                      }
+                      if (funds.state === 'error') {
+                        return <small>资金记录读取失败，请收起后重新展开</small>;
+                      }
+                      return (
+                        <>
+                          {funds.facts && funds.facts.records.length > 0 && (
+                            <p className="workspace-subtitle">
+                              采购净支出 {formatMoney(-financeFactsNetCents(funds.facts))}
+                              {order.payable
+                                ? ` · 待确认应付 ${formatMoney(order.payable.amountCents)}`
+                                : ''}
+                            </p>
+                          )}
+                          <FinanceFactsSummary facts={funds.facts} />
+                        </>
+                      );
+                    })()}
+                  </details>
                 </article>
               ))}
           </div>
@@ -491,6 +596,7 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                     <th>出货状态</th>
                     <th>原因</th>
                     <th>时间</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -512,6 +618,27 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                       {index === 0 && <td rowSpan={record.items.length}>{record.reason}</td>}
                       {index === 0 && (
                         <td rowSpan={record.items.length}>{formatTime(record.occurredAt)}</td>
+                      )}
+                      {index === 0 && (
+                        <td rowSpan={record.items.length}>
+                          <button
+                            type="button"
+                            onClick={() => setRecordFundsTarget({
+                              preset: {
+                                sourceType: 'supplier_return',
+                                sourceId: record.id,
+                                sourceLabel: `供应方退货 · ${record.supplierName}`,
+                                defaultType: 'purchase_cost',
+                                defaultDirection: 'income',
+                              },
+                              reloadOrderIds: record.purchaseOrderId
+                                ? [record.purchaseOrderId]
+                                : [],
+                            })}
+                          >
+                            记供应方退款
+                          </button>
+                        </td>
                       )}
                     </tr>
                   )))}
@@ -950,6 +1077,15 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
           <InlineError message={formError} />
           <DialogFooter label="登记退货" saving={saving} onCancel={closeDialog} />
         </DialogShell>
+      )}
+
+      {recordFundsTarget && (
+        <FinanceRecordDialog
+          api={api}
+          preset={recordFundsTarget.preset}
+          onClose={() => setRecordFundsTarget(null)}
+          onSaved={() => reloadFundsForOrders(recordFundsTarget.reloadOrderIds)}
+        />
       )}
     </>,
   );

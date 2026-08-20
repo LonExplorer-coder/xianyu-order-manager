@@ -640,6 +640,12 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.recordSupplierReturn(input)
   ));
   ipcMain.handle('funds:view', () => desktopSession.queryFunds());
+  ipcMain.handle('funds:facts-for-source', (_event, sourceType: string, sourceId: string) => (
+    desktopSession.queryFinanceFactsForSource(sourceType as never, sourceId)
+  ));
+  ipcMain.handle('funds:facts-for-aftersales-case', (_event, caseId: string) => (
+    desktopSession.queryFinanceFactsForAftersalesCase(caseId)
+  ));
   ipcMain.handle('funds:confirm-pending-item', (_event, input: unknown) => (
     desktopSession.confirmPendingFinanceItem(input)
   ));

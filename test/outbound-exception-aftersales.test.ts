@@ -12,7 +12,7 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
-import { downgradeVersion35ToOriginalSchema } from './version31-fixture';
+import { clearVersion58FundsData, downgradeVersion35ToOriginalSchema } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
 
@@ -271,6 +271,7 @@ describe('正向发货异常上层处理', () => {
     openedApplications.splice(openedApplications.indexOf(application), 1);
     const database = new DatabaseSync(join(root, '数据', 'xianyu-order-manager.sqlite3'));
     try {
+      clearVersion58FundsData(database);
       downgradeVersion35ToOriginalSchema(database);
       expect(database.prepare(`
         SELECT name FROM sqlite_schema

@@ -643,6 +643,14 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
         pendingRemainingCents: 0,
       },
     }),
+    queryFinanceFactsForSource: vi.fn().mockResolvedValue({
+      pendingItems: [],
+      records: [],
+    }),
+    queryFinanceFactsForAftersalesCase: vi.fn().mockResolvedValue({
+      pendingItems: [],
+      records: [],
+    }),
     confirmPendingFinanceItem: vi.fn(),
     cancelPendingFinanceItem: vi.fn(),
     recordFinanceRecord: vi.fn(),

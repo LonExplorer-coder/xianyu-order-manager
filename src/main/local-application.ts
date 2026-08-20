@@ -278,7 +278,7 @@ import { AftersalesWorkflowTemplateService } from './aftersales-workflow-templat
 import { FulfillmentDemandService } from './fulfillment-demand-service';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
-import type { FundsView } from '../core/funds';
+import type { FundsView, FinanceFactsForSource, FinanceSourceTypeName } from '../core/funds';
 import { InventoryLedgerService } from './inventory-ledger-service';
 import { PurchaseOrderService } from './purchase-order-service';
 import { FundsService } from './funds-service';
@@ -6188,6 +6188,17 @@ export class LocalApplication {
 
   public queryFunds(): FundsView {
     return this.fundsService().view();
+  }
+
+  public queryFinanceFactsForSource(
+    sourceType: FinanceSourceTypeName,
+    sourceId: string,
+  ): FinanceFactsForSource {
+    return this.fundsService().factsForSource(sourceType, sourceId);
+  }
+
+  public queryFinanceFactsForAftersalesCase(caseId: string): FinanceFactsForSource {
+    return this.fundsService().factsForAftersalesCase(caseId);
   }
 
   public recordPendingFinanceItem(input: unknown): FundsView {

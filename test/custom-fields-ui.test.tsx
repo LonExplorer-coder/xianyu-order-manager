@@ -345,6 +345,10 @@ function createApi(
     removeOcrApiKey: vi.fn(),
     testOcrConnection: vi.fn(),
     listCustomFieldDefinitions: vi.fn().mockResolvedValue([]),
+    queryFinanceFactsForSource: vi.fn().mockResolvedValue({
+      pendingItems: [],
+      records: [],
+    }),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
     listTableTemplates: vi.fn().mockResolvedValue([]),
