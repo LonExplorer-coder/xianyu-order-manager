@@ -223,7 +223,6 @@ describe('发货组 Electron IPC', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
-      masking: 'masked',
     };
 
     await expect(invoke(

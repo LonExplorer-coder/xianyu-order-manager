@@ -217,6 +217,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(58)) migrateToVersion58(database);
   if (!versions.has(59)) migrateToVersion59(database);
   if (!versions.has(60)) migrateToVersion60(database);
+  if (!versions.has(61)) migrateToVersion61(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -7270,6 +7271,143 @@ function migrateToVersion60(database: DatabaseSync): void {
   } catch (error) {
     rollbackQuietly(database);
     throw error;
+  }
+}
+
+// v61 将字段级模板脱敏规则写入每套表格模板，并安全升级存量模板。
+function migrateToVersion61(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  let transactionStarted = false;
+  try {
+    database.exec('BEGIN IMMEDIATE;');
+    transactionStarted = true;
+    database.exec(`
+      DROP TRIGGER custom_field_definitions_keep_template_granularity_on_update;
+      DROP TRIGGER table_templates_prevent_granularity_change_with_dependencies;
+      DROP TRIGGER table_template_dependencies_match_granularity_on_insert;
+      DROP TRIGGER table_template_dependencies_match_granularity_on_update;
+
+      CREATE TABLE table_templates_v61 (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        granularity TEXT NOT NULL
+          CHECK (granularity IN ('order', 'order_item', 'shipment_group')),
+        configuration_version INTEGER NOT NULL DEFAULT 3
+          CHECK (configuration_version = 3),
+        configuration_json TEXT NOT NULL CHECK (
+          json_valid(configuration_json)
+          AND json_type(configuration_json) = 'object'
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (granularity, name_key)
+      ) STRICT;
+
+      INSERT INTO table_templates_v61 (
+        id, name, name_key, granularity, configuration_version,
+        configuration_json, created_at, updated_at
+      )
+      SELECT
+        id,
+        name,
+        name_key,
+        granularity,
+        3,
+        json_set(
+          configuration_json,
+          '$.maskingRules',
+          json_object(
+            'buyer_nickname', 'keep_first_and_last',
+            'recipient', 'keep_surname',
+            'phone', 'keep_first_3_last_4',
+            'address', 'keep_region'
+          )
+        ),
+        created_at,
+        updated_at
+      FROM table_templates;
+
+      DROP TABLE table_templates;
+      ALTER TABLE table_templates_v61 RENAME TO table_templates;
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_insert
+      BEFORE INSERT ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_template_dependencies_match_granularity_on_update
+      BEFORE UPDATE ON table_template_custom_field_dependencies
+      WHEN EXISTS (
+        SELECT 1
+        FROM table_templates AS templates
+        JOIN custom_field_definitions AS definitions
+          ON definitions.id = NEW.definition_id
+        WHERE templates.id = NEW.template_id
+          AND templates.granularity <> definitions.granularity
+      )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+
+      CREATE TRIGGER table_templates_prevent_granularity_change_with_dependencies
+      BEFORE UPDATE OF granularity ON table_templates
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies
+          WHERE template_id = OLD.id
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'cannot change table template granularity with custom field dependencies'
+        );
+      END;
+
+      CREATE TRIGGER custom_field_definitions_keep_template_granularity_on_update
+      BEFORE UPDATE OF granularity ON custom_field_definitions
+      WHEN OLD.granularity <> NEW.granularity
+        AND EXISTS (
+          SELECT 1
+          FROM table_template_custom_field_dependencies AS dependencies
+          JOIN table_templates AS templates
+            ON templates.id = dependencies.template_id
+          WHERE dependencies.definition_id = OLD.id
+            AND templates.granularity <> NEW.granularity
+        )
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          'table template and custom field granularities do not match'
+        );
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (61, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+    transactionStarted = false;
+  } catch (error) {
+    if (transactionStarted) rollbackQuietly(database);
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

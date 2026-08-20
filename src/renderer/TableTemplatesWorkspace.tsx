@@ -6,6 +6,8 @@ import type { ShipmentGroupWorkbenchQuery } from '../core/shipment-groups';
 import {
   availableTableFields,
   DEFAULT_DYNAMIC_PRODUCT_TABLE_GROUP,
+  DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
+  TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS,
   fieldReferenceKey,
   isDynamicProductTableGroup,
   tableTemplateLayoutItemKey,
@@ -14,6 +16,7 @@ import {
   type TableTemplateColumn,
   type TableTemplateGranularity,
   type TableTemplateLayoutItem,
+  type TableTemplateMaskingRules,
   type UpdateTableTemplateInput,
 } from '../core/table-templates';
 
@@ -37,6 +40,7 @@ type TemplateDraft = {
   granularity: TableTemplateGranularity;
   columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery;
+  maskingRules: TableTemplateMaskingRules;
 };
 
 const DEFAULT_FIELD_KEYS: Record<TableTemplateGranularity, string[]> = {
@@ -184,6 +188,7 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
       granularity: template.granularity,
       columns: cloneLayoutItems(template.columns),
       query: cloneQuery(template.query),
+      maskingRules: structuredClone(template.maskingRules),
     });
     setFeedback('');
   }
@@ -204,23 +209,27 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             granularity: 'order',
             columns: cloneLayoutItems(draft.columns),
             query: cloneQuery(draft.query as OrderWorkbenchQuery),
+            maskingRules: structuredClone(draft.maskingRules),
           }
         : draft.granularity === 'order_item' ? {
             name: draft.name,
             granularity: 'order_item',
             columns: cloneLayoutItems(draft.columns) as TableTemplateColumn[],
             query: cloneQuery(draft.query as OrderItemWorkbenchQuery),
+            maskingRules: structuredClone(draft.maskingRules),
           } : {
             name: draft.name,
             granularity: 'shipment_group',
             columns: cloneLayoutItems(draft.columns) as TableTemplateColumn[],
             query: cloneQuery(draft.query as ShipmentGroupWorkbenchQuery),
+            maskingRules: structuredClone(draft.maskingRules),
           };
       if (editingTemplateId) {
         const update: UpdateTableTemplateInput = {
           name: input.name,
           columns: input.columns,
           query: input.query,
+          maskingRules: input.maskingRules,
         };
         await props.onUpdate(editingTemplateId, update);
         setFeedback('模板修改已保存。');
@@ -495,6 +504,42 @@ export function TableTemplatesWorkspace(props: TableTemplatesWorkspaceProps) {
             </button>
           </div>
 
+          <fieldset className="template-masking-rules">
+            <legend>模板脱敏规则</legend>
+            <p>只影响导出预览和 Excel；应用内始终显示完整原文。</p>
+            {TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.some(({ granularities }) => (
+              granularities.some((granularity) => granularity === draft.granularity)
+            )) ? (
+              <div className="template-masking-rules__grid">
+                {TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.filter(({ granularities }) => (
+                  granularities.some((granularity) => granularity === draft.granularity)
+                )).map((field) => (
+                  <label key={field.key}>
+                    <span>{field.label}</span>
+                    <select
+                      aria-label={`${field.label}导出方式`}
+                      value={draft.maskingRules[field.key]}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        maskingRules: {
+                          ...current.maskingRules,
+                          [field.key]: event.target.value,
+                        } as TableTemplateMaskingRules,
+                      }))}
+                    >
+                      <option value={field.maskedRule}>
+                        {field.maskedDescription}（默认）
+                      </option>
+                      <option value="original">完整显示</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="template-masking-rules__empty">当前数据粒度没有个人信息字段。</p>
+            )}
+          </fieldset>
+
           <fieldset className="template-field-picker">
             <div className="template-field-picker__heading">
               <legend>选择字段</legend>
@@ -739,7 +784,13 @@ function newDraft(
   if (columns.length === 0 && fields[0]) {
     columns = [{ field: { ...fields[0].reference }, displayName: fields[0].defaultLabel }];
   }
-  return { name: '', granularity, columns, query: cloneQuery(query) };
+  return {
+    name: '',
+    granularity,
+    columns,
+    query: cloneQuery(query),
+    maskingRules: structuredClone(DEFAULT_TABLE_TEMPLATE_MASKING_RULES),
+  };
 }
 
 function cloneLayoutItems(columns: readonly TableTemplateLayoutItem[]): TableTemplateLayoutItem[] {

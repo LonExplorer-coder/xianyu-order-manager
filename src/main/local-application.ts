@@ -276,6 +276,7 @@ import type {
 import {
   DEFAULT_ORDER_TABLE_COLUMNS,
   DEFAULT_SHIPMENT_GROUP_TABLE_COLUMNS,
+  DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
   normalizeCreateTableTemplateInput,
   normalizeStoredTableTemplateInput,
   normalizeShipmentGroupWorkbenchQuery,
@@ -1730,7 +1731,7 @@ export class LocalApplication {
         INSERT INTO table_templates (
           id, name, name_key, granularity, configuration_version,
           configuration_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 2, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, 3, ?, ?, ?)
       `).run(
         template.id,
         template.name,
@@ -1756,7 +1757,10 @@ export class LocalApplication {
     const normalizedInput = normalizeUpdateTableTemplateInput(
       templateId,
       existing.granularity,
-      input,
+      {
+        ...input,
+        maskingRules: input.maskingRules ?? existing.maskingRules,
+      },
       definitions,
     );
     const normalized = normalizeTableTemplateCustomFilter({
@@ -2009,12 +2013,15 @@ export class LocalApplication {
       shipmentGroupDefinitions,
     );
     const plan = createOrderExportWorkbookPlan({
-      masking: normalizedInput.masking,
       includeOrderItems: true,
       orders: orderResult.orders,
       orderItems: orderItemResult.items,
       orderColumns,
       orderItemColumns,
+      orderMaskingRules: orderTemplate?.maskingRules
+        ?? DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
+      orderItemMaskingRules: orderItemTemplate?.maskingRules
+        ?? DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       orderCustomFieldValues: orderResult.customFieldValues,
       orderItemCustomFieldValues: orderItemResult.customFieldValues,
@@ -2022,6 +2029,8 @@ export class LocalApplication {
       orderMaximumItemCount: scopeStats.maximumItemCount,
       shipmentGroups: projectedGroups,
       shipmentGroupColumns,
+      shipmentGroupMaskingRules: shipmentGroupTemplate?.maskingRules
+        ?? DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
       shipmentGroupCustomFieldValues: groupCustomFieldValues,
     });
     return {
@@ -2091,12 +2100,15 @@ export class LocalApplication {
         };
     const addressRegions = this.orderExportAddressRegions(projectedOrderIds);
     const plan = createOrderExportWorkbookPlan({
-      masking: normalizedInput.masking,
       includeOrderItems: normalizedInput.includeOrderItems,
       orders: orderResult.orders,
       orderItems: orderItemResult.items,
       orderColumns,
       orderItemColumns,
+      orderMaskingRules: orderTemplate?.maskingRules
+        ?? DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
+      orderItemMaskingRules: orderItemTemplate?.maskingRules
+        ?? DEFAULT_TABLE_TEMPLATE_MASKING_RULES,
       customFieldDefinitions: this.listCustomFieldDefinitions(),
       orderCustomFieldValues: orderResult.customFieldValues,
       orderItemCustomFieldValues: orderItemResult.customFieldValues,
@@ -10207,7 +10219,7 @@ function parseTableTemplateRow(
   row: SqlRow,
   definitions: readonly CustomFieldDefinition[],
 ): TableTemplate {
-  if (asNumber(row.configuration_version) !== 2) {
+  if (asNumber(row.configuration_version) !== 3) {
     throw new Error('数据库表格模板配置版本不受支持');
   }
   let configuration: unknown;
@@ -10220,7 +10232,9 @@ function parseTableTemplateRow(
     throw new Error('数据库表格模板配置格式错误');
   }
   const config = configuration as Record<string, unknown>;
-  if (Object.keys(config).some((key) => key !== 'columns' && key !== 'query')) {
+  if (Object.keys(config).some((key) => (
+    key !== 'columns' && key !== 'query' && key !== 'maskingRules'
+  ))) {
     throw new Error('数据库表格模板配置包含未知属性');
   }
   const normalized = normalizeLegacyOrderItemDefaultDisplayNames(normalizeTableTemplateCustomFilter(
@@ -10229,6 +10243,7 @@ function parseTableTemplateRow(
       granularity: parseTableTemplateGranularity(row.granularity),
       columns: config.columns,
       query: config.query,
+      maskingRules: config.maskingRules,
     }, definitions),
     definitions,
   ));
@@ -10290,6 +10305,7 @@ function serializeTableTemplateConfiguration(template: TableTemplate): string {
   return JSON.stringify({
     columns: template.columns,
     query: template.query,
+    maskingRules: template.maskingRules,
   });
 }
 

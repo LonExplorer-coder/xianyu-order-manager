@@ -659,7 +659,7 @@ describe('第二阶段业务闭环验收', () => {
 
     const maskedPath = join(state.testRoot, '三表导出-默认脱敏.xlsx');
     await application.exportShipmentGroupsToWorkbook(
-      { ...baseExport, masking: 'masked' },
+      baseExport,
       maskedPath,
     );
     const maskedWorkbook = new ExcelJS.Workbook();
@@ -668,9 +668,38 @@ describe('第二阶段业务闭环验收', () => {
     if (!maskedGroupSheet) throw new Error('缺少合并发货表');
     expect(sheetHasCell(maskedGroupSheet, '13800001001')).toBe(false);
 
-    const plainPath = join(state.testRoot, '三表导出-关闭脱敏.xlsx');
+    const originalRules = {
+      buyer_nickname: 'original' as const,
+      recipient: 'original' as const,
+      phone: 'original' as const,
+      address: 'original' as const,
+    };
+    const orderTemplate = application.createTableTemplate({
+      name: '验收内部订单表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'system_order_number' }, displayName: '系统订单编号' },
+      ],
+      query: {},
+      maskingRules: originalRules,
+    });
+    const groupTemplate = application.createTableTemplate({
+      name: '验收内部发货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+        { field: { kind: 'builtin', key: 'address' }, displayName: '最终收货地址' },
+      ],
+      query: {},
+      maskingRules: originalRules,
+    });
+    const plainPath = join(state.testRoot, '三表导出-模板完整显示.xlsx');
     await application.exportShipmentGroupsToWorkbook(
-      { ...baseExport, masking: 'original' },
+      {
+        ...baseExport,
+        orderTemplateId: orderTemplate.id,
+        shipmentGroupTemplateId: groupTemplate.id,
+      },
       plainPath,
     );
     const workbook = new ExcelJS.Workbook();

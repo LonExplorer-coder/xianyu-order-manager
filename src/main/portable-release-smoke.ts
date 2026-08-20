@@ -761,7 +761,6 @@ async function createPortableSmokeImportExportLoop(
     orderTemplateId: null,
     orderItemTemplateId: null,
     shipmentGroupTemplateId: null,
-    masking: 'original',
   }, destinationPath);
   return await verifyPortableSmokeImportExportWorkbook(configDirectory);
 }

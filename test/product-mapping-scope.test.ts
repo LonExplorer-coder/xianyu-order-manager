@@ -606,7 +606,7 @@ describe('商品映射三级适用范围', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 60 });
+        .toEqual({ version: 61 });
       expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       reopened.close();

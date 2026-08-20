@@ -198,7 +198,6 @@ describe('表格模板 Electron IPC', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked',
     };
     await expect(invoke('orders:export', { ...valid, destinationPath: '/tmp/leak.xlsx' }))
       .rejects.toThrow(/未知属性/);
@@ -213,7 +212,7 @@ describe('表格模板 Electron IPC', () => {
     await expect(invoke('orders:export', { ...valid, orderTemplateId: 42 }))
       .rejects.toThrow(/模板/);
     await expect(invoke('orders:export', { ...valid, masking: 'none' }))
-      .rejects.toThrow(/脱敏/);
+      .rejects.toThrow(/未知属性/);
     await expect(invoke('orders:export', { ...valid, includeOrderItems: '是' }))
       .rejects.toThrow(/订单商品明细表导出选项/);
 
@@ -225,6 +224,7 @@ describe('表格模板 Electron IPC', () => {
         columns: [{ header: '系统订单编号', valueType: 'text' as const }],
         rows: [['20260813-000001']],
         totalRowCount: 1,
+        maskingSummary: ['无个人信息字段'],
       }],
     };
     const previewOrderExport = vi.spyOn(session, 'previewOrderExport')
@@ -233,8 +233,7 @@ describe('表格模板 Electron IPC', () => {
     await expect(invoke('orders:preview-export', valid)).resolves.toEqual(preview);
     expect(previewOrderExport).toHaveBeenCalledWith(valid);
     await expect(invoke('orders:preview-export', { ...valid, masking: 'original' }))
-      .resolves.toEqual(preview);
-    expect(previewOrderExport).toHaveBeenLastCalledWith({ ...valid, masking: 'original' });
+      .rejects.toThrow(/未知属性/);
     expect(electronBoundary.showSaveDialog).not.toHaveBeenCalled();
     await expect(invoke('orders:preview-export', { ...valid, unknown: true }))
       .rejects.toThrow(/未知属性/);

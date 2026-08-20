@@ -256,7 +256,6 @@ describe('发货组字段与模板持久化', () => {
       orderTemplateId: orderTemplate.id,
       orderItemTemplateId: itemTemplate.id,
       shipmentGroupTemplateId: groupTemplate.id,
-      masking: 'masked' as const,
     };
 
     const preview = application.previewShipmentGroupExport(input);
@@ -318,7 +317,6 @@ describe('发货组字段与模板持久化', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
-      masking: 'masked',
     })).toThrow('请先确认最终收件人再导出');
   });
 
@@ -339,7 +337,6 @@ describe('发货组字段与模板持久化', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
-      masking: 'masked' as const,
     };
 
     expect(application.previewShipmentGroupExport(input).orderCount).toBe(2);
@@ -367,7 +364,6 @@ describe('发货组字段与模板持久化', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
-      masking: 'masked',
     })).toThrow('一次最多导出 10000 笔发货组成员订单');
   });
 
@@ -509,7 +505,6 @@ describe('发货组字段与模板持久化', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: template.id,
-      masking: 'masked',
     });
     expect(preview.sheets[2].rows).toEqual([['广东省深圳市福田区***']]);
   });

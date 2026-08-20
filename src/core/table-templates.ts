@@ -33,6 +33,49 @@ export const TABLE_TEMPLATE_GRANULARITIES = [
 
 export type TableTemplateGranularity = (typeof TABLE_TEMPLATE_GRANULARITIES)[number];
 
+export type TableTemplateMaskingRules = {
+  buyer_nickname: 'original' | 'keep_first_and_last';
+  recipient: 'original' | 'keep_surname';
+  phone: 'original' | 'keep_first_3_last_4';
+  address: 'original' | 'keep_region';
+};
+
+export const TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS = [{
+  key: 'buyer_nickname',
+  label: '买家昵称',
+  maskedRule: 'keep_first_and_last',
+  maskedDescription: '保留首尾字符',
+  granularities: ['order'],
+}, {
+  key: 'recipient',
+  label: '收件人',
+  maskedRule: 'keep_surname',
+  maskedDescription: '保留姓氏',
+  granularities: ['order', 'shipment_group'],
+}, {
+  key: 'phone',
+  label: '手机号',
+  maskedRule: 'keep_first_3_last_4',
+  maskedDescription: '保留前 3 后 4 位',
+  granularities: ['order', 'shipment_group'],
+}, {
+  key: 'address',
+  label: '收货地址',
+  maskedRule: 'keep_region',
+  maskedDescription: '仅保留省、市、区县',
+  granularities: ['order', 'shipment_group'],
+}] as const satisfies ReadonlyArray<{
+  key: keyof TableTemplateMaskingRules;
+  label: string;
+  maskedRule: string;
+  maskedDescription: string;
+  granularities: ReadonlyArray<TableTemplateGranularity>;
+}>;
+
+export const DEFAULT_TABLE_TEMPLATE_MASKING_RULES = Object.fromEntries(
+  TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.map(({ key, maskedRule }) => [key, maskedRule]),
+) as TableTemplateMaskingRules;
+
 /** 按粒度记住的当前表格模板标识；缺键表示该粒度使用默认视图。 */
 export type ActiveTableTemplateIds = Partial<Record<TableTemplateGranularity, string>>;
 
@@ -195,6 +238,7 @@ type OrderTableTemplateConfiguration = {
   granularity: 'order';
   columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery;
+  maskingRules: TableTemplateMaskingRules;
 };
 
 type OrderItemTableTemplateConfiguration = {
@@ -202,6 +246,7 @@ type OrderItemTableTemplateConfiguration = {
   granularity: 'order_item';
   columns: TableTemplateColumn[];
   query: OrderItemWorkbenchQuery;
+  maskingRules: TableTemplateMaskingRules;
 };
 
 type ShipmentGroupTableTemplateConfiguration = {
@@ -209,9 +254,21 @@ type ShipmentGroupTableTemplateConfiguration = {
   granularity: 'shipment_group';
   columns: TableTemplateColumn[];
   query: ShipmentGroupWorkbenchQuery;
+  maskingRules: TableTemplateMaskingRules;
 };
 
 export type CreateTableTemplateInput =
+  | (Omit<OrderTableTemplateConfiguration, 'maskingRules'> & {
+    maskingRules?: TableTemplateMaskingRules;
+  })
+  | (Omit<OrderItemTableTemplateConfiguration, 'maskingRules'> & {
+    maskingRules?: TableTemplateMaskingRules;
+  })
+  | (Omit<ShipmentGroupTableTemplateConfiguration, 'maskingRules'> & {
+    maskingRules?: TableTemplateMaskingRules;
+  });
+
+export type NormalizedTableTemplateConfiguration =
   | OrderTableTemplateConfiguration
   | OrderItemTableTemplateConfiguration
   | ShipmentGroupTableTemplateConfiguration;
@@ -220,6 +277,7 @@ export type UpdateTableTemplateInput = {
   name: string;
   columns: TableTemplateLayoutItem[];
   query: OrderWorkbenchQuery | OrderItemWorkbenchQuery | ShipmentGroupWorkbenchQuery;
+  maskingRules?: TableTemplateMaskingRules;
 };
 
 export type TableTemplate =
@@ -494,15 +552,15 @@ export function availableTableFields(
 export function normalizeCreateTableTemplateInput(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[],
-): CreateTableTemplateInput {
-  return normalizeTableTemplateInput(input, customFieldDefinitions, true);
+): NormalizedTableTemplateConfiguration {
+  return normalizeTableTemplateInput(input, customFieldDefinitions, true, false);
 }
 
 export function normalizeStoredTableTemplateInput(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[],
-): CreateTableTemplateInput {
-  return normalizeTableTemplateInput(input, customFieldDefinitions, false);
+): NormalizedTableTemplateConfiguration {
+  return normalizeTableTemplateInput(input, customFieldDefinitions, false, true);
 }
 
 export function normalizeShipmentGroupWorkbenchQuery(
@@ -520,21 +578,26 @@ function normalizeTableTemplateInput(
   input: unknown,
   customFieldDefinitions: readonly CustomFieldDefinition[],
   enforceFutureHeaderSafety: boolean,
-): CreateTableTemplateInput {
+  requireStoredMaskingRules: boolean,
+): NormalizedTableTemplateConfiguration {
   const record = strictRecord(
     input,
     '表格模板',
-    ['name', 'granularity', 'columns', 'query'],
+    ['name', 'granularity', 'columns', 'query', 'maskingRules'],
   );
+  if (requireStoredMaskingRules && record.maskingRules === undefined) {
+    throw new Error('数据库表格模板缺少模板脱敏规则');
+  }
   const name = nonEmptyText(record.name, '模板名称', MAX_TEMPLATE_NAME_LENGTH);
   const granularity = tableTemplateGranularity(record.granularity);
   const columns = normalizeColumns(record.columns, granularity, customFieldDefinitions);
   const query = normalizeQuery(record.query, granularity, customFieldDefinitions);
+  const maskingRules = normalizeTableTemplateMaskingRules(record.maskingRules);
   if (granularity === 'order') {
     if (enforceFutureHeaderSafety) {
       assertOrderTableLayoutFutureHeaderSafety(columns);
     }
-    return { name, granularity, columns, query: query as OrderWorkbenchQuery };
+    return { name, granularity, columns, query: query as OrderWorkbenchQuery, maskingRules };
   }
   if (granularity === 'shipment_group') {
     return {
@@ -542,6 +605,7 @@ function normalizeTableTemplateInput(
       granularity,
       columns: columns as TableTemplateColumn[],
       query: query as ShipmentGroupWorkbenchQuery,
+      maskingRules,
     };
   }
   return {
@@ -549,6 +613,7 @@ function normalizeTableTemplateInput(
     granularity,
     columns: columns as TableTemplateColumn[],
     query: query as OrderItemWorkbenchQuery,
+    maskingRules,
   };
 }
 
@@ -563,19 +628,47 @@ export function normalizeUpdateTableTemplateInput(
   const record = strictRecord(
     input,
     '表格模板更新',
-    ['name', 'columns', 'query'],
+    ['name', 'columns', 'query', 'maskingRules'],
   );
   const normalized = normalizeCreateTableTemplateInput({
     name: record.name,
     granularity,
     columns: record.columns,
     query: record.query,
+    maskingRules: record.maskingRules,
   }, customFieldDefinitions);
   return {
     name: normalized.name,
     columns: normalized.columns,
     query: normalized.query,
+    maskingRules: normalized.maskingRules,
   };
+}
+
+export function normalizeTableTemplateMaskingRules(
+  value: unknown,
+): TableTemplateMaskingRules {
+  if (value === undefined) return structuredClone(DEFAULT_TABLE_TEMPLATE_MASKING_RULES);
+  const record = strictRecord(
+    value,
+    '模板脱敏规则',
+    TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.map(({ key }) => key),
+  );
+  return Object.fromEntries(TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.map((definition) => [
+    definition.key,
+    maskingRule(record[definition.key], definition.label, definition.maskedRule),
+  ])) as TableTemplateMaskingRules;
+}
+
+function maskingRule<T extends string>(
+  value: unknown,
+  label: string,
+  maskedRule: T,
+): 'original' | T {
+  if (value !== 'original' && value !== maskedRule) {
+    throw new Error(`${label}模板脱敏规则无效`);
+  }
+  return value as 'original' | T;
 }
 
 export function fieldReferenceKey(reference: TableFieldReference): string {

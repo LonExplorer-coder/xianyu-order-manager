@@ -1,6 +1,7 @@
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -39,6 +40,68 @@ function closeApplication(application: LocalApplication): void {
 }
 
 describe('多套表格模板', () => {
+  it('拒绝缺失模板脱敏规则的当前版本存储配置', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const template = application.createTableTemplate({
+      name: '损坏配置测试',
+      granularity: 'order',
+      columns: [{ field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' }],
+      query: {},
+    });
+    const database = new DatabaseSync(join(dataDirectory, 'xianyu-order-manager.sqlite3'));
+    try {
+      database.prepare(`
+        UPDATE table_templates
+        SET configuration_json = json_remove(configuration_json, '$.maskingRules')
+        WHERE id = ?
+      `).run(template.id);
+    } finally {
+      database.close();
+    }
+
+    expect(() => application.listTableTemplates()).toThrow(/模板脱敏规则/u);
+  });
+
+  it('按模板持久保存并更新字段级模板脱敏规则', async () => {
+    const { application, dataDirectory } = await openApplication();
+    const created = application.createTableTemplate({
+      name: '内部发货表',
+      granularity: 'shipment_group',
+      columns: [
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+        { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+      ],
+      query: {},
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'original',
+        phone: 'original',
+        address: 'keep_region',
+      },
+    });
+    const updated = application.updateTableTemplate(created.id, {
+      name: created.name,
+      columns: created.columns,
+      query: created.query,
+      maskingRules: {
+        ...created.maskingRules,
+        phone: 'keep_first_3_last_4',
+      },
+    });
+
+    expect(updated.maskingRules).toEqual({
+      buyer_nickname: 'keep_first_and_last',
+      recipient: 'original',
+      phone: 'keep_first_3_last_4',
+      address: 'keep_region',
+    });
+    closeApplication(application);
+    const reopened = new LocalApplication(unusedRecognizer);
+    applications.push(reopened);
+    reopened.openDataDirectory(dataDirectory);
+    expect(reopened.listTableTemplates()).toEqual([updated]);
+  });
+
   it('按粒度保存多套命名模板，并在关闭数据目录后完整恢复列、别名、顺序、筛选和排序', async () => {
     const { application, dataDirectory } = await openApplication();
     const priority = application.createCustomFieldDefinition({

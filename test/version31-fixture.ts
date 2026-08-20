@@ -1,7 +1,104 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v61 将字段级模板脱敏规则写入表格模板；测试降级还原为 v60 的配置版本 2。
+export function removeVersion61ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 61',
+  ).get();
+  if (!applied) return;
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER custom_field_definitions_keep_template_granularity_on_update;
+    DROP TRIGGER table_templates_prevent_granularity_change_with_dependencies;
+    DROP TRIGGER table_template_dependencies_match_granularity_on_insert;
+    DROP TRIGGER table_template_dependencies_match_granularity_on_update;
+
+    CREATE TABLE table_templates_v60_fixture (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      name_key TEXT NOT NULL,
+      granularity TEXT NOT NULL
+        CHECK (granularity IN ('order', 'order_item', 'shipment_group')),
+      configuration_version INTEGER NOT NULL DEFAULT 2
+        CHECK (configuration_version = 2),
+      configuration_json TEXT NOT NULL CHECK (
+        json_valid(configuration_json)
+        AND json_type(configuration_json) = 'object'
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (granularity, name_key)
+    ) STRICT;
+
+    INSERT INTO table_templates_v60_fixture (
+      id, name, name_key, granularity, configuration_version,
+      configuration_json, created_at, updated_at
+    )
+    SELECT
+      id, name, name_key, granularity, 2,
+      json_remove(configuration_json, '$.maskingRules'),
+      created_at, updated_at
+    FROM table_templates;
+
+    DROP TABLE table_templates;
+    ALTER TABLE table_templates_v60_fixture RENAME TO table_templates;
+
+    CREATE TRIGGER table_template_dependencies_match_granularity_on_insert
+    BEFORE INSERT ON table_template_custom_field_dependencies
+    WHEN EXISTS (
+      SELECT 1
+      FROM table_templates AS templates
+      JOIN custom_field_definitions AS definitions
+        ON definitions.id = NEW.definition_id
+      WHERE templates.id = NEW.template_id
+        AND templates.granularity <> definitions.granularity
+    )
+    BEGIN SELECT RAISE(ABORT, 'table template and custom field granularities do not match'); END;
+
+    CREATE TRIGGER table_template_dependencies_match_granularity_on_update
+    BEFORE UPDATE ON table_template_custom_field_dependencies
+    WHEN EXISTS (
+      SELECT 1
+      FROM table_templates AS templates
+      JOIN custom_field_definitions AS definitions
+        ON definitions.id = NEW.definition_id
+      WHERE templates.id = NEW.template_id
+        AND templates.granularity <> definitions.granularity
+    )
+    BEGIN SELECT RAISE(ABORT, 'table template and custom field granularities do not match'); END;
+
+    CREATE TRIGGER table_templates_prevent_granularity_change_with_dependencies
+    BEFORE UPDATE OF granularity ON table_templates
+    WHEN OLD.granularity <> NEW.granularity
+      AND EXISTS (
+        SELECT 1 FROM table_template_custom_field_dependencies
+        WHERE template_id = OLD.id
+      )
+    BEGIN SELECT RAISE(ABORT, 'cannot change table template granularity with custom field dependencies'); END;
+
+    CREATE TRIGGER custom_field_definitions_keep_template_granularity_on_update
+    BEFORE UPDATE OF granularity ON custom_field_definitions
+    WHEN OLD.granularity <> NEW.granularity
+      AND EXISTS (
+        SELECT 1
+        FROM table_template_custom_field_dependencies AS dependencies
+        JOIN table_templates AS templates
+          ON templates.id = dependencies.template_id
+        WHERE dependencies.definition_id = OLD.id
+          AND templates.granularity <> NEW.granularity
+      )
+    BEGIN SELECT RAISE(ABORT, 'table template and custom field granularities do not match'); END;
+
+    DELETE FROM schema_migrations WHERE version = 61;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // v60 建立订单生命周期事件；有事件时拒绝测试降级。
 export function removeVersion60ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion61ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 60',
   ).get();

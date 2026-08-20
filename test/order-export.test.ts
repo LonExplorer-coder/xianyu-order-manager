@@ -106,6 +106,134 @@ afterEach(() => {
 });
 
 describe('默认脱敏的订单工作簿导出', () => {
+  it('订单模板逐字段控制导出值并让预览返回实际模板脱敏摘要', async () => {
+    const { application } = await createApplicationWithOrders([
+      recognition({ orderNumber: 'XY-MASKING-RULES-001' }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+    const template = application.createTableTemplate({
+      name: '内部寄件订单表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家昵称' },
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+        { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+        { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
+      ],
+      query: {},
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'original',
+        phone: 'keep_first_3_last_4',
+        address: 'original',
+      },
+    });
+
+    const preview = application.previewOrderExport({
+      scope: { kind: 'selected_orders', orderIds: [order.id] },
+      orderTemplateId: template.id,
+      includeOrderItems: false,
+      orderItemTemplateId: null,
+    });
+
+    expect(preview.sheets[0]).toMatchObject({
+      maskingSummary: [
+        '买家昵称：保留首尾字符',
+        '收件人：完整显示',
+        '手机号：保留前 3 后 4 位',
+        '收货地址：完整显示',
+      ],
+      rows: [['海**家', '陈海棠', '138****0001', '上海市浦东新区海棠路1号']],
+    });
+  });
+
+  it('四项模板脱敏规则的全部组合不会把已脱敏原文藏入工作簿内容或元数据', async () => {
+    const privacy = {
+      buyerNickname: '隐私昵称甲乙',
+      recipient: '收件隐私丙丁',
+      phone: '18712345678',
+      addressOriginal: '浙江省杭州市西湖区秘密路99号',
+    };
+    const { application, testRoot } = await createApplicationWithOrders([
+      recognition({
+        orderNumber: 'XY-MASKING-COMBINATIONS-001',
+        ...privacy,
+        phoneNormalized: privacy.phone,
+        addressNormalized: privacy.addressOriginal,
+        province: '浙江省',
+        city: '杭州市',
+        district: '西湖区',
+      }),
+    ]);
+    const order = application.queryOrders({}).orders[0];
+
+    for (let combination = 0; combination < 16; combination += 1) {
+      const original = {
+        buyer: Boolean(combination & 1),
+        recipient: Boolean(combination & 2),
+        phone: Boolean(combination & 4),
+        address: Boolean(combination & 8),
+      };
+      const template = application.createTableTemplate({
+        name: `脱敏组合 ${combination}`,
+        granularity: 'order',
+        columns: [
+          { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家昵称' },
+          { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+          { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+          { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
+        ],
+        query: {},
+        maskingRules: {
+          buyer_nickname: original.buyer ? 'original' : 'keep_first_and_last',
+          recipient: original.recipient ? 'original' : 'keep_surname',
+          phone: original.phone ? 'original' : 'keep_first_3_last_4',
+          address: original.address ? 'original' : 'keep_region',
+        },
+      });
+      const input = {
+        scope: { kind: 'selected_orders' as const, orderIds: [order.id] },
+        orderTemplateId: template.id,
+        includeOrderItems: false,
+        orderItemTemplateId: null,
+      };
+      const expectedRow = [
+        original.buyer ? privacy.buyerNickname : '隐****乙',
+        original.recipient ? privacy.recipient : '收*****',
+        original.phone ? privacy.phone : '187****5678',
+        original.address ? privacy.addressOriginal : '浙江省杭州市西湖区***',
+      ];
+      expect(application.previewOrderExport(input).sheets[0].rows).toEqual([expectedRow]);
+
+      const destinationPath = join(testRoot, `脱敏组合-${combination}.xlsx`);
+      await application.exportOrdersToWorkbook(input, destinationPath);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.readFile(destinationPath);
+      const worksheet = workbook.getWorksheet('订单总表');
+      if (!worksheet) throw new Error('缺少订单总表');
+      expect(rowValues(worksheet, 2)).toEqual(expectedRow);
+      const definedNames: string[] = [];
+      workbook.definedNames.forEach((name) => definedNames.push(name));
+      expect(definedNames).toEqual([]);
+      expect(workbook.worksheets.every(({ state }) => state === 'visible')).toBe(true);
+      worksheet.eachRow({ includeEmpty: true }, (row) => row.eachCell(
+        { includeEmpty: true },
+        (cell) => expect(cell.note).toBeUndefined(),
+      ));
+
+      const archiveText = await readZipText(destinationPath);
+      for (const [rawValue, shouldExist] of [
+        [privacy.buyerNickname, original.buyer],
+        [privacy.recipient, original.recipient],
+        [privacy.phone, original.phone],
+        [privacy.addressOriginal, original.address],
+      ] as const) {
+        expect(archiveText.includes(rawValue)).toBe(shouldExist);
+      }
+      expect(archiveText).not.toContain('/comments');
+    }
+  });
+
   it('导出将当前履约五态显示为中文标签', () => {
     expect([
       'pending_shipment',
@@ -118,17 +246,33 @@ describe('默认脱敏的订单工作簿导出', () => {
     ))).toEqual(['待发货', '部分发货', '已发货', '已收货', '未知']);
   });
 
-  it('本次关闭脱敏时让真实预览和最终工作簿一致输出完整隐私字段', async () => {
+  it('模板选择完整显示时让真实预览和最终工作簿一致输出完整隐私字段', async () => {
     const { application, testRoot } = await createApplicationWithOrders([
       recognition({ orderNumber: 'XY-ORIGINAL-PRIVACY-001' }),
     ]);
     const order = application.queryOrders({}).orders[0];
+    const template = application.createTableTemplate({
+      name: '内部订单表',
+      granularity: 'order',
+      columns: [
+        { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
+        { field: { kind: 'builtin', key: 'recipient' }, displayName: '收件人' },
+        { field: { kind: 'builtin', key: 'phone' }, displayName: '手机号' },
+        { field: { kind: 'builtin', key: 'address' }, displayName: '收货地址' },
+      ],
+      query: {},
+      maskingRules: {
+        buyer_nickname: 'original',
+        recipient: 'original',
+        phone: 'original',
+        address: 'original',
+      },
+    });
     const input = {
       scope: { kind: 'selected_orders' as const, orderIds: [order.id] },
-      orderTemplateId: null,
+      orderTemplateId: template.id,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'original' as const,
     };
 
     const preview = application.previewOrderExport(input);
@@ -180,7 +324,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: null });
@@ -225,7 +368,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked' as const,
     };
 
     const orderOnly = application.previewOrderExport(baseInput);
@@ -368,7 +510,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: 4 });
@@ -578,7 +719,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked' as const,
     };
 
     await application.exportOrdersToWorkbook(exportInput, destinationPath);
@@ -695,7 +835,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, defaultPath);
     const defaultWorkbook = new ExcelJS.Workbook();
     await defaultWorkbook.xlsx.readFile(defaultPath);
@@ -739,7 +878,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'masked',
     }, customPath);
     const customWorkbook = new ExcelJS.Workbook();
     await customWorkbook.xlsx.readFile(customPath);
@@ -827,7 +965,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, currentPath);
     const currentWorkbook = new ExcelJS.Workbook();
     await currentWorkbook.xlsx.readFile(currentPath);
@@ -850,7 +987,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, selectedPath);
     const selectedWorkbook = new ExcelJS.Workbook();
     await selectedWorkbook.xlsx.readFile(selectedPath);
@@ -1001,7 +1137,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'masked' as const,
     };
     const preview = application.previewOrderExport(exportInput);
     await application.exportOrdersToWorkbook(exportInput, destinationPath);
@@ -1102,7 +1237,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     expect(outcome).toEqual({ orderCount: 1, orderItemCount: 2 });
@@ -1131,7 +1265,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked' as const,
     };
 
     await expect(application.exportOrdersToWorkbook({
@@ -1225,7 +1358,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: template.id,
       includeOrderItems: true,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
@@ -1260,11 +1392,13 @@ describe('默认脱敏的订单工作簿导出', () => {
           name: '订单总表',
           columns: [{ header: '下单时间', valueType: 'datetime' }],
           rows: [[new Date(Number.NaN)]],
+          maskingSummary: ['无个人信息字段'],
         },
         {
           name: '订单商品明细表',
           columns: [{ header: '订单号', valueType: 'text' }],
           rows: [],
+          maskingSummary: ['无个人信息字段'],
         },
       ],
     };
@@ -1321,7 +1455,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'masked',
     }, destinationPath))
       .rejects.toThrow('订单总表列数 16385 超过 Excel 上限 16384');
     expect(await readFile(destinationPath)).toEqual(originalContents);
@@ -1351,7 +1484,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: template.id,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
@@ -1379,7 +1511,6 @@ describe('默认脱敏的订单工作簿导出', () => {
       orderTemplateId: null,
       orderItemTemplateId: null,
       shipmentGroupTemplateId: null,
-      masking: 'masked',
     }, destinationPath);
 
     const workbook = new ExcelJS.Workbook();
@@ -1503,7 +1634,6 @@ describe('回购与累计消费导出', () => {
       orderTemplateId: template.id,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'original' as const,
     };
 
     const preview = application.previewOrderExport(input);

@@ -145,6 +145,53 @@ function orderSummaryForProjection(
 }
 
 describe('表格模板核心契约', () => {
+  it('新表格模板默认启用四项模板脱敏规则', () => {
+    const normalized = normalizeCreateTableTemplateInput({
+      name: '对外订单表',
+      granularity: 'order',
+      columns: [
+        orderColumn({ kind: 'builtin', key: 'buyer_nickname' }, '买家昵称'),
+        orderColumn({ kind: 'builtin', key: 'recipient' }, '收件人'),
+        orderColumn({ kind: 'builtin', key: 'phone' }, '手机号'),
+        orderColumn({ kind: 'builtin', key: 'address' }, '收货地址'),
+      ],
+      query: {},
+    }, definitions);
+
+    expect(normalized.maskingRules).toEqual({
+      buyer_nickname: 'keep_first_and_last',
+      recipient: 'keep_surname',
+      phone: 'keep_first_3_last_4',
+      address: 'keep_region',
+    });
+  });
+
+  it('模板脱敏规则允许每项独立完整显示并拒绝未知转换', () => {
+    const base = {
+      name: '内部发货表',
+      granularity: 'shipment_group',
+      columns: [orderColumn({ kind: 'builtin', key: 'phone' }, '手机号')],
+      query: {},
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'keep_surname',
+        phone: 'original',
+        address: 'keep_region',
+      },
+    };
+
+    expect(normalizeCreateTableTemplateInput(base, definitions).maskingRules).toEqual({
+      buyer_nickname: 'keep_first_and_last',
+      recipient: 'keep_surname',
+      phone: 'original',
+      address: 'keep_region',
+    });
+    expect(() => normalizeCreateTableTemplateInput({
+      ...base,
+      maskingRules: { ...base.maskingRules, phone: 'last_4_only' },
+    }, definitions)).toThrow(/手机号模板脱敏规则无效/u);
+  });
+
   it('发货组模板保存本粒度字段、筛选、排序和受控计算字段', () => {
     const normalized = normalizeCreateTableTemplateInput({
       name: '合并拣货表',
@@ -181,6 +228,12 @@ describe('表格模板核心契约', () => {
           definitionId: shipmentGroupField.id,
           value: '东区',
         },
+      },
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'keep_surname',
+        phone: 'keep_first_3_last_4',
+        address: 'keep_region',
       },
     });
     expect(availableTableFields('shipment_group', definitions)).toEqual(expect.arrayContaining([
@@ -643,7 +696,15 @@ describe('表格模板核心契约', () => {
         customFieldSort: { definitionId: itemField.id, direction: 'desc' },
       },
     };
-    expect(normalizeCreateTableTemplateInput(input, definitions)).toEqual(input);
+    expect(normalizeCreateTableTemplateInput(input, definitions)).toEqual({
+      ...input,
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'keep_surname',
+        phone: 'keep_first_3_last_4',
+        address: 'keep_region',
+      },
+    });
     expect(() => normalizeCreateTableTemplateInput({
       ...input,
       query: { text: '订单查询字段不能混入商品模板' },

@@ -54,6 +54,13 @@ import { hasActiveParentAftersalesCase } from '../src/renderer/aftersales-presen
 
 afterEach(cleanup);
 
+const DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES = {
+  buyer_nickname: 'keep_first_and_last',
+  recipient: 'keep_surname',
+  phone: 'keep_first_3_last_4',
+  address: 'keep_region',
+} as const;
+
 const emptyAftersalesRounds: Pick<
   AftersalesCase,
   'rounds' | 'fulfillment' | 'workflowTemplate'
@@ -289,12 +296,14 @@ function exportPreviewSheet(
   name: '订单总表' | '订单商品明细表',
   headers: string[],
   rows: string[][],
+  maskingSummary: string[] = ['无个人信息字段'],
 ) {
   return {
     name,
     columns: headers.map((header) => ({ header, valueType: 'text' as const })),
     rows,
     totalRowCount: rows.length,
+    maskingSummary,
   };
 }
 
@@ -1124,6 +1133,7 @@ describe('订单管理工作台', () => {
       id: 'template-shipment-export-orders',
       name: '发货订单总表',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' }],
       query: {},
       createdAt,
@@ -1133,6 +1143,7 @@ describe('订单管理工作台', () => {
       id: 'template-shipment-export-items',
       name: '发货商品明细',
       granularity: 'order_item',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' }],
       query: {},
       createdAt,
@@ -1142,6 +1153,7 @@ describe('订单管理工作台', () => {
       id: 'template-shipment-export-groups',
       name: '东区合并发货表',
       granularity: 'shipment_group',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'builtin', key: 'member_order_numbers' }, displayName: '成员订单' },
         { field: { kind: 'custom', definitionId: zoneField.id }, displayName: '拣货区' },
@@ -1174,12 +1186,14 @@ describe('订单管理工作台', () => {
           columns: [{ header: '平台单号', valueType: 'text' }],
           rows: [[confirmedOrder.orderNumber]],
           totalRowCount: 1,
+          maskingSummary: ['无个人信息字段'],
         },
         {
           name: '订单商品明细表',
           columns: [{ header: '商品', valueType: 'text' }],
           rows: [[confirmedOrder.items[0].sourceTitle]],
           totalRowCount: 1,
+          maskingSummary: ['无个人信息字段'],
         },
         {
           name: '合并发货表',
@@ -1189,6 +1203,7 @@ describe('订单管理工作台', () => {
           ],
           rows: [[confirmedOrder.orderNumber, '西区']],
           totalRowCount: 1,
+          maskingSummary: ['无个人信息字段'],
         },
       ],
     });
@@ -1294,7 +1309,6 @@ describe('订单管理工作台', () => {
       orderTemplateId: orderTemplate.id,
       orderItemTemplateId: itemTemplate.id,
       shipmentGroupTemplateId: groupTemplate.id,
-      masking: 'masked',
     }));
     expect(await screen.findByText(
       '已导出 1 个发货组、1 笔订单：闲鱼发货组-20260814.xlsx',
@@ -6454,6 +6468,7 @@ describe('订单管理工作台', () => {
       id: 'template-dynamic-collision',
       name: '表头冲突模板',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         {
           kind: 'dynamic_product_group',
@@ -6500,6 +6515,7 @@ describe('订单管理工作台', () => {
       id: 'template-dynamic-labels',
       name: '自定义商品表头',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{
         kind: 'dynamic_product_group',
         labels: { product: '货品', specification: '属性', quantity: '件数' },
@@ -11202,6 +11218,7 @@ describe('订单管理工作台', () => {
       id: 'template-picking',
       name: '待发货拣货',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'custom', definitionId: noteField.id }, displayName: '跟单说明' },
         { field: { kind: 'computed', key: 'order_total' }, displayName: '实付' },
@@ -11303,6 +11320,7 @@ describe('订单管理工作台', () => {
       id: 'template-a',
       name: '订单模板 A',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' },
         { field: { kind: 'custom', definitionId: fieldA.id }, displayName: 'A 跟单' },
@@ -11315,6 +11333,7 @@ describe('订单管理工作台', () => {
       id: 'template-b',
       name: '订单模板 B',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'custom', definitionId: fieldB.id }, displayName: 'B 跟单' },
         { field: { kind: 'custom', definitionId: fieldA.id }, displayName: 'A 备用' },
@@ -11398,7 +11417,6 @@ describe('订单管理工作台', () => {
       orderTemplateId: templateA.id,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked',
     }));
 
     await user.click(await screen.findByRole('button', { name: '导出当前结果 1 笔' }));
@@ -11427,6 +11445,7 @@ describe('订单管理工作台', () => {
       id: 'template-order-operations',
       name: '订单运营看板',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'computed', key: 'shipment_summary' }, displayName: '发货概况' },
         { field: { kind: 'computed', key: 'logistics_summary' }, displayName: '物流概况' },
@@ -11473,6 +11492,7 @@ describe('订单管理工作台', () => {
       id: 'template-total-only',
       name: '金额概览',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{
         field: { kind: 'computed', key: 'order_total' },
         displayName: '成交金额',
@@ -11528,6 +11548,7 @@ describe('订单管理工作台', () => {
       id: 'template-active-delete',
       name: '待发货临时视图',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'computed', key: 'order_total' }, displayName: '实付' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11537,6 +11558,7 @@ describe('订单管理工作台', () => {
       id: 'template-remaining',
       name: '剩余订单视图',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{
         field: { kind: 'custom', definitionId: remainingField.id },
         displayName: '剩余备注',
@@ -11590,6 +11612,7 @@ describe('订单管理工作台', () => {
       id: 'template-query-order',
       name: '筛选保存',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
       query: {
         dateField: 'ordered_at',
@@ -11648,6 +11671,7 @@ describe('订单管理工作台', () => {
       id: 'template-order-active',
       name: '待发货订单',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11657,6 +11681,7 @@ describe('订单管理工作台', () => {
       id: 'template-group-active',
       name: '按拣货区',
       granularity: 'shipment_group',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' }],
       query: {},
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11704,6 +11729,7 @@ describe('订单管理工作台', () => {
       id: 'template-order-tab',
       name: '待发货订单',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11713,6 +11739,7 @@ describe('订单管理工作台', () => {
       id: 'template-item-tab',
       name: '商品明细',
       granularity: 'order_item',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' }],
       query: {},
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11758,6 +11785,7 @@ describe('订单管理工作台', () => {
       id: 'template-order-restore',
       name: '待发货订单',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11812,6 +11840,7 @@ describe('订单管理工作台', () => {
       id: 'template-order-clear',
       name: '待发货订单',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '订单号' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11850,6 +11879,7 @@ describe('订单管理工作台', () => {
       id: 'template-group-bar',
       name: '按拣货区',
       granularity: 'shipment_group',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'shipment_group_id' }, displayName: '发货组标识' }],
       query: {},
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -11893,6 +11923,7 @@ describe('订单管理工作台', () => {
       id: 'template-failing',
       name: '暂时不可用',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'computed', key: 'order_total' }, displayName: '成交金额' }],
       query: { fulfillmentStatus: 'pending_shipment' },
       createdAt: '2026-07-30T00:00:00.000Z',
@@ -12426,6 +12457,7 @@ describe('订单管理工作台', () => {
       id: 'template-items',
       name: '商品拣货',
       granularity: 'order_item',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '关联单号' },
         { field: { kind: 'custom', definitionId: binField.id }, displayName: '货位' },
@@ -12495,6 +12527,11 @@ describe('订单管理工作台', () => {
       id: 'template-export-orders',
       name: '财务订单表',
       granularity: 'order',
+      maskingRules: {
+        ...DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
+        recipient: 'original',
+        address: 'original',
+      },
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
         { field: { kind: 'builtin', key: 'buyer_nickname' }, displayName: '买家' },
@@ -12515,6 +12552,7 @@ describe('订单管理工作台', () => {
       id: 'template-export-items',
       name: '拣货商品表',
       granularity: 'order_item',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [
         { field: { kind: 'builtin', key: 'order_number' }, displayName: '平台单号' },
         { field: { kind: 'builtin', key: 'product_title' }, displayName: '商品' },
@@ -12541,18 +12579,12 @@ describe('订单管理工作台', () => {
         ? [
           [
             first.orderNumber,
-            input.masking === 'masked' ? '测**家' : first.buyerNickname,
-            input.masking === 'masked' ? '人******' : first.recipient,
-            input.masking === 'masked' ? '138****0000' : first.phone,
-            input.masking === 'masked' ? '广东省深圳市南山区***' : first.addressOriginal,
+            '测**家', first.recipient, '138****0000', first.addressOriginal,
             '脱敏测试商品', '白色', '2', '', '', '', '¥8.00',
           ],
           [
             second.orderNumber,
-            input.masking === 'masked' ? '测**家' : second.buyerNickname,
-            input.masking === 'masked' ? '人******' : second.recipient,
-            input.masking === 'masked' ? '138****0000' : second.phone,
-            input.masking === 'masked' ? '广东省深圳市南山区***' : second.addressOriginal,
+            '测**家', second.recipient, '138****0000', second.addressOriginal,
             '同款测试商品', '大号', '1', '同款测试商品', '小号', '2', '¥8.00',
           ],
         ]
@@ -12564,7 +12596,19 @@ describe('订单管理工作台', () => {
         orderCount: 2,
         orderItemCount: input.includeOrderItems ? 3 : null,
         sheets: [
-          exportPreviewSheet('订单总表', orderHeaders, orderRows),
+          exportPreviewSheet(
+            '订单总表',
+            orderHeaders,
+            orderRows,
+            input.orderTemplateId === orderTemplate.id
+              ? [
+                  '买家昵称：保留首尾字符',
+                  '收件人：完整显示',
+                  '手机号：保留前 3 后 4 位',
+                  '收货地址：完整显示',
+                ]
+              : ['无个人信息字段'],
+          ),
           ...(input.includeOrderItems ? [exportPreviewSheet(
             '订单商品明细表',
             input.orderItemTemplateId === itemTemplate.id
@@ -12609,12 +12653,9 @@ describe('订单管理工作台', () => {
     expect(within(dialog).queryByRole('combobox', {
       name: '订单商品明细表模板',
     })).not.toBeInTheDocument();
-    expect(within(dialog).getByText('收件人仅保留姓氏')).toBeVisible();
-    expect(within(dialog).getByText('手机号保留前 3 后 4 位')).toBeVisible();
-    expect(within(dialog).getByText('地址仅保留省、市、区县')).toBeVisible();
-    expect(within(dialog).getByText('买家昵称仅保留首尾字符')).toBeVisible();
-    const masking = within(dialog).getByRole('checkbox', { name: /导出时脱敏/u });
-    expect(masking).toBeChecked();
+    expect(within(dialog).getByText('无个人信息字段')).toBeVisible();
+    expect(within(dialog).queryByRole('checkbox', { name: /导出时脱敏/u }))
+      .not.toBeInTheDocument();
     await user.selectOptions(
       within(dialog).getByRole('combobox', { name: '订单总表模板' }),
       orderTemplate.id,
@@ -12635,7 +12676,7 @@ describe('订单管理工作台', () => {
     expect(within(previewRows[1]).getAllByRole('cell').map(({ textContent }) => textContent))
       .toEqual([
         first.orderNumber,
-        '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+        '测**家', first.recipient, '138****0000', first.addressOriginal,
         '脱敏测试商品', '白色', '2',
         '', '', '',
         '¥8.00',
@@ -12643,25 +12684,19 @@ describe('订单管理工作台', () => {
     expect(within(previewRows[2]).getAllByRole('cell').map(({ textContent }) => textContent))
       .toEqual([
         second.orderNumber,
-        '测**家', '人******', '138****0000', '广东省深圳市南山区***',
+        '测**家', second.recipient, '138****0000', second.addressOriginal,
         '同款测试商品', '大号', '1',
         '同款测试商品', '小号', '2',
         '¥8.00',
       ]);
     expect(within(dialog).queryByText(confirmedOrder.phone)).not.toBeInTheDocument();
-    expect(within(dialog).queryByText(confirmedOrder.addressOriginal)).not.toBeInTheDocument();
-    await user.click(masking);
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      '完整收件人、手机号、收货地址和买家昵称',
+    expect(within(dialog).getByText('买家昵称：保留首尾字符')).toBeVisible();
+    expect(within(dialog).getByText('收件人：完整显示')).toBeVisible();
+    expect(within(dialog).getByText('手机号：保留前 3 后 4 位')).toBeVisible();
+    expect(within(dialog).getByText('收货地址：完整显示')).toBeVisible();
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(
+      '当前模板会导出上列字段的完整原文',
     );
-    const originalPreview = await within(dialog).findByRole('table', {
-      name: '订单总表导出预览',
-    });
-    expect(within(originalPreview).getAllByText(first.phone)).toHaveLength(2);
-    expect(within(originalPreview).getAllByText(first.addressOriginal)).toHaveLength(2);
-    await user.click(masking);
-    expect(within(dialog).queryByText(/隐私提醒/u)).not.toBeInTheDocument();
-    expect(await within(dialog).findAllByText('138****0000')).toHaveLength(2);
     const includeOrderItems = within(dialog).getByRole('checkbox', {
       name: /附加订单商品明细表/u,
     });
@@ -12703,7 +12738,6 @@ describe('订单管理工作台', () => {
       orderTemplateId: orderTemplate.id,
       includeOrderItems: true,
       orderItemTemplateId: itemTemplate.id,
-      masking: 'masked',
     }));
     expect(await screen.findByRole('status')).toHaveTextContent(
       '已导出 2 笔订单、3 条订单商品明细：闲鱼订单-20260731.xlsx',
@@ -12711,7 +12745,8 @@ describe('订单管理工作台', () => {
     expect(screen.queryByRole('dialog', { name: '导出订单 Excel' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '导出当前结果 2 笔' }));
     const reopened = screen.getByRole('dialog', { name: '导出订单 Excel' });
-    expect(within(reopened).getByRole('checkbox', { name: /导出时脱敏/u })).toBeChecked();
+    expect(within(reopened).queryByRole('checkbox', { name: /导出时脱敏/u }))
+      .not.toBeInTheDocument();
   });
 
   it('导出预览只接受最新模板请求，较晚返回的旧结果不会覆盖界面', async () => {
@@ -12721,6 +12756,7 @@ describe('订单管理工作台', () => {
       id: 'template-latest-preview',
       name: '最新预览模板',
       granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
       columns: [{ field: { kind: 'builtin', key: 'order_number' }, displayName: '最新表头' }],
       query: {},
       createdAt: '2026-08-13T00:00:00.000Z',
@@ -12883,7 +12919,6 @@ describe('订单管理工作台', () => {
       orderTemplateId: null,
       includeOrderItems: false,
       orderItemTemplateId: null,
-      masking: 'masked',
     }));
   });
 

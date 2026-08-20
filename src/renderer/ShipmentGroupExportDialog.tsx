@@ -8,6 +8,7 @@ import type {
   ShipmentGroupExportResult,
 } from '../core/shipment-group-export';
 import type { TableTemplate } from '../core/table-templates';
+import { TableTemplateMaskingSummary } from './TableTemplateMaskingSummary';
 
 export type ShipmentGroupExportDialogProps = {
   groups: OpenShipmentGroup[];
@@ -36,7 +37,6 @@ export function ShipmentGroupExportDialog({
       id === initialShipmentGroupTemplateId && granularity === 'shipment_group'
     )) ? initialShipmentGroupTemplateId ?? '' : ''
   ));
-  const [maskingEnabled, setMaskingEnabled] = useState(true);
   const [preview, setPreview] = useState<ShipmentGroupExportPreviewResult | null>(null);
   const [activeSheetName, setActiveSheetName] = useState<
     '订单总表' | '订单商品明细表' | '合并发货表'
@@ -56,7 +56,6 @@ export function ShipmentGroupExportDialog({
       orderTemplateId: orderTemplateId || null,
       orderItemTemplateId: orderItemTemplateId || null,
       shipmentGroupTemplateId: shipmentGroupTemplateId || null,
-      masking: maskingEnabled ? 'masked' : 'original',
     };
   }
 
@@ -76,7 +75,6 @@ export function ShipmentGroupExportDialog({
     });
     return () => { cancelled = true; };
   }, [
-    maskingEnabled,
     onPreview,
     orderItemTemplateId,
     orderTemplateId,
@@ -186,22 +184,7 @@ export function ShipmentGroupExportDialog({
           ) : null}
         </section>
 
-        <section className="order-export-dialog__masking">
-          <label>
-            <input
-              type="checkbox"
-              checked={maskingEnabled}
-              disabled={saving}
-              onChange={(event) => setMaskingEnabled(event.target.checked)}
-            />
-            <span><strong>导出时脱敏</strong><small>仅影响本次三表预览与导出</small></span>
-          </label>
-          {!maskingEnabled && (
-            <p className="order-export-dialog__privacy-warning" role="alert">
-              隐私提醒：本次文件将包含完整收件人、手机号和收货地址。
-            </p>
-          )}
-        </section>
+        <TableTemplateMaskingSummary sheet={activeSheet} />
 
         {error && <p className="order-export-dialog__error" role="alert">{error}</p>}
         <footer className="order-export-dialog__actions">

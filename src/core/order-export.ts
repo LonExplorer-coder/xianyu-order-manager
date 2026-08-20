@@ -1,9 +1,11 @@
 import {
   DEFAULT_ORDER_ITEM_TABLE_COLUMNS,
+  TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS,
   DEFAULT_ORDER_TABLE_COLUMNS,
   type TableCellValue,
   type TableTemplateColumn,
   type TableTemplateLayoutItem,
+  type TableTemplateMaskingRules,
 } from './table-templates';
 import type { CustomFieldType } from './custom-fields';
 import type { RecognitionBatchItemStatus } from './contracts';
@@ -19,7 +21,6 @@ export type OrderExportInput = {
   orderTemplateId: string | null;
   includeOrderItems: boolean;
   orderItemTemplateId: string | null;
-  masking: 'masked' | 'original';
 };
 
 export type OrderExportWriteResult = {
@@ -32,6 +33,7 @@ export type OrderExportPreviewSheet = {
   columns: Array<{ header: string; valueType: CustomFieldType }>;
   rows: string[][];
   totalRowCount: number;
+  maskingSummary: string[];
 };
 
 export type OrderExportPreviewResult = OrderExportWriteResult & {
@@ -79,14 +81,11 @@ export function normalizeOrderExportInput(value: unknown): OrderExportInput {
   const input = strictRecord(
     value,
     '订单导出请求',
-    ['scope', 'orderTemplateId', 'includeOrderItems', 'orderItemTemplateId', 'masking'],
+    ['scope', 'orderTemplateId', 'includeOrderItems', 'orderItemTemplateId'],
   );
   const scope = strictRecord(input.scope, '订单导出范围', ['kind', 'orderIds']);
   if (scope.kind !== 'current_result' && scope.kind !== 'selected_orders') {
     throw new Error('订单导出范围无效');
-  }
-  if (input.masking !== 'masked' && input.masking !== 'original') {
-    throw new Error('订单导出脱敏方式无效');
   }
   if (typeof input.includeOrderItems !== 'boolean') {
     throw new Error('订单商品明细表导出选项无效');
@@ -106,7 +105,6 @@ export function normalizeOrderExportInput(value: unknown): OrderExportInput {
     orderTemplateId: optionalTemplateId(input.orderTemplateId, '订单总表模板'),
     includeOrderItems: input.includeOrderItems,
     orderItemTemplateId,
-    masking: input.masking,
   };
 }
 
@@ -151,19 +149,43 @@ export function maskBuyerNickname(value: string): string {
   return `${characters[0]}${'*'.repeat(Math.max(2, characters.length - 2))}${characters.at(-1)}`;
 }
 
-export function defaultMaskedOrderCell(
+export function applyTableTemplateMaskingRule(
   fieldKey: string,
   value: TableCellValue,
   region: OrderExportAddressRegion,
+  rules: TableTemplateMaskingRules,
 ): TableCellValue {
   if (typeof value !== 'string') return value;
   switch (fieldKey) {
-    case 'buyer_nickname': return maskBuyerNickname(value);
-    case 'recipient': return maskRecipient(value);
-    case 'phone': return maskPhone(value);
-    case 'address': return maskAddress(region);
+    case 'buyer_nickname':
+      return rules.buyer_nickname === 'original' ? value : maskBuyerNickname(value);
+    case 'recipient':
+      return rules.recipient === 'original' ? value : maskRecipient(value);
+    case 'phone':
+      return rules.phone === 'original' ? value : maskPhone(value);
+    case 'address':
+      return rules.address === 'original' ? value : maskAddress(region);
     default: return value;
   }
+}
+
+export function tableTemplateMaskingSummary(
+  fieldKeys: readonly string[],
+  rules: TableTemplateMaskingRules,
+): string[] {
+  const included = fieldKeys.flatMap((key, index, all) => {
+    if (all.indexOf(key) !== index) return [];
+    const definition = TABLE_TEMPLATE_MASKING_FIELD_DEFINITIONS.find(
+      (candidate) => candidate.key === key,
+    );
+    return definition ? [definition] : [];
+  });
+  if (included.length === 0) return ['无个人信息字段'];
+  return included.map((definition) => (
+    `${definition.label}：${rules[definition.key] === 'original'
+      ? '完整显示'
+      : definition.maskedDescription}`
+  ));
 }
 
 export function orderExportBuiltinTextLabel(

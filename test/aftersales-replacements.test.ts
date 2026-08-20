@@ -702,7 +702,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 60 });
+        .toEqual({ version: 61 });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);

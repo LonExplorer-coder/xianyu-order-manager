@@ -8,7 +8,6 @@ export type ShipmentGroupExportInput = {
   orderTemplateId: string | null;
   orderItemTemplateId: string | null;
   shipmentGroupTemplateId: string | null;
-  masking: 'masked' | 'original';
 };
 
 export type ShipmentGroupExportWriteResult = {
@@ -35,7 +34,6 @@ export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroup
     'orderTemplateId',
     'orderItemTemplateId',
     'shipmentGroupTemplateId',
-    'masking',
   ]);
   if (!Array.isArray(input.shipmentGroups) || input.shipmentGroups.length === 0) {
     throw new Error('请至少选择一个发货组导出');
@@ -75,9 +73,6 @@ export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroup
   if (new Set(shipmentGroups.map(({ id }) => id)).size !== shipmentGroups.length) {
     throw new Error('发货组导出记录不能重复');
   }
-  if (input.masking !== 'masked' && input.masking !== 'original') {
-    throw new Error('合并发货表导出脱敏方式无效');
-  }
   return {
     shipmentGroups,
     orderTemplateId: optionalTemplateId(input.orderTemplateId, '订单总表模板'),
@@ -86,7 +81,6 @@ export function normalizeShipmentGroupExportInput(value: unknown): ShipmentGroup
       input.shipmentGroupTemplateId,
       '合并发货表模板',
     ),
-    masking: input.masking,
   };
 }
 

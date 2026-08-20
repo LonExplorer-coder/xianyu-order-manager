@@ -10,8 +10,9 @@ import type {
   CustomFieldValueRecord,
 } from '../core/custom-fields';
 import {
-  defaultMaskedOrderCell,
+  applyTableTemplateMaskingRule,
   orderExportBuiltinTextLabel,
+  tableTemplateMaskingSummary,
   type OrderExportAddressRegion,
   type OrderExportPreviewSheet,
 } from '../core/order-export';
@@ -34,15 +35,17 @@ import {
   type TableFieldReference,
   type TableTemplateColumn,
   type TableTemplateLayoutItem,
+  type TableTemplateMaskingRules,
 } from '../core/table-templates';
 
 export type OrderExportWorkbookSource = {
-  masking: 'masked' | 'original';
   includeOrderItems: boolean;
   orders: OrderSummary[];
   orderItems: OrderItemWorkbenchItem[];
   orderColumns: TableTemplateLayoutItem[];
   orderItemColumns: TableTemplateColumn[];
+  orderMaskingRules: TableTemplateMaskingRules;
+  orderItemMaskingRules: TableTemplateMaskingRules;
   customFieldDefinitions: CustomFieldDefinition[];
   orderCustomFieldValues: CustomFieldValueRecord[];
   orderItemCustomFieldValues: CustomFieldValueRecord[];
@@ -50,6 +53,7 @@ export type OrderExportWorkbookSource = {
   orderMaximumItemCount?: number;
   shipmentGroups?: OpenShipmentGroup[];
   shipmentGroupColumns?: TableTemplateColumn[];
+  shipmentGroupMaskingRules?: TableTemplateMaskingRules;
   shipmentGroupCustomFieldValues?: ShipmentGroupCustomFieldValue[];
 };
 
@@ -64,6 +68,7 @@ export type OrderExportWorksheetPlan = {
     valueType: CustomFieldType;
   }>;
   rows: WorkbookCellValue[][];
+  maskingSummary: string[];
 };
 
 export type OrderExportWorkbookPlan = {
@@ -88,6 +93,7 @@ export function createOrderExportPreviewSheets(
       ))
     )),
     totalRowCount: totalRowCounts[worksheet.name] ?? worksheet.rows.length,
+    maskingSummary: [...worksheet.maskingSummary],
   }));
 }
 
@@ -120,8 +126,13 @@ export function createOrderExportWorkbookPlan(
         return toWorkbookCellValue(null, column.valueType, rawValue);
       }
       const valueType = requireProjectionValueType(column);
-      const maskedValue = source.masking === 'masked' && column.field.kind === 'builtin'
-        ? defaultMaskedOrderCell(column.field.key, rawValue, region)
+      const maskedValue = column.field.kind === 'builtin'
+        ? applyTableTemplateMaskingRule(
+          column.field.key,
+          rawValue,
+          region,
+          source.orderMaskingRules,
+        )
         : rawValue;
       return toWorkbookCellValue(column.field, valueType, maskedValue);
     });
@@ -135,6 +146,14 @@ export function createOrderExportWorkbookPlan(
         : requireProjectionValueType(column),
     })),
     rows: orderRows,
+    maskingSummary: tableTemplateMaskingSummary(
+      orderProjection.columns.flatMap((column) => (
+        column.kind === 'field' && column.field.kind === 'builtin'
+          ? [column.field.key]
+          : []
+      )),
+      source.orderMaskingRules,
+    ),
   }];
   if (source.includeOrderItems) {
     assertExcelColumnCount('订单商品明细表', source.orderItemColumns.length);
@@ -154,6 +173,12 @@ export function createOrderExportWorkbookPlan(
         valueType: requireDescriptor(orderItemCatalog, column.field).valueType,
       })),
       rows: orderItemRows,
+      maskingSummary: tableTemplateMaskingSummary(
+        source.orderItemColumns.flatMap((column) => (
+          column.field.kind === 'builtin' ? [column.field.key] : []
+        )),
+        source.orderItemMaskingRules,
+      ),
     });
   }
   if (source.shipmentGroups) {
@@ -177,8 +202,13 @@ export function createOrderExportWorkbookPlan(
           city: '',
           district: '',
         };
-        const maskedValue = source.masking === 'masked' && column.field.kind === 'builtin'
-          ? defaultMaskedOrderCell(column.field.key, rawValue, region)
+        const maskedValue = column.field.kind === 'builtin'
+          ? applyTableTemplateMaskingRule(
+            column.field.key,
+            rawValue,
+            region,
+            source.shipmentGroupMaskingRules ?? source.orderMaskingRules,
+          )
           : rawValue;
         return toWorkbookCellValue(column.field, descriptor.valueType, maskedValue);
       })
@@ -190,6 +220,12 @@ export function createOrderExportWorkbookPlan(
         valueType: requireDescriptor(shipmentGroupCatalog, column.field).valueType,
       })),
       rows: shipmentGroupRows,
+      maskingSummary: tableTemplateMaskingSummary(
+        shipmentGroupColumns.flatMap((column) => (
+          column.field.kind === 'builtin' ? [column.field.key] : []
+        )),
+        source.shipmentGroupMaskingRules ?? source.orderMaskingRules,
+      ),
     });
   }
 

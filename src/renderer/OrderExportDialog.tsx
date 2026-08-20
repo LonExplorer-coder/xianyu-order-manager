@@ -18,6 +18,7 @@ import {
 import {
   type TableTemplate,
 } from '../core/table-templates';
+import { TableTemplateMaskingSummary } from './TableTemplateMaskingSummary';
 
 export type OrderExportDialogProps = {
   scopeKind: OrderExportInput['scope']['kind'];
@@ -54,7 +55,6 @@ export function OrderExportDialog({
   const [activePreviewSheet, setActivePreviewSheet] = useState<
     '订单总表' | '订单商品明细表' | '合并发货表'
   >('订单总表');
-  const [maskingEnabled, setMaskingEnabled] = useState(true);
   const [preview, setPreview] = useState<OrderExportPreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewError, setPreviewError] = useState('');
@@ -89,7 +89,7 @@ export function OrderExportDialog({
     return () => {
       cancelled = true;
     };
-  }, [includeOrderItems, maskingEnabled, onPreview, orderIds, orderItemTemplateId, orderTemplateId]);
+  }, [includeOrderItems, onPreview, orderIds, orderItemTemplateId, orderTemplateId]);
 
   function exportInput(): OrderExportInput {
     return {
@@ -97,7 +97,6 @@ export function OrderExportDialog({
       orderTemplateId: orderTemplateId || null,
       includeOrderItems,
       orderItemTemplateId: includeOrderItems ? orderItemTemplateId || null : null,
-      masking: maskingEnabled ? 'masked' : 'original',
     };
   }
 
@@ -298,32 +297,10 @@ export function OrderExportDialog({
           )}
         </section>
 
-        <section className="order-export-dialog__masking" aria-labelledby={`${headingId}-masking`}>
-          <label>
-            <input
-              type="checkbox"
-              checked={maskingEnabled}
-              disabled={saving}
-              onChange={(event) => setMaskingEnabled(event.target.checked)}
-            />
-            <span>
-              <strong id={`${headingId}-masking`}>导出时脱敏</strong>
-              <small>仅影响本次预览与导出；重新打开时默认开启</small>
-            </span>
-          </label>
-          {maskingEnabled ? (
-            <ul>
-              <li>收件人仅保留姓氏</li>
-              <li>手机号保留前 3 后 4 位</li>
-              <li>地址仅保留省、市、区县</li>
-              <li>买家昵称仅保留首尾字符</li>
-            </ul>
-          ) : (
-            <p className="order-export-dialog__privacy-warning" role="alert">
-              隐私提醒：本次文件将包含完整收件人、手机号、收货地址和买家昵称，请确认保存位置安全。
-            </p>
-          )}
-        </section>
+        <TableTemplateMaskingSummary
+          sheet={activeSheet}
+          headingId={`${headingId}-masking`}
+        />
 
         {error && <p className="order-export-dialog__error" role="alert">{error}</p>}
 

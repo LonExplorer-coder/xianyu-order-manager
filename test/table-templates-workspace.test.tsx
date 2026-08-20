@@ -19,6 +19,13 @@ import { TableTemplatesWorkspace } from '../src/renderer/TableTemplatesWorkspace
 
 afterEach(cleanup);
 
+const DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES = {
+  buyer_nickname: 'keep_first_and_last',
+  recipient: 'keep_surname',
+  phone: 'keep_first_3_last_4',
+  address: 'keep_region',
+} as const;
+
 const customFieldDefinitions: CustomFieldDefinition[] = [{
   id: 'field-order-note',
   name: '客服备注',
@@ -52,6 +59,7 @@ const financeTemplate: TableTemplate = {
   id: 'template-finance',
   name: '财务核对',
   granularity: 'order',
+      maskingRules: DEFAULT_TEST_TABLE_TEMPLATE_MASKING_RULES,
   columns: [{
     field: { kind: 'computed', key: 'order_total' },
     displayName: '成交金额',
@@ -102,6 +110,37 @@ function scalarColumns(
 }
 
 describe('表格模板工作台', () => {
+  it('新模板默认启用安全规则并可逐字段改为完整显示', async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderWorkspace();
+
+    expect(screen.getByRole('combobox', { name: '买家昵称导出方式' }))
+      .toHaveValue('keep_first_and_last');
+    expect(screen.getByRole('combobox', { name: '收件人导出方式' }))
+      .toHaveValue('keep_surname');
+    expect(screen.getByRole('combobox', { name: '手机号导出方式' }))
+      .toHaveValue('keep_first_3_last_4');
+    expect(screen.getByRole('combobox', { name: '收货地址导出方式' }))
+      .toHaveValue('keep_region');
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '手机号导出方式' }),
+      'original',
+    );
+    await user.type(screen.getByRole('textbox', { name: '模板名称' }), '内部发货表');
+    await user.click(screen.getByRole('button', { name: '创建模板' }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    expect(onCreate.mock.calls[0]?.[0]).toMatchObject({
+      maskingRules: {
+        buyer_nickname: 'keep_first_and_last',
+        recipient: 'keep_surname',
+        phone: 'original',
+        address: 'keep_region',
+      },
+    });
+  });
+
   it('把动态商品列组作为整体选择和移动并分别修改三个基础表头', async () => {
     const user = userEvent.setup();
     const { onCreate } = renderWorkspace();
