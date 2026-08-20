@@ -279,9 +279,11 @@ import { FulfillmentDemandService } from './fulfillment-demand-service';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
 import type { FundsView, FinanceFactsForSource, FinanceSourceTypeName } from '../core/funds';
+import type { ProfitReportView } from '../core/profit';
 import { InventoryLedgerService } from './inventory-ledger-service';
 import { PurchaseOrderService } from './purchase-order-service';
 import { FundsService } from './funds-service';
+import { ProfitService } from './profit-service';
 import { FulfillmentPlanService } from './fulfillment-plan-service';
 import { RecipientService, type RecipientView } from './recipient-service';
 import type { RecipientSummaryView } from '../core/recipients';
@@ -6205,6 +6207,10 @@ export class LocalApplication {
     return this.fundsService().factsForShipmentRecord(recordId);
   }
 
+  public queryProfitReport(): ProfitReportView {
+    return this.profitService().report();
+  }
+
   public recordPendingFinanceItem(input: unknown): FundsView {
     return this.fundsService().recordPendingItem(input);
   }
@@ -8171,6 +8177,10 @@ export class LocalApplication {
 
   private fundsService(): FundsService {
     return new FundsService(this.requireWorkspace());
+  }
+
+  private profitService(): ProfitService {
+    return new ProfitService(this.requireWorkspace());
   }
 
   private recipientService(): RecipientService {

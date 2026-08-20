@@ -474,6 +474,24 @@ type DesktopApiTestOverrides = Partial<DesktopApi> & {
   selectSourceScreenshot?: () => Promise<OrderDraft | null>;
 };
 
+function profitFixture() {
+  return {
+    generatedAt: '2026-08-20T06:00:00.000Z',
+    orders: [],
+    products: [],
+    unmapped: { orderCount: 0, transactionCents: 0, allocatedNetCents: 0 },
+    others: [],
+    totals: {
+      transactionCents: 0,
+      profitCents: 0,
+      pendingRemainingCents: 0,
+      scrapCostCents: 0,
+      purchasePaymentNetCents: 0,
+      othersNetCents: 0,
+    },
+  };
+}
+
 function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
   const {
     selectSourceScreenshot = vi.fn().mockResolvedValue(null),
@@ -631,6 +649,7 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     changePurchaseOrderExpectedDate: vi.fn(),
     recordPurchaseArrival: vi.fn(),
     recordSupplierReturn: vi.fn(),
+    queryProfitReport: vi.fn().mockResolvedValue(profitFixture()),
     queryFunds: vi.fn().mockResolvedValue({
       pendingItems: [],
       records: [],

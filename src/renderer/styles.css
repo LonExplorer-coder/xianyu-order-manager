@@ -1131,6 +1131,72 @@ select:focus-visible {
   letter-spacing: 0.03em;
 }
 
+.profit-workspace {
+  min-width: 0;
+  padding-bottom: 24px;
+}
+
+.profit-generated-at {
+  color: var(--navy-500);
+  font-size: 12px;
+}
+
+.profit-detail-row > td {
+  padding: 0;
+  background: var(--surface-muted);
+}
+
+.profit-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px 20px;
+}
+
+.profit-detail h3 {
+  margin: 6px 0 0;
+  color: var(--navy-950);
+  font-size: 13px;
+}
+
+.profit-detail p {
+  margin: 0;
+  color: var(--navy-700);
+}
+
+.profit-component-list {
+  display: flex;
+  margin: 0;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  padding: 0;
+}
+
+.profit-component-list li {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.2fr) minmax(90px, 0.7fr) minmax(180px, 1.4fr) minmax(140px, 1.2fr) minmax(120px, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  color: var(--navy-700);
+  font-size: 12.5px;
+}
+
+.profit-component-list li > span:first-child {
+  color: var(--navy-950);
+  font-weight: 600;
+}
+
+.profit-component--reference {
+  opacity: 0.65;
+}
+
+.profit-product-meta {
+  display: block;
+  color: var(--navy-500);
+  font-size: 11px;
+}
+
 .shipment-groups-workspace {
   min-width: 0;
   padding-bottom: 24px;
@@ -6575,6 +6641,7 @@ select:focus-visible {
   .workbench-template-bar,
   .orders-overview,
   .funds-overview,
+  .profit-overview,
   .shipment-groups-section__heading,
   .shipment-groups-empty,
   .shipment-groups-status,

@@ -122,6 +122,7 @@ import type { FulfillmentDemandView } from '../core/fulfillment-demand';
 import type { InventoryMovementView, InventoryView } from '../core/inventory-ledger';
 import type { PurchaseView } from '../core/purchase-orders';
 import type { FundsView, FinanceFactsForSource, FinanceSourceTypeName } from '../core/funds';
+import type { ProfitReportView } from '../core/profit';
 import type { RecipientSummaryView } from '../core/recipients';
 import type { AftersalesWorkflowTemplate } from '../core/aftersales-workflow-templates';
 import {
@@ -898,6 +899,10 @@ export class DesktopSession {
 
   public queryFunds(): FundsView {
     return this.requireApplication().queryFunds();
+  }
+
+  public queryProfitReport(): ProfitReportView {
+    return this.requireApplication().queryProfitReport();
   }
 
   public queryFinanceFactsForSource(

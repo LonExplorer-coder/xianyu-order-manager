@@ -640,6 +640,7 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
     desktopSession.recordSupplierReturn(input)
   ));
   ipcMain.handle('funds:view', () => desktopSession.queryFunds());
+  ipcMain.handle('profit:report', () => desktopSession.queryProfitReport());
   ipcMain.handle('funds:facts-for-source', (_event, sourceType: string, sourceId: string) => (
     desktopSession.queryFinanceFactsForSource(sourceType as never, sourceId)
   ));

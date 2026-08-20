@@ -56,6 +56,8 @@ export type PortableReleaseSmokeResult = {
   inventoryMovementCount: number;
   financePendingItemCount: number;
   financeRecordCount: number;
+  profitOrderCount: number;
+  profitTotalProfitCents: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -301,6 +303,29 @@ export async function runPortableReleaseDataSmoke(
       throw new Error('便携版重启后资金汇总不完整');
     }
 
+    const profit = session.queryProfitReport();
+    const smokeProfitOrder = profit.orders.find(({ orderNumber }) => (
+      orderNumber === PORTABLE_SMOKE_ORDER_NUMBER
+    ));
+    if (
+      profit.orders.length !== 1 ||
+      !smokeProfitOrder ||
+      smokeProfitOrder.transactionAmountCents !== 800 ||
+      smokeProfitOrder.settlementNetCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
+      smokeProfitOrder.refundNetCents !== -PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      smokeProfitOrder.purchaseCostCents !== 0 ||
+      smokeProfitOrder.profitCents
+        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      smokeProfitOrder.pendingRemainingCents !== 0 ||
+      profit.unmapped.allocatedNetCents
+        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      profit.totals.profitCents
+        !== PORTABLE_SMOKE_SETTLEMENT_CENTS - PORTABLE_SMOKE_ACTUAL_REFUND_CENTS ||
+      profit.totals.pendingRemainingCents !== 0
+    ) {
+      throw new Error('便携版重启后利润视图不完整');
+    }
+
     return {
       phase: input.phase,
       dataDirectory,
@@ -319,6 +344,8 @@ export async function runPortableReleaseDataSmoke(
       inventoryMovementCount: inventory.movements.length,
       financePendingItemCount: funds.pendingItems.length,
       financeRecordCount: funds.records.length,
+      profitOrderCount: profit.orders.length,
+      profitTotalProfitCents: profit.totals.profitCents,
     };
   } finally {
     session.close();
@@ -406,12 +433,17 @@ function createPortableSmokeFundsHistory(session: DesktopSession): void {
   if (confirmed.pendingItems[0]?.remainingCents !== 0) {
     throw new Error('便携版冒烟退款确认后仍有剩余待确认金额');
   }
+  const settlementOrder = session.listOrders()
+    .find(({ orderNumber }) => orderNumber === PORTABLE_SMOKE_ORDER_NUMBER);
+  if (!settlementOrder) throw new Error('便携版冒烟缺少结算来源订单');
   session.recordFinanceRecord({
     type: 'platform_settlement',
     direction: 'income',
     amountCents: PORTABLE_SMOKE_SETTLEMENT_CENTS,
     occurredAt: new Date().toISOString(),
     note: PORTABLE_SMOKE_SETTLEMENT_NOTE,
+    sourceType: 'order',
+    sourceId: settlementOrder.id,
   });
 }
 

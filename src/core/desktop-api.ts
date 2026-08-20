@@ -165,6 +165,7 @@ import type {
   RecordFinanceRecordInput,
   ReverseFinanceRecordInput,
 } from './funds';
+import type { ProfitReportView } from './profit';
 import type {
   ChangePurchaseOrderExpectedDateInput,
   ChangePurchaseOrderItemQuantityInput,
@@ -352,6 +353,7 @@ export interface DesktopApi {
   recordInventoryAdjustment(input: RecordInventoryAdjustmentInput): Promise<InventoryView>;
   recordInventoryInspection(input: RecordInventoryInspectionInput): Promise<InventoryView>;
   queryFunds(): Promise<FundsView>;
+  queryProfitReport(): Promise<ProfitReportView>;
   queryFinanceFactsForSource(
     sourceType: FinanceSourceTypeName,
     sourceId: string,

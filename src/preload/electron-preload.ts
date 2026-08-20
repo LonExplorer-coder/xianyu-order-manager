@@ -210,6 +210,7 @@ const api: DesktopApi = {
   ),
   queryPurchases: () => ipcRenderer.invoke('purchases:view'),
   queryFunds: () => ipcRenderer.invoke('funds:view'),
+  queryProfitReport: () => ipcRenderer.invoke('profit:report'),
   queryFinanceFactsForSource: (sourceType: string, sourceId: string) => (
     ipcRenderer.invoke('funds:facts-for-source', sourceType, sourceId)
   ),
