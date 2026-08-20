@@ -911,6 +911,10 @@ export class DesktopSession {
     return this.requireApplication().queryFinanceFactsForAftersalesCase(caseId);
   }
 
+  public queryFinanceFactsForShipmentRecord(recordId: string): FinanceFactsForSource {
+    return this.requireApplication().queryFinanceFactsForShipmentRecord(recordId);
+  }
+
   public confirmPendingFinanceItem(input: unknown): FundsView {
     return this.requireApplication().confirmPendingFinanceItem(input);
   }

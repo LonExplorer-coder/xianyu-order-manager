@@ -3428,13 +3428,13 @@ function ShipmentRecordsSection({
     preset: FinanceRecordDialogPreset;
     recordId: string;
   } | null>(null);
-  function loadFundsForRecord(recordId: string): void {
-    if (fundsByRecord[recordId]) return;
+  function loadFundsForRecord(recordId: string, force = false): void {
+    if (!force && fundsByRecord[recordId]) return;
     setFundsByRecord((previous) => ({
       ...previous,
       [recordId]: { facts: null, state: 'loading' },
     }));
-    api.queryFinanceFactsForSource('shipment_record', recordId)
+    api.queryFinanceFactsForShipmentRecord(recordId)
       .then((facts) => {
         setFundsByRecord((previous) => ({
           ...previous,
@@ -3790,7 +3790,7 @@ function ShipmentRecordsSection({
                 delete next[recordFundsTarget.recordId];
                 return next;
               });
-              loadFundsForRecord(recordFundsTarget.recordId);
+              loadFundsForRecord(recordFundsTarget.recordId, true);
             }}
           />
         )}
@@ -3824,7 +3824,7 @@ function ShipmentRecordsSection({
               delete next[recordFundsTarget.recordId];
               return next;
             });
-            loadFundsForRecord(recordFundsTarget.recordId);
+            loadFundsForRecord(recordFundsTarget.recordId, true);
           }}
         />
       )}

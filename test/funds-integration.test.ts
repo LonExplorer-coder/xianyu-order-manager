@@ -70,12 +70,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function openShippedApplication(): Promise<{
+async function openShippedApplication(deliver = true): Promise<{
   application: LocalApplication;
   dataDirectory: string;
   orderId: string;
   shipmentRecordId: string;
+  shipmentPackageId: string;
   shipmentPackageItemId: string;
+  shipmentPackageRevision: number;
 }> {
   const root = await mkdtemp(join(tmpdir(), 'xianyu-funds-integration-'));
   const dataDirectory = join(root, '数据');
@@ -103,20 +105,26 @@ async function openShippedApplication(): Promise<{
       items,
     }],
   });
-  const record = application.updateShipmentPackageLogisticsStatus({
-    recordId: shipment.record.id,
-    packageId: shipment.record.packages[0]!.id,
-    expectedRevision: shipment.record.packages[0]!.revision,
-    logisticsStatus: 'delivered',
-    occurredAt: '2026-08-20T14:10:00+08:00',
-    reason: '资金接入前置：买家已签收',
-  }).record;
+  let record = shipment.record;
+  if (deliver) {
+    record = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipment.record.id,
+      packageId: shipment.record.packages[0]!.id,
+      expectedRevision: shipment.record.packages[0]!.revision,
+      logisticsStatus: 'delivered',
+      occurredAt: '2026-08-20T14:10:00+08:00',
+      reason: '资金接入前置：买家已签收',
+    }).record;
+  }
+  const shipmentPackage = record.packages[0]!;
   return {
     application,
     dataDirectory,
     orderId: order.id,
     shipmentRecordId: record.id,
-    shipmentPackageItemId: record.packages[0]!.items[0]!.id,
+    shipmentPackageId: shipmentPackage.id,
+    shipmentPackageItemId: shipmentPackage.items[0]!.id,
+    shipmentPackageRevision: shipmentPackage.revision,
   };
 }
 
@@ -360,6 +368,83 @@ describe('业务资金接入', () => {
     const view = application.queryFunds();
     expect(view.pendingItems.filter(({ type }) => type === 'carrier_claim')).toEqual([]);
     expect(view.pendingItems).toEqual([]);
+  });
+
+  it('正向丢件索赔同意后的待确认事项与首发运费在发货记录资金聚合并可见', async () => {
+    const {
+      application,
+      shipmentRecordId,
+      shipmentPackageId,
+      shipmentPackageItemId,
+      shipmentPackageRevision,
+    } = await openShippedApplication(false);
+    const accepted = application.updateShipmentPackageLogisticsStatus({
+      recordId: shipmentRecordId,
+      packageId: shipmentPackageId,
+      expectedRevision: shipmentPackageRevision,
+      logisticsStatus: 'in_transit',
+      carrierAcceptanceConfirmed: true,
+      occurredAt: '2026-08-20T14:15:00+08:00',
+      reason: '承运方已确认揽收',
+    });
+    const lost = application.recordShipmentPackageLogisticsException({
+      recordId: shipmentRecordId,
+      packageId: shipmentPackageId,
+      expectedRevision: accepted.record.packages[0]!.revision,
+      exceptionType: 'lost',
+      stage: 'confirmed',
+      impact: {
+        scope: 'items',
+        items: [{ sourceItemId: shipmentPackageItemId, quantity: 1 }],
+      },
+      carrierConfirmedLoss: true,
+      occurredAt: '2026-08-20T14:20:00+08:00',
+      reason: '承运方确认正向包裹丢件',
+    });
+    const opened = application.progressShipmentPackageCarrierClaim({
+      kind: 'open',
+      recordId: shipmentRecordId,
+      packageId: shipmentPackageId,
+      expectedRevision: lost.record.packages[0]!.revision,
+      requestedAmountCents: 1_200,
+      occurredAt: '2026-08-20T14:25:00+08:00',
+      reason: '申请正向丢件赔付',
+    });
+    application.progressShipmentPackageCarrierClaim({
+      kind: 'resolve',
+      recordId: shipmentRecordId,
+      packageId: shipmentPackageId,
+      expectedClaimRevision: 1,
+      outcome: 'approved',
+      approvedAmountCents: 1_200,
+      occurredAt: '2026-08-20T14:30:00+08:00',
+      reason: '承运方同意赔付',
+    });
+    void opened;
+
+    application.recordFinanceRecord({
+      type: 'initial_freight',
+      direction: 'expense',
+      amountCents: 800,
+      occurredAt: '2026-08-20T14:35:00+08:00',
+      note: '首发顺丰运费',
+      sourceType: 'shipment_record',
+      sourceId: shipmentRecordId,
+    });
+
+    const facts = application.queryFinanceFactsForShipmentRecord(shipmentRecordId);
+    expect(facts.pendingItems).toHaveLength(1);
+    expect(facts.pendingItems[0]).toMatchObject({
+      type: 'carrier_claim',
+      direction: 'income',
+      amountCents: 1_200,
+      status: 'pending',
+    });
+    expect(facts.records.map(({ type }) => type)).toEqual(['initial_freight']);
+    expect(facts.records[0]).toMatchObject({
+      sourceType: 'shipment_record',
+      sourceId: shipmentRecordId,
+    });
   });
 
   it('采购付款与供应方退款分别关联采购订单与退货，供应方退款走采购成本收入方向', async () => {

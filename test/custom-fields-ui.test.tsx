@@ -349,6 +349,10 @@ function createApi(
       pendingItems: [],
       records: [],
     }),
+    queryFinanceFactsForShipmentRecord: vi.fn().mockResolvedValue({
+      pendingItems: [],
+      records: [],
+    }),
     createCustomFieldDefinition: vi.fn(),
     saveCustomFieldValues: vi.fn().mockResolvedValue([]),
     listTableTemplates: vi.fn().mockResolvedValue([]),

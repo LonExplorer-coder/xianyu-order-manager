@@ -357,6 +357,7 @@ export interface DesktopApi {
     sourceId: string,
   ): Promise<FinanceFactsForSource>;
   queryFinanceFactsForAftersalesCase(caseId: string): Promise<FinanceFactsForSource>;
+  queryFinanceFactsForShipmentRecord(recordId: string): Promise<FinanceFactsForSource>;
   confirmPendingFinanceItem(input: ConfirmPendingFinanceItemInput): Promise<FundsView>;
   cancelPendingFinanceItem(input: CancelPendingFinanceItemInput): Promise<FundsView>;
   recordFinanceRecord(input: RecordFinanceRecordInput): Promise<FundsView>;

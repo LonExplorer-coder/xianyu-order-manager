@@ -25,6 +25,10 @@ import type { Workspace } from './workspace';
 
 type SqlRow = Record<string, string | number | null>;
 
+// 人工录入来源的存在性校验表。注意 (source_type, source_id) 是双层语义：
+// 人工录入的 sourceId 指向这里的业务主表；业务钩子（ADR 0044）写入的 sourceId
+// 是事实级锚点——aftersales_case 指向 legacy financial_records.id（逐笔退款），
+// logistics_exception 指向 carrier_claims.id（索赔本身），两者都不在本表内。
 const SOURCE_TABLES: Record<FinanceSourceTypeName, string> = {
   order: 'original_orders',
   shipment_record: 'shipment_records',
@@ -62,19 +66,42 @@ export class FundsService {
     `).all(caseId) as unknown as SqlRow[]) {
       caseSourceIds.add(String(row.id));
     }
+    return this.factsForAnchors(
+      caseSourceIds,
+      new Set<string>((
+        this.workspace.database.prepare(`
+          SELECT c.id AS id
+          FROM carrier_claims c
+          JOIN aftersales_return_records r ON r.id = c.return_record_id
+          WHERE r.aftersales_case_id = ?
+        `).all(caseId) as unknown as SqlRow[]
+      ).map((row) => String(row.id))),
+    );
+  }
+
+  // 发货记录的资金聚合：直接挂记录的记录（如首发运费），加上该记录各包裹的
+  // 正向丢件索赔同意待确认（carrier_claims 出库方向，ADR 0044）。
+  public factsForShipmentRecord(recordId: string): FinanceFactsForSource {
     const claimIds = new Set<string>((
       this.workspace.database.prepare(`
         SELECT c.id AS id
         FROM carrier_claims c
-        JOIN aftersales_return_records r ON r.id = c.return_record_id
-        WHERE r.aftersales_case_id = ?
-      `).all(caseId) as unknown as SqlRow[]
+        JOIN shipment_packages p ON p.id = c.shipment_package_id
+        WHERE c.direction = 'outbound' AND p.shipment_record_id = ?
+      `).all(recordId) as unknown as SqlRow[]
     ).map((row) => String(row.id)));
+    return this.factsForAnchors(new Set<string>([recordId]), claimIds);
+  }
 
+  private factsForAnchors(
+    primarySourceIds: Set<string>,
+    claimIds: Set<string>,
+  ): FinanceFactsForSource {
     const view = this.buildView();
     const belongs = (sourceType: FinanceSourceTypeName, sourceId: string | null): boolean => (
       sourceId !== null
-      && ((sourceType === 'aftersales_case' && caseSourceIds.has(sourceId))
+      && ((sourceType === 'aftersales_case' && primarySourceIds.has(sourceId))
+        || (sourceType === 'shipment_record' && primarySourceIds.has(sourceId))
         || (sourceType === 'logistics_exception' && claimIds.has(sourceId)))
     );
     return {
@@ -93,25 +120,7 @@ export class FundsService {
     const now = new Date().toISOString();
     this.workspace.transaction(() => {
       this.requireSourceRecord(prepared.sourceType, prepared.sourceId);
-      // 幂等只作用于 (来源类型, 来源标识, 类型) 锚点；其他约束冲突照常抛错，不静默吞掉。
-      this.workspace.database.prepare(`
-        INSERT INTO finance_pending_items (
-          id, type, direction, amount_cents, currency, status,
-          source_type, source_id, note, occurred_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'CNY', 'pending', ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (source_type, source_id, type) DO NOTHING
-      `).run(
-        randomUUID(),
-        prepared.type,
-        financeDirectionOfType(prepared.type),
-        prepared.amountCents,
-        prepared.sourceType,
-        prepared.sourceId,
-        prepared.note,
-        prepared.occurredAt,
-        now,
-        now,
-      );
+      this.insertPendingItem(prepared, now);
     });
     return this.buildView();
   }
@@ -173,6 +182,8 @@ export class FundsService {
   // 业务事实钩子：在业务事务内幂等立账待确认事项（#74）。
   // 与人工入口不同：来源存在性由调用方的事实真实性保证，不重复校验；
   // 重复提交同一事实被唯一锚点吞掉。业务完成到这里为止，绝不生成资金记录。
+  // 注意：note 沿用业务侧说明，两侧长度上限都是 500（aftersales-cases / logistics-exceptions），
+  // 业务侧放宽前这里隐式依赖该上限。
   public recordBusinessPendingFact(fact: {
     type: FinanceRecordTypeName;
     amountCents: number;
@@ -181,7 +192,18 @@ export class FundsService {
     note: string;
     occurredAt: string;
   }): void {
-    const now = new Date().toISOString();
+    this.insertPendingItem(fact, new Date().toISOString());
+  }
+
+  // 幂等只作用于 (来源类型, 来源标识, 类型) 锚点；其他约束冲突照常抛错，不静默吞掉。
+  private insertPendingItem(entry: {
+    type: FinanceRecordTypeName;
+    amountCents: number;
+    sourceType: FinanceSourceTypeName;
+    sourceId: string;
+    note: string;
+    occurredAt: string;
+  }, now: string): void {
     this.workspace.database.prepare(`
       INSERT INTO finance_pending_items (
         id, type, direction, amount_cents, currency, status,
@@ -190,13 +212,13 @@ export class FundsService {
       ON CONFLICT (source_type, source_id, type) DO NOTHING
     `).run(
       randomUUID(),
-      fact.type,
-      financeDirectionOfType(fact.type),
-      fact.amountCents,
-      fact.sourceType,
-      fact.sourceId,
-      fact.note,
-      fact.occurredAt,
+      entry.type,
+      financeDirectionOfType(entry.type),
+      entry.amountCents,
+      entry.sourceType,
+      entry.sourceId,
+      entry.note,
+      entry.occurredAt,
       now,
       now,
     );
@@ -270,6 +292,7 @@ export class FundsService {
     return this.buildView();
   }
 
+  // 与 buildView 的聚合口径保持一致：剩余待确认按方向加权净额，最低钳到 0。
   private remainingCents(row: SqlRow): number {
     const signed = this.workspace.database.prepare(`
       SELECT COALESCE(SUM(CASE direction WHEN 'income' THEN amount_cents ELSE -amount_cents END), 0)
@@ -277,7 +300,7 @@ export class FundsService {
       FROM finance_records WHERE pending_item_id = ?
     `).get(row.id) as unknown as SqlRow;
     const sign = row.direction === 'income' ? 1 : -1;
-    return Number(row.amount_cents) - sign * Number(signed.signed);
+    return Math.max(Number(row.amount_cents) - sign * Number(signed.signed), 0);
   }
 
   private requirePendingItem(id: string): SqlRow {

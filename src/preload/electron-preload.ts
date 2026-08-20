@@ -216,6 +216,9 @@ const api: DesktopApi = {
   queryFinanceFactsForAftersalesCase: (caseId: string) => (
     ipcRenderer.invoke('funds:facts-for-aftersales-case', caseId)
   ),
+  queryFinanceFactsForShipmentRecord: (recordId: string) => (
+    ipcRenderer.invoke('funds:facts-for-shipment-record', recordId)
+  ),
   confirmPendingFinanceItem: (input) => (
     ipcRenderer.invoke('funds:confirm-pending-item', input)
   ),

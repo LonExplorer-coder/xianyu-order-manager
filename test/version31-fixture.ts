@@ -1,11 +1,18 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 // 迁移旅程测试降级前的资金数据清理：业务钩子（#74）会在旅程中生成待确认资金事项，
-// 降级守卫会拒绝带走资金数据；测试里显式清空（先摘删除触发器再复原）。
+// 降级守卫会拒绝带走资金数据；测试里显式清空两张资金表（先摘删除触发器再复原）。
 export function clearVersion58FundsData(database: DatabaseSync): void {
   database.exec(`
+    DROP TRIGGER IF EXISTS finance_records_are_immutable_on_delete;
     DROP TRIGGER IF EXISTS finance_pending_items_are_immutable_on_delete;
+    DELETE FROM finance_records;
     DELETE FROM finance_pending_items;
+    CREATE TRIGGER finance_records_are_immutable_on_delete
+    BEFORE DELETE ON finance_records
+    BEGIN
+      SELECT RAISE(ABORT, 'finance records are immutable');
+    END;
     CREATE TRIGGER finance_pending_items_are_immutable_on_delete
     BEFORE DELETE ON finance_pending_items
     BEGIN

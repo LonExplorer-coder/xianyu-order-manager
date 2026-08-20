@@ -151,8 +151,8 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
   const supplierReturns = view?.supplierReturns ?? [];
 
   // 采购的资金影响按订单懒加载：付款挂采购订单、供应方退款挂退货记录，展示时合并。
-  function loadFundsForOrder(orderId: string): void {
-    if (fundsByOrder[orderId]) return;
+  function loadFundsForOrder(orderId: string, force = false): void {
+    if (!force && fundsByOrder[orderId]) return;
     setFundsByOrder((previous) => ({
       ...previous,
       [orderId]: { facts: null, state: 'loading' },
@@ -192,7 +192,7 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
       for (const orderId of orderIds) delete next[orderId];
       return next;
     });
-    for (const orderId of orderIds) loadFundsForOrder(orderId);
+    for (const orderId of orderIds) loadFundsForOrder(orderId, true);
   }
 
   const openDialog = (next: OrderDialogKind) => {
@@ -563,14 +563,14 @@ export function PurchaseWorkspace({ api }: { api: DesktopApi }) {
                       }
                       return (
                         <>
-                          {funds.facts && funds.facts.records.length > 0 && (
-                            <p className="workspace-subtitle">
-                              采购净支出 {formatMoney(-financeFactsNetCents(funds.facts))}
-                              {order.payable
-                                ? ` · 待确认应付 ${formatMoney(order.payable.amountCents)}`
-                                : ''}
-                            </p>
-                          )}
+                          <p className="workspace-subtitle">
+                            {order.payable
+                              ? `待确认应付 ${formatMoney(order.payable.amountCents)}`
+                              : '无待确认应付'}
+                            {funds.facts && funds.facts.records.length > 0
+                              ? ` · 采购净支出 ${formatMoney(-financeFactsNetCents(funds.facts))}`
+                              : ''}
+                          </p>
                           <FinanceFactsSummary facts={funds.facts} />
                         </>
                       );

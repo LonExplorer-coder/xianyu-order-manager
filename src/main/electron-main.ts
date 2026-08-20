@@ -646,6 +646,9 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('funds:facts-for-aftersales-case', (_event, caseId: string) => (
     desktopSession.queryFinanceFactsForAftersalesCase(caseId)
   ));
+  ipcMain.handle('funds:facts-for-shipment-record', (_event, recordId: string) => (
+    desktopSession.queryFinanceFactsForShipmentRecord(recordId)
+  ));
   ipcMain.handle('funds:confirm-pending-item', (_event, input: unknown) => (
     desktopSession.confirmPendingFinanceItem(input)
   ));

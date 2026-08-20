@@ -6201,6 +6201,10 @@ export class LocalApplication {
     return this.fundsService().factsForAftersalesCase(caseId);
   }
 
+  public queryFinanceFactsForShipmentRecord(recordId: string): FinanceFactsForSource {
+    return this.fundsService().factsForShipmentRecord(recordId);
+  }
+
   public recordPendingFinanceItem(input: unknown): FundsView {
     return this.fundsService().recordPendingItem(input);
   }

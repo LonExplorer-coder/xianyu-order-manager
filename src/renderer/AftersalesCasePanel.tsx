@@ -115,8 +115,8 @@ export function AftersalesCasePanel({
     string,
     { facts: FinanceFactsForSource | null; state: 'loading' | 'ready' | 'error' }
   >>({});
-  const loadFundsImpact = (caseId: string): void => {
-    if (fundsByCase[caseId]) return;
+  const loadFundsImpact = (caseId: string, force = false): void => {
+    if (!force && fundsByCase[caseId]) return;
     setFundsByCase((previous) => ({
       ...previous,
       [caseId]: { facts: null, state: 'loading' },
@@ -1159,7 +1159,7 @@ export function AftersalesCasePanel({
               delete next[recordFundsTarget.caseId];
               return next;
             });
-            loadFundsImpact(recordFundsTarget.caseId);
+            loadFundsImpact(recordFundsTarget.caseId, true);
           }}
         />
       )}

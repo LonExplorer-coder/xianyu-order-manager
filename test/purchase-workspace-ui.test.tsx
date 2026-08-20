@@ -290,4 +290,52 @@ describe('采购工作区', () => {
     expect(queried).toHaveBeenCalledWith('purchase_order', 'order-po-1');
     expect(queried).toHaveBeenCalledWith('supplier_return', 'return-po-1');
   });
+
+  it('登记付款保存后资金详情强制重载显示新记录', async () => {
+    const user = userEvent.setup();
+    const paymentRecord = {
+      id: 'record-po-refresh-1',
+      sequence: 1,
+      type: 'purchase_cost',
+      direction: 'expense',
+      amountCents: 5_000,
+      currency: 'CNY',
+      confirmedSource: 'manual_confirmation',
+      confirmedAt: '2026-08-20T06:00:00.000Z',
+      occurredAt: '2026-08-20T06:00:00.000Z',
+      pendingItemId: null,
+      sourceType: 'purchase_order',
+      sourceId: 'order-po-1',
+      reversesRecordId: null,
+      note: '支付采购全款',
+      createdAt: '2026-08-20T06:00:00.000Z',
+    };
+    const queryFinanceFactsForSource = vi.fn(
+      (_sourceType: string, sourceId: string) => Promise.resolve(
+        sourceId === 'order-po-1' && queryFinanceFactsForSource.mock.calls.length > 1
+          ? { pendingItems: [], records: [paymentRecord] }
+          : { pendingItems: [], records: [] },
+      ),
+    );
+    renderPurchase({
+      recordFinanceRecord: vi.fn().mockResolvedValue({
+        pendingItems: [], records: [], typeTotals: [], pendingTotals: [],
+        totals: { incomeCents: 0, expenseCents: 0, netCents: 0, pendingRemainingCents: 0 },
+      }),
+      queryFinanceFactsForSource,
+    });
+
+    await user.click(await screen.findByText('资金（付款与退款）'));
+    await waitFor(() => expect(queryFinanceFactsForSource).toHaveBeenCalled());
+    expect(screen.queryByText('支付采购全款')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '登记付款 / 退款' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByLabelText('金额（元）'), '50');
+    await user.type(within(dialog).getByLabelText('资金说明'), '支付采购全款');
+    await user.click(within(dialog).getByRole('button', { name: '保存资金记录' }));
+
+    expect(await screen.findByText('支付采购全款')).toBeVisible();
+    expect(screen.getByText(/采购净支出 ¥50\.00/)).toBeVisible();
+  });
 });

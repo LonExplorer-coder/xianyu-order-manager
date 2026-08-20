@@ -354,8 +354,8 @@ export function FundsWorkspace({ api }: { api: DesktopApi }) {
                   <td>{formatTime(record.occurredAt)}</td>
                   <td>{formatTime(record.confirmedAt)}</td>
                   <td>
-                    {record.sourceType !== null && record.sourceId !== null
-                      ? `${financeSourceLabel(record.sourceType)} · ${record.sourceId.slice(0, 8)}`
+                    {record.sourceType !== null
+                      ? financeSourceLabel(record.sourceType)
                       : '直接录入'}
                   </td>
                   <td>{record.note}</td>
