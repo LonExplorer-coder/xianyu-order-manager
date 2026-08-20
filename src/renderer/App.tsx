@@ -5131,7 +5131,11 @@ function OrdersWorkspace({
   );
   if (allLifecycleOrderCount === 0) {
     return (
-      <section className="empty-workspace workspace-enter">
+      <section
+        className="empty-workspace workspace-enter"
+        aria-hidden={historicalImportSelection ? true : undefined}
+        inert={historicalImportSelection ? true : undefined}
+      >
         <div className="empty-visual" aria-hidden="true">
           <div className="document-outline"><Icon name="image" /></div>
           <span className="scan-line" />
@@ -5166,7 +5170,12 @@ function OrdersWorkspace({
   }
 
   return (
-    <section className="orders-workspace workspace-enter" aria-busy={openingOrder}>
+    <section
+      className="orders-workspace workspace-enter"
+      aria-busy={openingOrder}
+      aria-hidden={historicalImportSelection ? true : undefined}
+      inert={historicalImportSelection ? true : undefined}
+    >
       <header className="workspace-header">
         <div>
           <span className="section-kicker">原始订单</span>

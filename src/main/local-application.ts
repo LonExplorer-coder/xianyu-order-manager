@@ -96,6 +96,7 @@ import {
   hasEquivalentOrderContent,
   hasSameOrderIdentity,
   normalizedOrderIdentityPart,
+  pairOrderItemsForComparison,
 } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import {
@@ -4112,6 +4113,9 @@ export class LocalApplication {
       buffer,
       columnMapping: input.columnMapping,
       findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+      prepareExistingOrderCandidate: (existing, candidate) => (
+        this.prepareHistoricalUpdateCandidate(existing, candidate, input.columnMapping)
+      ),
     })).preview;
   }
 
@@ -4130,6 +4134,9 @@ export class LocalApplication {
       buffer,
       columnMapping: normalized.columnMapping,
       findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+      prepareExistingOrderCandidate: (existing, candidate) => (
+        this.prepareHistoricalUpdateCandidate(existing, candidate, normalized.columnMapping)
+      ),
     });
     if (plan.preview.previewToken !== normalized.previewToken) {
       throw new Error('历史订单预览已过期，请重新预览');
@@ -4149,6 +4156,7 @@ export class LocalApplication {
           }
           this.updateHistoricalOrder(
             candidate,
+            normalized.columnMapping,
             normalizedSourceName,
             orderPreview.existingOrderId,
             orderPreview.expectedRevision,
@@ -4179,6 +4187,9 @@ export class LocalApplication {
       buffer,
       columnMapping: normalized.columnMapping,
       findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+      prepareExistingOrderCandidate: (existing, candidate) => (
+        this.prepareHistoricalUpdateCandidate(existing, candidate, normalized.columnMapping)
+      ),
     });
     if (plan.preview.previewToken !== normalized.previewToken) {
       throw new Error('历史订单预览已过期，请重新预览');
@@ -4310,6 +4321,7 @@ export class LocalApplication {
 
   private updateHistoricalOrder(
     imported: HistoricalOrderImportCandidate,
+    columnMapping: HistoricalOrderImportInput['columnMapping'],
     sourceName: string,
     orderId: string,
     expectedRevision: number,
@@ -4323,32 +4335,26 @@ export class LocalApplication {
     ) {
       throw new Error('历史订单预览已过期，请重新预览');
     }
-    const candidate = withHigherPriorityCurrentQuantities(existing, imported);
+    const confirmed = this.prepareHistoricalUpdateCandidate(existing, imported, columnMapping);
     const hasShipmentHistory = this.orderFulfillmentProjection().hasShipmentHistory(orderId);
-    const fulfillmentStatus = hasShipmentHistory
-      ? existing.fulfillmentStatus
-      : candidate.fulfillmentStatus;
-    const confirmed = { ...candidate, fulfillmentStatus };
-    const changes = diffOrderCurrentValues(existing, confirmed).filter((change) => (
-      !hasShipmentHistory || change.path !== 'fulfillmentStatus'
-    ));
+    const changes = diffOrderCurrentValues(existing, confirmed);
     if (changes.length === 0) {
       throw new Error('历史订单内容已与当前值一致，请重新预览');
     }
 
-    const persistedItemIds = matchOrderItemIds(existing.items, candidate.items);
-    for (const item of candidate.items) {
+    const persistedItemIds = matchHistoricalOrderItemIds(existing.items, confirmed.items);
+    for (const item of confirmed.items) {
       if (!persistedItemIds.has(item.id)) persistedItemIds.set(item.id, randomUUID());
     }
     const existingItemsById = new Map(existing.items.map((item) => [item.id, item]));
     const retainedExistingItemIds = new Set(persistedItemIds.values());
-    const importItems = candidate.items.map((item, position) => ({ ...item, position }));
+    const importItems = confirmed.items.map((item, position) => ({ ...item, position }));
     const productStandardizations = this.prepareProductStandardizations(
       importItems,
       undefined,
       { platform: existing.platform, sellerAccount: existing.sellerAccount },
     );
-    for (const item of candidate.items) {
+    for (const item of confirmed.items) {
       const persistedItemId = persistedItemIds.get(item.id);
       const existingItem = persistedItemId ? existingItemsById.get(persistedItemId) : undefined;
       if (!existingItem?.standardProduct) continue;
@@ -4385,40 +4391,40 @@ export class LocalApplication {
         updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
-      candidate.alipayTransactionNumber,
-      candidate.buyerNickname,
-      candidate.recipient,
-      candidate.phone,
-      candidate.phoneNormalized,
-      candidate.addressOriginal,
-      candidate.addressNormalized,
-      candidate.province,
-      candidate.city,
-      candidate.district,
-      candidate.orderedAtOriginal,
-      candidate.orderedAtNormalized,
-      candidate.paidAtOriginal,
-      candidate.paidAtNormalized,
-      candidate.productTotalCents,
-      candidate.shippingFeeCents,
-      candidate.amountCents,
-      candidate.platformTransactionStatus,
-      fulfillmentStatus,
+      confirmed.alipayTransactionNumber,
+      confirmed.buyerNickname,
+      confirmed.recipient,
+      confirmed.phone,
+      confirmed.phoneNormalized,
+      confirmed.addressOriginal,
+      confirmed.addressNormalized,
+      confirmed.province,
+      confirmed.city,
+      confirmed.district,
+      confirmed.orderedAtOriginal,
+      confirmed.orderedAtNormalized,
+      confirmed.paidAtOriginal,
+      confirmed.paidAtNormalized,
+      confirmed.productTotalCents,
+      confirmed.shippingFeeCents,
+      confirmed.amountCents,
+      confirmed.platformTransactionStatus,
+      confirmed.fulfillmentStatus,
       now,
       orderId,
       expectedRevision,
     );
     if (updatedOrder.changes !== 1) throw new Error('历史订单预览已过期，请重新预览');
-    if (['refunded', 'cancelled'].includes(candidate.platformTransactionStatus)) {
+    if (['refunded', 'cancelled'].includes(confirmed.platformTransactionStatus)) {
       new FulfillmentDemandService(workspace).shrinkDraftsAfterOrderExit(
         orderId,
         now,
-        candidate.platformTransactionStatus === 'refunded'
+        confirmed.platformTransactionStatus === 'refunded'
           ? '订单整单退款后重算未确认建议'
           : '订单取消后重算未确认建议',
       );
     }
-    this.recipientService().ensureRecipient(candidate.recipient, candidate.phoneNormalized, now);
+    this.recipientService().ensureRecipient(confirmed.recipient, confirmed.phoneNormalized, now);
 
     workspace.database.prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
       .run(orderId);
@@ -4435,7 +4441,7 @@ export class LocalApplication {
         standard_product_id, standardization_source, standard_display_preference
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    candidate.items.forEach((item, position) => {
+    confirmed.items.forEach((item, position) => {
       const itemId = persistedItemIds.get(item.id);
       if (!itemId) throw new Error('历史订单商品标识无效');
       const subtotal = safeSubtotal(requireMoney('商品单价', item.unitPriceCents), item.quantity);
@@ -4507,6 +4513,63 @@ export class LocalApplication {
       );
     }
     if (hasShipmentHistory) this.synchronizeShipmentOrderFulfillment(orderId, now);
+  }
+
+  private prepareHistoricalUpdateCandidate(
+    existing: OriginalOrder,
+    imported: HistoricalOrderImportCandidate,
+    columnMapping: HistoricalOrderImportInput['columnMapping'],
+  ): HistoricalOrderImportCandidate {
+    const columns = columnMapping.columns;
+    const existingIdByImportedId = matchHistoricalOrderItemIds(existing.items, imported.items);
+    const existingItemsById = new Map(existing.items.map((item) => [item.id, item]));
+    const withPreservedUnmappedFields: HistoricalOrderImportCandidate = {
+      ...imported,
+      alipayTransactionNumber: columns.alipayTransactionNumber === null
+        ? existing.alipayTransactionNumber
+        : imported.alipayTransactionNumber,
+      buyerNickname: columns.buyerNickname === null
+        ? existing.buyerNickname
+        : imported.buyerNickname,
+      orderedAtOriginal: columns.orderedAt === null
+        ? existing.orderedAtOriginal
+        : imported.orderedAtOriginal,
+      orderedAtNormalized: columns.orderedAt === null
+        ? existing.orderedAtNormalized
+        : imported.orderedAtNormalized,
+      paidAtOriginal: columns.paidAt === null
+        ? existing.paidAtOriginal
+        : imported.paidAtOriginal,
+      paidAtNormalized: columns.paidAt === null
+        ? existing.paidAtNormalized
+        : imported.paidAtNormalized,
+      productTotalCents: columns.productTotal === null
+        ? existing.productTotalCents
+        : imported.productTotalCents,
+      shippingFeeCents: columns.shippingFee === null
+        ? existing.shippingFeeCents
+        : imported.shippingFeeCents,
+      platformTransactionStatus: columns.platformTransactionStatus === null
+        ? existing.platformTransactionStatus
+        : imported.platformTransactionStatus,
+      fulfillmentStatus: columns.fulfillmentStatus === null
+        ? existing.fulfillmentStatus
+        : imported.fulfillmentStatus,
+      items: imported.items.map((item) => {
+        if (columns.itemSpec !== null) return item;
+        const existingId = existingIdByImportedId.get(item.id);
+        const existingItem = existingId ? existingItemsById.get(existingId) : undefined;
+        return existingItem ? { ...item, sourceSpec: existingItem.sourceSpec } : item;
+      }),
+    };
+    const withProtectedQuantities = withHigherPriorityCurrentQuantities(
+      existing,
+      withPreservedUnmappedFields,
+      matchHistoricalOrderItemIds,
+    );
+    return this.orderFulfillmentProjection().hasShipmentHistory(existing.id)
+      ? { ...withProtectedQuantities, fulfillmentStatus: existing.fulfillmentStatus }
+      : withProtectedQuantities;
   }
 
   public inspectProductCatalogWorkbook(
@@ -8934,8 +8997,9 @@ function withManualQuantityEdits(
 function withHigherPriorityCurrentQuantities<T extends { items: Array<RecognitionItem & { id: string }> }>(
   current: OriginalOrder,
   incoming: T,
+  matchItems: typeof matchOrderItemIds = matchOrderItemIds,
 ): T {
-  const currentIdByIncomingId = matchOrderItemIds(current.items, incoming.items);
+  const currentIdByIncomingId = matchItems(current.items, incoming.items);
   const currentById = new Map(current.items.map((item) => [item.id, item]));
   return {
     ...incoming,
@@ -8956,6 +9020,15 @@ function withHigherPriorityCurrentQuantities<T extends { items: Array<Recognitio
       };
     }),
   };
+}
+
+function matchHistoricalOrderItemIds(
+  existingItems: readonly (RecognitionItem & { id: string })[],
+  importedItems: readonly (RecognitionItem & { id: string })[],
+): Map<string, string> {
+  return new Map(pairOrderItemsForComparison(existingItems, importedItems).map((pair) => (
+    [importedItems[pair.afterIndex].id, existingItems[pair.beforeIndex].id]
+  )));
 }
 
 function requiredQuantitySource(item: RecognitionItem): QuantitySource {

@@ -6,6 +6,7 @@ import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
+import type { OrderEditInput, OriginalOrder } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
 
 const openedApplications: LocalApplication[] = [];
@@ -106,6 +107,67 @@ async function updatedWorkbook(itemPrice = 50): Promise<Buffer> {
     '已付款', '待发货', '2026-08-19 10:00:00', '2026-08-19 10:01:00',
   ]);
   return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+const fullHistoricalHeaders = [
+  '交易平台', '业务账号', '平台单号', '支付宝交易号', '买家昵称', '收件姓名', '联系电话', '完整地址',
+  '下单时间', '付款时间', '商品总价', '运费', '实付金额', '交易状态', '发货状态', '商品标题', '商品规格', '商品单价', '购买数量',
+] as const;
+
+async function historicalWorkbook(
+  rows: readonly (readonly unknown[])[],
+  headers: readonly string[] = fullHistoricalHeaders,
+): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('旧订单');
+  worksheet.addRow([...headers]);
+  for (const row of rows) worksheet.addRow([...row]);
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function fullHistoricalRow(overrides: {
+  recipient?: string;
+  itemTitle?: string;
+  itemSpec?: string;
+  quantity?: number;
+  orderNumber?: string;
+} = {}): unknown[] {
+  return [
+    '闲鱼', '娃物账号', overrides.orderNumber ?? '202608200000000099',
+    'ALI-20260820-0099', '原买家', overrides.recipient ?? '张三', '13800138000',
+    '广东省深圳市南山区科技园 1 号', '2026-08-19 10:00:00', '2026-08-19 10:01:00',
+    100, 8.5, 108.5, '已付款', '待发货', overrides.itemTitle ?? '海棠杯',
+    overrides.itemSpec ?? '红色 450ml', 100, overrides.quantity ?? 1,
+  ];
+}
+
+function orderEditInput(order: OriginalOrder): OrderEditInput {
+  return {
+    orderId: order.id,
+    expectedRevision: order.revision,
+    identityCorrection: null,
+    alipayTransactionNumber: order.alipayTransactionNumber,
+    buyerNickname: order.buyerNickname,
+    recipient: order.recipient,
+    phone: order.phone,
+    addressOriginal: order.addressOriginal,
+    province: order.province,
+    city: order.city,
+    district: order.district,
+    orderedAtOriginal: order.orderedAtOriginal,
+    paidAtOriginal: order.paidAtOriginal,
+    productTotalCents: order.productTotalCents,
+    shippingFeeCents: order.shippingFeeCents,
+    amountCents: order.amountCents,
+    note: order.note ?? '',
+    items: order.items.map((item) => ({
+      id: item.id,
+      sourceTitle: item.sourceTitle,
+      sourceSpec: item.sourceSpec,
+      unitPriceCents: item.unitPriceCents,
+      quantity: item.quantity,
+    })),
+  };
 }
 
 describe('历史订单工作簿', () => {
@@ -414,5 +476,150 @@ describe('历史订单工作簿', () => {
         { sourceSnapshot: { sourceName: '旧订单.xlsx' } },
       ],
     });
+  });
+
+  it('更新时保留未映射的可选字段', async () => {
+    const application = await openApplication('xianyu-historical-order-optional-columns-');
+    const baselineBuffer = await historicalWorkbook([fullHistoricalRow()]);
+    const baselineInspection = await application.inspectHistoricalOrderWorkbook(baselineBuffer);
+    const baselinePreview = await application.previewHistoricalOrderImport(baselineBuffer, {
+      columnMapping: baselineInspection.suggestedColumnMapping,
+    });
+    await application.confirmHistoricalOrderImport(baselineBuffer, '完整历史订单.xlsx', {
+      columnMapping: baselineInspection.suggestedColumnMapping,
+      previewToken: baselinePreview.previewToken,
+    });
+
+    const minimalHeaders = [
+      '交易平台', '业务账号', '平台单号', '收件姓名', '联系电话', '完整地址',
+      '实付金额', '商品标题', '商品单价', '购买数量',
+    ];
+    const minimalBuffer = await historicalWorkbook([[
+      '闲鱼', '娃物账号', '202608200000000099', '张三（更新）', '13800138000',
+      '广东省深圳市南山区科技园 1 号', 108.5, '海棠杯', 100, 1,
+    ]], minimalHeaders);
+    const minimalInspection = await application.inspectHistoricalOrderWorkbook(minimalBuffer);
+    const preview = await application.previewHistoricalOrderImport(minimalBuffer, {
+      columnMapping: minimalInspection.suggestedColumnMapping,
+    });
+    expect(preview.orders[0]).toMatchObject({ action: 'update' });
+    await application.confirmHistoricalOrderImport(minimalBuffer, '最小必填历史订单.xlsx', {
+      columnMapping: minimalInspection.suggestedColumnMapping,
+      previewToken: preview.previewToken,
+    });
+
+    const [saved] = application.listOrders();
+    expect(application.getOrder(saved.id).order).toMatchObject({
+      recipient: '张三(更新)',
+      alipayTransactionNumber: 'ALI-20260820-0099',
+      buyerNickname: '原买家',
+      orderedAtOriginal: '2026-08-19 10:00:00',
+      paidAtOriginal: '2026-08-19 10:01:00',
+      productTotalCents: 10_000,
+      shippingFeeCents: 850,
+      platformTransactionStatus: 'paid',
+      fulfillmentStatus: 'pending_shipment',
+      items: [expect.objectContaining({ sourceSpec: '红色 450ml' })],
+    });
+  });
+
+  it('更新完全相同的多个商品时保留商品标识和自定义字段', async () => {
+    const application = await openApplication('xianyu-historical-order-stable-items-');
+    const baselineBuffer = await historicalWorkbook([fullHistoricalRow(), fullHistoricalRow()]);
+    const inspection = await application.inspectHistoricalOrderWorkbook(baselineBuffer);
+    const baselinePreview = await application.previewHistoricalOrderImport(baselineBuffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    await application.confirmHistoricalOrderImport(baselineBuffer, '重复商品订单.xlsx', {
+      columnMapping: inspection.suggestedColumnMapping,
+      previewToken: baselinePreview.previewToken,
+    });
+    const [saved] = application.listOrders();
+    const before = application.getOrder(saved.id);
+    const location = application.createCustomFieldDefinition({
+      name: '库位', granularity: 'order_item', type: 'text', required: false,
+      defaultValue: null, options: [],
+    });
+    application.saveCustomFieldValues({
+      orderId: saved.id,
+      orderValues: [],
+      itemValues: before.order.items.map((item, index) => ({
+        definitionId: location.id,
+        orderItemId: item.id,
+        value: `${String.fromCharCode(65 + index)} 区`,
+      })),
+    });
+
+    const updateBuffer = await historicalWorkbook([
+      fullHistoricalRow({ recipient: '张三（更新）' }),
+      fullHistoricalRow({ recipient: '张三（更新）' }),
+    ]);
+    const updatePreview = await application.previewHistoricalOrderImport(updateBuffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    await application.confirmHistoricalOrderImport(updateBuffer, '重复商品更新.xlsx', {
+      columnMapping: inspection.suggestedColumnMapping,
+      previewToken: updatePreview.previewToken,
+    });
+    const after = application.getOrder(saved.id);
+    expect(after.order.items.map(({ id }) => id)).toEqual(before.order.items.map(({ id }) => id));
+    expect(after.customFieldValues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ orderItemId: before.order.items[0].id, value: 'A 区' }),
+      expect.objectContaining({ orderItemId: before.order.items[1].id, value: 'B 区' }),
+    ]));
+  });
+
+  it('预览时就应用人工数量保护，保护后相同则直接标记重复', async () => {
+    const application = await openApplication('xianyu-historical-order-manual-quantity-');
+    const buffer = await historicalWorkbook([fullHistoricalRow()]);
+    const inspection = await application.inspectHistoricalOrderWorkbook(buffer);
+    const firstPreview = await application.previewHistoricalOrderImport(buffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    await application.confirmHistoricalOrderImport(buffer, '人工数量订单.xlsx', {
+      columnMapping: inspection.suggestedColumnMapping,
+      previewToken: firstPreview.previewToken,
+    });
+    const [saved] = application.listOrders();
+    const current = application.getOrder(saved.id).order;
+    const edit = orderEditInput(current);
+    edit.items[0].quantity = 2;
+    application.confirmOrderEdit(edit);
+
+    const preview = await application.previewHistoricalOrderImport(buffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    expect(preview.orders[0]).toMatchObject({ action: 'duplicate', changes: [] });
+    expect(preview.summary).toMatchObject({ updateOrderCount: 0, duplicateOrderCount: 1 });
+  });
+
+  it('拒绝将超过上限的商品行聚合为单笔订单', async () => {
+    const application = await openApplication('xianyu-historical-order-item-limit-');
+    const buffer = await historicalWorkbook(Array.from(
+      { length: 101 },
+      () => fullHistoricalRow({ orderNumber: '202608200000000100' }),
+    ));
+    const inspection = await application.inspectHistoricalOrderWorkbook(buffer);
+    const preview = await application.previewHistoricalOrderImport(buffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    expect(preview.orders).toEqual([]);
+    expect(preview.summary.errorRowCount).toBe(101);
+    expect(preview.errorRows[0]?.errors).toContain('同一原始订单的商品行不能超过 100 行');
+  });
+
+  it('预览时隔离商品小计超出安全范围的行', async () => {
+    const application = await openApplication('xianyu-historical-order-subtotal-limit-');
+    const row = fullHistoricalRow({ orderNumber: '202608200000000101', quantity: 2 });
+    row[17] = 50_000_000_000_000;
+    const buffer = await historicalWorkbook([row]);
+    const inspection = await application.inspectHistoricalOrderWorkbook(buffer);
+    const preview = await application.previewHistoricalOrderImport(buffer, {
+      columnMapping: inspection.suggestedColumnMapping,
+    });
+    expect(preview.orders).toEqual([]);
+    expect(preview.errorRows).toEqual([
+      expect.objectContaining({ rowNumber: 2, errors: ['商品小计超出安全范围'] }),
+    ]);
   });
 });

@@ -858,10 +858,10 @@ describe('订单管理工作台', () => {
         recipient: '张三',
         amountCents: 10_850,
         itemCount: 1,
-        action: 'create' as const,
-        existingOrderId: null,
-        expectedRevision: null,
-        changes: [],
+        action: 'update' as const,
+        existingOrderId: 'historical-existing-order',
+        expectedRevision: 3,
+        changes: [{ path: 'recipient', before: '旧收件人', after: '张三' }],
         errors: [],
       }],
       errorRows: [{
@@ -872,19 +872,25 @@ describe('订单管理工作台', () => {
         errors: ['平台订单编号不能为空'],
       }],
       summary: {
-        createOrderCount: 1,
-        updateOrderCount: 0,
+        createOrderCount: 0,
+        updateOrderCount: 1,
         duplicateOrderCount: 0,
         errorRowCount: 1,
       },
     };
-    const previewHistoricalOrderImport = vi.fn().mockResolvedValue(preview);
+    let resolveInitialPreview!: (value: typeof preview) => void;
+    const initialPreview = new Promise<typeof preview>((resolve) => {
+      resolveInitialPreview = resolve;
+    });
+    const previewHistoricalOrderImport = vi.fn()
+      .mockReturnValueOnce(initialPreview)
+      .mockResolvedValue(preview);
     const downloadHistoricalOrderImportErrors = vi.fn().mockResolvedValue({
       kind: 'saved', fileName: '旧订单-错误行.xlsx', filePath: '/tmp/旧订单-错误行.xlsx', rowCount: 1,
     });
     const confirmHistoricalOrderImport = vi.fn().mockResolvedValue({
-      createdOrderCount: 1,
-      updatedOrderCount: 0,
+      createdOrderCount: 0,
+      updatedOrderCount: 1,
       skippedDuplicateOrderCount: 0,
       skippedErrorRowCount: 1,
     });
@@ -900,12 +906,29 @@ describe('订单管理工作台', () => {
 
     render(<App api={api} />);
     expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: '导入历史订单' }));
+    const importButton = screen.getByRole('button', { name: '导入历史订单' });
+    await user.click(importButton);
 
-    expect(await screen.findByRole('dialog', { name: '导入历史订单' })).toBeVisible();
+    const pendingDialog = await screen.findByRole('dialog', { name: '导入历史订单' });
+    expect(pendingDialog).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(pendingDialog).toBeVisible();
+    await act(async () => {
+      resolveInitialPreview(preview);
+      await initialPreview;
+    });
     expect(screen.getByText('旧订单.xlsx')).toBeVisible();
-    expect(await screen.findByText('新增 1 笔')).toBeVisible();
-    expect(screen.getByText('错误 1 行')).toBeVisible();
+    expect(await screen.findByLabelText('更新 1 笔')).toBeVisible();
+    expect(screen.getByLabelText('错误 1 行')).toBeVisible();
+    expect(screen.getByRole('list', { name: '202608200000000001 变更明细' })).toHaveTextContent(
+      '收件人旧收件人 → 张三',
+    );
+    importButton.focus();
+    expect(pendingDialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '导入历史订单' })).not.toBeInTheDocument();
+    await user.click(importButton);
+    expect(await screen.findByLabelText('更新 1 笔')).toBeVisible();
     expect(previewHistoricalOrderImport).toHaveBeenCalledWith(
       'historical-session',
       { columnMapping: selection.inspection.suggestedColumnMapping },

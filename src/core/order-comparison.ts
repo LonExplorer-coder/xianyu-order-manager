@@ -92,29 +92,10 @@ function diffOrderItems(
   beforeItems: readonly RecognitionItem[],
   afterItems: readonly RecognitionItem[],
 ): OrderFieldChange[] {
+  const pairs = pairOrderItemsForComparison(beforeItems, afterItems);
   const unmatchedBefore = new Set(beforeItems.map((_item, index) => index));
   const unmatchedAfter = new Set(afterItems.map((_item, index) => index));
-  const pairs: ItemPair[] = [];
-
-  for (const beforeIndex of unmatchedBefore) {
-    const signature = persistedItemSignature(beforeItems[beforeIndex]);
-    const exactAfterIndex = [...unmatchedAfter].find((afterIndex) => (
-      persistedItemSignature(afterItems[afterIndex]) === signature
-    ));
-    if (exactAfterIndex === undefined) continue;
-    unmatchedBefore.delete(beforeIndex);
-    unmatchedAfter.delete(exactAfterIndex);
-    pairs.push({ beforeIndex, afterIndex: exactAfterIndex });
-  }
-
-  const minimumDifferencePairs = minimumDifferenceItemPairs(
-    [...unmatchedBefore],
-    [...unmatchedAfter],
-    beforeItems,
-    afterItems,
-  );
-  pairs.push(...minimumDifferencePairs);
-  for (const pair of minimumDifferencePairs) {
+  for (const pair of pairs) {
     unmatchedBefore.delete(pair.beforeIndex);
     unmatchedAfter.delete(pair.afterIndex);
   }
@@ -151,14 +132,47 @@ function diffOrderItems(
   return changes;
 }
 
-type ItemPair = { beforeIndex: number; afterIndex: number };
+export type OrderItemComparisonPair = { beforeIndex: number; afterIndex: number };
+
+/**
+ * Returns the deterministic item pairing used by both the visible diff and
+ * historical-import persistence. Equal items keep source order; the remainder
+ * uses the same minimum-difference assignment shown in the preview.
+ */
+export function pairOrderItemsForComparison(
+  beforeItems: readonly RecognitionItem[],
+  afterItems: readonly RecognitionItem[],
+): OrderItemComparisonPair[] {
+  const unmatchedBefore = new Set(beforeItems.map((_item, index) => index));
+  const unmatchedAfter = new Set(afterItems.map((_item, index) => index));
+  const pairs: OrderItemComparisonPair[] = [];
+
+  for (const beforeIndex of unmatchedBefore) {
+    const signature = persistedItemSignature(beforeItems[beforeIndex]);
+    const exactAfterIndex = [...unmatchedAfter].find((afterIndex) => (
+      persistedItemSignature(afterItems[afterIndex]) === signature
+    ));
+    if (exactAfterIndex === undefined) continue;
+    unmatchedBefore.delete(beforeIndex);
+    unmatchedAfter.delete(exactAfterIndex);
+    pairs.push({ beforeIndex, afterIndex: exactAfterIndex });
+  }
+
+  pairs.push(...minimumDifferenceItemPairs(
+    [...unmatchedBefore],
+    [...unmatchedAfter],
+    beforeItems,
+    afterItems,
+  ));
+  return pairs;
+}
 
 function minimumDifferenceItemPairs(
   beforeIndices: readonly number[],
   afterIndices: readonly number[],
   beforeItems: readonly RecognitionItem[],
   afterItems: readonly RecognitionItem[],
-): ItemPair[] {
+): OrderItemComparisonPair[] {
   if (beforeIndices.length === 0 || afterIndices.length === 0) return [];
 
   if (beforeIndices.length <= afterIndices.length) {

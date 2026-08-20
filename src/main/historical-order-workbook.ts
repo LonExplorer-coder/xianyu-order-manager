@@ -29,6 +29,7 @@ const MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 const MAX_WORKSHEETS = 20;
 const MAX_DATA_ROWS = 10_000;
 const MAX_COLUMNS = 200;
+const MAX_ITEMS_PER_ORDER = 100;
 const REQUIRED_COLUMNS: readonly HistoricalOrderColumnKey[] = [
   'platform', 'sellerAccount', 'orderNumber', 'recipient', 'phone', 'address',
   'amount', 'itemTitle', 'unitPrice', 'quantity',
@@ -77,6 +78,10 @@ export async function previewHistoricalOrderWorkbook(input: {
   buffer: Buffer;
   columnMapping: HistoricalOrderColumnMapping;
   findExistingOrder: (candidate: HistoricalOrderImportCandidate) => OriginalOrder | null;
+  prepareExistingOrderCandidate?: (
+    existing: OriginalOrder,
+    candidate: HistoricalOrderImportCandidate,
+  ) => HistoricalOrderImportCandidate;
 }): Promise<HistoricalOrderWorkbookPreviewPlan> {
   for (const key of REQUIRED_COLUMNS) {
     if (input.columnMapping.columns[key] === null) {
@@ -99,24 +104,27 @@ export async function previewHistoricalOrderWorkbook(input: {
     }));
   const orders = candidates.map((candidate) => {
     const existing = input.findExistingOrder(candidate);
+    const comparedCandidate = existing
+      ? input.prepareExistingOrderCandidate?.(existing, candidate) ?? candidate
+      : candidate;
     const action = !existing
       ? 'create' as const
-      : hasEquivalentOrderContent(existing, candidate)
+      : hasEquivalentOrderContent(existing, comparedCandidate)
         ? 'duplicate' as const
         : 'update' as const;
     return {
-      rowNumbers: candidate.rowNumbers,
-      platform: candidate.platform,
-      sellerAccount: candidate.sellerAccount,
-      orderNumber: candidate.orderNumber,
-      recipient: candidate.recipient,
-      amountCents: candidate.amountCents,
-      itemCount: candidate.items.length,
+      rowNumbers: comparedCandidate.rowNumbers,
+      platform: comparedCandidate.platform,
+      sellerAccount: comparedCandidate.sellerAccount,
+      orderNumber: comparedCandidate.orderNumber,
+      recipient: comparedCandidate.recipient,
+      amountCents: comparedCandidate.amountCents,
+      itemCount: comparedCandidate.items.length,
       action,
       existingOrderId: existing?.id ?? null,
       expectedRevision: existing?.revision ?? null,
       changes: existing && action === 'update'
-        ? diffOrderCurrentValues(existing, candidate)
+        ? diffOrderCurrentValues(existing, comparedCandidate)
         : [],
       errors: [],
     };
@@ -224,6 +232,9 @@ function parseRows(
     const sourceSpec = textFor(row, mapping, 'itemSpec');
     const quantity = quantityFor(row, mapping, errors);
     if (!sourceTitle) errors.push('商品标题不能为空');
+    if (unitPriceCents !== null && !Number.isSafeInteger(unitPriceCents * quantity)) {
+      errors.push('商品小计超出安全范围');
+    }
 
     const orderedAtOriginal = dateTimeTextFor(row, mapping, 'orderedAt');
     const paidAtOriginal = dateTimeTextFor(row, mapping, 'paidAt');
@@ -285,6 +296,13 @@ function groupRowsAsOrders(rows: ParsedRow[]): HistoricalOrderImportCandidate[] 
 
   const candidates: HistoricalOrderImportCandidate[] = [];
   for (const matches of grouped.values()) {
+    if (matches.length > MAX_ITEMS_PER_ORDER) {
+      for (const row of matches) {
+        row.errors.push(`同一原始订单的商品行不能超过 ${MAX_ITEMS_PER_ORDER} 行`);
+        row.candidate = null;
+      }
+      continue;
+    }
     if (matches.some(({ errors }) => errors.length > 0)) {
       for (const row of matches) {
         if (row.errors.length === 0) {
