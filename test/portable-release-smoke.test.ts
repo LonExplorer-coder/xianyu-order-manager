@@ -27,7 +27,7 @@ function expectedPortableSmokeResult(
     phase,
     dataDirectory,
     orderNumber: PORTABLE_SMOKE_ORDER_NUMBER,
-    orderCount: 1,
+    orderCount: 3,
     shipmentRecordCount: 1,
     shipmentTimelineEventCount: 1,
     aftersalesCaseCount: 1,
@@ -45,9 +45,11 @@ function expectedPortableSmokeResult(
     financeExpenseCents: 150,
     financeNetCents: 210,
     financePendingRemainingCents: 250,
-    profitOrderCount: 1,
+    profitOrderCount: 3,
     profitTotalProfitCents: -290,
     profitPendingRemainingCents: -250,
+    importExportLoopOrderCount: 2,
+    importExportLoopSheetCount: 3,
   };
 }
 

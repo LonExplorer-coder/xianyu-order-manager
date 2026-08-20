@@ -1,5 +1,7 @@
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+
+import ExcelJS from 'exceljs';
 
 import { ControlledRecognizer } from '../adapters/recognition/controlled-recognizer';
 import type {
@@ -31,6 +33,11 @@ const PORTABLE_SMOKE_PURCHASE_ARRIVAL_REASON = '便携版验收到货入库';
 const PORTABLE_SMOKE_CONFIRM_REFUND_NOTE = '便携版验收确认退款到账';
 const PORTABLE_SMOKE_SETTLEMENT_CENTS = 360;
 const PORTABLE_SMOKE_SETTLEMENT_NOTE = '便携版验收平台结算到账';
+const PORTABLE_SMOKE_IMPORT_ORDER_A = 'PORTABLE-SMOKE-IMPORT-001';
+const PORTABLE_SMOKE_IMPORT_ORDER_B = 'PORTABLE-SMOKE-IMPORT-002';
+const PORTABLE_SMOKE_IMPORT_PHONE = '13900000901';
+const PORTABLE_SMOKE_IMPORT_ADDRESS = '浙江省杭州市便携验收路1号';
+const PORTABLE_SMOKE_IMPORT_EXPORT_NAME = '便携冒烟三表导出.xlsx';
 
 export type PortableReleaseSmokeInput = {
   phase: 'write' | 'read';
@@ -63,6 +70,8 @@ export type PortableReleaseSmokeResult = {
   profitOrderCount: number;
   profitTotalProfitCents: number;
   profitPendingRemainingCents: number;
+  importExportLoopOrderCount: number;
+  importExportLoopSheetCount: number;
 };
 
 export async function runPortableReleaseDataSmoke(
@@ -82,6 +91,7 @@ export async function runPortableReleaseDataSmoke(
   );
 
   try {
+    let importExportLoopSheetCount = 0;
     if (input.phase === 'write') {
       await importPortableSmokeOrder(session, configDirectory, dataDirectory);
       await session.waitForCurrentRecognitionWork();
@@ -89,14 +99,26 @@ export async function runPortableReleaseDataSmoke(
       createPortableSmokeFulfillmentHistory(session);
       createPortableSmokeOperationsHistory(session);
       createPortableSmokeFundsHistory(session);
+      importExportLoopSheetCount = await createPortableSmokeImportExportLoop(
+        session,
+        configDirectory,
+      );
     } else {
       const restored = session.restore();
       if (restored.kind !== 'ready' || resolve(restored.dataDirectory) !== dataDirectory) {
         throw new Error('便携版重启后未能自动打开原订单数据目录');
       }
+      importExportLoopSheetCount = await verifyPortableSmokeImportExportWorkbook(configDirectory);
     }
 
     const orders = session.listOrders();
+    const importExportLoopOrderCount = orders.filter(({ orderNumber }) => (
+      orderNumber === PORTABLE_SMOKE_IMPORT_ORDER_A
+      || orderNumber === PORTABLE_SMOKE_IMPORT_ORDER_B
+    )).length;
+    if (importExportLoopOrderCount !== 2) {
+      throw new Error('便携版冒烟历史导入订单不完整');
+    }
     const smokeOrder = orders.find((order) => (
       order.orderNumber === PORTABLE_SMOKE_ORDER_NUMBER
     ));
@@ -320,7 +342,10 @@ export async function runPortableReleaseDataSmoke(
       orderNumber === PORTABLE_SMOKE_ORDER_NUMBER
     ));
     if (
-      profit.orders.length !== 1 ||
+      profit.orders.length !== 3 ||
+      profit.orders.filter(({ orderNumber }) => (
+        orderNumber === PORTABLE_SMOKE_ORDER_NUMBER
+      )).length !== 1 ||
       !smokeProfitOrder ||
       smokeProfitOrder.transactionAmountCents !== 800 ||
       smokeProfitOrder.settlementNetCents !== PORTABLE_SMOKE_SETTLEMENT_CENTS ||
@@ -367,6 +392,8 @@ export async function runPortableReleaseDataSmoke(
       profitOrderCount: profit.orders.length,
       profitTotalProfitCents: profit.totals.profitCents,
       profitPendingRemainingCents: profit.totals.pendingRemainingCents,
+      importExportLoopOrderCount,
+      importExportLoopSheetCount,
     };
   } finally {
     session.close();
@@ -666,3 +693,102 @@ const PORTABLE_SMOKE_RECOGNITION: RecognitionResult = {
     quantityInferred: true,
   }],
 };
+
+// 便携版验收的导入导出闭环腿：历史工作簿导入两笔同收货订单 → 合并成一个发货组
+// → 三表导出 → 重新读取实际工作簿核对。读回阶段重读同一份导出文件。
+async function createPortableSmokeImportExportLoop(
+  session: DesktopSession,
+  configDirectory: string,
+): Promise<number> {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('旧订单');
+  worksheet.addRow([
+    '交易平台', '业务账号', '平台单号', '收件姓名', '联系电话', '完整地址',
+    '实付金额', '商品标题', '商品规格', '商品单价', '购买数量', '商品总价', '运费',
+    '交易状态', '发货状态', '下单时间', '付款时间',
+  ]);
+  worksheet.addRow([
+    '闲鱼', '便携验收账号', PORTABLE_SMOKE_IMPORT_ORDER_A, '便携验收历史收件人',
+    PORTABLE_SMOKE_IMPORT_PHONE, PORTABLE_SMOKE_IMPORT_ADDRESS, 6,
+    '便携版验收历史商品', '标准', 6, 1, 6, 0,
+    '已付款', '待发货', '2026-08-20 12:00:00', '2026-08-20 12:00:30',
+  ]);
+  worksheet.addRow([
+    '闲鱼', '便携验收账号', PORTABLE_SMOKE_IMPORT_ORDER_B, '便携验收历史收件人',
+    PORTABLE_SMOKE_IMPORT_PHONE, PORTABLE_SMOKE_IMPORT_ADDRESS, 7,
+    '便携版验收历史商品', '加大', 7, 1, 7, 0,
+    '已付款', '待发货', '2026-08-20 12:05:00', '2026-08-20 12:05:30',
+  ]);
+  const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const inspection = await session.inspectHistoricalOrderWorkbook(buffer);
+  const preview = await session.previewHistoricalOrderImport(buffer, {
+    columnMapping: inspection.suggestedColumnMapping,
+  });
+  if (preview.summary.createOrderCount !== 2) {
+    throw new Error('便携版冒烟历史导入预览不完整');
+  }
+  const confirmed = await session.confirmHistoricalOrderImport(
+    buffer,
+    '便携冒烟旧订单.xlsx',
+    {
+      columnMapping: inspection.suggestedColumnMapping,
+      previewToken: preview.previewToken,
+    },
+  );
+  if (confirmed.createdOrderCount !== 2) {
+    throw new Error('便携版冒烟历史导入未写入');
+  }
+
+  const importedGroup = session.queryShipmentGroups().groups.find(({ orders }) => (
+    orders.some(({ orderNumber }) => orderNumber === PORTABLE_SMOKE_IMPORT_ORDER_A)
+  ));
+  if (!importedGroup || importedGroup.orders.length !== 2) {
+    throw new Error('便携版冒烟导入订单未合并成一个发货组');
+  }
+  const destinationPath = join(configDirectory, PORTABLE_SMOKE_IMPORT_EXPORT_NAME);
+  try {
+    await access(destinationPath);
+    throw new Error('便携版冒烟三表导出文件已存在，拒绝覆盖');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  await session.exportShipmentGroupsToWorkbook({
+    shipmentGroups: [{
+      id: importedGroup.id,
+      expectedMemberOrderIds: importedGroup.orders.map(({ id }) => id),
+    }],
+    orderTemplateId: null,
+    orderItemTemplateId: null,
+    shipmentGroupTemplateId: null,
+    masking: 'original',
+  }, destinationPath);
+  return await verifyPortableSmokeImportExportWorkbook(configDirectory);
+}
+
+async function verifyPortableSmokeImportExportWorkbook(configDirectory: string): Promise<number> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(join(configDirectory, PORTABLE_SMOKE_IMPORT_EXPORT_NAME));
+  const sheets = ['订单总表', '订单商品明细表', '合并发货表'].map((name) => (
+    workbook.getWorksheet(name)
+  ));
+  if (sheets.some((sheet) => !sheet)) {
+    throw new Error('便携版冒烟三表导出缺少工作表');
+  }
+  const orderSheet = sheets[0]!;
+  const exportedOrderNumbers = new Set<string>();
+  orderSheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const values = row.values;
+    if (!Array.isArray(values)) throw new Error('便携版冒烟导出行格式无效');
+    for (const value of values) {
+      if (value === PORTABLE_SMOKE_IMPORT_ORDER_A || value === PORTABLE_SMOKE_IMPORT_ORDER_B) {
+        exportedOrderNumbers.add(String(value));
+      }
+    }
+  });
+  if (exportedOrderNumbers.size !== 2) {
+    throw new Error('便携版冒烟三表导出缺少导入订单');
+  }
+  return sheets.length;
+}
