@@ -557,6 +557,10 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       order: confirmedOrder,
       resolution: 'order_updated',
     }),
+    selectHistoricalOrderImport: vi.fn().mockResolvedValue({ kind: 'canceled' }),
+    previewHistoricalOrderImport: vi.fn(),
+    confirmHistoricalOrderImport: vi.fn(),
+    downloadHistoricalOrderImportErrors: vi.fn().mockResolvedValue({ kind: 'cancelled' }),
     listStandardProducts: vi.fn().mockResolvedValue([]),
     selectProductCatalogImport: vi.fn().mockResolvedValue({ kind: 'canceled' }),
     previewProductCatalogImport: vi.fn(),
@@ -820,6 +824,104 @@ describe('订单管理工作台', () => {
       '截图会发送至您配置的阿里云百炼，原图仍保存在本机。每张截图调用 1 次 advanced_recognition，并由本机规则按六区拆分字段；有有限候选且已启用候选裁决时，最多追加 1 次文本模型调用。无法确定时会转入人工确认。',
     )).toBeVisible();
     expect(screen.getByText('/Users/test/闲鱼订单')).toBeVisible();
+  });
+
+  it('在空订单页预览历史工作簿，下载错误行后确认导入', async () => {
+    const user = userEvent.setup();
+    const columns = {
+      platform: 1, sellerAccount: 2, orderNumber: 3,
+      alipayTransactionNumber: null, buyerNickname: null,
+      recipient: 4, phone: 5, address: 6, orderedAt: null, paidAt: null,
+      productTotal: null, shippingFee: null, amount: 7,
+      platformTransactionStatus: null, fulfillmentStatus: null,
+      itemTitle: 8, itemSpec: null, unitPrice: 9, quantity: 10,
+    };
+    const selection = {
+      kind: 'selected' as const,
+      sessionId: 'historical-session',
+      fileName: '旧订单.xlsx',
+      inspection: {
+        worksheets: [{
+          name: '旧订单',
+          headers: ['平台', '账号', '订单号', '收件人', '手机号', '地址', '金额', '商品', '单价', '数量'],
+        }],
+        suggestedColumnMapping: { worksheet: '旧订单', columns },
+      },
+    };
+    const preview = {
+      previewToken: 'historical-preview-token',
+      orders: [{
+        rowNumbers: [2],
+        platform: 'xianyu' as const,
+        sellerAccount: '娃物账号',
+        orderNumber: '202608200000000001',
+        recipient: '张三',
+        amountCents: 10_850,
+        itemCount: 1,
+        action: 'create' as const,
+        existingOrderId: null,
+        expectedRevision: null,
+        changes: [],
+        errors: [],
+      }],
+      errorRows: [{
+        rowNumber: 3,
+        platform: '闲鱼',
+        sellerAccount: '娃物账号',
+        orderNumber: '',
+        errors: ['平台订单编号不能为空'],
+      }],
+      summary: {
+        createOrderCount: 1,
+        updateOrderCount: 0,
+        duplicateOrderCount: 0,
+        errorRowCount: 1,
+      },
+    };
+    const previewHistoricalOrderImport = vi.fn().mockResolvedValue(preview);
+    const downloadHistoricalOrderImportErrors = vi.fn().mockResolvedValue({
+      kind: 'saved', fileName: '旧订单-错误行.xlsx', filePath: '/tmp/旧订单-错误行.xlsx', rowCount: 1,
+    });
+    const confirmHistoricalOrderImport = vi.fn().mockResolvedValue({
+      createdOrderCount: 1,
+      updatedOrderCount: 0,
+      skippedDuplicateOrderCount: 0,
+      skippedErrorRowCount: 1,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/闲鱼订单', orders: [],
+      }),
+      selectHistoricalOrderImport: vi.fn().mockResolvedValue(selection),
+      previewHistoricalOrderImport,
+      downloadHistoricalOrderImportErrors,
+      confirmHistoricalOrderImport,
+    });
+
+    render(<App api={api} />);
+    expect(await screen.findByRole('heading', { name: '还没有订单' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '导入历史订单' }));
+
+    expect(await screen.findByRole('dialog', { name: '导入历史订单' })).toBeVisible();
+    expect(screen.getByText('旧订单.xlsx')).toBeVisible();
+    expect(await screen.findByText('新增 1 笔')).toBeVisible();
+    expect(screen.getByText('错误 1 行')).toBeVisible();
+    expect(previewHistoricalOrderImport).toHaveBeenCalledWith(
+      'historical-session',
+      { columnMapping: selection.inspection.suggestedColumnMapping },
+    );
+
+    await user.click(screen.getByRole('button', { name: '下载 1 行错误' }));
+    expect(downloadHistoricalOrderImportErrors).toHaveBeenCalledWith('historical-session', {
+      columnMapping: selection.inspection.suggestedColumnMapping,
+      previewToken: 'historical-preview-token',
+    });
+    await user.click(screen.getByRole('button', { name: '确认导入' }));
+    expect(confirmHistoricalOrderImport).toHaveBeenCalledWith('historical-session', {
+      columnMapping: selection.inspection.suggestedColumnMapping,
+      previewToken: 'historical-preview-token',
+    });
+    expect(screen.queryByRole('dialog', { name: '导入历史订单' })).not.toBeInTheDocument();
   });
 
   it('从侧栏查看开放发货组汇总和未自动成组提示', async () => {

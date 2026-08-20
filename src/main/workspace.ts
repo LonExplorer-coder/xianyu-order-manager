@@ -215,6 +215,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(56)) migrateToVersion56(database);
   if (!versions.has(57)) migrateToVersion57(database);
   if (!versions.has(58)) migrateToVersion58(database);
+  if (!versions.has(59)) migrateToVersion59(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -6995,6 +6996,222 @@ function migrateToVersion58(database: DatabaseSync): void {
   } catch (error) {
     rollbackQuietly(database);
     throw error;
+  }
+}
+
+// v59 来源快照可由来源截图或历史导入建立；历史导入不伪造截图、识别批次或订单草稿。
+function migrateToVersion59(database: DatabaseSync): void {
+  const migratedAt = new Date().toISOString();
+  database.exec('PRAGMA foreign_keys = OFF;');
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      DROP TRIGGER IF EXISTS source_snapshots_only_finalize_once;
+      DROP TRIGGER IF EXISTS source_snapshots_are_immutable_on_delete;
+
+      CREATE TABLE original_orders_v59 (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        screenshot_id TEXT REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        platform TEXT NOT NULL,
+        seller_account TEXT NOT NULL,
+        platform_order_number TEXT NOT NULL,
+        alipay_transaction_number TEXT NOT NULL,
+        buyer_nickname TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address_original TEXT NOT NULL,
+        address_normalized TEXT NOT NULL,
+        province TEXT NOT NULL,
+        city TEXT NOT NULL,
+        district TEXT NOT NULL,
+        ordered_at_original TEXT NOT NULL,
+        ordered_at_normalized TEXT NOT NULL,
+        paid_at_original TEXT NOT NULL,
+        paid_at_normalized TEXT NOT NULL,
+        product_total_cents INTEGER CHECK (product_total_cents >= 0),
+        shipping_fee_cents INTEGER CHECK (shipping_fee_cents >= 0),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        platform_transaction_status TEXT NOT NULL
+          CHECK (platform_transaction_status IN ('paid', 'cancelled', 'refunded', 'unknown')),
+        fulfillment_status TEXT NOT NULL
+          CHECK (fulfillment_status IN (
+            'pending_shipment', 'partially_shipped', 'shipped', 'delivered', 'unknown'
+          )),
+        lifecycle_status TEXT NOT NULL
+          CHECK (lifecycle_status IN ('active', 'trashed', 'deleted')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        seller_account_normalized TEXT NOT NULL DEFAULT '',
+        platform_order_number_normalized TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        shipping_carrier TEXT NOT NULL DEFAULT '',
+        tracking_number TEXT NOT NULL DEFAULT '',
+        system_order_number TEXT NOT NULL CHECK (
+          system_order_number GLOB
+            '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+          AND substr(system_order_number, 10, 6) <> '000000'
+        ),
+        CHECK ((draft_id IS NULL) = (screenshot_id IS NULL)),
+        UNIQUE (platform, seller_account, platform_order_number)
+      ) STRICT;
+
+      INSERT INTO original_orders_v59 (
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number, system_order_number
+      )
+      SELECT
+        id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at, revision,
+        seller_account_normalized, platform_order_number_normalized,
+        note, shipping_carrier, tracking_number, system_order_number
+      FROM original_orders;
+
+      DROP TABLE original_orders;
+      ALTER TABLE original_orders_v59 RENAME TO original_orders;
+
+      CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (
+        platform,
+        seller_account_normalized,
+        platform_order_number_normalized
+      );
+
+      CREATE UNIQUE INDEX original_orders_by_system_order_number
+      ON original_orders (system_order_number);
+
+      CREATE TRIGGER original_orders_require_system_order_number_on_insert
+      BEFORE INSERT ON original_orders
+      WHEN NEW.system_order_number IS NULL
+        OR NEW.system_order_number NOT GLOB
+          '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+        OR substr(NEW.system_order_number, 10, 6) = '000000'
+      BEGIN
+        SELECT RAISE(ABORT, 'system order number is required');
+      END;
+
+      CREATE TRIGGER original_orders_system_order_number_is_immutable
+      BEFORE UPDATE OF system_order_number ON original_orders
+      WHEN NEW.system_order_number IS NOT OLD.system_order_number
+      BEGIN
+        SELECT RAISE(ABORT, 'system order number is immutable');
+      END;
+
+      CREATE TABLE source_snapshots_v59 (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+        order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+        screenshot_id TEXT UNIQUE REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+        source_type TEXT NOT NULL CHECK (source_type IN ('screenshot', 'historical_import')),
+        source_name TEXT CHECK (
+          source_name IS NULL OR length(trim(source_name)) BETWEEN 1 AND 255
+        ),
+        source_row_numbers_json TEXT CHECK (
+          source_row_numbers_json IS NULL OR (
+            json_valid(source_row_numbers_json)
+            AND json_type(source_row_numbers_json) = 'array'
+          )
+        ),
+        recognition_json TEXT NOT NULL CHECK (json_valid(recognition_json)),
+        confirmed_json TEXT CHECK (
+          confirmed_json IS NULL OR json_valid(confirmed_json)
+        ),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK (
+          (
+            source_type = 'screenshot'
+            AND draft_id IS NOT NULL
+            AND screenshot_id IS NOT NULL
+            AND source_name IS NULL
+            AND source_row_numbers_json IS NULL
+          ) OR (
+            source_type = 'historical_import'
+            AND draft_id IS NULL
+            AND screenshot_id IS NULL
+            AND source_name IS NOT NULL
+            AND source_row_numbers_json IS NOT NULL
+            AND json_array_length(source_row_numbers_json) BETWEEN 1 AND 10000
+          )
+        ),
+        CHECK (
+          (
+            order_id IS NULL
+            AND confirmed_json IS NULL
+            AND resolved_at IS NULL
+          ) OR (
+            order_id IS NOT NULL
+            AND confirmed_json IS NOT NULL
+            AND resolved_at IS NOT NULL
+          )
+        )
+      ) STRICT;
+
+      INSERT INTO source_snapshots_v59 (
+        id, draft_id, order_id, screenshot_id,
+        source_type, source_name, source_row_numbers_json,
+        recognition_json, confirmed_json, created_at, resolved_at
+      )
+      SELECT
+        id, draft_id, order_id, screenshot_id,
+        'screenshot', NULL, NULL,
+        recognition_json, confirmed_json, created_at, resolved_at
+      FROM source_snapshots;
+
+      DROP TABLE source_snapshots;
+      ALTER TABLE source_snapshots_v59 RENAME TO source_snapshots;
+
+      CREATE TRIGGER source_snapshots_only_finalize_once
+      BEFORE UPDATE ON source_snapshots
+      WHEN
+        OLD.source_type != 'screenshot'
+        OR OLD.order_id IS NOT NULL
+        OR OLD.confirmed_json IS NOT NULL
+        OR OLD.resolved_at IS NOT NULL
+        OR NEW.id != OLD.id
+        OR NEW.draft_id != OLD.draft_id
+        OR NEW.screenshot_id != OLD.screenshot_id
+        OR NEW.source_type != OLD.source_type
+        OR NEW.source_name IS NOT OLD.source_name
+        OR NEW.source_row_numbers_json IS NOT OLD.source_row_numbers_json
+        OR NEW.recognition_json != OLD.recognition_json
+        OR NEW.created_at != OLD.created_at
+        OR NEW.order_id IS NULL
+        OR NEW.confirmed_json IS NULL
+        OR NEW.resolved_at IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'source snapshots are immutable after finalization');
+      END;
+
+      CREATE TRIGGER source_snapshots_are_immutable_on_delete
+      BEFORE DELETE ON source_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'source snapshots are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (59, ?)')
+      .run(migratedAt);
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }
 

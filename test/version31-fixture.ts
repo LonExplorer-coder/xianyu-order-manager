@@ -1,5 +1,139 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v59 允许历史导入不依赖截图、识别批次和订单草稿；存在历史导入数据时拒绝测试降级。
+export function removeVersion59ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 59',
+  ).get();
+  if (!applied) return;
+  const historicalCount = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM original_orders WHERE draft_id IS NULL OR screenshot_id IS NULL)
+      + (SELECT COUNT(*) FROM source_snapshots WHERE source_type = 'historical_import') AS count
+  `).get() as { count: number };
+  if (historicalCount.count > 0) {
+    throw new Error('v59 测试降级前必须移除历史导入数据');
+  }
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER IF EXISTS source_snapshots_only_finalize_once;
+    DROP TRIGGER IF EXISTS source_snapshots_are_immutable_on_delete;
+
+    CREATE TABLE original_orders_v58_fixture (
+      id TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+      screenshot_id TEXT NOT NULL REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+      platform TEXT NOT NULL,
+      seller_account TEXT NOT NULL,
+      platform_order_number TEXT NOT NULL,
+      alipay_transaction_number TEXT NOT NULL,
+      buyer_nickname TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      phone_normalized TEXT NOT NULL,
+      address_original TEXT NOT NULL,
+      address_normalized TEXT NOT NULL,
+      province TEXT NOT NULL,
+      city TEXT NOT NULL,
+      district TEXT NOT NULL,
+      ordered_at_original TEXT NOT NULL,
+      ordered_at_normalized TEXT NOT NULL,
+      paid_at_original TEXT NOT NULL,
+      paid_at_normalized TEXT NOT NULL,
+      product_total_cents INTEGER CHECK (product_total_cents >= 0),
+      shipping_fee_cents INTEGER CHECK (shipping_fee_cents >= 0),
+      amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+      platform_transaction_status TEXT NOT NULL
+        CHECK (platform_transaction_status IN ('paid', 'cancelled', 'refunded', 'unknown')),
+      fulfillment_status TEXT NOT NULL
+        CHECK (fulfillment_status IN (
+          'pending_shipment', 'partially_shipped', 'shipped', 'delivered', 'unknown'
+        )),
+      lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('active', 'trashed', 'deleted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+      seller_account_normalized TEXT NOT NULL DEFAULT '',
+      platform_order_number_normalized TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      shipping_carrier TEXT NOT NULL DEFAULT '',
+      tracking_number TEXT NOT NULL DEFAULT '',
+      system_order_number TEXT NOT NULL CHECK (
+        system_order_number GLOB
+          '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+        AND substr(system_order_number, 10, 6) <> '000000'
+      ),
+      UNIQUE (platform, seller_account, platform_order_number)
+    ) STRICT;
+    INSERT INTO original_orders_v58_fixture
+    SELECT
+      id, draft_id, screenshot_id, platform, seller_account, platform_order_number,
+      alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+      address_original, address_normalized, province, city, district,
+      ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+      product_total_cents, shipping_fee_cents, amount_cents,
+      platform_transaction_status, fulfillment_status, lifecycle_status,
+      created_at, updated_at, revision,
+      seller_account_normalized, platform_order_number_normalized,
+      note, shipping_carrier, tracking_number, system_order_number
+    FROM original_orders;
+    DROP TABLE original_orders;
+    ALTER TABLE original_orders_v58_fixture RENAME TO original_orders;
+    CREATE UNIQUE INDEX original_orders_by_normalized_identity
+      ON original_orders (platform, seller_account_normalized, platform_order_number_normalized);
+    CREATE UNIQUE INDEX original_orders_by_system_order_number
+      ON original_orders (system_order_number);
+    CREATE TRIGGER original_orders_require_system_order_number_on_insert
+    BEFORE INSERT ON original_orders
+    WHEN NEW.system_order_number IS NULL
+      OR NEW.system_order_number NOT GLOB
+        '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+      OR substr(NEW.system_order_number, 10, 6) = '000000'
+    BEGIN SELECT RAISE(ABORT, 'system order number is required'); END;
+    CREATE TRIGGER original_orders_system_order_number_is_immutable
+    BEFORE UPDATE OF system_order_number ON original_orders
+    WHEN NEW.system_order_number IS NOT OLD.system_order_number
+    BEGIN SELECT RAISE(ABORT, 'system order number is immutable'); END;
+
+    CREATE TABLE source_snapshots_v58_fixture (
+      id TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL UNIQUE REFERENCES order_drafts(id) ON DELETE RESTRICT,
+      order_id TEXT REFERENCES original_orders(id) ON DELETE RESTRICT,
+      screenshot_id TEXT NOT NULL UNIQUE REFERENCES source_screenshots(id) ON DELETE RESTRICT,
+      recognition_json TEXT NOT NULL CHECK (json_valid(recognition_json)),
+      confirmed_json TEXT CHECK (confirmed_json IS NULL OR json_valid(confirmed_json)),
+      created_at TEXT NOT NULL,
+      resolved_at TEXT,
+      CHECK (
+        (order_id IS NULL AND confirmed_json IS NULL AND resolved_at IS NULL)
+        OR (order_id IS NOT NULL AND confirmed_json IS NOT NULL AND resolved_at IS NOT NULL)
+      )
+    ) STRICT;
+    INSERT INTO source_snapshots_v58_fixture
+    SELECT id, draft_id, order_id, screenshot_id,
+      recognition_json, confirmed_json, created_at, resolved_at
+    FROM source_snapshots;
+    DROP TABLE source_snapshots;
+    ALTER TABLE source_snapshots_v58_fixture RENAME TO source_snapshots;
+    CREATE TRIGGER source_snapshots_only_finalize_once
+    BEFORE UPDATE ON source_snapshots
+    WHEN
+      OLD.order_id IS NOT NULL OR OLD.confirmed_json IS NOT NULL OR OLD.resolved_at IS NOT NULL
+      OR NEW.id != OLD.id OR NEW.draft_id != OLD.draft_id
+      OR NEW.screenshot_id != OLD.screenshot_id OR NEW.recognition_json != OLD.recognition_json
+      OR NEW.created_at != OLD.created_at OR NEW.order_id IS NULL
+      OR NEW.confirmed_json IS NULL OR NEW.resolved_at IS NULL
+    BEGIN SELECT RAISE(ABORT, 'source snapshots are immutable after finalization'); END;
+    CREATE TRIGGER source_snapshots_are_immutable_on_delete
+    BEFORE DELETE ON source_snapshots
+    BEGIN SELECT RAISE(ABORT, 'source snapshots are immutable'); END;
+    DELETE FROM schema_migrations WHERE version = 59;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // 迁移旅程测试降级前的资金数据清理：业务钩子（#74）会在旅程中生成待确认资金事项，
 // 降级守卫会拒绝带走资金数据；测试里显式清空两张资金表（先摘删除触发器再复原）。
 export function clearVersion58FundsData(database: DatabaseSync): void {
@@ -23,6 +157,7 @@ export function clearVersion58FundsData(database: DatabaseSync): void {
 
 // v58 建立资金事实双表（待确认资金事项、资金记录）；存在资金数据时拒绝降级。
 export function removeVersion58ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion59ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 58',
   ).get();

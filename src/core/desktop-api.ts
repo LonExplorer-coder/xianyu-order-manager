@@ -186,6 +186,14 @@ import type {
   ProductCatalogImportSelectionOutcome,
 } from './product-catalog';
 import type {
+  HistoricalOrderErrorRowsDownloadOutcome,
+  HistoricalOrderImportConfirmationInput,
+  HistoricalOrderImportInput,
+  HistoricalOrderImportPreview,
+  HistoricalOrderImportResult,
+  HistoricalOrderImportSelectionOutcome,
+} from './historical-order-import';
+import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
@@ -231,6 +239,19 @@ export interface DesktopApi {
     customValues?: DraftCustomFieldValues,
     productStandardizations?: readonly ProductStandardizationConfirmation[],
   ): Promise<OrderUpdateConfirmation>;
+  selectHistoricalOrderImport(): Promise<HistoricalOrderImportSelectionOutcome>;
+  previewHistoricalOrderImport(
+    sessionId: string,
+    input: HistoricalOrderImportInput,
+  ): Promise<HistoricalOrderImportPreview>;
+  confirmHistoricalOrderImport(
+    sessionId: string,
+    input: HistoricalOrderImportConfirmationInput,
+  ): Promise<HistoricalOrderImportResult>;
+  downloadHistoricalOrderImportErrors(
+    sessionId: string,
+    input: HistoricalOrderImportConfirmationInput,
+  ): Promise<HistoricalOrderErrorRowsDownloadOutcome>;
   listStandardProducts(): Promise<StandardProduct[]>;
   selectProductCatalogImport(): Promise<ProductCatalogImportSelectionOutcome>;
   previewProductCatalogImport(

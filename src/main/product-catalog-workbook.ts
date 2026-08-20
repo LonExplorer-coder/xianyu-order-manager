@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 
 import ExcelJS from 'exceljs';
-import yauzl from 'yauzl';
 
 import type {
   ProductCatalogColumnMapping,
@@ -18,14 +17,12 @@ import {
   type ProductMappingView,
   type StandardProduct,
 } from '../core/product-standardization';
+import { assertXlsxWorkbookArchiveLimits } from './xlsx-workbook-safety';
 
 const MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 const MAX_WORKSHEETS = 20;
 const MAX_DATA_ROWS_PER_WORKSHEET = 10_000;
 const MAX_COLUMNS_PER_WORKSHEET = 200;
-const MAX_ARCHIVE_ENTRIES = 500;
-const MAX_ARCHIVE_ENTRY_BYTES = 50 * 1024 * 1024;
-const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024;
 
 type ParsedProductRow = Omit<ProductCatalogProductPreviewRow, 'action' | 'errors'> & {
   errors: string[];
@@ -312,72 +309,7 @@ async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
 }
 
 export function assertProductCatalogWorkbookArchiveLimits(buffer: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    yauzl.fromBuffer(buffer, {
-      lazyEntries: true,
-      validateEntrySizes: true,
-      strictFileNames: true,
-    }, (openError, zipFile) => {
-      if (openError || !zipFile) {
-        reject(new Error('无法读取商品目录工作簿，请确认文件是有效的 .xlsx 文件'));
-        return;
-      }
-      let entryCount = 0;
-      let totalBytes = 0;
-      let settled = false;
-      const fail = (message: string) => {
-        if (settled) return;
-        settled = true;
-        reject(new Error(message));
-      };
-      zipFile.on('error', () => fail('无法读取商品目录工作簿，请确认文件是有效的 .xlsx 文件'));
-      zipFile.on('end', () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      });
-      zipFile.on('entry', (entry) => {
-        entryCount += 1;
-        if (entryCount > MAX_ARCHIVE_ENTRIES) {
-          fail('商品目录工作簿内部文件数量过多');
-          return;
-        }
-        if (entry.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) {
-          fail('商品目录工作簿解压后内容过大');
-          return;
-        }
-        if (entry.fileName.endsWith('/')) {
-          zipFile.readEntry();
-          return;
-        }
-        let entryBytes = 0;
-        zipFile.openReadStream(entry, (streamError, stream) => {
-          if (streamError || !stream) {
-            fail('无法读取商品目录工作簿，请确认文件是有效的 .xlsx 文件');
-            return;
-          }
-          stream.on('error', () => (
-            fail('无法读取商品目录工作簿，请确认文件是有效的 .xlsx 文件')
-          ));
-          stream.on('data', (chunk: Buffer) => {
-            entryBytes += chunk.length;
-            totalBytes += chunk.length;
-            if (
-              entryBytes > MAX_ARCHIVE_ENTRY_BYTES ||
-              totalBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES
-            ) {
-              fail('商品目录工作簿解压后内容过大');
-              stream.destroy();
-            }
-          });
-          stream.on('end', () => {
-            if (!settled) zipFile.readEntry();
-          });
-        });
-      });
-      zipFile.readEntry();
-    });
-  });
+  return assertXlsxWorkbookArchiveLimits(buffer, '商品目录工作簿');
 }
 
 function parseProductRows(

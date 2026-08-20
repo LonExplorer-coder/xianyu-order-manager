@@ -63,6 +63,13 @@ import type {
   ProductCatalogImportResult,
   ProductCatalogWorkbookInspection,
 } from '../core/product-catalog';
+import type {
+  HistoricalOrderImportConfirmationInput,
+  HistoricalOrderImportInput,
+  HistoricalOrderImportPreview,
+  HistoricalOrderImportResult,
+  HistoricalOrderWorkbookInspection,
+} from '../core/historical-order-import';
 import { createHash, randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
@@ -561,6 +568,40 @@ export class DesktopSession {
 
   public listStandardProducts(): StandardProduct[] {
     return this.requireApplication().listStandardProducts();
+  }
+
+  public inspectHistoricalOrderWorkbook(
+    buffer: Buffer,
+  ): Promise<HistoricalOrderWorkbookInspection> {
+    return this.requireApplication().inspectHistoricalOrderWorkbook(buffer);
+  }
+
+  public previewHistoricalOrderImport(
+    buffer: Buffer,
+    input: HistoricalOrderImportInput,
+  ): Promise<HistoricalOrderImportPreview> {
+    return this.requireApplication().previewHistoricalOrderImport(buffer, input);
+  }
+
+  public async confirmHistoricalOrderImport(
+    buffer: Buffer,
+    sourceName: string,
+    input: HistoricalOrderImportConfirmationInput,
+  ): Promise<HistoricalOrderImportResult> {
+    const result = await this.requireApplication().confirmHistoricalOrderImport(
+      buffer,
+      sourceName,
+      input,
+    );
+    this.refreshOrders();
+    return result;
+  }
+
+  public createHistoricalOrderErrorRowsWorkbook(
+    buffer: Buffer,
+    input: HistoricalOrderImportConfirmationInput,
+  ): Promise<Buffer> {
+    return this.requireApplication().createHistoricalOrderErrorRowsWorkbook(buffer, input);
   }
 
   public inspectProductCatalogWorkbook(

@@ -175,6 +175,10 @@ import {
 import { OrderExportDialog } from './OrderExportDialog';
 import { ShipmentGroupExportDialog } from './ShipmentGroupExportDialog';
 import { ShipmentGroupCustomFieldsDialog } from './ShipmentGroupCustomFieldsDialog';
+import {
+  HistoricalOrderImportDialog,
+  type SelectedHistoricalOrderImport,
+} from './HistoricalOrderImportDialog';
 import { TableTemplatesWorkspace } from './TableTemplatesWorkspace';
 import { AftersalesWorkflowTemplatesWorkspace } from './AftersalesWorkflowTemplatesWorkspace';
 import { FulfillmentPlansWorkspace } from './FulfillmentPlansWorkspace';
@@ -234,7 +238,7 @@ export function App({ api }: AppProps) {
   const [reviewScreenshotUrl, setReviewScreenshotUrl] = useState('');
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [detailScreenshotUrl, setDetailScreenshotUrl] = useState('');
-  const [detailScreenshotId, setDetailScreenshotId] = useState('');
+  const [detailSourceSnapshotId, setDetailSourceSnapshotId] = useState('');
   const [detailDirtyKind, setDetailDirtyKind] = useState<DetailDirtyKind>('none');
   const [recognitionBatches, setRecognitionBatches] = useState<RecognitionBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
@@ -345,7 +349,7 @@ export function App({ api }: AppProps) {
     setReviewBatchId('');
     setOrderDetails(null);
     setDetailScreenshotUrl('');
-    setDetailScreenshotId('');
+    setDetailSourceSnapshotId('');
     setDetailDirtyKind('none');
     detailSourceRequestVersion.current += 1;
     orderQueryRequestVersion.current += 1;
@@ -1161,10 +1165,12 @@ export function App({ api }: AppProps) {
     setOperationError('');
     try {
       const details = await api.getOrder(orderId);
-      const screenshotUrl = await api.getScreenshotDataUrl(details.sourceScreenshot.id);
+      const screenshotUrl = details.sourceScreenshot
+        ? await api.getScreenshotDataUrl(details.sourceScreenshot.id)
+        : '';
       if (requestVersion !== detailSourceRequestVersion.current) return;
       setDetailScreenshotUrl(screenshotUrl);
-      setDetailScreenshotId(details.sourceScreenshot.id);
+      setDetailSourceSnapshotId(details.sourceSnapshot.id);
       setDetailDirtyKind('none');
       setOrderDetails(details);
     } catch (error) {
@@ -1178,16 +1184,22 @@ export function App({ api }: AppProps) {
     }
   }
 
-  async function selectDetailSource(screenshotId: string) {
-    if (screenshotId === detailScreenshotId) return;
+  async function selectDetailSource(sourceSnapshotId: string) {
+    if (sourceSnapshotId === detailSourceSnapshotId) return;
     const requestVersion = ++detailSourceRequestVersion.current;
     setBusyAction('detail');
     setOperationError('');
     try {
-      const screenshotUrl = await api.getScreenshotDataUrl(screenshotId);
+      const source = orderDetails?.sources.find(({ sourceSnapshot }) => (
+        sourceSnapshot.id === sourceSnapshotId
+      ));
+      if (!source) throw new Error('未找到来源快照');
+      const screenshotUrl = source.sourceScreenshot
+        ? await api.getScreenshotDataUrl(source.sourceScreenshot.id)
+        : '';
       if (requestVersion !== detailSourceRequestVersion.current) return;
       setDetailScreenshotUrl(screenshotUrl);
-      setDetailScreenshotId(screenshotId);
+      setDetailSourceSnapshotId(sourceSnapshotId);
     } catch (error) {
       if (requestVersion === detailSourceRequestVersion.current) {
         setOperationError(errorMessage(error));
@@ -1304,7 +1316,7 @@ export function App({ api }: AppProps) {
     detailSourceRequestVersion.current += 1;
     setOrderDetails(null);
     setDetailScreenshotUrl('');
-    setDetailScreenshotId('');
+    setDetailSourceSnapshotId('');
     setDetailDirtyKind('none');
     setOperationError('');
     setBusyAction(null);
@@ -1525,7 +1537,7 @@ export function App({ api }: AppProps) {
         api={api}
         details={orderDetails}
         screenshotUrl={detailScreenshotUrl}
-        selectedScreenshotId={detailScreenshotId}
+        selectedSourceSnapshotId={detailSourceSnapshotId}
         sourceLoading={busyAction === 'detail'}
         customFieldsSaving={busyAction === 'custom-fields'}
         orderEditSaving={busyAction === 'order-edit'}
@@ -5028,6 +5040,12 @@ function OrdersWorkspace({
   const [exportFeedback, setExportFeedback] = useState('');
   const [statusLogisticsFeedback, setStatusLogisticsFeedback] = useState('');
   const [statusLogisticsOrders, setStatusLogisticsOrders] = useState<OrderSummary[] | null>(null);
+  const [historicalImportSelection, setHistoricalImportSelection] = useState<
+    SelectedHistoricalOrderImport | null
+  >(null);
+  const [historicalImportSelecting, setHistoricalImportSelecting] = useState(false);
+  const [historicalImportError, setHistoricalImportError] = useState('');
+  const [historicalImportFeedback, setHistoricalImportFeedback] = useState('');
   const selectAllOrdersRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setSelectedCustomFilterId(query.customFieldFilter?.definitionId ?? '');
@@ -5083,6 +5101,34 @@ function OrdersWorkspace({
     query.sortField !== DEFAULT_ORDER_QUERY.sortField ||
     query.sortDirection !== DEFAULT_ORDER_QUERY.sortDirection,
   );
+
+  async function selectHistoricalOrderImport() {
+    setHistoricalImportSelecting(true);
+    setHistoricalImportError('');
+    setHistoricalImportFeedback('');
+    try {
+      const selection = await api.selectHistoricalOrderImport();
+      if (selection.kind === 'selected') setHistoricalImportSelection(selection);
+    } catch (selectionError) {
+      setHistoricalImportError(errorMessage(selectionError));
+    } finally {
+      setHistoricalImportSelecting(false);
+    }
+  }
+
+  const historicalImportDialog = historicalImportSelection && (
+    <HistoricalOrderImportDialog
+      api={api}
+      selection={historicalImportSelection}
+      onClose={() => setHistoricalImportSelection(null)}
+      onImported={(result) => {
+        setHistoricalImportSelection(null);
+        setHistoricalImportFeedback(
+          `历史订单已导入：新增 ${result.createdOrderCount} 笔，更新 ${result.updatedOrderCount} 笔，重复跳过 ${result.skippedDuplicateOrderCount} 笔，错误跳过 ${result.skippedErrorRowCount} 行。`,
+        );
+      }}
+    />
+  );
   if (allLifecycleOrderCount === 0) {
     return (
       <section className="empty-workspace workspace-enter">
@@ -5093,11 +5139,17 @@ function OrdersWorkspace({
         <span className="section-kicker">订单工作台</span>
         <h1>还没有订单</h1>
         <p>一次可上传 1–50 张闲鱼订单截图；每张截图独立识别、校对并入库。</p>
-        <InlineError message={error} />
-        <button className="button button--primary button--large" type="button" onClick={onUpload} disabled={uploading}>
-          <Icon name="upload" />
-          {uploading ? '正在添加来源截图…' : '上传订单截图'}
-        </button>
+        <InlineError message={historicalImportError || error} />
+        {historicalImportFeedback && <p className="historical-import-feedback" role="status">{historicalImportFeedback}</p>}
+        <div className="empty-import-actions">
+          <button className="button button--primary button--large" type="button" onClick={onUpload} disabled={uploading || historicalImportSelecting}>
+            <Icon name="upload" />
+            {uploading ? '正在添加来源截图…' : '上传订单截图'}
+          </button>
+          <button className="button button--quiet" type="button" onClick={() => void selectHistoricalOrderImport()} disabled={uploading || historicalImportSelecting}>
+            {historicalImportSelecting ? '正在读取…' : '导入历史订单'}
+          </button>
+        </div>
         <p className="upload-disclosure">{OCR_UPLOAD_DISCLOSURE}</p>
         <div className="empty-support">
           <span>PNG、JPG、JPEG 或 WebP</span>
@@ -5108,6 +5160,7 @@ function OrdersWorkspace({
           <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
         )}
         <p className="data-path"><Icon name="folder" />{dataDirectory}</p>
+        {historicalImportDialog}
       </section>
     );
   }
@@ -5123,19 +5176,27 @@ function OrdersWorkspace({
             : '逐条查看订单商品明细，并按商品级自定义字段筛选或排序。'}</p>
         </div>
         <div className="upload-action">
-          <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder}>
-            <Icon name="upload" />
-            {uploading ? '正在添加来源截图…' : '上传订单截图'}
-          </button>
+          <div className="upload-action__buttons">
+            <button className="button button--quiet" type="button" onClick={() => void selectHistoricalOrderImport()} disabled={uploading || openingOrder || historicalImportSelecting}>
+              {historicalImportSelecting ? '正在读取…' : '导入历史订单'}
+            </button>
+            <button className="button button--primary" type="button" onClick={onUpload} disabled={uploading || openingOrder || historicalImportSelecting}>
+              <Icon name="upload" />
+              {uploading ? '正在添加来源截图…' : '上传订单截图'}
+            </button>
+          </div>
           <small>{OCR_UPLOAD_DISCLOSURE}</small>
         </div>
       </header>
 
-      <InlineError message={error} />
+      <InlineError message={historicalImportError || error} />
+      {historicalImportFeedback && <p className="historical-import-feedback" role="status">{historicalImportFeedback}</p>}
 
       {latestBatch && (
         <RecentBatchStrip batch={latestBatch} onOpen={() => onOpenBatch(latestBatch.id)} />
       )}
+
+      {historicalImportDialog}
 
       <div className="workspace-view-switch" role="tablist" aria-label="工作台视图">
         <button
@@ -10122,9 +10183,17 @@ function OrderEditWorkspace({
             <span><Icon name="image" />来源证据</span>
             <span>只读 · 不会改写</span>
           </div>
-          <div className="source-image-stage">
-            <img src={screenshotUrl} alt="来源截图" />
-          </div>
+          {details.sourceScreenshot ? (
+            <div className="source-image-stage">
+              <img src={screenshotUrl} alt="来源截图" />
+            </div>
+          ) : (
+            <div className="source-image-stage source-import-stage">
+              <strong>{details.sourceSnapshot.sourceName ?? '历史订单工作簿'}</strong>
+              <span>第 {(details.sourceSnapshot.sourceRowNumbers ?? []).join('、')} 行</span>
+              <small>历史导入来源只读</small>
+            </div>
+          )}
         </figure>
 
         <form id="order-edit-form" className="review-form" onSubmit={previewChanges}>
@@ -10545,7 +10614,7 @@ function DetailWorkspace({
   api,
   details,
   screenshotUrl,
-  selectedScreenshotId,
+  selectedSourceSnapshotId,
   sourceLoading,
   customFieldsSaving,
   orderEditSaving,
@@ -10565,7 +10634,7 @@ function DetailWorkspace({
   api: DesktopApi;
   details: OrderDetails;
   screenshotUrl: string;
-  selectedScreenshotId: string;
+  selectedSourceSnapshotId: string;
   sourceLoading: boolean;
   customFieldsSaving: boolean;
   orderEditSaving: boolean;
@@ -10574,7 +10643,7 @@ function DetailWorkspace({
   backLabel: string;
   onBack: () => void;
   onDirtyChange: (kind: DetailDirtyKind) => void;
-  onSelectSource: (screenshotId: string) => void;
+  onSelectSource: (sourceSnapshotId: string) => void;
   onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
   onUpdateOrder: (input: OrderEditInput) => Promise<OrderDetails>;
   onUpdatePlatformTransactionStatus: (
@@ -10679,7 +10748,7 @@ function DetailWorkspace({
     (key) => customFieldValidity[key] !== false,
   );
   const selectedSource = details.sources.find(
-    (source) => source.sourceScreenshot.id === selectedScreenshotId,
+    (source) => source.sourceSnapshot.id === selectedSourceSnapshotId,
   ) ?? details.sources[0];
   const sourceScreenshot = selectedSource?.sourceScreenshot ?? details.sourceScreenshot;
   const sourceSnapshot = selectedSource?.sourceSnapshot ?? details.sourceSnapshot;
@@ -10812,14 +10881,24 @@ function DetailWorkspace({
       <div className="detail-layout">
         <figure className="source-panel source-panel--detail">
           <div className="panel-label">
-            <span><Icon name="image" />来源截图</span>
-            <span>{sourceScreenshot.mimeType.replace('image/', '').toUpperCase()}</span>
+            <span><Icon name="image" />来源证据</span>
+            <span>{sourceScreenshot
+              ? sourceScreenshot.mimeType.replace('image/', '').toUpperCase()
+              : '历史导入'}</span>
           </div>
-          <div className="source-image-stage">
-            <img src={screenshotUrl} alt="来源截图" />
-          </div>
+          {sourceScreenshot ? (
+            <div className="source-image-stage">
+              <img src={screenshotUrl} alt="来源截图" />
+            </div>
+          ) : (
+            <div className="source-image-stage source-import-stage">
+              <strong>历史订单工作簿</strong>
+              <span>第 {(sourceSnapshot.sourceRowNumbers ?? []).join('、')} 行</span>
+              <small>没有来源截图，也没有调用 OCR</small>
+            </div>
+          )}
           <figcaption>
-            <span>{sourceScreenshot.originalName}</span>
+            <span>{sourceScreenshot?.originalName ?? sourceSnapshot.sourceName ?? '历史导入'}</span>
             <small>保存于本机数据目录</small>
           </figcaption>
         </figure>
@@ -11414,21 +11493,27 @@ function DetailWorkspace({
               <h3>来源证据</h3>
               <ol className="evidence-source-list" aria-label="来源证据">
                 {details.sources.map(({ sourceScreenshot: source, sourceSnapshot: snapshot }) => {
-                  const selected = source.id === sourceScreenshot.id;
+                  const selected = snapshot.id === sourceSnapshot.id;
                   const currentValueSource = snapshot.id === details.sourceSnapshot.id;
+                  const sourceLabel = source?.originalName ?? snapshot.sourceName ?? '历史导入';
                   return (
                     <li key={snapshot.id}>
                       <button
                         className={`evidence-source${selected ? ' is-selected' : ''}`}
                         type="button"
-                        aria-label={`查看来源 ${source.originalName}`}
+                        aria-label={`查看来源 ${sourceLabel}`}
                         aria-pressed={selected}
                         disabled={sourceLoading}
-                        onClick={() => onSelectSource(source.id)}
+                        onClick={() => onSelectSource(snapshot.id)}
                       >
                         <span className="evidence-source__copy">
-                          <strong>{source.originalName}</strong>
-                          <small>{formatDateTime(snapshot.createdAt)}</small>
+                          <strong>{sourceLabel}</strong>
+                          <small>
+                            {snapshot.sourceType === 'historical_import'
+                              ? `历史导入 · 第 ${(snapshot.sourceRowNumbers ?? []).join('、')} 行`
+                              : '来源截图'}
+                            {' · '}{formatDateTime(snapshot.createdAt)}
+                          </small>
                         </span>
                         <span className="evidence-source__status">
                           {currentValueSource ? '当前值来源' : '历史来源'}
@@ -11457,7 +11542,7 @@ function DetailWorkspace({
                             <strong>v{event.baseRevision} → v{event.resultRevision}</strong>
                             <small>
                               {{
-                                source_update: '截图确认更新',
+                                source_update: '来源确认更新',
                                 manual_edit: '手动修改',
                                 shipment_sync: '发货同步',
                               }[event.source]}
@@ -11466,13 +11551,13 @@ function DetailWorkspace({
                                 <button
                                   className="change-event__source"
                                   type="button"
-                                  aria-label={`查看修改来源 ${eventSource.sourceScreenshot.originalName}`}
+                                  aria-label={`查看修改来源 ${eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}`}
                                   disabled={sourceLoading}
-                                  onClick={() => onSelectSource(eventSource.sourceScreenshot.id)}
+                                  onClick={() => onSelectSource(eventSource.sourceSnapshot.id)}
                                 >
-                                  {eventSource.sourceScreenshot.originalName}
+                                  {eventSource.sourceScreenshot?.originalName ?? eventSource.sourceSnapshot.sourceName ?? '历史导入'}
                                 </button>
-                              ) : '无截图来源'}
+                              ) : '无来源快照'}
                               {' · '}{formatDateTime(event.createdAt)}
                             </small>
                           </span>

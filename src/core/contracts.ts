@@ -359,7 +359,10 @@ export type ConfirmedOrderSnapshot = Omit<RecognitionResult, 'fulfillmentStatus'
 export type SourceSnapshot = {
   id: string;
   createdAt: string;
-  recognition: RecognitionResult;
+  sourceType?: 'screenshot' | 'historical_import';
+  sourceName?: string | null;
+  sourceRowNumbers?: number[];
+  recognition: ConfirmedOrderSnapshot;
   confirmed: ConfirmedOrderSnapshot | null;
 };
 
@@ -404,13 +407,13 @@ export type OrderDraftReview =
 
 export type OrderSource = {
   recognitionStatus: RecognitionBatchItemStatus;
-  sourceScreenshot: SourceScreenshot;
+  sourceScreenshot: SourceScreenshot | null;
   sourceSnapshot: SourceSnapshot;
 };
 
 export type OrderDetails = {
   order: OriginalOrder;
-  sourceScreenshot: SourceScreenshot;
+  sourceScreenshot: SourceScreenshot | null;
   sourceSnapshot: SourceSnapshot;
   sources: OrderSource[];
   changeEvents: OrderChangeEvent[];

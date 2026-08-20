@@ -42,6 +42,10 @@ import {
   normalizeProductCatalogImportConfirmationInput,
   normalizeProductCatalogImportInput,
 } from '../core/product-catalog';
+import {
+  normalizeHistoricalOrderImportConfirmationInput,
+  normalizeHistoricalOrderImportInput,
+} from '../core/historical-order-import';
 import type {
   OrderItemWorkbenchQuery,
   OrderWorkbenchQuery,
@@ -80,6 +84,7 @@ import {
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
 const PRODUCT_CATALOG_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
+const HISTORICAL_ORDER_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -134,6 +139,11 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   let productCatalogImportSession: {
     id: string;
     buffer: Buffer;
+  } | null = null;
+  let historicalOrderImportSession: {
+    id: string;
+    buffer: Buffer;
+    fileName: string;
   } | null = null;
 
   ipcMain.handle('app:get-bootstrap-state', () => desktopSession.getState());
@@ -396,6 +406,95 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('workflow:cancel-draft', (_event, draftId: unknown) => {
     return desktopSession.cancelDraft(parseDraftId(draftId));
   });
+  ipcMain.handle('orders:select-historical-import', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+    const selection = await dialog.showOpenDialog(window, {
+      title: '选择历史订单工作簿',
+      buttonLabel: '读取并预览',
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      properties: ['openFile'],
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { kind: 'canceled' as const };
+    }
+    const filePath = selection.filePaths[0];
+    if (extname(filePath).toLowerCase() !== '.xlsx') {
+      throw new Error('历史订单导入只支持 .xlsx 文件');
+    }
+    if ((await stat(filePath)).size > HISTORICAL_ORDER_MAX_WORKBOOK_BYTES) {
+      throw new Error('历史订单工作簿不能超过 10 MB');
+    }
+    const buffer = await readFile(filePath);
+    const inspection = await desktopSession.inspectHistoricalOrderWorkbook(buffer);
+    const id = randomUUID();
+    const fileName = basename(filePath);
+    historicalOrderImportSession = { id, buffer, fileName };
+    return { kind: 'selected' as const, sessionId: id, fileName, inspection };
+  });
+  ipcMain.handle(
+    'orders:preview-historical-import',
+    (_event, sessionId: unknown, input: unknown) => {
+      const current = requireHistoricalOrderImportSession(
+        historicalOrderImportSession,
+        sessionId,
+      );
+      return desktopSession.previewHistoricalOrderImport(
+        current.buffer,
+        normalizeHistoricalOrderImportInput(input),
+      );
+    },
+  );
+  ipcMain.handle(
+    'orders:download-historical-import-errors',
+    async (event, sessionId: unknown, input: unknown) => {
+      const current = requireHistoricalOrderImportSession(
+        historicalOrderImportSession,
+        sessionId,
+      );
+      const normalized = normalizeHistoricalOrderImportConfirmationInput(input);
+      const preview = await desktopSession.previewHistoricalOrderImport(current.buffer, normalized);
+      if (preview.previewToken !== normalized.previewToken) {
+        throw new Error('历史订单预览已过期，请重新预览');
+      }
+      const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+      const selection = await dialog.showSaveDialog(window, {
+        title: '下载历史订单错误行',
+        buttonLabel: '保存 Excel',
+        defaultPath: defaultHistoricalOrderErrorRowsFileName(current.fileName),
+        filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+        properties: ['showOverwriteConfirmation', 'createDirectory'],
+      });
+      if (selection.canceled || !selection.filePath) return { kind: 'cancelled' as const };
+      const filePath = xlsxFilePath(selection.filePath);
+      const buffer = await desktopSession.createHistoricalOrderErrorRowsWorkbook(
+        current.buffer,
+        normalized,
+      );
+      await writeFile(filePath, buffer);
+      return {
+        kind: 'saved' as const,
+        fileName: basename(filePath),
+        filePath,
+        rowCount: preview.summary.errorRowCount,
+      };
+    },
+  );
+  ipcMain.handle(
+    'orders:confirm-historical-import',
+    async (_event, sessionId: unknown, input: unknown) => {
+      const current = requireHistoricalOrderImportSession(
+        historicalOrderImportSession,
+        sessionId,
+      );
+      const result = await desktopSession.confirmHistoricalOrderImport(
+        current.buffer,
+        current.fileName,
+        normalizeHistoricalOrderImportConfirmationInput(input),
+      );
+      historicalOrderImportSession = null;
+      return result;
+    },
+  );
   ipcMain.handle('products:list', () => desktopSession.listStandardProducts());
   ipcMain.handle('products:select-catalog-import', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
@@ -1453,6 +1552,11 @@ function defaultProductCatalogExportFileName(now: Date): string {
   return `商品目录-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
 }
 
+function defaultHistoricalOrderErrorRowsFileName(sourceName: string): string {
+  const stem = basename(sourceName, extname(sourceName)).normalize('NFKC').trim() || '历史订单';
+  return `${stem}-错误行.xlsx`;
+}
+
 function defaultShipmentGroupExportFileName(now: Date): string {
   const part = (value: number): string => String(value).padStart(2, '0');
   return `合并发货-${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}.xlsx`;
@@ -1468,6 +1572,16 @@ function requireProductCatalogImportSession(
 ): { id: string; buffer: Buffer } {
   if (typeof sessionId !== 'string' || !session || session.id !== sessionId) {
     throw new Error('商品目录导入会话已失效，请重新选择文件');
+  }
+  return session;
+}
+
+function requireHistoricalOrderImportSession(
+  session: { id: string; buffer: Buffer; fileName: string } | null,
+  sessionId: unknown,
+): { id: string; buffer: Buffer; fileName: string } {
+  if (typeof sessionId !== 'string' || !session || session.id !== sessionId) {
+    throw new Error('历史订单导入会话已失效，请重新选择文件');
   }
   return session;
 }

@@ -160,6 +160,7 @@ describe('完整订单工作流', () => {
     const beforeRestart = application.getOrder(confirmed.id);
     expect(beforeRestart.sourceSnapshot.recognition.recipient).toBe('识别原值');
     expect(beforeRestart.order.recipient).toBe('人工修正值');
+    if (!beforeRestart.sourceScreenshot) throw new Error('测试订单缺少来源截图');
     expect(beforeRestart.sourceScreenshot.originalName).toBe('脱敏测试订单.png');
     expect(JSON.stringify(beforeRestart)).not.toContain('rawResponse');
     expect(
@@ -216,11 +217,10 @@ describe('完整订单工作流', () => {
       fulfillmentStatus: 'shipped',
       lifecycleStatus: 'active',
     });
-    expect(
-      reopened.getRecognitionEvidence(
-        reopened.getOrder(orders[0].id).sourceScreenshot.id,
-      ).rawResponse,
-    ).toContain('ALI-SYNTH-WORKFLOW-0001');
+    const reopenedDetails = reopened.getOrder(orders[0].id);
+    if (!reopenedDetails.sourceScreenshot) throw new Error('测试订单缺少来源截图');
+    expect(reopened.getRecognitionEvidence(reopenedDetails.sourceScreenshot.id).rawResponse)
+      .toContain('ALI-SYNTH-WORKFLOW-0001');
     expect(recognizer.networkRequestCount).toBe(0);
   });
 

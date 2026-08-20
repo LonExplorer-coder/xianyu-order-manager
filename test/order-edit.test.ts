@@ -132,6 +132,7 @@ describe('已入库原始订单人工修改', () => {
     expect(saved.lastManualEditAt).toBe(saved.changeEvents[0].createdAt);
     expect(saved.sourceSnapshot).toEqual(before.sourceSnapshot);
     expect(saved.sources).toEqual(before.sources);
+    if (!before.sourceScreenshot) throw new Error('测试订单缺少来源截图');
     expect(application.getRecognitionEvidence(before.sourceScreenshot.id)).toMatchObject({
       rawResponse: expect.stringContaining('XY-MANUAL-EDIT-0001'),
     });

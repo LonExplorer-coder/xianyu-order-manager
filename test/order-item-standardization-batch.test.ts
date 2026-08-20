@@ -1037,7 +1037,7 @@ describe('订单商品批量关联留痕迁移', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 58 });
+        .toEqual({ version: 59 });
       verified.prepare(`
         INSERT INTO order_item_standardization_batch_events (
           id, batch_id, order_id, order_item_id,

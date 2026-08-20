@@ -112,6 +112,7 @@ export async function runPortableReleaseDataSmoke(
     ) {
       throw new Error('便携版冒烟订单详情不完整');
     }
+    if (!details.sourceScreenshot) throw new Error('便携版冒烟订单缺少来源截图');
     const screenshotDataUrl = await session.getScreenshotDataUrl(
       details.sourceScreenshot.id,
     );

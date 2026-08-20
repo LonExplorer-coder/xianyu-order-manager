@@ -157,6 +157,15 @@ import {
   type ProductCatalogImportResult,
   type ProductCatalogWorkbookInspection,
 } from '../core/product-catalog';
+import type {
+  HistoricalOrderImportCandidate,
+  HistoricalOrderImportConfirmationInput,
+  HistoricalOrderImportInput,
+  HistoricalOrderImportPreview,
+  HistoricalOrderImportResult,
+  HistoricalOrderWorkbookInspection,
+} from '../core/historical-order-import';
+import { normalizeHistoricalOrderImportConfirmationInput } from '../core/historical-order-import';
 import {
   assessAutomaticImport,
   isOrderReviewIssueCode,
@@ -282,6 +291,11 @@ import {
   inspectProductCatalogWorkbook as inspectCatalogWorkbook,
   previewProductCatalogWorkbook,
 } from './product-catalog-workbook';
+import {
+  createHistoricalOrderErrorRowsWorkbook as buildHistoricalOrderErrorRowsWorkbook,
+  inspectHistoricalOrderWorkbook as inspectHistoricalWorkbook,
+  previewHistoricalOrderWorkbook,
+} from './historical-order-workbook';
 import {
   shanghaiDateKey,
   systemOrderNumberForSequence,
@@ -4082,6 +4096,419 @@ export class LocalApplication {
     `).all() as unknown as SqlRow[]).map(parseStandardProductRow);
   }
 
+  public inspectHistoricalOrderWorkbook(
+    buffer: Buffer,
+  ): Promise<HistoricalOrderWorkbookInspection> {
+    this.requireWorkspace();
+    return inspectHistoricalWorkbook(buffer);
+  }
+
+  public async previewHistoricalOrderImport(
+    buffer: Buffer,
+    input: HistoricalOrderImportInput,
+  ): Promise<HistoricalOrderImportPreview> {
+    this.requireWorkspace();
+    return (await previewHistoricalOrderWorkbook({
+      buffer,
+      columnMapping: input.columnMapping,
+      findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+    })).preview;
+  }
+
+  public async confirmHistoricalOrderImport(
+    buffer: Buffer,
+    sourceName: string,
+    input: HistoricalOrderImportConfirmationInput | unknown,
+  ): Promise<HistoricalOrderImportResult> {
+    const workspace = this.requireWorkspace();
+    const normalizedSourceName = sourceName.normalize('NFKC').trim();
+    if (!normalizedSourceName || normalizedSourceName.length > 255) {
+      throw new Error('历史导入来源文件名无效');
+    }
+    const normalized = normalizeHistoricalOrderImportConfirmationInput(input);
+    const plan = await previewHistoricalOrderWorkbook({
+      buffer,
+      columnMapping: normalized.columnMapping,
+      findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+    });
+    if (plan.preview.previewToken !== normalized.previewToken) {
+      throw new Error('历史订单预览已过期，请重新预览');
+    }
+
+    let createdOrderCount = 0;
+    let updatedOrderCount = 0;
+    const now = new Date().toISOString();
+    workspace.transaction(() => {
+      plan.preview.orders.forEach((orderPreview, index) => {
+        const candidate = plan.candidates[index];
+        if (!candidate) throw new Error('历史订单预览内容无效');
+        if (orderPreview.action === 'duplicate') return;
+        if (orderPreview.action === 'update') {
+          if (!orderPreview.existingOrderId || orderPreview.expectedRevision === null) {
+            throw new Error('历史订单预览内容无效');
+          }
+          this.updateHistoricalOrder(
+            candidate,
+            normalizedSourceName,
+            orderPreview.existingOrderId,
+            orderPreview.expectedRevision,
+            now,
+          );
+          updatedOrderCount += 1;
+          return;
+        }
+        this.insertHistoricalOrder(candidate, normalizedSourceName, now);
+        createdOrderCount += 1;
+      });
+    });
+    return {
+      createdOrderCount,
+      updatedOrderCount,
+      skippedDuplicateOrderCount: plan.preview.summary.duplicateOrderCount,
+      skippedErrorRowCount: plan.preview.summary.errorRowCount,
+    };
+  }
+
+  public async createHistoricalOrderErrorRowsWorkbook(
+    buffer: Buffer,
+    input: HistoricalOrderImportConfirmationInput | unknown,
+  ): Promise<Buffer> {
+    this.requireWorkspace();
+    const normalized = normalizeHistoricalOrderImportConfirmationInput(input);
+    const plan = await previewHistoricalOrderWorkbook({
+      buffer,
+      columnMapping: normalized.columnMapping,
+      findExistingOrder: (candidate) => this.findOriginalOrderByIdentity(candidate),
+    });
+    if (plan.preview.previewToken !== normalized.previewToken) {
+      throw new Error('历史订单预览已过期，请重新预览');
+    }
+    return buildHistoricalOrderErrorRowsWorkbook({
+      buffer,
+      columnMapping: normalized.columnMapping,
+      errorRows: plan.preview.errorRows,
+    });
+  }
+
+  private insertHistoricalOrder(
+    candidate: HistoricalOrderImportCandidate,
+    sourceName: string,
+    now: string,
+  ): void {
+    const workspace = this.requireWorkspace();
+    if (this.findOriginalOrderByIdentity(candidate)) {
+      throw new Error('历史订单预览已过期，请重新预览');
+    }
+    const orderId = randomUUID();
+    const systemOrderNumber = this.nextSystemOrderNumber(now);
+    const importItems = candidate.items.map((item, position) => ({ ...item, position }));
+    const productStandardizations = this.prepareProductStandardizations(
+      importItems,
+      undefined,
+      { platform: candidate.platform, sellerAccount: candidate.sellerAccount },
+    );
+    workspace.database.prepare(`
+      INSERT INTO original_orders (
+        id, system_order_number, draft_id, screenshot_id, platform,
+        seller_account, seller_account_normalized,
+        platform_order_number, platform_order_number_normalized,
+        alipay_transaction_number, buyer_nickname, recipient, phone, phone_normalized,
+        address_original, address_normalized, province, city, district,
+        ordered_at_original, ordered_at_normalized, paid_at_original, paid_at_normalized,
+        product_total_cents, shipping_fee_cents, amount_cents,
+        platform_transaction_status, fulfillment_status, lifecycle_status,
+        created_at, updated_at
+      ) VALUES (
+        ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        'active', ?, ?
+      )
+    `).run(
+      orderId,
+      systemOrderNumber,
+      candidate.platform,
+      candidate.sellerAccount,
+      normalizedOrderIdentityPart(candidate.sellerAccount),
+      candidate.orderNumber,
+      normalizedOrderIdentityPart(candidate.orderNumber),
+      candidate.alipayTransactionNumber,
+      candidate.buyerNickname,
+      candidate.recipient,
+      candidate.phone,
+      candidate.phoneNormalized,
+      candidate.addressOriginal,
+      candidate.addressNormalized,
+      candidate.province,
+      candidate.city,
+      candidate.district,
+      candidate.orderedAtOriginal,
+      candidate.orderedAtNormalized,
+      candidate.paidAtOriginal,
+      candidate.paidAtNormalized,
+      candidate.productTotalCents,
+      candidate.shippingFeeCents,
+      candidate.amountCents,
+      candidate.platformTransactionStatus,
+      candidate.fulfillmentStatus,
+      now,
+      now,
+    );
+    this.recipientService().ensureRecipient(candidate.recipient, candidate.phoneNormalized, now);
+
+    const insertItem = workspace.database.prepare(`
+      INSERT INTO order_items (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_source, subtotal_cents,
+        standard_product_id, standardization_source, standard_display_preference
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const itemIds: string[] = [];
+    candidate.items.forEach((item, position) => {
+      const itemId = randomUUID();
+      itemIds.push(itemId);
+      const standardization = productStandardizations.get(item.id);
+      if (!standardization) throw new Error('历史订单商品标准化结果无效');
+      insertItem.run(
+        itemId,
+        orderId,
+        position,
+        item.sourceTitle,
+        item.sourceSpec,
+        item.unitPriceCents,
+        item.quantity,
+        requiredQuantitySource(item),
+        safeSubtotal(requireMoney('商品单价', item.unitPriceCents), item.quantity),
+        standardization.standardProductId,
+        standardization.source,
+        plannedStandardDisplayPreference(standardization.standardProductId, undefined),
+      );
+      if (standardization.matchedMappingId) {
+        this.markProductMappingUsed(standardization.matchedMappingId, now);
+      }
+    });
+    this.insertDefaultCustomFieldValues(orderId, itemIds, now);
+    this.assertRequiredCustomFieldValuesPresent(orderId);
+
+    const snapshotId = randomUUID();
+    const serialized = serializeRecognition(candidate);
+    workspace.database.prepare(`
+      INSERT INTO source_snapshots (
+        id, draft_id, order_id, screenshot_id,
+        source_type, source_name, source_row_numbers_json,
+        recognition_json, confirmed_json, created_at, resolved_at
+      ) VALUES (?, NULL, ?, NULL, 'historical_import', ?, ?, ?, ?, ?, ?)
+    `).run(
+      snapshotId,
+      orderId,
+      sourceName,
+      JSON.stringify(candidate.rowNumbers),
+      serialized,
+      serialized,
+      now,
+      now,
+    );
+  }
+
+  private updateHistoricalOrder(
+    imported: HistoricalOrderImportCandidate,
+    sourceName: string,
+    orderId: string,
+    expectedRevision: number,
+    now: string,
+  ): void {
+    const workspace = this.requireWorkspace();
+    const existing = this.getOrder(orderId).order;
+    if (
+      existing.revision !== expectedRevision ||
+      !hasSameOrderIdentity(existing, imported)
+    ) {
+      throw new Error('历史订单预览已过期，请重新预览');
+    }
+    const candidate = withHigherPriorityCurrentQuantities(existing, imported);
+    const hasShipmentHistory = this.orderFulfillmentProjection().hasShipmentHistory(orderId);
+    const fulfillmentStatus = hasShipmentHistory
+      ? existing.fulfillmentStatus
+      : candidate.fulfillmentStatus;
+    const confirmed = { ...candidate, fulfillmentStatus };
+    const changes = diffOrderCurrentValues(existing, confirmed).filter((change) => (
+      !hasShipmentHistory || change.path !== 'fulfillmentStatus'
+    ));
+    if (changes.length === 0) {
+      throw new Error('历史订单内容已与当前值一致，请重新预览');
+    }
+
+    const persistedItemIds = matchOrderItemIds(existing.items, candidate.items);
+    for (const item of candidate.items) {
+      if (!persistedItemIds.has(item.id)) persistedItemIds.set(item.id, randomUUID());
+    }
+    const existingItemsById = new Map(existing.items.map((item) => [item.id, item]));
+    const retainedExistingItemIds = new Set(persistedItemIds.values());
+    const importItems = candidate.items.map((item, position) => ({ ...item, position }));
+    const productStandardizations = this.prepareProductStandardizations(
+      importItems,
+      undefined,
+      { platform: existing.platform, sellerAccount: existing.sellerAccount },
+    );
+    for (const item of candidate.items) {
+      const persistedItemId = persistedItemIds.get(item.id);
+      const existingItem = persistedItemId ? existingItemsById.get(persistedItemId) : undefined;
+      if (!existingItem?.standardProduct) continue;
+      productStandardizations.set(item.id, {
+        standardProductId: existingItem.standardProduct.id,
+        source: existingItem.standardizationSource,
+        createMapping: false,
+        matchedMappingId: null,
+      });
+    }
+    const updatedOrder = workspace.database.prepare(`
+      UPDATE original_orders
+      SET
+        alipay_transaction_number = ?,
+        buyer_nickname = ?,
+        recipient = ?,
+        phone = ?,
+        phone_normalized = ?,
+        address_original = ?,
+        address_normalized = ?,
+        province = ?,
+        city = ?,
+        district = ?,
+        ordered_at_original = ?,
+        ordered_at_normalized = ?,
+        paid_at_original = ?,
+        paid_at_normalized = ?,
+        product_total_cents = ?,
+        shipping_fee_cents = ?,
+        amount_cents = ?,
+        platform_transaction_status = ?,
+        fulfillment_status = ?,
+        revision = revision + 1,
+        updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      candidate.alipayTransactionNumber,
+      candidate.buyerNickname,
+      candidate.recipient,
+      candidate.phone,
+      candidate.phoneNormalized,
+      candidate.addressOriginal,
+      candidate.addressNormalized,
+      candidate.province,
+      candidate.city,
+      candidate.district,
+      candidate.orderedAtOriginal,
+      candidate.orderedAtNormalized,
+      candidate.paidAtOriginal,
+      candidate.paidAtNormalized,
+      candidate.productTotalCents,
+      candidate.shippingFeeCents,
+      candidate.amountCents,
+      candidate.platformTransactionStatus,
+      fulfillmentStatus,
+      now,
+      orderId,
+      expectedRevision,
+    );
+    if (updatedOrder.changes !== 1) throw new Error('历史订单预览已过期，请重新预览');
+    if (['refunded', 'cancelled'].includes(candidate.platformTransactionStatus)) {
+      new FulfillmentDemandService(workspace).shrinkDraftsAfterOrderExit(
+        orderId,
+        now,
+        candidate.platformTransactionStatus === 'refunded'
+          ? '订单整单退款后重算未确认建议'
+          : '订单取消后重算未确认建议',
+      );
+    }
+    this.recipientService().ensureRecipient(candidate.recipient, candidate.phoneNormalized, now);
+
+    workspace.database.prepare('UPDATE order_items SET position = position + 100000 WHERE order_id = ?')
+      .run(orderId);
+    const updateItem = workspace.database.prepare(`
+      UPDATE order_items
+      SET position = ?, source_title = ?, source_spec = ?, unit_price_cents = ?,
+        quantity = ?, quantity_source = ?, subtotal_cents = ?
+      WHERE id = ? AND order_id = ?
+    `);
+    const insertItem = workspace.database.prepare(`
+      INSERT INTO order_items (
+        id, order_id, position, source_title, source_spec,
+        unit_price_cents, quantity, quantity_source, subtotal_cents,
+        standard_product_id, standardization_source, standard_display_preference
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    candidate.items.forEach((item, position) => {
+      const itemId = persistedItemIds.get(item.id);
+      if (!itemId) throw new Error('历史订单商品标识无效');
+      const subtotal = safeSubtotal(requireMoney('商品单价', item.unitPriceCents), item.quantity);
+      if (existingItemsById.has(itemId)) {
+        updateItem.run(
+          position, item.sourceTitle, item.sourceSpec, item.unitPriceCents,
+          item.quantity, requiredQuantitySource(item), subtotal, itemId, orderId,
+        );
+      } else {
+        const standardization = productStandardizations.get(item.id);
+        if (!standardization) throw new Error('历史订单商品标准化结果无效');
+        insertItem.run(
+          itemId, orderId, position, item.sourceTitle, item.sourceSpec,
+          item.unitPriceCents, item.quantity, requiredQuantitySource(item), subtotal,
+          standardization.standardProductId,
+          standardization.source,
+          plannedStandardDisplayPreference(standardization.standardProductId, undefined),
+        );
+        if (standardization.matchedMappingId) {
+          this.markProductMappingUsed(standardization.matchedMappingId, now);
+        }
+        this.insertDefaultCustomFieldValues(null, [itemId], now);
+      }
+    });
+    const removedItemIds = existing.items
+      .map(({ id }) => id)
+      .filter((id) => !retainedExistingItemIds.has(id));
+    if (removedItemIds.length > 0) {
+      workspace.database.prepare(`
+        DELETE FROM order_items
+        WHERE order_id = ? AND id IN (${removedItemIds.map(() => '?').join(', ')})
+      `).run(orderId, ...removedItemIds);
+    }
+    this.assertRequiredCustomFieldValuesPresent(orderId);
+
+    const snapshotId = randomUUID();
+    workspace.database.prepare(`
+      INSERT INTO source_snapshots (
+        id, draft_id, order_id, screenshot_id,
+        source_type, source_name, source_row_numbers_json,
+        recognition_json, confirmed_json, created_at, resolved_at
+      ) VALUES (?, NULL, ?, NULL, 'historical_import', ?, ?, ?, ?, ?, ?)
+    `).run(
+      snapshotId,
+      orderId,
+      sourceName,
+      JSON.stringify(imported.rowNumbers),
+      serializeRecognition(imported),
+      serializeRecognition(confirmed),
+      now,
+      now,
+    );
+    const eventId = randomUUID();
+    workspace.database.prepare(`
+      INSERT INTO order_change_events (
+        id, order_id, source_snapshot_id, source,
+        base_revision, result_revision, created_at
+      ) VALUES (?, ?, ?, 'source_update', ?, ?, ?)
+    `).run(eventId, orderId, snapshotId, expectedRevision, expectedRevision + 1, now);
+    const insertChange = workspace.database.prepare(`
+      INSERT INTO order_field_changes (
+        id, event_id, field_path, before_json, after_json
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const change of changes) {
+      insertChange.run(
+        randomUUID(), eventId, change.path,
+        JSON.stringify(change.before), JSON.stringify(change.after),
+      );
+    }
+    if (hasShipmentHistory) this.synchronizeShipmentOrderFulfillment(orderId, now);
+  }
+
   public inspectProductCatalogWorkbook(
     buffer: Buffer,
   ): Promise<ProductCatalogWorkbookInspection> {
@@ -6896,7 +7323,7 @@ export class LocalApplication {
       parameters.push(query.sellerAccount);
     }
     if (query.initialSourceRecognitionStatus) {
-      where.push('source_items.status = ?');
+      where.push("COALESCE(source_items.status, 'imported') = ?");
       parameters.push(query.initialSourceRecognitionStatus);
     }
     if (query.platformTransactionStatus) {
@@ -7021,7 +7448,7 @@ export class LocalApplication {
             ORDER BY manual_events.result_revision DESC, manual_events.id DESC
             LIMIT 1
           ) AS last_manual_edit_at,
-          source_items.status AS initial_source_recognition_status,
+          COALESCE(source_items.status, 'imported') AS initial_source_recognition_status,
           orders.platform_transaction_status,
           orders.fulfillment_status,
           orders.lifecycle_status,
@@ -7069,7 +7496,7 @@ export class LocalApplication {
             ) AS ordered_items
           ), '[]') AS items_json
         FROM original_orders AS orders
-        JOIN recognition_batch_items AS source_items
+        LEFT JOIN recognition_batch_items AS source_items
           ON source_items.draft_id = orders.draft_id
         LEFT JOIN order_items AS items ON items.order_id = orders.id
         WHERE ${where.join('\n          AND ')}
@@ -7557,13 +7984,16 @@ export class LocalApplication {
           screenshots.content_sha256,
           screenshots.created_at AS screenshot_created_at,
           snapshots.id AS snapshot_id,
+          snapshots.source_type,
+          snapshots.source_name,
+          snapshots.source_row_numbers_json,
           snapshots.recognition_json,
           snapshots.confirmed_json,
           snapshots.created_at AS snapshot_created_at,
           source_items.status AS recognition_status
         FROM source_snapshots AS snapshots
-        JOIN source_screenshots AS screenshots ON screenshots.id = snapshots.screenshot_id
-        JOIN recognition_batch_items AS source_items
+        LEFT JOIN source_screenshots AS screenshots ON screenshots.id = snapshots.screenshot_id
+        LEFT JOIN recognition_batch_items AS source_items
           ON source_items.draft_id = snapshots.draft_id
         LEFT JOIN (
           SELECT source_snapshot_id, MAX(result_revision) AS result_revision
@@ -7578,25 +8008,37 @@ export class LocalApplication {
           snapshots.rowid DESC
       `)
       .all(orderId) as unknown as SqlRow[];
-    const sources = sourceRows.map((sourceRow) => ({
-      recognitionStatus: asRecognitionBatchItemStatus(sourceRow.recognition_status),
-      sourceScreenshot: {
-        id: asString(sourceRow.source_id),
-        originalName: asString(sourceRow.original_name),
-        relativePath: asString(sourceRow.relative_path),
-        mimeType: asString(sourceRow.mime_type),
-        sha256: asString(sourceRow.content_sha256),
-        createdAt: asString(sourceRow.screenshot_created_at),
-      } satisfies SourceScreenshot,
-      sourceSnapshot: {
-        id: asString(sourceRow.snapshot_id),
-        createdAt: asString(sourceRow.snapshot_created_at),
-        recognition: parseStoredRecognition(asString(sourceRow.recognition_json)),
-        confirmed: sourceRow.confirmed_json === null
+    const sources = sourceRows.map((sourceRow) => {
+      const sourceType = asOrderSourceType(sourceRow.source_type);
+      return {
+        recognitionStatus: sourceType === 'historical_import'
+          ? 'imported' as const
+          : asRecognitionBatchItemStatus(sourceRow.recognition_status),
+        sourceScreenshot: sourceType === 'historical_import'
           ? null
-          : parseStoredConfirmedOrderSnapshot(asString(sourceRow.confirmed_json)),
-      } satisfies SourceSnapshot,
-    }));
+          : {
+            id: asString(sourceRow.source_id),
+            originalName: asString(sourceRow.original_name),
+            relativePath: asString(sourceRow.relative_path),
+            mimeType: asString(sourceRow.mime_type),
+            sha256: asString(sourceRow.content_sha256),
+            createdAt: asString(sourceRow.screenshot_created_at),
+          } satisfies SourceScreenshot,
+        sourceSnapshot: {
+          id: asString(sourceRow.snapshot_id),
+          createdAt: asString(sourceRow.snapshot_created_at),
+          sourceType,
+          sourceName: sourceRow.source_name === null ? null : asString(sourceRow.source_name),
+          sourceRowNumbers: sourceRow.source_row_numbers_json === null
+            ? []
+            : parseSourceRowNumbers(asString(sourceRow.source_row_numbers_json)),
+          recognition: parseStoredConfirmedOrderSnapshot(asString(sourceRow.recognition_json)),
+          confirmed: sourceRow.confirmed_json === null
+            ? null
+            : parseStoredConfirmedOrderSnapshot(asString(sourceRow.confirmed_json)),
+        } satisfies SourceSnapshot,
+      };
+    });
     const latestSource = sources[0];
     if (!latestSource) throw new Error('原始订单缺少来源快照');
 
@@ -7871,8 +8313,9 @@ export class LocalApplication {
       .prepare(`
         INSERT INTO source_snapshots (
           id, draft_id, order_id, screenshot_id,
+          source_type, source_name, source_row_numbers_json,
           recognition_json, confirmed_json, created_at, resolved_at
-        ) VALUES (?, ?, NULL, ?, ?, NULL, ?, NULL)
+        ) VALUES (?, ?, NULL, ?, 'screenshot', NULL, NULL, ?, NULL, ?, NULL)
       `)
       .run(
         randomUUID(),
@@ -8096,6 +8539,39 @@ export class LocalApplication {
       }));
     }
     return values;
+  }
+
+  private insertDefaultCustomFieldValues(
+    orderId: string | null,
+    orderItemIds: readonly string[],
+    now: string,
+  ): void {
+    const workspace = this.requireWorkspace();
+    if (orderId) {
+      workspace.database.prepare(`
+        INSERT INTO custom_field_values (
+          id, definition_id, order_id, order_item_id,
+          value_json, created_at, updated_at
+        )
+        SELECT lower(hex(randomblob(16))), definitions.id, ?, NULL,
+          definitions.default_value_json, ?, ?
+        FROM custom_field_definitions AS definitions
+        WHERE definitions.granularity = 'order'
+          AND definitions.default_value_json IS NOT NULL
+      `).run(orderId, now, now);
+    }
+    const insertItemDefaults = workspace.database.prepare(`
+      INSERT INTO custom_field_values (
+        id, definition_id, order_id, order_item_id,
+        value_json, created_at, updated_at
+      )
+      SELECT lower(hex(randomblob(16))), definitions.id, NULL, ?,
+        definitions.default_value_json, ?, ?
+      FROM custom_field_definitions AS definitions
+      WHERE definitions.granularity = 'order_item'
+        AND definitions.default_value_json IS NOT NULL
+    `);
+    for (const orderItemId of orderItemIds) insertItemDefaults.run(orderItemId, now, now);
   }
 
   private assertRequiredCustomFieldValuesPresent(orderId: string): void {
@@ -8455,10 +8931,10 @@ function withManualQuantityEdits(
   };
 }
 
-function withHigherPriorityCurrentQuantities(
+function withHigherPriorityCurrentQuantities<T extends { items: Array<RecognitionItem & { id: string }> }>(
   current: OriginalOrder,
-  incoming: OrderDraft,
-): OrderDraft {
+  incoming: T,
+): T {
   const currentIdByIncomingId = matchOrderItemIds(current.items, incoming.items);
   const currentById = new Map(current.items.map((item) => [item.id, item]));
   return {
@@ -8666,6 +9142,17 @@ function parseStoredConfirmedOrderSnapshot(serialized: string): ConfirmedOrderSn
       ? parsed.fulfillmentStatus
       : recognition.fulfillmentStatus,
   };
+}
+
+function parseSourceRowNumbers(serialized: string): number[] {
+  const parsed: unknown = JSON.parse(serialized);
+  if (
+    !Array.isArray(parsed) || parsed.length === 0 || parsed.length > 10_000 ||
+    !parsed.every((value) => Number.isSafeInteger(value) && value >= 2 && value <= 10_001)
+  ) {
+    throw new Error('历史导入来源行号格式错误');
+  }
+  return parsed as number[];
 }
 
 function storedText(value: unknown, fallback: string): string {
@@ -8877,6 +9364,15 @@ function asRecognitionBatchItemStatus(
 ): RecognitionBatchItemStatus {
   if (!isRecognitionBatchItemStatus(value)) {
     throw new Error('数据库来源截图识别状态格式错误');
+  }
+  return value;
+}
+
+function asOrderSourceType(
+  value: string | number | null | undefined,
+): 'screenshot' | 'historical_import' {
+  if (value !== 'screenshot' && value !== 'historical_import') {
+    throw new Error('数据库来源快照类型格式错误');
   }
   return value;
 }
@@ -9851,7 +10347,7 @@ function orderWorkbenchSortExpression(field: OrderWorkbenchSortField): string {
       ORDER BY sorted_items.position
       LIMIT 1
     ), '') COLLATE NOCASE`,
-    initial_source_recognition_status: 'source_items.status',
+    initial_source_recognition_status: "COALESCE(source_items.status, 'imported')",
     platform_transaction_status: 'orders.platform_transaction_status',
     fulfillment_status: 'orders.fulfillment_status',
     lifecycle_status: 'orders.lifecycle_status',

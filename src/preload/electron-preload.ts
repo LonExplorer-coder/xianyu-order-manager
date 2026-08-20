@@ -59,6 +59,16 @@ const api: DesktopApi = {
       productStandardizations,
     )
   ),
+  selectHistoricalOrderImport: () => ipcRenderer.invoke('orders:select-historical-import'),
+  previewHistoricalOrderImport: (sessionId, input) => (
+    ipcRenderer.invoke('orders:preview-historical-import', sessionId, input)
+  ),
+  confirmHistoricalOrderImport: (sessionId, input) => (
+    ipcRenderer.invoke('orders:confirm-historical-import', sessionId, input)
+  ),
+  downloadHistoricalOrderImportErrors: (sessionId, input) => (
+    ipcRenderer.invoke('orders:download-historical-import-errors', sessionId, input)
+  ),
   listStandardProducts: () => ipcRenderer.invoke('products:list'),
   selectProductCatalogImport: () => ipcRenderer.invoke('products:select-catalog-import'),
   previewProductCatalogImport: (sessionId, input) => (
