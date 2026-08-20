@@ -9048,12 +9048,12 @@ describe('订单管理工作台', () => {
         field: 'shipping_contact',
         candidates: [{
           candidateId: 'phone-a',
-          displayText: '彭 13881173018',
+          displayText: '赵 13900000501',
           evidenceRefs: [{ lineId: 'shipping-line-1' }],
         }],
         contextLines: [{
           lineId: 'shipping-line-1',
-          text: '彭 13881173018 复制',
+          text: '赵 13900000501 复制',
           left: 0.08,
           top: 0.2,
           right: 0.45,
@@ -9088,7 +9088,7 @@ describe('订单管理工作台', () => {
     expect(dialog).toHaveTextContent('DeepSeek');
     expect(dialog).toHaveTextContent('本地调用编号');
     expect(dialog).toHaveTextContent('candidate-run-auto-imported');
-    expect(dialog).toHaveTextContent('彭 13881173018');
+    expect(dialog).toHaveTextContent('赵 13900000501');
   });
 
   it('校对页可查看同一份冲突明细，并可用 Escape 或点击外部关闭', async () => {
@@ -9160,19 +9160,19 @@ describe('订单管理工作台', () => {
           candidates: [
             {
               candidateId: 'phone-a',
-              displayText: '彭 13881173018',
+              displayText: '赵 13900000501',
               evidenceRefs: [{ lineId: 'shipping-line-1' }],
             },
             {
               candidateId: 'phone-b',
-              displayText: '彭 13981173018',
+              displayText: '赵 13900000602',
               evidenceRefs: [{ lineId: 'shipping-line-2' }],
             },
           ],
           contextLines: [
             {
               lineId: 'shipping-line-1',
-              text: '彭 13881173018 复制',
+              text: '赵 13900000501 复制',
               left: 0.08,
               top: 0.2,
               right: 0.45,
@@ -9180,7 +9180,7 @@ describe('订单管理工作台', () => {
             },
             {
               lineId: 'shipping-line-2',
-              text: '13981173018',
+              text: '13900000602',
               left: 0.08,
               top: 0.25,
               right: 0.3,
@@ -9242,9 +9242,9 @@ describe('订单管理工作台', () => {
     expect(dialog).toHaveTextContent('收货信息区');
     expect(dialog).toHaveTextContent('收货联系人');
     expect(dialog).toHaveTextContent('已选择');
-    expect(dialog).toHaveTextContent('彭 13881173018');
+    expect(dialog).toHaveTextContent('赵 13900000501');
     expect(dialog).toHaveTextContent('依据行');
-    expect(dialog).toHaveTextContent('彭 13881173018 复制');
+    expect(dialog).toHaveTextContent('赵 13900000501 复制');
     expect(dialog).toHaveTextContent('未确定');
     expect(dialog).not.toHaveTextContent('SECRET_RAW_MODEL_RESPONSE');
     expect(dialog).not.toHaveTextContent('SECRET_API_KEY');

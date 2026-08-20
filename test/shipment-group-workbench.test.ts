@@ -93,8 +93,8 @@ describe('发货组工作台投影', () => {
   it('文本字段按包含筛选，多选字段按包含全部所选项筛选', () => {
     const target = group({
       id: 'group-filter-target',
-      recipient: '刘环湘',
-      address: '广东省惠州市惠城区水口街道1号',
+      recipient: '刘测试',
+      address: '广东省惠州市惠城区测试路1号',
       orderNumber: 'FILTER-001',
       amountCents: 1_200,
     });
@@ -131,8 +131,8 @@ describe('发货组工作台投影', () => {
   it('按成员订单与自定义字段筛选，并用发货组字段投影一行', () => {
     const east = group({
       id: 'group-east',
-      recipient: '刘环湘',
-      address: '广东省惠州市惠城区水口街道1号',
+      recipient: '刘测试',
+      address: '广东省惠州市惠城区测试路1号',
       orderNumber: 'A-002',
       amountCents: 1_200,
     });
@@ -183,8 +183,8 @@ describe('发货组工作台投影', () => {
   it('按受控汇总字段或组级自定义字段排序', () => {
     const east = group({
       id: 'group-east',
-      recipient: '刘环湘',
-      address: '广东省惠州市惠城区水口街道1号',
+      recipient: '刘测试',
+      address: '广东省惠州市惠城区测试路1号',
       orderNumber: 'A-002',
       amountCents: 1_200,
     });

@@ -63,8 +63,8 @@ describe('闲鱼有限候选规划与本地补丁', () => {
     };
     const regionLayout = layout({
       shipping_information: [
-        word('彭 13881173018 复制', 50, 320, 470, 355),
-        word('刘环湘 13352789806 去发货', 50, 370, 570, 405),
+        word('赵 13900000501 复制', 50, 320, 470, 355),
+        word('刘测试 13900000502 去发货', 50, 370, 570, 405),
         word('广东省惠州市惠城区安全路1号', 50, 420, 720, 455),
       ],
     }, [word('推广联系人 13600000000', 50, 900, 600, 940)]);
@@ -80,14 +80,14 @@ describe('闲鱼有限候选规划与本地补丁', () => {
       region: 'shipping_information',
       field: 'shipping_contact',
       candidates: [
-        { displayText: '彭 13881173018' },
-        { displayText: '刘环湘 13352789806' },
+        { displayText: '赵 13900000501' },
+        { displayText: '刘测试 13900000502' },
       ],
     });
     expect(plan.candidateSets[0]?.contextLines).toEqual([
       {
         lineId: 'shipping_information:line:1',
-        text: '彭 13881173018 复制',
+        text: '赵 13900000501 复制',
         left: 50,
         top: 320,
         right: 470,
@@ -95,7 +95,7 @@ describe('闲鱼有限候选规划与本地补丁', () => {
       },
       {
         lineId: 'shipping_information:line:2',
-        text: '刘环湘 13352789806 去发货',
+        text: '刘测试 13900000502 去发货',
         left: 50,
         top: 370,
         right: 570,
@@ -122,9 +122,9 @@ describe('闲鱼有限候选规划与本地补丁', () => {
 
     expect(applied).toEqual({
       shipping_information: {
-        recipient: '刘环湘',
-        recipient_phone_line_text: '刘环湘 13352789806',
-        phone: '13352789806',
+        recipient: '刘测试',
+        recipient_phone_line_text: '刘测试 13900000502',
+        phone: '13900000502',
         address: '广东省惠州市惠城区安全路1号',
       },
     });
@@ -387,8 +387,8 @@ describe('闲鱼有限候选规划与本地补丁', () => {
   it('手机号同行只有功能按钮而没有姓名时不伪造联系人候选', () => {
     const regionLayout = layout({
       shipping_information: [
-        word('去发货 13881173018', 50, 320, 470, 355),
-        word('刘环湘 13352789806 复制', 50, 370, 570, 405),
+        word('去发货 13900000501', 50, 320, 470, 355),
+        word('刘测试 13900000502 复制', 50, 370, 570, 405),
       ],
     });
 
@@ -418,8 +418,8 @@ describe('闲鱼有限候选规划与本地补丁', () => {
           word('交易已取消', 40, 245, 300, 280),
         ],
         shipping_information: [
-          word('彭 13881173018 复制', 50, 320, 470, 355),
-          word('刘环湘 13352789806 去发货', 50, 370, 570, 405),
+          word('赵 13900000501 复制', 50, 320, 470, 355),
+          word('刘测试 13900000502 去发货', 50, 370, 570, 405),
         ],
       }),
     });
@@ -484,7 +484,7 @@ describe('闲鱼有限候选规划与本地补丁', () => {
           word('买家已付款，请尽快发货', 40, 180, 720, 235),
         ],
         shipping_information: [
-          word('刘环湘 13352789806 复制', 50, 330, 620, 365),
+          word('刘测试 13900000502 复制', 50, 330, 620, 365),
           word('广东省惠州市惠城区安全路1号', 50, 380, 720, 425),
         ],
         purchased_items: [

@@ -10,7 +10,7 @@ const PHONE_AMBIGUITY: CandidateSet = {
   contextLines: [
     {
       lineId: 'shipping-line-1',
-      text: '彭 13881173018 复制',
+      text: '赵 13900000501 复制',
       left: 80,
       top: 320,
       right: 540,
@@ -20,12 +20,12 @@ const PHONE_AMBIGUITY: CandidateSet = {
   candidates: [
     {
       candidateId: 'phone-a',
-      displayText: '13881173018',
+      displayText: '13900000501',
       evidenceRefs: [{ lineId: 'shipping-line-1', startOffset: 2, endOffset: 13 }],
     },
     {
       candidateId: 'phone-b',
-      displayText: '13881173016',
+      displayText: '13900000601',
       evidenceRefs: [{ lineId: 'shipping-line-1', startOffset: 2, endOffset: 13 }],
     },
   ],
@@ -187,7 +187,7 @@ describe('OpenAI 兼容候选裁决客户端', () => {
       ambiguityId: 'shipping-phone-1',
       resolution: 'selected',
       candidateId: 'phone-a',
-      value: '13881173018',
+      value: '13900000501',
     }] })],
     ['未知歧义', JSON.stringify({ decisions: [{
       ambiguityId: 'other-ambiguity',
@@ -756,7 +756,7 @@ describe('OpenAI 兼容候选裁决客户端', () => {
       expect(payload.candidateSets[0].ambiguityId).toBe(
         'candidate-verification-connection-check',
       );
-      expect(JSON.stringify(payload)).not.toContain('13881173018');
+      expect(JSON.stringify(payload)).not.toContain('13900000501');
       return new Response(JSON.stringify({
         id: 'chatcmpl-connection-test',
         choices: [{ message: { content: JSON.stringify({
