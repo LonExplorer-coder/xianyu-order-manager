@@ -20,6 +20,7 @@ import type {
   OcrConnectionTestInput,
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
+import type { SaveOcrUsageQuotaInput } from '../core/ocr-usage';
 import type {
   CandidateVerificationConnectionTestInput,
   CandidateVerificationProvider,
@@ -1015,6 +1016,13 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('settings:test-ocr', (_event, input: unknown) => {
     return desktopSession.testOcrConnection(parseConnectionTestInput(input));
   });
+  ipcMain.handle('settings:get-ocr-usage', () => desktopSession.getOcrUsage());
+  ipcMain.handle('settings:save-ocr-usage-quota', (_event, input: unknown) => {
+    return desktopSession.saveOcrUsageQuota(parseOcrUsageQuotaInput(input));
+  });
+  ipcMain.handle('settings:confirm-ocr-usage-resume', () => (
+    desktopSession.confirmOcrUsageResume()
+  ));
   ipcMain.handle('settings:get-candidate-verification', () => (
     desktopSession.getCandidateVerificationSettings()
   ));
@@ -1814,6 +1822,22 @@ function parseConnectionTestInput(input: unknown): OcrConnectionTestInput {
     throw new Error('请先确认本次测试会产生一次 OCR 调用');
   }
   return { consentToPaidCall: true };
+}
+
+function parseOcrUsageQuotaInput(input: unknown): SaveOcrUsageQuotaInput {
+  if (!isRecord(input)) throw new Error('OCR 用量额度设置无效');
+  if (
+    typeof input.monthlyLimitCents !== 'number' ||
+    typeof input.estimatedPricePerCallCents !== 'number' ||
+    (input.mode !== 'remind' && input.mode !== 'hard_stop')
+  ) {
+    throw new Error('OCR 用量额度设置无效');
+  }
+  return {
+    monthlyLimitCents: input.monthlyLimitCents,
+    mode: input.mode,
+    estimatedPricePerCallCents: input.estimatedPricePerCallCents,
+  };
 }
 
 function asBoundedString(

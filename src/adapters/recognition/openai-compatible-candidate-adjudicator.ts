@@ -10,6 +10,7 @@ import {
   isCandidateVerificationBatchValid,
 } from '../../core/candidate-verification';
 import { normalizeCandidateVerificationBaseUrl } from '../../core/candidate-verification-settings';
+import type { OcrCallOutcome, OcrCallRecorder } from '../../core/ocr-usage';
 
 export type CandidateAdjudicatorFetch = (
   input: string,
@@ -22,6 +23,7 @@ export type OpenAICompatibleCandidateAdjudicatorOptions = {
   model: string;
   apiKey: string;
   fetcher?: CandidateAdjudicatorFetch;
+  onOcrCall?: OcrCallRecorder;
   timeoutMilliseconds?: number;
   maxResponseBytes?: number;
   maxTokens?: number;
@@ -97,6 +99,16 @@ export class OpenAICompatibleCandidateAdjudicator {
     return this.options.model;
   }
 
+  private recordCall(outcome: OcrCallOutcome, requestId?: string): void {
+    this.options.onOcrCall?.recordCall({
+      kind: 'candidate_adjudication',
+      outcome,
+      provider: this.options.provider,
+      model: this.options.model,
+      ...(requestId ? { requestId } : {}),
+    });
+  }
+
   public async adjudicate(
     candidateSets: readonly CandidateSet[],
   ): Promise<CandidateAdjudicationResult> {
@@ -111,31 +123,44 @@ export class OpenAICompatibleCandidateAdjudicator {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMilliseconds);
     let requestId: string | undefined;
+    let response: Response;
     try {
-      const response = await this.fetcher(this.endpoint, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.options.apiKey}`,
-          'content-type': 'application/json',
-        },
-        redirect: 'error',
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: this.options.model,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            {
-              role: 'user',
-              content: JSON.stringify({ candidateSets }),
-            },
-          ],
-          stream: false,
-          temperature: 0,
-          max_tokens: this.maxTokens,
-          response_format: { type: 'json_object' },
-          ...providerParameters(this.options.provider),
-        }),
-      });
+      try {
+        response = await this.fetcher(this.endpoint, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.options.apiKey}`,
+            'content-type': 'application/json',
+          },
+          redirect: 'error',
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: this.options.model,
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              {
+                role: 'user',
+                content: JSON.stringify({ candidateSets }),
+              },
+            ],
+            stream: false,
+            temperature: 0,
+            max_tokens: this.maxTokens,
+            response_format: { type: 'json_object' },
+            ...providerParameters(this.options.provider),
+          }),
+        });
+      } catch (error) {
+        this.recordCall('failure');
+        throw error;
+      }
+      this.recordCall(
+        response.ok ? 'success' : 'failure',
+        boundedRemoteRequestId(
+          response.headers.get('x-request-id') ?? response.headers.get('request-id'),
+          this.options.apiKey,
+        ),
+      );
       requestId = boundedRemoteRequestId(
         response.headers.get('x-request-id') ?? response.headers.get('request-id'),
         this.options.apiKey,

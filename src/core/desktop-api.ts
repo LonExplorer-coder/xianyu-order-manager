@@ -34,6 +34,10 @@ import type {
   SaveOcrSettingsInput,
 } from './ocr-settings';
 import type {
+  OcrUsageView,
+  SaveOcrUsageQuotaInput,
+} from './ocr-usage';
+import type {
   CandidateVerificationConnectionTestInput,
   CandidateVerificationConnectionTestResult,
   CandidateVerificationSettingsView,
@@ -483,6 +487,9 @@ export interface DesktopApi {
   saveOcrSettings(input: SaveOcrSettingsInput): Promise<OcrSettingsView>;
   removeOcrApiKey(): Promise<OcrSettingsView>;
   testOcrConnection(input: OcrConnectionTestInput): Promise<OcrConnectionTestResult>;
+  getOcrUsage(): Promise<OcrUsageView>;
+  saveOcrUsageQuota(input: SaveOcrUsageQuotaInput): Promise<OcrUsageView>;
+  confirmOcrUsageResume(): Promise<OcrUsageView>;
   getCandidateVerificationSettings(): Promise<CandidateVerificationSettingsView>;
   saveCandidateVerificationSettings(
     input: SaveCandidateVerificationSettingsInput,

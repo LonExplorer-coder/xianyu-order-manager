@@ -81,6 +81,10 @@ import type {
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import type {
+  OcrUsageView,
+  SaveOcrUsageQuotaInput,
+} from '../core/ocr-usage';
+import type {
   CandidateVerificationConnectionTestInput,
   CandidateVerificationConnectionTestResult,
   CandidateVerificationSettingsView,
@@ -144,6 +148,7 @@ import {
   type RecognitionBatchItemUpdate,
 } from './local-application';
 import { OcrSettingsService } from './ocr-settings';
+import { OcrUsageService } from './ocr-usage-service';
 import { CandidateVerificationSettingsService } from './candidate-verification-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
@@ -197,6 +202,7 @@ export class DesktopSession {
     private readonly validateDataDirectory: DataDirectoryValidator = () => undefined,
     private readonly candidateVerificationSettings?: CandidateVerificationSettingsService,
     private readonly backupSettings?: BackupSettingsFile,
+    private readonly ocrUsage?: OcrUsageService,
   ) {}
 
   public restore(): BootstrapState {
@@ -1221,6 +1227,57 @@ export class DesktopSession {
     return this.ocrSettings.testConnection(input);
   }
 
+  public getOcrUsage(): OcrUsageView {
+    return this.requireOcrUsage().getView();
+  }
+
+  public saveOcrUsageQuota(input: SaveOcrUsageQuotaInput): OcrUsageView {
+    const view = this.requireOcrUsage().saveQuota(input);
+    this.replayRecognitionItemsPausedByQuota();
+    return view;
+  }
+
+  public confirmOcrUsageResume(): OcrUsageView {
+    const view = this.requireOcrUsage().confirmResume();
+    this.replayRecognitionItemsPausedByQuota();
+    return view;
+  }
+
+  private replayRecognitionItemsPausedByQuota(): void {
+    if (this.state.kind !== 'ready' || !this.application) return;
+    const application = this.application;
+    const generation = this.workspaceGeneration;
+    for (const { batchId, itemId } of application.listRecognitionItemsPausedByQuota()) {
+      try {
+        const item = application.requestRecognitionItemRetry(batchId, itemId);
+        this.applyRecognitionItemStatusToView(
+          generation,
+          {
+            batchId,
+            itemId,
+            status: 'waiting_recognition',
+            retryCount: 0,
+            nextRetryAt: null,
+          },
+        );
+        this.enqueueRecognitionItem(
+          application,
+          generation,
+          batchId,
+          itemId,
+          item.retryCount,
+        );
+      } catch {
+        // 单项重放失败（例如本机队列文件已不可用）不影响其他项。
+      }
+    }
+  }
+
+  private requireOcrUsage(): OcrUsageService {
+    if (!this.ocrUsage) throw new Error('当前运行环境未配置 OCR 用量监控');
+    return this.ocrUsage;
+  }
+
   public getCandidateVerificationSettings(): Promise<CandidateVerificationSettingsView> {
     return this.requireCandidateVerificationSettings().getSettings();
   }
@@ -1267,6 +1324,7 @@ export class DesktopSession {
     this.workspaceGeneration += 1;
     this.recognitionBatches.splice(0);
     this.seenSourceHashes.clear();
+    this.ocrUsage?.bindEventStore(null);
     if (this.application) this.retireApplication(this.application);
     this.application = undefined;
     this.state = { kind: 'needs_data_directory' };
@@ -1284,11 +1342,19 @@ export class DesktopSession {
     const previousApplication = this.application;
     const preserveCurrentWorkspace = this.state.kind === 'ready' &&
       previousApplication !== undefined;
-    const application = new LocalApplication(this.recognizer);
+    this.ocrUsage?.bindEventStore(null);
+    const application = new LocalApplication(this.recognizer, this.ocrUsage);
     try {
       this.validateDataDirectory(dataDirectory);
       if (!remember) assertRememberedDataDirectoryExists(dataDirectory);
       application.openDataDirectory(dataDirectory);
+      this.ocrUsage?.bindEventStore({
+        recordOcrUsageEvent: (event) => application.recordOcrUsageEvent(event),
+        queryOcrMonthlyUsage: (fromIso, toIso) =>
+          application.queryOcrMonthlyUsage(fromIso, toIso),
+        queryRecentOcrUsageEvents: (limit) =>
+          application.queryRecentOcrUsageEvents(limit),
+      });
       this.reconcilePendingOrderIntake(application);
       const recognitionBatches = application.restoreRecognitionBatches();
       const orders = application.listOrders();
@@ -1333,6 +1399,7 @@ export class DesktopSession {
       }
     } catch (error) {
       application.close();
+      this.ocrUsage?.bindEventStore(null);
       if (preserveCurrentWorkspace) {
         throw error instanceof Error ? error : new Error('无法打开数据目录');
       }
@@ -1849,6 +1916,7 @@ function userFacingRecognitionError(error: unknown): string {
 
 const SAFE_RECOGNITION_ERROR_MESSAGES = new Set([
   '请先在设置中保存百炼 OCR 配置和 API Key',
+  '本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续',
   '无法连接百炼服务，请检查网络后重试',
   '百炼 OCR 识别未通过，请检查 API Key、Workspace ID、地域和模型权限',
   '百炼 OCR 当前限流或额度不足，请稍后再试',

@@ -52,6 +52,7 @@ export class CandidateVerificationSettingsService {
     private readonly repository: CandidateVerificationSettingsRepository,
     private readonly apiKeyStores: CandidateVerificationApiKeyStores,
     private readonly connectionTester: CandidateVerificationConnectionTester,
+    private readonly usageGate?: { assertCanProceed(): void },
   ) {}
 
   public getSettings(): Promise<CandidateVerificationSettingsView> {
@@ -217,6 +218,7 @@ export class CandidateVerificationSettingsService {
     }
     const apiKey = await this.apiKeyStores[record.provider].getApiKey();
     if (!apiKey) throw new Error('请先保存当前服务商的 API Key');
+    this.usageGate?.assertCanProceed();
     const result = await this.connectionTester.testConnection({
       provider: record.provider,
       baseUrl: record.baseUrl,

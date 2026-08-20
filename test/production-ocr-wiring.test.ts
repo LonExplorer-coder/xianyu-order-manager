@@ -387,6 +387,237 @@ describe('正式 OCR 装配', () => {
     expect(new Headers(verifierCall?.[1]?.headers).get('authorization'))
       .toBe('Bearer sk-production-deepseek');
   });
+
+  it('识别成功后按月统计用量与估算费用并保留最近调用记录', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-ocr-usage-wiring-'));
+    const sourcePath = join(testRoot, '用量订单.png');
+    await writeFile(
+      sourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    const request = vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.startsWith('https://api.deepseek.com/')) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ decisions: [] }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      const advancedRecognition =
+        body.parameters?.ocr_options?.task === 'advanced_recognition';
+      return new Response(JSON.stringify({
+        output: {
+          choices: [{
+            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: [{
+                ocr_result: advancedRecognition
+                  ? { words_info: productionLocatedWords() }
+                  : {
+                      kv_result: {
+                        platform_status: { top_status_text: '买家已付款，请尽快发货' },
+                        shipping_information: {
+                          recipient: '用量收件人',
+                          recipient_phone_line_text: '用量收件人 13800000000',
+                          phone: '13800000000',
+                          address: '广东省深圳市南山区用量路1号',
+                          province: '广东省',
+                          city: '深圳市',
+                          district: '南山区',
+                          controls: ['复制'],
+                        },
+                        purchased_items: {
+                          items: [{ title: '用量商品', spec: '白色', unit_price: '8.00', quantity: null }],
+                          controls: [],
+                        },
+                        amount_summary: {
+                          product_total: '8.00',
+                          shipping_fee: '0.00',
+                          amount: '8.00',
+                        },
+                        order_details: {
+                          detail_state: 'expanded',
+                          order_number: 'USAGE-OCR-20260820-001',
+                          alipay_transaction_number: '2026082000000000000001',
+                          buyer_nickname_label: '买家昵称',
+                          buyer_nickname: '用量买家',
+                          order_time: '2026-08-20 09:01:02',
+                          payment_time: '2026-08-20 09:01:03',
+                          controls: ['复制', '交易快照'],
+                        },
+                      },
+                    },
+              }],
+            },
+          }],
+        },
+        request_id: 'request-usage-ocr',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      request,
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-usage-test',
+      region: 'cn-beijing',
+      apiKey: 'sk-usage-sentinel',
+    });
+    session.useDataDirectory(join(testRoot, '订单数据'));
+
+    const usageBefore = session.getOcrUsage();
+    expect(usageBefore.usage).toEqual({
+      totalCalls: 0,
+      succeededCalls: 0,
+      failedCalls: 0,
+      estimatedCostCents: 0,
+    });
+    expect(usageBefore.quota.mode).toBe('remind');
+    expect(usageBefore.hardPaused).toBe(false);
+
+    await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+
+    const usageAfter = session.getOcrUsage();
+    expect(usageAfter.usage).toEqual({
+      totalCalls: 1,
+      succeededCalls: 1,
+      failedCalls: 0,
+      estimatedCostCents: 5,
+    });
+    expect(usageAfter.recentEvents).toHaveLength(1);
+    expect(usageAfter.recentEvents[0]).toMatchObject({
+      kind: 'recognition',
+      outcome: 'success',
+      provider: 'aliyun-bailian',
+      model: 'qwen3.5-ocr',
+      estimatedCents: 5,
+    });
+  });
+
+  it('硬暂停在付费调用前拦截并保留待处理截图，确认继续后放行', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-ocr-quota-wiring-'));
+    const sourcePath = join(testRoot, '额度订单.png');
+    await writeFile(
+      sourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    const request = vi.fn(async (_url: string, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body)) as {
+        parameters?: { ocr_options?: { task?: string } };
+      };
+      const advancedRecognition =
+        body.parameters?.ocr_options?.task === 'advanced_recognition';
+      return new Response(JSON.stringify({
+        output: {
+          choices: [{
+            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: [{
+                ocr_result: advancedRecognition
+                  ? { words_info: productionLocatedWords() }
+                  : { kv_result: productionKvResult() },
+              }],
+            },
+          }],
+        },
+        request_id: 'request-quota-ocr',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const deepseekStore = new MemoryApiKeyStore();
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      candidateVerificationApiKeyStores: {
+        deepseek: deepseekStore,
+        'aliyun-bailian': new MemoryApiKeyStore(),
+        'openai-compatible': new MemoryApiKeyStore(),
+      },
+      request,
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-quota-test',
+      region: 'cn-beijing',
+      apiKey: 'sk-quota-sentinel',
+    });
+    await session.saveCandidateVerificationSettings({
+      enabled: true,
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-quota-deepseek',
+    });
+    session.useDataDirectory(join(testRoot, '订单数据'));
+    session.saveOcrUsageQuota({
+      monthlyLimitCents: 1,
+      mode: 'hard_stop',
+      estimatedPricePerCallCents: 5,
+    });
+
+    // 首次调用时累计为 0 未撞线，识别成功产生 5 分费用。
+    await session.submitSourceScreenshots([sourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // 第二次付费调用前已超 1 分额度，被闸门拦截并保留待处理截图。
+    const secondSourcePath = join(testRoot, '额度订单2.png');
+    await writeFile(
+      secondSourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      ).with(10, 0x42),
+    );
+    await session.submitSourceScreenshots([secondSourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status).toBe('failed');
+    });
+    expect(session.listRecognitionBatches()[0].items[0].errorMessage)
+      .toMatch(/硬暂停额度/u);
+    expect(request).toHaveBeenCalledTimes(1);
+    const paused = session.getOcrUsage();
+    expect(paused.hardPaused).toBe(true);
+    expect(paused.quota.pausedMonth).not.toBeNull();
+
+    // 连接测试与候选裁决连接测试同样被闸门拦截。
+    await expect(session.testOcrConnection({ consentToPaidCall: true }))
+      .rejects.toThrow(/硬暂停额度/u);
+    await expect(session.testCandidateVerificationConnection({ consentToPaidCall: true }))
+      .rejects.toThrow(/硬暂停额度/u);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // 确认继续后被硬暂停拦截的队列项自动重放。
+    const resumed = session.confirmOcrUsageResume();
+    expect(resumed.hardPaused).toBe(false);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(session.getOcrUsage().usage).toMatchObject({
+      totalCalls: 2,
+      succeededCalls: 2,
+      estimatedCostCents: 10,
+    });
+  });
 });
 
 async function eventually(assertion: () => void): Promise<void> {
@@ -418,6 +649,41 @@ function productionWord(
       bottom - top,
       0,
     ],
+  };
+}
+
+function productionKvResult(): Record<string, unknown> {
+  return {
+    platform_status: { top_status_text: '买家已付款，请尽快发货' },
+    shipping_information: {
+      recipient: '配额收件人',
+      recipient_phone_line_text: '配额收件人 13800000000',
+      phone: '13800000000',
+      address: '广东省深圳市南山区配额路1号',
+      province: '广东省',
+      city: '深圳市',
+      district: '南山区',
+      controls: ['复制'],
+    },
+    purchased_items: {
+      items: [{ title: '配额商品', spec: '白色', unit_price: '8.00', quantity: null }],
+      controls: [],
+    },
+    amount_summary: {
+      product_total: '8.00',
+      shipping_fee: '0.00',
+      amount: '8.00',
+    },
+    order_details: {
+      detail_state: 'expanded',
+      order_number: 'QUOTA-OCR-20260820-001',
+      alipay_transaction_number: '2026082000000000000001',
+      buyer_nickname_label: '买家昵称',
+      buyer_nickname: '配额买家',
+      order_time: '2026-08-20 09:01:02',
+      payment_time: '2026-08-20 09:01:03',
+      controls: ['复制', '交易快照'],
+    },
   };
 }
 

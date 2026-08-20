@@ -46,6 +46,7 @@ export class OcrSettingsService {
     private readonly repository: OcrSettingsRepository,
     private readonly apiKeyStore: ApiKeyStore,
     private readonly connectionTester: BailianConnectionTester,
+    private readonly usageGate?: { assertCanProceed(): void },
   ) {}
 
   public async getSettings(): Promise<OcrSettingsView> {
@@ -104,6 +105,7 @@ export class OcrSettingsService {
     const apiKey = await this.apiKeyStore.getApiKey();
     if (!apiKey) throw new Error('请先保存百炼 API Key');
 
+    this.usageGate?.assertCanProceed();
     const result = await this.connectionTester.testConnection({
       workspaceId: record.workspaceId,
       region: record.region,

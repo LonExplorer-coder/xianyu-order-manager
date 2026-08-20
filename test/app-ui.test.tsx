@@ -752,6 +752,26 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     saveOcrSettings: vi.fn(),
     removeOcrApiKey: vi.fn(),
     testOcrConnection: vi.fn(),
+    getOcrUsage: vi.fn().mockResolvedValue({
+      month: '2026-08',
+      usage: {
+        totalCalls: 0,
+        succeededCalls: 0,
+        failedCalls: 0,
+        estimatedCostCents: 0,
+      },
+      quota: {
+        monthlyLimitCents: 1_000,
+        mode: 'remind',
+        estimatedPricePerCallCents: 5,
+        pausedMonth: null,
+      },
+      hardPaused: false,
+      overLimit: false,
+      recentEvents: [],
+    }),
+    saveOcrUsageQuota: vi.fn(),
+    confirmOcrUsageResume: vi.fn(),
     getCandidateVerificationSettings: vi.fn().mockResolvedValue({
       enabled: false,
       provider: 'deepseek',
@@ -11007,6 +11027,170 @@ describe('订单管理工作台', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('API Key 已移除');
     expect(screen.getByText('尚未保存 API Key')).toBeVisible();
     expect(screen.queryByText('••••••••')).not.toBeInTheDocument();
+  });
+
+  it('设置页显示本月 OCR 用量统计、成功率与估算费用', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOcrUsage: vi.fn().mockResolvedValue({
+        month: '2026-08',
+        usage: {
+          totalCalls: 3,
+          succeededCalls: 2,
+          failedCalls: 1,
+          estimatedCostCents: 10,
+        },
+        quota: {
+          monthlyLimitCents: 1_000,
+          mode: 'remind',
+          estimatedPricePerCallCents: 5,
+          pausedMonth: null,
+          resumedMonth: null,
+        },
+        hardPaused: false,
+        overLimit: false,
+        recentEvents: [
+          {
+            id: 'event-1',
+            kind: 'recognition',
+            outcome: 'success',
+            provider: 'aliyun-bailian',
+            model: 'qwen3.5-ocr',
+            occurredAt: '2026-08-20T10:00:00.000Z',
+            estimatedCents: 5,
+          },
+          {
+            id: 'event-2',
+            kind: 'connection_test',
+            outcome: 'failure',
+            provider: 'aliyun-bailian',
+            model: 'qwen3.5-ocr',
+            occurredAt: '2026-08-20T11:00:00.000Z',
+            estimatedCents: 0,
+          },
+        ],
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByRole('heading', { name: 'OCR 用量' })).toBeVisible();
+    const stats = await screen.findByLabelText('本月 OCR 用量统计');
+    expect(stats).toHaveTextContent('3');
+    expect(stats).toHaveTextContent('67%');
+    expect(stats).toHaveTextContent('¥0.10');
+    expect(stats).toHaveTextContent('¥10.00');
+    expect(screen.getByLabelText('月度额度')).toHaveValue('10.00');
+    expect(screen.getByLabelText('单次估算费用')).toHaveValue('0.05');
+    expect(screen.getByLabelText('仅提醒')).toBeChecked();
+
+    await user.click(screen.getByText('最近调用记录（2）'));
+    expect(screen.getByText('识别')).toBeVisible();
+    expect(screen.getByText('连接测试')).toBeVisible();
+  });
+
+  it('可保存硬暂停额度并在撞线后确认继续放行', async () => {
+    const user = userEvent.setup();
+    const saveOcrUsageQuota = vi.fn().mockResolvedValue({
+      month: '2026-08',
+      usage: {
+        totalCalls: 0,
+        succeededCalls: 0,
+        failedCalls: 0,
+        estimatedCostCents: 0,
+      },
+      quota: {
+        monthlyLimitCents: 2_000,
+        mode: 'hard_stop',
+        estimatedPricePerCallCents: 5,
+        pausedMonth: null,
+        resumedMonth: null,
+      },
+      hardPaused: false,
+      overLimit: false,
+      recentEvents: [],
+    });
+    const confirmOcrUsageResume = vi.fn().mockResolvedValue({
+      month: '2026-08',
+      usage: {
+        totalCalls: 20,
+        succeededCalls: 20,
+        failedCalls: 0,
+        estimatedCostCents: 100,
+      },
+      quota: {
+        monthlyLimitCents: 2_000,
+        mode: 'hard_stop',
+        estimatedPricePerCallCents: 5,
+        pausedMonth: null,
+        resumedMonth: '2026-08',
+      },
+      hardPaused: false,
+      overLimit: false,
+      recentEvents: [],
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: 'D:\\闲鱼订单',
+        orders: [],
+      }),
+      getOcrUsage: vi.fn().mockResolvedValue({
+        month: '2026-08',
+        usage: {
+          totalCalls: 20,
+          succeededCalls: 20,
+          failedCalls: 0,
+          estimatedCostCents: 100,
+        },
+        quota: {
+          monthlyLimitCents: 2_000,
+          mode: 'hard_stop',
+          estimatedPricePerCallCents: 5,
+          pausedMonth: '2026-08',
+          resumedMonth: null,
+        },
+        hardPaused: true,
+        overLimit: true,
+        recentEvents: [],
+      }),
+      saveOcrUsageQuota,
+      confirmOcrUsageResume,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByRole('heading', { name: 'OCR 用量' })).toBeVisible();
+    expect(screen.getByText('已暂停')).toBeVisible();
+    expect(screen.getByText('本月估算费用已达到额度上限。')).toBeVisible();
+    expect(screen.getByLabelText('硬暂停')).toBeChecked();
+
+    // 先确认继续（放行后按钮消失），再保存额度设置。
+    await user.click(screen.getByRole('button', { name: '确认继续' }));
+    expect(confirmOcrUsageResume).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '已确认继续，本月不再拦截付费调用',
+    );
+    expect(screen.queryByRole('button', { name: '确认继续' })).not.toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText('月度额度'));
+    await user.type(screen.getByLabelText('月度额度'), '20');
+    await user.click(screen.getByRole('button', { name: '保存额度设置' }));
+    expect(saveOcrUsageQuota).toHaveBeenCalledWith({
+      monthlyLimitCents: 2_000,
+      mode: 'hard_stop',
+      estimatedPricePerCallCents: 5,
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'OCR 用量额度设置已保存',
+    );
   });
 
   it('候选裁决默认关闭并以独立配置接入 DeepSeek', async () => {

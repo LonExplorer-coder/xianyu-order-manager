@@ -218,6 +218,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(59)) migrateToVersion59(database);
   if (!versions.has(60)) migrateToVersion60(database);
   if (!versions.has(61)) migrateToVersion61(database);
+  if (!versions.has(62)) migrateToVersion62(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -8464,5 +8465,52 @@ function assertForeignKeyIntegrity(database: DatabaseSync): void {
   const violations = database.prepare('PRAGMA foreign_key_check;').all();
   if (violations.length > 0) {
     throw new Error('数据库升级后外键完整性检查失败');
+  }
+}
+
+function migrateToVersion62(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF;');
+  let transactionStarted = false;
+  try {
+    database.exec('BEGIN IMMEDIATE;');
+    transactionStarted = true;
+    database.exec(`
+      CREATE TABLE ocr_usage_events (
+        id TEXT PRIMARY KEY,
+        occurred_at TEXT NOT NULL,
+        call_kind TEXT NOT NULL
+          CHECK (call_kind IN ('recognition', 'connection_test', 'candidate_adjudication')),
+        outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        request_id TEXT NOT NULL DEFAULT '',
+        estimated_cents INTEGER NOT NULL CHECK (estimated_cents >= 0)
+      ) STRICT;
+
+      CREATE INDEX ocr_usage_events_by_occurred_at
+      ON ocr_usage_events (occurred_at DESC, id DESC);
+
+      CREATE TRIGGER ocr_usage_events_are_immutable_on_update
+      BEFORE UPDATE ON ocr_usage_events
+      BEGIN
+        SELECT RAISE(ABORT, 'ocr usage events are immutable');
+      END;
+
+      CREATE TRIGGER ocr_usage_events_are_immutable_on_delete
+      BEFORE DELETE ON ocr_usage_events
+      BEGIN
+        SELECT RAISE(ABORT, 'ocr usage events are immutable');
+      END;
+    `);
+    assertForeignKeyIntegrity(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (62, ?)')
+      .run(new Date().toISOString());
+    database.exec('COMMIT;');
+    transactionStarted = false;
+  } catch (error) {
+    if (transactionStarted) rollbackQuietly(database);
+    throw error;
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;');
   }
 }

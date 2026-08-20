@@ -32,6 +32,11 @@ import type {
   BailianConnectionTester,
   BailianRegion,
 } from '../../main/ocr-settings';
+import type {
+  OcrCallKind,
+  OcrCallOutcome,
+  OcrCallRecorder,
+} from '../../core/ocr-usage';
 import {
   planXianyuSemanticRegions,
 } from './xianyu-semantic-regions';
@@ -287,12 +292,15 @@ export type BailianOcrClientOptions = {
   maxResponseBytes?: number;
   /** Keeps historical provider-contract tests readable; production must not enable it. */
   legacyKieCompatibility?: boolean;
+  /** 每次付费调用后回调（主识别、针对性复核、手动/自动重试与连接测试）。 */
+  onOcrCall?: OcrCallRecorder;
 };
 
 export class BailianOcrClient implements BailianConnectionTester {
   private readonly timeoutMilliseconds: number;
   private readonly maxResponseBytes: number;
   private readonly legacyKieCompatibility: boolean;
+  private readonly onOcrCall?: OcrCallRecorder;
 
   public constructor(
     private readonly request: FetchLike = globalThis.fetch,
@@ -301,6 +309,7 @@ export class BailianOcrClient implements BailianConnectionTester {
     this.timeoutMilliseconds = Math.max(1, options.timeoutMilliseconds ?? 60_000);
     this.maxResponseBytes = Math.max(1, options.maxResponseBytes ?? 1_048_576);
     this.legacyKieCompatibility = options.legacyKieCompatibility ?? false;
+    this.onOcrCall = options.onOcrCall;
   }
 
   public async recognizeOrder(input: {
@@ -576,12 +585,18 @@ export class BailianOcrClient implements BailianConnectionTester {
         redirect: 'error',
       });
     } catch {
+      this.recordPaidCall('recognition', 'failure');
       clearTimeout(timeout);
       throw new Error('无法连接百炼服务，请检查网络后重试');
     }
 
+    let callOutcomeRecorded = false;
     try {
-      if (!response.ok) throwForRecognitionStatus(response.status);
+      if (!response.ok) {
+        this.recordPaidCall('recognition', 'failure');
+        callOutcomeRecorded = true;
+        throwForRecognitionStatus(response.status);
+      }
 
       let bounded: { rawResponse: string; payload: unknown };
       try {
@@ -610,6 +625,8 @@ export class BailianOcrClient implements BailianConnectionTester {
       }
       const firstContent = asRecord(content[0]);
       const ocrResult = asRecord(firstContent.ocr_result);
+      this.recordPaidCall('recognition', 'success', optionalText(payload.request_id));
+      callOutcomeRecorded = true;
       return {
         ocrResult,
         evidence: {
@@ -621,11 +638,27 @@ export class BailianOcrClient implements BailianConnectionTester {
         },
       };
     } catch (error) {
+      // HTTP 2xx 但响应无法解析时厂商已计费，仍记一次成功调用。
+      if (!callOutcomeRecorded) this.recordPaidCall('recognition', 'success');
       if (error instanceof Error && error.message.startsWith('百炼 OCR')) throw error;
       throw new Error('百炼 OCR 返回了无法识别的订单结果');
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private recordPaidCall(
+    kind: OcrCallKind,
+    outcome: OcrCallOutcome,
+    requestId?: string,
+  ): void {
+    this.onOcrCall?.recordCall({
+      kind,
+      outcome,
+      provider: 'aliyun-bailian',
+      model: 'qwen3.5-ocr',
+      ...(requestId ? { requestId } : {}),
+    });
   }
 
   public async testConnection(input: {
@@ -668,12 +701,14 @@ export class BailianOcrClient implements BailianConnectionTester {
         redirect: 'error',
       });
     } catch {
+      this.recordPaidCall('connection_test', 'failure');
       clearTimeout(timeout);
       throw new Error('无法连接百炼服务，请检查网络后重试');
     }
 
     try {
       if (!response.ok) {
+        this.recordPaidCall('connection_test', 'failure');
         if ([401, 403, 404].includes(response.status)) {
           throw new Error('连接未通过，请检查 API Key、Workspace ID 和地域');
         }
@@ -685,6 +720,7 @@ export class BailianOcrClient implements BailianConnectionTester {
         }
         throw new Error('百炼 OCR 连接测试失败');
       }
+      this.recordPaidCall('connection_test', 'success');
 
       let payload: {
         choices?: Array<{ message?: { content?: unknown } }>;

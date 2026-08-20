@@ -330,6 +330,8 @@ import { OrderFulfillmentProjectionService } from './order-fulfillment-projectio
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { Workspace } from './workspace';
+import type { OcrUsageService } from './ocr-usage-service';
+import type { OcrUsageEventRecord, OcrMonthlyUsage } from '../core/ocr-usage';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -396,7 +398,10 @@ const RECOGNITION_CONFLICT_DETAIL_KEYS = new Set([
 export class LocalApplication {
   private workspace?: Workspace;
 
-  public constructor(private readonly recognizer: Recognizer) {}
+  public constructor(
+    private readonly recognizer: Recognizer,
+    private readonly ocrUsage?: OcrUsageService,
+  ) {}
 
   public openDataDirectory(dataDirectory: string): void {
     if (this.workspace) {
@@ -537,6 +542,24 @@ export class LocalApplication {
       sourcePath: workspace.resolveStoredPath(asString(row.queue_relative_path)),
       retryCount: asNumber(row.retry_count),
       nextRetryAt: row.next_retry_at === null ? null : asString(row.next_retry_at),
+    }));
+  }
+
+  public listRecognitionItemsPausedByQuota(): Array<{
+    batchId: string;
+    itemId: string;
+  }> {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database
+      .prepare(`
+        SELECT id AS item_id, batch_id
+        FROM recognition_batch_items
+        WHERE status = 'failed' AND error_message = ?
+      `)
+      .all('本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续') as unknown as SqlRow[];
+    return rows.map((row) => ({
+      batchId: asString(row.batch_id),
+      itemId: asString(row.item_id),
     }));
   }
 
@@ -883,6 +906,7 @@ export class LocalApplication {
     onPhase?: (phase: 'validating') => void,
     batchItemId?: string,
   ): Promise<OrderDraft> {
+    this.ocrUsage?.assertCanProceed();
     const workspace = this.requireWorkspace();
     const extension = extname(sourcePath).toLowerCase();
     const mimeType = IMAGE_MIME_TYPES[extension];
@@ -1021,13 +1045,81 @@ export class LocalApplication {
     return { id: batchId, drafts };
   }
 
+  public recordOcrUsageEvent(event: OcrUsageEventRecord): void {
+    const workspace = this.requireWorkspace();
+    workspace.database
+      .prepare(`
+        INSERT INTO ocr_usage_events (
+          id, occurred_at, call_kind, outcome, provider, model, request_id, estimated_cents
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        event.id,
+        event.occurredAt,
+        event.kind,
+        event.outcome,
+        event.provider,
+        event.model,
+        event.requestId ?? '',
+        event.estimatedCents,
+      );
+  }
+
+  public queryOcrMonthlyUsage(fromIso: string, toIso: string): OcrMonthlyUsage {
+    const workspace = this.requireWorkspace();
+    const row = workspace.database
+      .prepare(`
+        SELECT
+          COUNT(*) AS total_calls,
+          SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS succeeded_calls,
+          SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failed_calls,
+          SUM(estimated_cents) AS estimated_cost_cents
+        FROM ocr_usage_events
+        WHERE occurred_at >= ? AND occurred_at < ?
+      `)
+      .get(fromIso, toIso) as SqlRow | undefined;
+    if (!row) {
+      return { totalCalls: 0, succeededCalls: 0, failedCalls: 0, estimatedCostCents: 0 };
+    }
+    return {
+      totalCalls: Number(row.total_calls),
+      succeededCalls: Number(row.succeeded_calls),
+      failedCalls: Number(row.failed_calls),
+      estimatedCostCents: Number(row.estimated_cost_cents),
+    };
+  }
+
+  public queryRecentOcrUsageEvents(limit: number): OcrUsageEventRecord[] {
+    const workspace = this.requireWorkspace();
+    const rows = workspace.database
+      .prepare(`
+        SELECT id, occurred_at, call_kind, outcome, provider, model, request_id, estimated_cents
+        FROM ocr_usage_events
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT ?
+      `)
+      .all(limit) as unknown as SqlRow[];
+    return rows.map((row) => {
+      const requestId = asString(row.request_id);
+      return {
+        id: asString(row.id),
+        occurredAt: asString(row.occurred_at),
+        kind: asString(row.call_kind) as OcrUsageEventRecord['kind'],
+        outcome: asString(row.outcome) as OcrUsageEventRecord['outcome'],
+        provider: asString(row.provider),
+        model: asString(row.model),
+        ...(requestId ? { requestId } : {}),
+        estimatedCents: Number(row.estimated_cents),
+      };
+    });
+  }
+
   public getDraft(draftId: string): OrderDraft {
     const workspace = this.requireWorkspace();
     const row = workspace.database
       .prepare('SELECT * FROM order_drafts WHERE id = ?')
       .get(draftId) as SqlRow | undefined;
     if (!row) throw new Error('未找到订单草稿');
-
     const itemRows = workspace.database
       .prepare('SELECT * FROM draft_items WHERE draft_id = ? ORDER BY position')
       .all(draftId) as unknown as SqlRow[];

@@ -331,6 +331,11 @@ const api: DesktopApi = {
   saveOcrSettings: (input) => ipcRenderer.invoke('settings:save-ocr', input),
   removeOcrApiKey: () => ipcRenderer.invoke('settings:remove-ocr-api-key'),
   testOcrConnection: (input) => ipcRenderer.invoke('settings:test-ocr', input),
+  getOcrUsage: () => ipcRenderer.invoke('settings:get-ocr-usage'),
+  saveOcrUsageQuota: (input) => (
+    ipcRenderer.invoke('settings:save-ocr-usage-quota', input)
+  ),
+  confirmOcrUsageResume: () => ipcRenderer.invoke('settings:confirm-ocr-usage-resume'),
   getCandidateVerificationSettings: () => (
     ipcRenderer.invoke('settings:get-candidate-verification')
   ),

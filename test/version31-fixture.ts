@@ -1,7 +1,29 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+// v62 建立 OCR 用量事件表；有事件时拒绝测试降级。
+export function removeVersion62ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 62',
+  ).get();
+  if (!applied) return;
+  const eventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM ocr_usage_events',
+  ).get() as { count: number };
+  if (eventCount.count > 0) {
+    throw new Error('v62 测试降级前必须移除 OCR 用量事件');
+  }
+  database.exec(`
+    DROP TRIGGER IF EXISTS ocr_usage_events_are_immutable_on_update;
+    DROP TRIGGER IF EXISTS ocr_usage_events_are_immutable_on_delete;
+    DROP INDEX IF EXISTS ocr_usage_events_by_occurred_at;
+    DROP TABLE IF EXISTS ocr_usage_events;
+    DELETE FROM schema_migrations WHERE version = 62;
+  `);
+}
+
 // v61 将字段级模板脱敏规则写入表格模板；测试降级还原为 v60 的配置版本 2。
 export function removeVersion61ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion62ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 61',
   ).get();

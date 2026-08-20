@@ -46,6 +46,7 @@ import { FULFILLMENT_STATUS_LABELS } from '../core/fulfillment-status';
 import { diffOrderCurrentValues, hasSameOrderIdentity } from '../core/order-comparison';
 import { matchOrderItemIds } from '../core/order-item-matching';
 import type { OcrSettingsView } from '../core/ocr-settings';
+import type { OcrQuotaMode, OcrUsageView } from '../core/ocr-usage';
 import type {
   BackupEventRecord,
   BackupSettingsView,
@@ -7401,6 +7402,12 @@ function SettingsWorkspace({
   const [feedback, setFeedback] = useState<SettingsFeedback>(null);
   const [orderIntakeFeedback, setOrderIntakeFeedback] = useState<SettingsFeedback>(null);
   const [showPaidCallConfirmation, setShowPaidCallConfirmation] = useState(false);
+  const [ocrUsage, setOcrUsage] = useState<OcrUsageView | null>(null);
+  const [usageBusy, setUsageBusy] = useState<'saving' | 'resuming' | null>(null);
+  const [usageFeedback, setUsageFeedback] = useState<SettingsFeedback>(null);
+  const [limitInput, setLimitInput] = useState('');
+  const [priceInput, setPriceInput] = useState('');
+  const [quotaMode, setQuotaMode] = useState<OcrQuotaMode>('remind');
   const [candidateSettings, setCandidateSettings] =
     useState<CandidateVerificationSettingsView | null>(null);
   const [candidateEnabled, setCandidateEnabled] = useState(false);
@@ -7469,6 +7476,18 @@ function SettingsWorkspace({
       })
       .finally(() => {
         if (active) setBusy(null);
+      });
+    void api
+      .getOcrUsage()
+      .then((usageValue) => {
+        if (!active) return;
+        setOcrUsage(usageValue);
+        setLimitInput(formatMoneyInput(usageValue.quota.monthlyLimitCents));
+        setPriceInput(formatMoneyInput(usageValue.quota.estimatedPricePerCallCents));
+        setQuotaMode(usageValue.quota.mode);
+      })
+      .catch((error: unknown) => {
+        if (active) setUsageFeedback({ kind: 'error', message: errorMessage(error) });
       });
     void api
       .getCandidateVerificationSettings()
@@ -7761,6 +7780,56 @@ function SettingsWorkspace({
       setFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function saveOcrUsageQuota(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!/^\d+(\.\d{1,2})?$/u.test(limitInput.trim())) {
+      setUsageFeedback({
+        kind: 'error',
+        message: '月度额度必须是 0 到 100000 元之间的数字',
+      });
+      return;
+    }
+    if (!/^\d+(\.\d{1,2})?$/u.test(priceInput.trim())) {
+      setUsageFeedback({
+        kind: 'error',
+        message: '单次估算费用必须是 0 到 1000 元之间的数字',
+      });
+      return;
+    }
+    setUsageBusy('saving');
+    setUsageFeedback(null);
+    try {
+      const saved = await api.saveOcrUsageQuota({
+        monthlyLimitCents: Math.round(Number(limitInput) * 100),
+        mode: quotaMode,
+        estimatedPricePerCallCents: Math.round(Number(priceInput) * 100),
+      });
+      setOcrUsage(saved);
+      setLimitInput(formatMoneyInput(saved.quota.monthlyLimitCents));
+      setPriceInput(formatMoneyInput(saved.quota.estimatedPricePerCallCents));
+      setQuotaMode(saved.quota.mode);
+      setUsageFeedback({ kind: 'success', message: 'OCR 用量额度设置已保存' });
+    } catch (error) {
+      setUsageFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setUsageBusy(null);
+    }
+  }
+
+  async function resumeOcrUsage() {
+    setUsageBusy('resuming');
+    setUsageFeedback(null);
+    try {
+      const resumed = await api.confirmOcrUsageResume();
+      setOcrUsage(resumed);
+      setUsageFeedback({ kind: 'success', message: '已确认继续，本月不再拦截付费调用' });
+    } catch (error) {
+      setUsageFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setUsageBusy(null);
     }
   }
 
@@ -8339,6 +8408,195 @@ function SettingsWorkspace({
             <SettingsNotice feedback={feedback} />
             </>
           )}
+
+          <section className="settings-section settings-section--ocr-usage">
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">用量与额度</span>
+                <h2>OCR 用量</h2>
+                <p>统计本月所有实际付费识别尝试，按次估算费用。</p>
+              </div>
+              {ocrUsage?.hardPaused && (
+                <span className="service-state is-ready">
+                  <i aria-hidden="true" />
+                  已暂停
+                </span>
+              )}
+            </div>
+
+            {!ocrUsage ? (
+              usageFeedback ? (
+                <SettingsNotice feedback={usageFeedback} />
+              ) : (
+                <div className="settings-loading settings-loading--compact" role="status">
+                  正在读取 OCR 用量…
+                </div>
+              )
+            ) : (
+              <>
+                <div className="ocr-usage-stats" aria-label="本月 OCR 用量统计">
+                  <div className="ocr-usage-stat">
+                    <span className="ocr-usage-stat-value">{ocrUsage.usage.totalCalls}</span>
+                    <small>调用次数</small>
+                  </div>
+                  <div className="ocr-usage-stat">
+                    <span className="ocr-usage-stat-value">
+                      {ocrUsage.usage.totalCalls > 0
+                        ? `${Math.round(
+                            (ocrUsage.usage.succeededCalls / ocrUsage.usage.totalCalls) * 100,
+                          )}%`
+                        : '—'}
+                    </span>
+                    <small>成功率</small>
+                  </div>
+                  <div className="ocr-usage-stat">
+                    <span className="ocr-usage-stat-value">
+                      {formatMoney(ocrUsage.usage.estimatedCostCents)}
+                    </span>
+                    <small>估算费用</small>
+                  </div>
+                  <div className="ocr-usage-stat">
+                    <span className="ocr-usage-stat-value">
+                      {formatMoney(ocrUsage.quota.monthlyLimitCents)}
+                    </span>
+                    <small>月度额度</small>
+                  </div>
+                </div>
+
+                <div
+                  className={`ocr-usage-meter${ocrUsage.overLimit ? ' is-over-limit' : ''}`}
+                  role="progressbar"
+                  aria-label="本月 OCR 费用进度"
+                  aria-valuemin={0}
+                  aria-valuemax={ocrUsage.quota.monthlyLimitCents || 1}
+                  aria-valuenow={ocrUsage.usage.estimatedCostCents}
+                >
+                  <i
+                    style={{
+                      width: `${ocrUsage.quota.monthlyLimitCents > 0
+                        ? Math.min(
+                            100,
+                            (ocrUsage.usage.estimatedCostCents
+                              / ocrUsage.quota.monthlyLimitCents) * 100,
+                          )
+                        : 0}%`,
+                    }}
+                  />
+                </div>
+
+                {ocrUsage.overLimit && (
+                  <div className="ocr-usage-warning" role="status">
+                    <strong>本月估算费用已达到额度上限。</strong>
+                    {ocrUsage.hardPaused
+                      ? '新的付费识别调用已被暂停，待处理截图仍安全保留在本机。'
+                      : ocrUsage.quota.mode === 'hard_stop'
+                        ? '已确认继续，本月不再拦截付费调用。'
+                        : '当前为仅提醒模式，识别不会中断；如需强制停止，请切换为硬暂停。'}
+                  </div>
+                )}
+
+                {ocrUsage.hardPaused && (
+                  <div className="ocr-usage-paused" aria-label="硬暂停恢复">
+                    <p>调整额度，或确认继续以在本月内放行后续付费调用。</p>
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      disabled={usageBusy !== null}
+                      onClick={() => void resumeOcrUsage()}
+                    >
+                      {usageBusy === 'resuming' ? '正在恢复…' : '确认继续'}
+                    </button>
+                  </div>
+                )}
+
+                <form
+                  className="settings-section-form"
+                  aria-label="OCR 用量额度设置"
+                  onSubmit={(event) => void saveOcrUsageQuota(event)}
+                >
+                  <div className="settings-fields">
+                    <Field label="月度额度（元）">
+                      <input
+                        aria-label="月度额度"
+                        inputMode="decimal"
+                        value={limitInput}
+                        onChange={(event) => setLimitInput(event.target.value)}
+                        placeholder="例如 10"
+                      />
+                      <small className="field-help">
+                        超过额度后按所选模式提醒或暂停；0 表示不设额度。
+                      </small>
+                    </Field>
+                    <Field label="单次估算费用（元）">
+                      <input
+                        aria-label="单次估算费用"
+                        inputMode="decimal"
+                        value={priceInput}
+                        onChange={(event) => setPriceInput(event.target.value)}
+                        placeholder="例如 0.05"
+                      />
+                      <small className="field-help">
+                        仅用于估算，成功调用按此单价累计，失败调用不计费。
+                      </small>
+                    </Field>
+                    <Field label="额度模式">
+                      <div className="ocr-quota-mode" role="radiogroup" aria-label="额度模式">
+                        <label>
+                          <input
+                            type="radio"
+                            name="ocr-quota-mode"
+                            checked={quotaMode === 'remind'}
+                            onChange={() => setQuotaMode('remind')}
+                          />
+                          仅提醒
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            name="ocr-quota-mode"
+                            checked={quotaMode === 'hard_stop'}
+                            onChange={() => setQuotaMode('hard_stop')}
+                          />
+                          硬暂停
+                        </label>
+                      </div>
+                      <small className="field-help">
+                        默认仅提醒；硬暂停必须由你主动开启，达到额度后在下一次付费调用前暂停。
+                      </small>
+                    </Field>
+                  </div>
+                  <div className="settings-actions">
+                    <button className="button button--primary" type="submit" disabled={usageBusy !== null}>
+                      <Icon name="check" />
+                      {usageBusy === 'saving' ? '正在保存…' : '保存额度设置'}
+                    </button>
+                  </div>
+                </form>
+
+                <details className="ocr-usage-events">
+                  <summary>最近调用记录（{ocrUsage.recentEvents.length}）</summary>
+                  {ocrUsage.recentEvents.length === 0 ? (
+                    <p className="ocr-usage-events-empty">还没有付费调用记录。</p>
+                  ) : (
+                    <ul className="ocr-usage-events-list">
+                      {ocrUsage.recentEvents.map((event) => (
+                        <li key={event.id}>
+                          <span>{formatDateTime(event.occurredAt)}</span>
+                          <span>{ocrCallKindLabel(event.kind)}</span>
+                          <span className={event.outcome === 'success' ? 'is-success' : 'is-failure'}>
+                            {event.outcome === 'success' ? '成功' : '失败'}
+                          </span>
+                          <span>{formatMoney(event.estimatedCents)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
+
+                <SettingsNotice feedback={usageFeedback} />
+              </>
+            )}
+          </section>
 
           {candidateBusy === 'loading' && !candidateSettings ? (
             <div className="settings-loading settings-loading--compact" role="status">
@@ -12153,6 +12411,12 @@ function renderTableCellValue(
 function formatMoney(cents: number | null): string {
   if (cents === null) return '—';
   return `¥${(cents / 100).toFixed(2)}`;
+}
+
+function ocrCallKindLabel(kind: OcrUsageView['recentEvents'][number]['kind']): string {
+  if (kind === 'recognition') return '识别';
+  if (kind === 'connection_test') return '连接测试';
+  return '候选裁决';
 }
 
 function repurchaseStatusLabel(rank: number | null): string {
