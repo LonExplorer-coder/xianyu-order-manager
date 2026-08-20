@@ -131,6 +131,7 @@ function profitFixture(): ProfitReportView {
             allocatedNetCents: 3_675,
           },
         ],
+        traceComponents: [],
         costComponents: [],
       },
       {
@@ -158,6 +159,26 @@ function profitFixture(): ProfitReportView {
             allocatedNetCents: 3_675,
           },
         ],
+        traceComponents: [
+          {
+            kind: 'arrival',
+            sourceLabel: '到货（采购订单 #1）',
+            quantity: 2,
+            unitCostCents: 800,
+            detail: '合格 1 / 瑕疵 0 / 报废 1',
+            occurredAt: '2026-08-20T14:05:00+08:00',
+            reason: '到货入库',
+          },
+          {
+            kind: 'return_receipt',
+            sourceLabel: '退货签收（售后处理单 abcd1234）',
+            quantity: 1,
+            unitCostCents: null,
+            detail: '进入待检查库存',
+            occurredAt: '2026-08-20T14:40:00+08:00',
+            reason: '买家寄回',
+          },
+        ],
         costComponents: [
           {
             kind: 'scrap',
@@ -178,6 +199,19 @@ function profitFixture(): ProfitReportView {
     ],
     unmapped: { orderCount: 0, transactionCents: 0, allocatedNetCents: 0 },
     others: [
+      {
+        kind: 'pending',
+        id: 'pending-profit-2',
+        type: 'purchase_cost',
+        direction: 'expense',
+        amountCents: 1_500,
+        allocatedCents: -1_500,
+        remainingCents: -1_500,
+        sourceLabel: '采购订单 #2',
+        occurredAt: '2026-08-20T15:00:00+08:00',
+        note: '第二笔采购待付款',
+        reference: false,
+      },
       {
         kind: 'record',
         id: 'record-profit-3',
@@ -233,8 +267,11 @@ describe('利润工作区', () => {
 
     const othersTable = screen.getByRole('table', { name: '采购与其他资金' });
     const paymentRow = within(othersTable).getByRole('row', { name: /支付采购全款/ });
+    expect(within(paymentRow).getByText('已确认')).toBeVisible();
     expect(within(paymentRow).getByText('采购订单 #1')).toBeVisible();
     expect(within(paymentRow).getByText('-¥31.00')).toBeVisible();
+    const pendingRow = within(othersTable).getByRole('row', { name: /第二笔采购待付款/ });
+    expect(within(pendingRow).getByText('待确认')).toBeVisible();
   });
 
   it('展开订单明细看到资金与成本的可追溯条目，成交参照单独标注', async () => {
@@ -279,6 +316,9 @@ describe('利润工作区', () => {
     if (!detailRow) throw new Error('未找到明细行');
     expect(within(detailRow as HTMLElement).getByText(/到货检查报废（采购订单 #1）/)).toBeVisible();
     expect(within(detailRow as HTMLElement).getByText(/累计到货 2 件/)).toBeVisible();
+    expect(within(detailRow as HTMLElement).getByText(/到货·合格 1 \/ 瑕疵 0 \/ 报废 1/)).toBeVisible();
+    expect(within(detailRow as HTMLElement)
+      .getByText(/退货签收（售后处理单 abcd1234）/)).toBeVisible();
   });
 
   it('读取失败时呈现错误信息', async () => {

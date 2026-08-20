@@ -59,6 +59,18 @@ export type ProfitOrderRow = {
   costComponents: ProfitCostComponent[];
 };
 
+// 商品行的库存与采购追溯条目：到货、退货签收与供应方退回的原记录明细。
+export type ProfitTraceComponent = {
+  kind: 'arrival' | 'return_receipt' | 'supplier_return';
+  sourceLabel: string;
+  quantity: number;
+  // 到货与供应方退回带批次单价；退货签收无金额概念，为 null。
+  unitCostCents: number | null;
+  detail: string;
+  occurredAt: string;
+  reason: string;
+};
+
 export type ProfitProductRow = {
   standardProductId: string;
   sku: string;
@@ -76,6 +88,7 @@ export type ProfitProductRow = {
   scrapCostCents: number;
   returnReceivedQuantity: number;
   marginCents: number;
+  traceComponents: ProfitTraceComponent[];
   allocations: Array<{
     orderId: string;
     orderNumber: string;

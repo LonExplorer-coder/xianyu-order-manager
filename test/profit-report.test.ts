@@ -401,6 +401,8 @@ describe('成本与利润视图', () => {
       allocatedCents: -800,
     });
     expect(refundComponent.sourceLabel).toContain('售后处理单');
+    // 部分退款追溯到售后单明细的商品与数量（ADR 0045 追溯口径第 1 条）。
+    expect(refundComponent.sourceLabel).toContain(`${PRODUCT_B.name} ×1`);
 
     const productA = productRowOf(report, PRODUCT_A.sku);
     expect(productA).toMatchObject({
@@ -703,7 +705,14 @@ describe('成本与利润视图', () => {
       sourceId: orderId,
     });
 
+    // 只读：查询前后资金与库存事实的行数不变（利润视图绝不改写事实）。
+    const fundsBefore = application.queryFunds();
+    const movementsBefore = application.queryInventory().movements.length;
     const first = application.queryProfitReport();
+    const fundsAfter = application.queryFunds();
+    expect(fundsAfter.records).toHaveLength(fundsBefore.records.length);
+    expect(fundsAfter.pendingItems).toHaveLength(fundsBefore.pendingItems.length);
+    expect(application.queryInventory().movements).toHaveLength(movementsBefore);
     const row = orderRowOf(first, 'XY-PROFIT-0006');
     expect(row).toMatchObject({
       transactionAmountCents: 1_000,

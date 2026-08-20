@@ -1,6 +1,7 @@
 import type {
   ProfitCostComponent,
   ProfitMoneyComponent,
+  ProfitTraceComponent,
   ProfitOrderRow,
   ProfitProductRow,
   ProfitReportTotals,
@@ -521,8 +522,20 @@ export class ProfitService {
   }
 
   // 资金来源的可读描述：双语义锚点翻译成人话（退款→售后单、索赔→承运索赔）。
+  // 同一来源在记录与待确认里会出现两次，标签按 (类型, 标识) 记忆化，避免逐条查库。
+  private readonly labelCache = new Map<string, string>();
+
   private moneySourceLabel(sourceType: string | null, sourceId: string | null): string {
     if (sourceType === null || sourceId === null) return '直接录入（无来源）';
+    const key = `${sourceType}:${sourceId}`;
+    const cached = this.labelCache.get(key);
+    if (cached !== undefined) return cached;
+    const label = this.computeMoneySourceLabel(sourceType, sourceId);
+    this.labelCache.set(key, label);
+    return label;
+  }
+
+  private computeMoneySourceLabel(sourceType: string, sourceId: string): string {
     if (sourceType === 'order') {
       const row = this.workspace.database.prepare(`
         SELECT platform_order_number FROM original_orders WHERE id = ?
@@ -538,14 +551,22 @@ export class ProfitService {
     }
     if (sourceType === 'aftersales_case') {
       const caseId = this.caseIdOfAnchor(sourceId);
-      return caseId ? `售后处理单 ${caseId.slice(0, 8)} 实际退款` : '售后处理单（已不存在）';
+      if (!caseId) return '售后处理单（已不存在）';
+      return `售后处理单 ${caseId.slice(0, 8)} 实际退款${this.caseItemsSummary(caseId)}`;
     }
     if (sourceType === 'logistics_exception') {
       const claim = this.workspace.database.prepare(`
-        SELECT direction FROM carrier_claims WHERE id = ?
+        SELECT direction, return_record_id FROM carrier_claims WHERE id = ?
       `).get(sourceId) as unknown as SqlRow | undefined;
       if (!claim) return '承运索赔（已不存在）';
-      return claim.direction === 'return' ? '承运索赔（售后退回）' : '承运索赔（正向丢件）';
+      if (claim.direction !== 'return' || claim.return_record_id === null) {
+        return '承运索赔（正向丢件）';
+      }
+      const caseRow = this.workspace.database.prepare(`
+        SELECT aftersales_case_id AS cid FROM aftersales_return_records WHERE id = ?
+      `).get(String(claim.return_record_id)) as unknown as SqlRow | undefined;
+      const caseId = caseRow ? String(caseRow.cid) : null;
+      return `承运索赔（售后退回${caseId ? this.caseItemsSummary(caseId, true) : ''}）`;
     }
     if (sourceType === 'purchase_order') {
       const row = this.workspace.database.prepare(`
@@ -555,12 +576,31 @@ export class ProfitService {
     }
     if (sourceType === 'supplier_return') {
       const row = this.workspace.database.prepare(`
-        SELECT s.name FROM supplier_returns sr JOIN suppliers s ON s.supplier_id = sr.supplier_id
+        SELECT s.name FROM supplier_returns sr JOIN suppliers s ON s.id = sr.supplier_id
         WHERE sr.id = ?
       `).get(sourceId) as unknown as SqlRow | undefined;
       return row ? `供应方退货（${String(row.name)}）` : '供应方退货（已不存在）';
     }
     return '未知来源';
+  }
+
+  // 售后单明细的商品与数量摘要（ADR 0045 追溯口径：退款/索赔要能追到商品与数量）。
+  // 未映射商品显示原始标题，不冒充标准商品。
+  private caseItemsSummary(caseId: string, leadingSpaceOnly = false): string {
+    const rows = this.workspace.database.prepare(`
+      SELECT ci.quantity, sp.name AS product_name, spi.source_title
+      FROM aftersales_case_items ci
+      JOIN shipment_package_items spi ON spi.id = ci.shipment_package_item_id
+      JOIN order_items oi ON oi.id = spi.source_order_item_id
+      LEFT JOIN standard_products sp ON sp.id = oi.standard_product_id
+      WHERE ci.case_id = ?
+      ORDER BY spi.position
+    `).all(caseId) as unknown as SqlRow[];
+    if (rows.length === 0) return '';
+    const parts = rows.map((row) => (
+      `${row.product_name === null ? String(row.source_title) : String(row.product_name)} ×${Number(row.quantity)}`
+    ));
+    return `${leadingSpaceOnly ? '' : '（'}${parts.join('、')}${leadingSpaceOnly ? '' : '）'}`;
   }
 
   private caseIdOfAnchor(sourceId: string): string | null {
@@ -691,10 +731,13 @@ export class ProfitService {
     `).all() as unknown as SqlRow[]) {
       const accumulator = accumulators.get(String(row.oid));
       if (!accumulator) continue;
-      const items = JSON.parse(String(row.items_json)) as Array<{
-        shipmentPackageItemId?: string;
-        quantity?: number;
-      }>;
+      let items: Array<{ shipmentPackageItemId?: string; quantity?: number }> = [];
+      try {
+        const parsed: unknown = JSON.parse(String(row.items_json));
+        if (Array.isArray(parsed)) items = parsed;
+      } catch {
+        items = [];
+      }
       const item = items.find((candidate) => candidate.shipmentPackageItemId === String(row.spi_id));
       if (!item || !item.quantity) continue;
       const quantity = Number(item.quantity);
@@ -909,6 +952,85 @@ export class ProfitService {
       `).all() as unknown as SqlRow[]).map((row) => [String(row.pid), Number(row.quantity)]),
     );
 
+    // 库存与采购追溯：到货、退货签收与供应方退回的逐条原记录（#75 验收第 5 条下钻）。
+    const tracesByProduct = new Map<string, ProfitTraceComponent[]>();
+    const pushTrace = (pid: string, component: ProfitTraceComponent): void => {
+      const list = tracesByProduct.get(pid) ?? [];
+      list.push(component);
+      tracesByProduct.set(pid, list);
+    };
+    for (const row of this.workspace.database.prepare(`
+      SELECT poi.standard_product_id AS pid, pai.received_quantity, pai.resellable_quantity,
+        pai.defective_quantity, pai.scrapped_quantity, poi.unit_price_cents,
+        pa.occurred_at, pa.reason, po.sequence
+      FROM purchase_arrival_items pai
+      JOIN purchase_arrivals pa ON pa.id = pai.arrival_id
+      JOIN purchase_order_items poi ON poi.id = pai.purchase_order_item_id
+      JOIN purchase_orders po ON po.id = poi.purchase_order_id AND po.status = 'confirmed'
+      ORDER BY pa.occurred_at, pai.id
+    `).all() as unknown as SqlRow[]) {
+      pushTrace(String(row.pid), {
+        kind: 'arrival',
+        sourceLabel: `到货（采购订单 #${Number(row.sequence)}）`,
+        quantity: Number(row.received_quantity),
+        unitCostCents: Number(row.unit_price_cents),
+        detail: `合格 ${Number(row.resellable_quantity)} / 瑕疵 ${Number(row.defective_quantity)}`
+          + ` / 报废 ${Number(row.scrapped_quantity)}`,
+        occurredAt: String(row.occurred_at),
+        reason: String(row.reason),
+      });
+    }
+    for (const row of this.workspace.database.prepare(`
+      SELECT m.standard_product_id AS pid, m.quantity, m.source_id, m.occurred_at, m.reason,
+        (SELECT rr.aftersales_case_id FROM aftersales_return_records rr WHERE rr.id = m.source_id)
+          AS case_id,
+        (SELECT 1 FROM aftersales_intercepted_return_inspection_events e
+          WHERE e.id = m.source_id) AS is_intercepted
+      FROM inventory_movements m
+      WHERE m.source_type = 'return_receipt' AND m.state = 'awaiting_inspection' AND m.direction = 'in'
+      ORDER BY m.occurred_at, m.sequence
+    `).all() as unknown as SqlRow[]) {
+      const caseLabel = row.case_id === null ? null : String(row.case_id).slice(0, 8);
+      pushTrace(String(row.pid), {
+        kind: 'return_receipt',
+        sourceLabel: caseLabel !== null
+          ? `退货签收（售后处理单 ${caseLabel}）`
+          : Number(row.is_intercepted) === 1
+            ? '拦截退回签收'
+            : '退货签收',
+        quantity: Number(row.quantity),
+        unitCostCents: null,
+        detail: '进入待检查库存',
+        occurredAt: String(row.occurred_at),
+        reason: String(row.reason),
+      });
+    }
+    for (const row of this.workspace.database.prepare(`
+      SELECT sri.standard_product_id AS pid, sri.quantity, sri.state, sr.occurred_at, sr.reason,
+        s.name AS supplier_name, po.sequence AS po_sequence
+      FROM supplier_return_items sri
+      JOIN supplier_returns sr ON sr.id = sri.supplier_return_id
+      JOIN suppliers s ON s.id = sr.supplier_id
+      LEFT JOIN purchase_orders po ON po.id = sr.purchase_order_id
+      ORDER BY sr.occurred_at, sri.id
+    `).all() as unknown as SqlRow[]) {
+      pushTrace(String(row.pid), {
+        kind: 'supplier_return',
+        sourceLabel: `供应方退货（${String(row.supplier_name)}${row.po_sequence === null
+          ? ''
+          : `，采购订单 #${Number(row.po_sequence)}`}）`,
+        quantity: Number(row.quantity),
+        unitCostCents: null,
+        detail: `状态：${row.state === 'sellable' ? '可销售'
+          : row.state === 'awaiting_inspection' ? '待检查'
+          : row.state === 'defective' ? '瑕疵品'
+          : row.state === 'scrapped' ? '报废'
+          : String(row.state)}`,
+        occurredAt: String(row.occurred_at),
+        reason: String(row.reason),
+      });
+    }
+
     const productRows: ProfitProductRow[] = products.map((product) => {
       const accumulator = accumulatorsByProduct.get(product.standardProductId)!;
       const unit = avgUnitCost.get(product.standardProductId) ?? 0;
@@ -931,6 +1053,7 @@ export class ProfitService {
         returnReceivedQuantity: accumulator.returnReceivedQuantity,
         marginCents: accumulator.allocatedNetCents - dispatchedCost - accumulator.scrapCostCents,
         allocations: accumulator.allocations,
+        traceComponents: tracesByProduct.get(product.standardProductId) ?? [],
         costComponents: accumulator.costComponents.map((component) => ({
           ...component,
           sku: component.sku || product.sku,

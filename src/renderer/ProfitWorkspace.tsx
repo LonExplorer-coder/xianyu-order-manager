@@ -11,6 +11,7 @@ import type {
   ProfitOrderRow,
   ProfitProductRow,
   ProfitReportView,
+  ProfitTraceComponent,
 } from '../core/profit';
 import { EmptyState, InlineError } from './DialogShell';
 import { formatMoney, formatTime } from './FinanceFacts';
@@ -181,6 +182,22 @@ export function ProfitWorkspace({ api }: { api: DesktopApi }) {
                       )}
                     />
                   ))}
+                  {report.unmapped.transactionCents > 0 && (
+                    <tr className="profit-unmapped-row">
+                      <td><span>未映射商品</span></td>
+                      <td>—</td>
+                      <td>{report.unmapped.orderCount}</td>
+                      <td>{formatMoney(report.unmapped.transactionCents)}</td>
+                      <td>{formatMoney(report.unmapped.allocatedNetCents)}</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>建立商品映射后进入商品汇总</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -200,6 +217,7 @@ export function ProfitWorkspace({ api }: { api: DesktopApi }) {
           <table aria-label="采购与其他资金">
             <thead>
               <tr>
+                <th>状态</th>
                 <th>类型</th>
                 <th>方向</th>
                 <th>金额</th>
@@ -211,6 +229,7 @@ export function ProfitWorkspace({ api }: { api: DesktopApi }) {
             <tbody>
               {report.others.map((component) => (
                 <tr key={`${component.kind}-${component.id}`}>
+                  <td>{component.kind === 'pending' ? '待确认' : '已确认'}</td>
                   <td>{financeRecordTypeLabel(component.type)}</td>
                   <td>{financeDirectionLabel(component.direction)}</td>
                   <td>{formatMoney(component.allocatedCents)}</td>
@@ -383,6 +402,19 @@ function ProfitProductRowView({
                   ))}
                 </ul>
               )}
+              <h3>库存与采购明细</h3>
+              {row.traceComponents.length === 0 ? (
+                <p>该商品还没有到货、退货签收或供应方退回记录。</p>
+              ) : (
+                <ul className="profit-component-list">
+                  {row.traceComponents.map((component, index) => (
+                    <ProfitTraceComponentLine
+                      key={`${component.kind}-${component.occurredAt}-${index}`}
+                      component={component}
+                    />
+                  ))}
+                </ul>
+              )}
               <h3>采购概况</h3>
               <p>
                 累计到货 {row.arrivedQuantity} 件；供应方退回 {row.supplierReturnedQuantity} 件；
@@ -407,6 +439,25 @@ function ProfitMoneyComponentLine({ component }: { component: ProfitMoneyCompone
       <span>{formatMoney(component.allocatedCents)}</span>
       <span>{component.sourceLabel}</span>
       <span>{component.note || '—'}</span>
+      <span>{formatTime(component.occurredAt)}</span>
+    </li>
+  );
+}
+
+function ProfitTraceComponentLine({ component }: { component: ProfitTraceComponent }) {
+  const kindLabel = component.kind === 'arrival'
+    ? '到货'
+    : component.kind === 'return_receipt'
+      ? '退货签收'
+      : '供应方退回';
+  return (
+    <li>
+      <span>{kindLabel}·{component.detail}</span>
+      <span>× {component.quantity}{component.unitCostCents === null
+        ? ''
+        : `（单价 ${formatMoney(component.unitCostCents)}）`}</span>
+      <span>{component.sourceLabel}</span>
+      <span>{component.reason || '—'}</span>
       <span>{formatTime(component.occurredAt)}</span>
     </li>
   );
