@@ -12,12 +12,25 @@ export function removeVersion62ExtensionArtifacts(database: DatabaseSync): void 
   if (eventCount.count > 0) {
     throw new Error('v62 测试降级前必须移除 OCR 用量事件');
   }
+  removeVersion63ExtensionArtifacts(database);
   database.exec(`
     DROP TRIGGER IF EXISTS ocr_usage_events_are_immutable_on_update;
     DROP TRIGGER IF EXISTS ocr_usage_events_are_immutable_on_delete;
     DROP INDEX IF EXISTS ocr_usage_events_by_occurred_at;
     DROP TABLE IF EXISTS ocr_usage_events;
     DELETE FROM schema_migrations WHERE version = 62;
+  `);
+}
+
+function removeVersion63ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 63',
+  ).get();
+  if (!applied) return;
+  database.exec(`
+    DROP TRIGGER IF EXISTS recognition_batch_items_clear_failure_code;
+    DROP TABLE IF EXISTS recognition_batch_item_failure_codes;
+    DELETE FROM schema_migrations WHERE version = 63;
   `);
 }
 

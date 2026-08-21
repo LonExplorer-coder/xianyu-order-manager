@@ -20,6 +20,7 @@ import {
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
+export const CURRENT_WORKSPACE_SCHEMA_VERSION = 63;
 
 export class WorkspaceInUseError extends Error {
   public constructor(public readonly dataDirectory: string) {
@@ -219,6 +220,7 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(60)) migrateToVersion60(database);
   if (!versions.has(61)) migrateToVersion61(database);
   if (!versions.has(62)) migrateToVersion62(database);
+  if (!versions.has(CURRENT_WORKSPACE_SCHEMA_VERSION)) migrateToVersion63(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -8512,5 +8514,37 @@ function migrateToVersion62(database: DatabaseSync): void {
     throw error;
   } finally {
     database.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function migrateToVersion63(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    database.exec(`
+      CREATE TABLE recognition_batch_item_failure_codes (
+        item_id TEXT PRIMARY KEY
+          REFERENCES recognition_batch_items(id) ON DELETE CASCADE,
+        failure_code TEXT NOT NULL CHECK (failure_code = 'ocr_quota_paused')
+      ) STRICT;
+
+      CREATE TRIGGER recognition_batch_items_clear_failure_code
+      AFTER UPDATE OF status ON recognition_batch_items
+      WHEN NEW.status <> 'failed'
+      BEGIN
+        DELETE FROM recognition_batch_item_failure_codes WHERE item_id = NEW.id;
+      END;
+
+      INSERT INTO recognition_batch_item_failure_codes (item_id, failure_code)
+      SELECT id, 'ocr_quota_paused'
+      FROM recognition_batch_items
+      WHERE status = 'failed'
+        AND error_message = '本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续';
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      .run(CURRENT_WORKSPACE_SCHEMA_VERSION, new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
   }
 }

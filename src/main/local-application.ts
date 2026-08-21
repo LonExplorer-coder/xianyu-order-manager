@@ -330,8 +330,11 @@ import { OrderFulfillmentProjectionService } from './order-fulfillment-projectio
 import { OrderOperationsProjectionService } from './order-operations-projection-service';
 import { LogisticsExceptionService } from './logistics-exception-service';
 import { Workspace } from './workspace';
-import type { OcrUsageService } from './ocr-usage-service';
-import type { OcrUsageEventRecord, OcrMonthlyUsage } from '../core/ocr-usage';
+import type { OcrUsageService, OcrUsageWorkspace } from './ocr-usage-service';
+import type {
+  OcrUsageEventRecord,
+  OcrUsageFailureCode,
+} from '../core/ocr-usage';
 
 type SqlRow = Record<string, string | number | null>;
 
@@ -342,6 +345,7 @@ export type RecognitionBatchItemUpdate = {
   draftId?: string;
   sha256?: string;
   errorMessage?: string;
+  failureCode?: OcrUsageFailureCode;
   retryCount?: number;
   nextRetryAt?: string | null;
   reviewIssues?: OrderReviewIssueCode[];
@@ -381,6 +385,7 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   '.webp': 'image/webp',
 };
 const MAX_SOURCE_SCREENSHOT_BYTES = 7_500_000;
+const UNATTRIBUTED_OCR_WORKSPACE_KEY = '0'.repeat(64);
 const MAX_RECOGNITION_CONFLICTS = RECOGNITION_CONFLICT_LIMITS.details;
 const MAX_RECOGNITION_CONFLICT_VALUES = RECOGNITION_CONFLICT_LIMITS.valuesPerSide;
 const MAX_RECOGNITION_CONFLICT_TEXT_LENGTH = RECOGNITION_CONFLICT_LIMITS.textLength;
@@ -397,6 +402,7 @@ const RECOGNITION_CONFLICT_DETAIL_KEYS = new Set([
 
 export class LocalApplication {
   private workspace?: Workspace;
+  private ocrUsageWorkspace?: OcrUsageWorkspace;
 
   public constructor(
     private readonly recognizer: Recognizer,
@@ -409,7 +415,12 @@ export class LocalApplication {
     }
     const workspace = Workspace.open(dataDirectory);
     this.workspace = workspace;
+    this.ocrUsageWorkspace = this.ocrUsage?.forDataDirectory(workspace.dataDirectory);
     try {
+      this.ocrUsage?.importWorkspaceEvents(
+        workspace.dataDirectory,
+        this.queryAllOcrUsageEvents(),
+      );
       this.expireTrashedOrders();
     } catch (error) {
       this.workspace = undefined;
@@ -552,11 +563,13 @@ export class LocalApplication {
     const workspace = this.requireWorkspace();
     const rows = workspace.database
       .prepare(`
-        SELECT id AS item_id, batch_id
-        FROM recognition_batch_items
-        WHERE status = 'failed' AND error_message = ?
+        SELECT items.id AS item_id, items.batch_id
+        FROM recognition_batch_items AS items
+        JOIN recognition_batch_item_failure_codes AS failures
+          ON failures.item_id = items.id
+        WHERE items.status = 'failed' AND failures.failure_code = 'ocr_quota_paused'
       `)
-      .all('本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续') as unknown as SqlRow[];
+      .all() as unknown as SqlRow[];
     return rows.map((row) => ({
       batchId: asString(row.batch_id),
       itemId: asString(row.item_id),
@@ -875,6 +888,15 @@ export class LocalApplication {
           input.batchId,
         );
       if (result.changes !== 1) throw new Error('未找到识别批次中的来源截图');
+      workspace.database
+        .prepare('DELETE FROM recognition_batch_item_failure_codes WHERE item_id = ?')
+        .run(input.itemId);
+      if (input.failureCode) {
+        workspace.database.prepare(`
+          INSERT INTO recognition_batch_item_failure_codes (item_id, failure_code)
+          VALUES (?, ?)
+        `).run(input.itemId, input.failureCode);
+      }
       if (input.reviewIssues !== undefined) {
         const linked = workspace.database
           .prepare(`
@@ -906,7 +928,6 @@ export class LocalApplication {
     onPhase?: (phase: 'validating') => void,
     batchItemId?: string,
   ): Promise<OrderDraft> {
-    this.ocrUsage?.assertCanProceed();
     const workspace = this.requireWorkspace();
     const extension = extname(sourcePath).toLowerCase();
     const mimeType = IMAGE_MIME_TYPES[extension];
@@ -932,13 +953,16 @@ export class LocalApplication {
     await writeFile(storedPath, bytes, { flag: 'wx' });
 
     try {
-      const attempt = await this.recognizer.recognize({
+      const recognize = () => this.recognizer.recognize({
         absolutePath: storedPath,
         originalName: basename(sourcePath),
         mimeType,
         sha256,
         bytes,
       });
+      const attempt = this.ocrUsageWorkspace
+        ? await this.ocrUsageWorkspace.runPaidOperation(recognize)
+        : await recognize();
       onPhase?.('validating');
       const recognition = withOcrQuantitySources(attempt.result);
       validateRecognition(recognition);
@@ -1065,44 +1089,20 @@ export class LocalApplication {
       );
   }
 
-  public queryOcrMonthlyUsage(fromIso: string, toIso: string): OcrMonthlyUsage {
-    const workspace = this.requireWorkspace();
-    const row = workspace.database
-      .prepare(`
-        SELECT
-          COUNT(*) AS total_calls,
-          SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS succeeded_calls,
-          SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failed_calls,
-          SUM(estimated_cents) AS estimated_cost_cents
-        FROM ocr_usage_events
-        WHERE occurred_at >= ? AND occurred_at < ?
-      `)
-      .get(fromIso, toIso) as SqlRow | undefined;
-    if (!row) {
-      return { totalCalls: 0, succeededCalls: 0, failedCalls: 0, estimatedCostCents: 0 };
-    }
-    return {
-      totalCalls: Number(row.total_calls),
-      succeededCalls: Number(row.succeeded_calls),
-      failedCalls: Number(row.failed_calls),
-      estimatedCostCents: Number(row.estimated_cost_cents),
-    };
-  }
-
-  public queryRecentOcrUsageEvents(limit: number): OcrUsageEventRecord[] {
+  private queryAllOcrUsageEvents(): OcrUsageEventRecord[] {
     const workspace = this.requireWorkspace();
     const rows = workspace.database
       .prepare(`
         SELECT id, occurred_at, call_kind, outcome, provider, model, request_id, estimated_cents
         FROM ocr_usage_events
-        ORDER BY occurred_at DESC, id DESC
-        LIMIT ?
+        ORDER BY occurred_at, id
       `)
-      .all(limit) as unknown as SqlRow[];
+      .all() as unknown as SqlRow[];
     return rows.map((row) => {
       const requestId = asString(row.request_id);
       return {
         id: asString(row.id),
+        workspaceKey: UNATTRIBUTED_OCR_WORKSPACE_KEY,
         occurredAt: asString(row.occurred_at),
         kind: asString(row.call_kind) as OcrUsageEventRecord['kind'],
         outcome: asString(row.outcome) as OcrUsageEventRecord['outcome'],

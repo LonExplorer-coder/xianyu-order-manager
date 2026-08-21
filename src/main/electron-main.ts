@@ -85,6 +85,7 @@ import {
   selectedSourceScreenshotDirectory,
   sourceScreenshotDialogOptions,
 } from './source-screenshot-dialog';
+import { acquireSingleInstance } from './single-instance';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
@@ -1607,95 +1608,111 @@ function requireHistoricalOrderImportSession(
   return session;
 }
 
-void app.whenReady().then(async () => {
-  if (process.env.XIANYU_PACKAGED_PORTABLE_SMOKE) {
-    try {
-      if (!app.isPackaged) throw new Error('便携版冒烟只能针对打包后的应用运行');
-      const result = await runPortableReleaseDataSmoke({
-        phase: portableSmokePhase(process.env.XIANYU_PACKAGED_PORTABLE_SMOKE),
-        configDirectory: requiredSmokePath(
-          process.env.XIANYU_PORTABLE_SMOKE_CONFIG_DIRECTORY,
-          '启动配置目录',
-        ),
-        dataDirectory: requiredSmokePath(
-          process.env.XIANYU_PORTABLE_SMOKE_DATA_DIRECTORY,
-          '订单数据目录',
-        ),
+export function startElectronApplication(): void {
+  const isPackagedSmokeProcess = Boolean(
+    process.env.XIANYU_PACKAGED_PORTABLE_SMOKE
+    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1',
+  );
+  if (!acquireSingleInstance(app, () => mainWindow, isPackagedSmokeProcess)) return;
+
+  void app.whenReady().then(async () => {
+    if (process.env.XIANYU_PACKAGED_PORTABLE_SMOKE) {
+      try {
+        if (!app.isPackaged) throw new Error('便携版冒烟只能针对打包后的应用运行');
+        const result = await runPortableReleaseDataSmoke({
+          phase: portableSmokePhase(process.env.XIANYU_PACKAGED_PORTABLE_SMOKE),
+          configDirectory: requiredSmokePath(
+            process.env.XIANYU_PORTABLE_SMOKE_CONFIG_DIRECTORY,
+            '启动配置目录',
+          ),
+          dataDirectory: requiredSmokePath(
+            process.env.XIANYU_PORTABLE_SMOKE_DATA_DIRECTORY,
+            '订单数据目录',
+          ),
+        });
+        console.log(`Packaged portable release smoke passed: ${JSON.stringify(result)}`);
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Packaged portable release smoke failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      }
+      return;
+    }
+
+    if (process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1') {
+      try {
+        await runPackagedCredentialStoreSmoke();
+        console.log('Packaged credential store smoke test passed and cleaned up.');
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Packaged credential store smoke test failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      }
+      return;
+    }
+
+    const configDirectory = join(app.getPath('userData'), 'bootstrap');
+    const validateDataDirectory = (dataDirectory: string): void => {
+      assertDataDirectoryOutsideProgram({
+        dataDirectory,
+        executablePath: app.getPath('exe'),
+        platform: process.platform,
       });
-      console.log(`Packaged portable release smoke passed: ${JSON.stringify(result)}`);
-      app.exit(0);
-    } catch (error) {
-      console.error(
-        'Packaged portable release smoke failed:',
-        error instanceof Error ? error.message : 'unknown error',
-      );
-      app.exit(1);
-    }
-    return;
-  }
-
-  if (process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1') {
-    try {
-      await runPackagedCredentialStoreSmoke();
-      console.log('Packaged credential store smoke test passed and cleaned up.');
-      app.exit(0);
-    } catch (error) {
-      console.error(
-        'Packaged credential store smoke test failed:',
-        error instanceof Error ? error.message : 'unknown error',
-      );
-      app.exit(1);
-    }
-    return;
-  }
-
-  const configDirectory = join(app.getPath('userData'), 'bootstrap');
-  const validateDataDirectory = (dataDirectory: string): void => {
-    assertDataDirectoryOutsideProgram({
-      dataDirectory,
-      executablePath: app.getPath('exe'),
-      platform: process.platform,
+    };
+    session = createConfiguredDesktopSession({
+      configDirectory,
+      apiKeyStore: new SystemApiKeyStore(),
+      candidateVerificationApiKeyStores: {
+        deepseek: new SystemApiKeyStore({
+          accountName: 'candidate-verification-deepseek-api-key',
+          secretLabel: 'DeepSeek 候选裁决 API Key',
+        }),
+        'aliyun-bailian': new SystemApiKeyStore({
+          accountName: 'candidate-verification-aliyun-bailian-api-key',
+          secretLabel: '百炼候选裁决 API Key',
+        }),
+        'openai-compatible': new SystemApiKeyStore({
+          accountName: 'candidate-verification-openai-compatible-api-key',
+          secretLabel: '自定义候选裁决 API Key',
+        }),
+      },
+      validateDataDirectory,
     });
-  };
-  session = createConfiguredDesktopSession({
-    configDirectory,
-    apiKeyStore: new SystemApiKeyStore(),
-    candidateVerificationApiKeyStores: {
-      deepseek: new SystemApiKeyStore({
-        accountName: 'candidate-verification-deepseek-api-key',
-        secretLabel: 'DeepSeek 候选裁决 API Key',
-      }),
-      'aliyun-bailian': new SystemApiKeyStore({
-        accountName: 'candidate-verification-aliyun-bailian-api-key',
-        secretLabel: '百炼候选裁决 API Key',
-      }),
-      'openai-compatible': new SystemApiKeyStore({
-        accountName: 'candidate-verification-openai-compatible-api-key',
-        secretLabel: '自定义候选裁决 API Key',
-      }),
-    },
-    validateDataDirectory,
-  });
-  session.restore();
-  registerIpcHandlers(session);
-  mainWindow = createWindow();
+    session.restore();
+    registerIpcHandlers(session);
+    mainWindow = createWindow();
 
-  const runAutomaticBackupTick = (): void => {
-    if (!session) return;
-    void session.runAutomaticBackup(app.getVersion()).catch((error: unknown) => {
-      console.error(
-        '自动备份执行失败：',
-        error instanceof Error ? error.message : error,
-      );
+    const runAutomaticBackupTick = (): void => {
+      if (!session) return;
+      void session.runAutomaticBackup(app.getVersion()).catch((error: unknown) => {
+        console.error(
+          '自动备份执行失败：',
+          error instanceof Error ? error.message : error,
+        );
+      });
+    };
+    runAutomaticBackupTick();
+    setInterval(runAutomaticBackupTick, 30 * 60 * 1000).unref();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
     });
-  };
-  runAutomaticBackupTick();
-  setInterval(runAutomaticBackupTick, 30 * 60 * 1000).unref();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
-});
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('before-quit', () => {
+    session?.close();
+  });
+}
 
 function portableSmokePhase(value: string): 'write' | 'read' {
   if (value === 'write' || value === 'read') return value;
@@ -1707,13 +1724,6 @@ function requiredSmokePath(value: string | undefined, label: string): string {
   return value;
 }
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
-
-app.on('before-quit', () => {
-  session?.close();
-});
 
 function parseSaveOcrSettingsInput(input: unknown): SaveOcrSettingsInput {
   if (!isRecord(input)) throw new Error('OCR 设置格式无效');

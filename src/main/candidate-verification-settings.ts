@@ -10,6 +10,7 @@ import {
   type CandidateVerificationSettingsView,
   type SaveCandidateVerificationSettingsInput,
 } from '../core/candidate-verification-settings';
+import type { OcrPaidOperationRunner } from './ocr-usage-service';
 
 export type CandidateVerificationSettingsRecord = {
   enabled: boolean;
@@ -52,7 +53,6 @@ export class CandidateVerificationSettingsService {
     private readonly repository: CandidateVerificationSettingsRepository,
     private readonly apiKeyStores: CandidateVerificationApiKeyStores,
     private readonly connectionTester: CandidateVerificationConnectionTester,
-    private readonly usageGate?: { assertCanProceed(): void },
   ) {}
 
   public getSettings(): Promise<CandidateVerificationSettingsView> {
@@ -199,12 +199,14 @@ export class CandidateVerificationSettingsService {
 
   public testConnection(
     input: CandidateVerificationConnectionTestInput,
+    usage: OcrPaidOperationRunner,
   ): Promise<CandidateVerificationConnectionTestResult> {
-    return this.withExclusiveAccess(() => this.testConnectionUnlocked(input));
+    return this.withExclusiveAccess(() => this.testConnectionUnlocked(input, usage));
   }
 
   private async testConnectionUnlocked(
     input: CandidateVerificationConnectionTestInput,
+    usage: OcrPaidOperationRunner,
   ): Promise<CandidateVerificationConnectionTestResult> {
     if (input.consentToPaidCall !== true) {
       throw new Error(
@@ -218,13 +220,13 @@ export class CandidateVerificationSettingsService {
     }
     const apiKey = await this.apiKeyStores[record.provider].getApiKey();
     if (!apiKey) throw new Error('请先保存当前服务商的 API Key');
-    this.usageGate?.assertCanProceed();
-    const result = await this.connectionTester.testConnection({
+    const test = () => this.connectionTester.testConnection({
       provider: record.provider,
       baseUrl: record.baseUrl,
       model: record.model,
       apiKey,
     });
+    const result = await usage.runPaidOperation(test);
     return {
       ok: true,
       provider: record.provider,

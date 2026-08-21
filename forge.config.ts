@@ -40,7 +40,7 @@ const config: ForgeConfig = {
     new VitePlugin({
       build: [
         {
-          entry: 'src/main/electron-main.ts',
+          entry: 'src/main/electron-entry.ts',
           config: 'vite.main.config.ts',
           target: 'main',
         },

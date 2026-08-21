@@ -12,6 +12,7 @@ import {
   projectOrderTableProjectionRow,
 } from '../src/core/table-templates';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { removeVersion45ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
@@ -455,7 +456,7 @@ describe('标准商品显示偏好迁移', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(() => verified.prepare(`
         UPDATE order_items SET standard_display_preference = NULL WHERE id = ?
       `).run(linkedOrder.items[0].id)).toThrow(/inconsistent/u);

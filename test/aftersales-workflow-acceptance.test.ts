@@ -16,6 +16,7 @@ import {
   projectAftersalesWorkflowSteps,
 } from '../src/core/aftersales-workflow-templates';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { clearVersion58FundsData, removeVersion50ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
@@ -467,7 +468,7 @@ describe('可执行售后流程阶段验收', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(verified.prepare(`
         SELECT COUNT(*) AS count FROM sqlite_schema
         WHERE type = 'table' AND name = 'aftersales_case_step_events'

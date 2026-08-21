@@ -1,7 +1,7 @@
 import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   RecognitionAttempt,
@@ -21,6 +21,7 @@ const applications: LocalApplication[] = [];
 
 afterEach(() => {
   for (const application of applications.splice(0)) application.close();
+  vi.useRealTimers();
 });
 
 class SequenceRecognizer implements Recognizer {
@@ -610,6 +611,9 @@ describe('库存与采购闭环验收', () => {
   });
 
   it('例一例三与正向丢件、拦截退回：售后链库存影响守恒且原发货快照不变', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-21T03:00:00.000Z'));
+
     const { application, orders } = await openLoopApplication([
       loopRecognition('XY-LOOP-AFTER-SALES-X', [
         ...boxItems(3),

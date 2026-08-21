@@ -12,6 +12,7 @@ import type {
   RecognizerSource,
 } from '../src/core/contracts';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { removeVersion35ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
@@ -702,7 +703,7 @@ describe('换货、直接补发与多轮售后', () => {
     const database = new DatabaseSync(databasePath);
     try {
       expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(() => database.prepare(`
         UPDATE aftersales_processing_rounds SET reason = '覆盖历史'
       `).run()).toThrow(/immutable/u);

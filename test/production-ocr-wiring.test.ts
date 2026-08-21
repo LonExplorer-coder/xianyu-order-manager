@@ -1,11 +1,13 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiKeyStore } from '../src/main/ocr-settings';
 import { createConfiguredDesktopSession } from '../src/main/production-session';
 import type { DesktopSession } from '../src/main/desktop-session';
+import { LocalApplication } from '../src/main/local-application';
 
 class MemoryApiKeyStore implements ApiKeyStore {
   public apiKey: string | null = null;
@@ -505,6 +507,145 @@ describe('正式 OCR 装配', () => {
     });
   });
 
+  it('所有数据目录共同累计一个全局月度用量', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-global-ocr-usage-'));
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '连接测试图片中的文字' } }],
+    }), { status: 200 }));
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      request,
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-global-usage',
+      region: 'cn-beijing',
+      apiKey: 'sk-global-usage',
+    });
+
+    session.useDataDirectory(join(testRoot, '数据目录A'));
+    await session.testOcrConnection({ consentToPaidCall: true });
+    expect(session.getOcrUsage().usage.totalCalls).toBe(1);
+
+    session.useDataDirectory(join(testRoot, '数据目录B'));
+    expect(session.getOcrUsage().usage.totalCalls).toBe(1);
+    await session.testOcrConnection({ consentToPaidCall: true });
+    expect(session.getOcrUsage().usage.totalCalls).toBe(2);
+    const workspaceKeys = session.getOcrUsage().recentEvents.map((event) => (
+      (event as { workspaceKey?: string }).workspaceKey
+    ));
+    expect(workspaceKeys).toEqual([
+      expect.stringMatching(/^[a-f0-9]{64}$/u),
+      expect.stringMatching(/^[a-f0-9]{64}$/u),
+    ]);
+    expect(new Set(workspaceKeys).size).toBe(2);
+
+    session.useDataDirectory(join(testRoot, '数据目录A'));
+    expect(session.getOcrUsage().usage.totalCalls).toBe(2);
+  });
+
+  it('切换数据目录后在途调用仍保留发起目录指纹', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-ocr-usage-in-flight-'));
+    let finishRequest!: (response: Response) => void;
+    const request = vi.fn(() => new Promise<Response>((resolveRequest) => {
+      finishRequest = resolveRequest;
+    }));
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      request,
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-in-flight-usage',
+      region: 'cn-beijing',
+      apiKey: 'sk-in-flight-usage',
+    });
+    const firstDataDirectory = join(testRoot, '数据目录A');
+    session.useDataDirectory(firstDataDirectory);
+
+    const pending = session.testOcrConnection({ consentToPaidCall: true });
+    await eventually(() => expect(request).toHaveBeenCalledOnce());
+    session.useDataDirectory(join(testRoot, '数据目录B'));
+    finishRequest(new Response(JSON.stringify({
+      choices: [{ message: { content: '连接测试图片中的文字' } }],
+    }), { status: 200 }));
+    await pending;
+
+    const expectedWorkspaceKey = createHash('sha256')
+      .update(resolve(firstDataDirectory))
+      .digest('hex');
+    expect(session.getOcrUsage().recentEvents[0].workspaceKey).toBe(expectedWorkspaceKey);
+  });
+
+  it('切换到不可用数据目录失败后仍持续累计全局用量', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-ocr-usage-switch-failure-'));
+    const rejectedDirectory = join(testRoot, '不可用数据目录');
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '连接测试图片中的文字' } }],
+    }), { status: 200 }));
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+      request,
+      validateDataDirectory: (dataDirectory) => {
+        if (dataDirectory === rejectedDirectory) throw new Error('新数据目录不可用');
+      },
+    });
+    sessions.push(session);
+    await session.saveOcrSettings({
+      workspaceId: 'ws-switch-failure-usage',
+      region: 'cn-beijing',
+      apiKey: 'sk-switch-failure-usage',
+    });
+    session.useDataDirectory(join(testRoot, '当前数据目录'));
+    await session.testOcrConnection({ consentToPaidCall: true });
+
+    expect(() => session.useDataDirectory(rejectedDirectory))
+      .toThrow('新数据目录不可用');
+    expect(session.getOcrUsage().usage.totalCalls).toBe(1);
+    await session.testOcrConnection({ consentToPaidCall: true });
+    expect(session.getOcrUsage().usage.totalCalls).toBe(2);
+  });
+
+  it('数据目录首次打开时把旧用量事件幂等导入全局累计', async () => {
+    const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-global-ocr-import-'));
+    const dataDirectory = join(testRoot, '旧数据目录');
+    const legacy = new LocalApplication({
+      recognize: async () => { throw new Error('用量导入不应调用 OCR'); },
+    });
+    legacy.openDataDirectory(dataDirectory);
+    legacy.recordOcrUsageEvent({
+      id: 'legacy-global-usage-event',
+      workspaceKey: '0'.repeat(64),
+      kind: 'recognition',
+      outcome: 'success',
+      provider: 'aliyun-bailian',
+      model: 'qwen3.5-ocr',
+      occurredAt: new Date().toISOString(),
+      estimatedCents: 5,
+    });
+    legacy.close();
+
+    const session = createConfiguredDesktopSession({
+      configDirectory: join(testRoot, '应用配置'),
+      apiKeyStore: new MemoryApiKeyStore(),
+    });
+    sessions.push(session);
+    session.useDataDirectory(dataDirectory);
+
+    expect(session.getOcrUsage().usage).toMatchObject({
+      totalCalls: 1,
+      succeededCalls: 1,
+      estimatedCostCents: 5,
+    });
+
+    session.useDataDirectory(join(testRoot, '其他数据目录'));
+    session.useDataDirectory(dataDirectory);
+    expect(session.getOcrUsage().usage.totalCalls).toBe(1);
+  });
+
   it('硬暂停在付费调用前拦截并保留待处理截图，确认继续后放行', async () => {
     const testRoot = await mkdtemp(join(tmpdir(), 'xianyu-ocr-quota-wiring-'));
     const sourcePath = join(testRoot, '额度订单.png');
@@ -562,7 +703,8 @@ describe('正式 OCR 装配', () => {
       model: 'deepseek-v4-flash',
       apiKey: 'sk-quota-deepseek',
     });
-    session.useDataDirectory(join(testRoot, '订单数据'));
+    const firstDataDirectory = join(testRoot, '订单数据');
+    session.useDataDirectory(firstDataDirectory);
     session.saveOcrUsageQuota({
       monthlyLimitCents: 1,
       mode: 'hard_stop',
@@ -604,7 +746,25 @@ describe('正式 OCR 装配', () => {
       .rejects.toThrow(/硬暂停额度/u);
     expect(request).toHaveBeenCalledTimes(1);
 
+    // 全局暂停期间，其他数据目录中的截图同样保留为待恢复队列项。
+    const secondDataDirectory = join(testRoot, '其他订单数据');
+    session.useDataDirectory(secondDataDirectory);
+    const thirdSourcePath = join(testRoot, '额度订单3.png');
+    await writeFile(
+      thirdSourcePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR4nO3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4unIZ5cAAAAASUVORK5CYII=',
+        'base64',
+      ).with(11, 0x43),
+    );
+    await session.submitSourceScreenshots([thirdSourcePath]);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status).toBe('failed');
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+
     // 确认继续后被硬暂停拦截的队列项自动重放。
+    session.useDataDirectory(firstDataDirectory);
     const resumed = session.confirmOcrUsageResume();
     expect(resumed.hardPaused).toBe(false);
     await eventually(() => {
@@ -612,10 +772,18 @@ describe('正式 OCR 装配', () => {
         .toBe('awaiting_confirmation');
     });
     expect(request).toHaveBeenCalledTimes(2);
+
+    // 其他数据目录下次打开时，其中的硬暂停队列项自动重新入队。
+    session.useDataDirectory(secondDataDirectory);
+    await eventually(() => {
+      expect(session.listRecognitionBatches()[0].items[0].status)
+        .toBe('awaiting_confirmation');
+    });
+    expect(request).toHaveBeenCalledTimes(3);
     expect(session.getOcrUsage().usage).toMatchObject({
-      totalCalls: 2,
-      succeededCalls: 2,
-      estimatedCostCents: 10,
+      totalCalls: 3,
+      succeededCalls: 3,
+      estimatedCostCents: 15,
     });
   });
 });
