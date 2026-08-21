@@ -14,6 +14,7 @@ import type {
 } from '../src/core/product-standardization';
 import { ControlledRecognizer } from '../src/adapters/recognition/controlled-recognizer';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { removeVersion45ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
@@ -1037,7 +1038,7 @@ describe('订单商品批量关联留痕迁移', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       verified.prepare(`
         INSERT INTO order_item_standardization_batch_events (
           id, batch_id, order_id, order_item_id,

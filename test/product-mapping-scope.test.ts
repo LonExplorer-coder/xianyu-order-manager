@@ -9,7 +9,7 @@ import { ControlledRecognizer } from '../src/adapters/recognition/controlled-rec
 import type { RecognitionResult } from '../src/core/contracts';
 import { normalizeProductText } from '../src/core/product-standardization';
 import { LocalApplication } from '../src/main/local-application';
-import { Workspace } from '../src/main/workspace';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION, Workspace } from '../src/main/workspace';
 import { removeVersion46ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
@@ -606,7 +606,7 @@ describe('商品映射三级适用范围', () => {
     const reopened = Workspace.open(dataDirectory);
     try {
       expect(reopened.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(reopened.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       reopened.close();

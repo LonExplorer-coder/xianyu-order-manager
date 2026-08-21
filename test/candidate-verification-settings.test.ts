@@ -12,6 +12,10 @@ import {
   type CandidateVerificationSettingsRepository,
 } from '../src/main/candidate-verification-settings';
 
+const immediatePaidOperation = {
+  runPaidOperation: <T>(operation: () => Promise<T>): Promise<T> => operation(),
+};
+
 class MemorySettingsRepository implements CandidateVerificationSettingsRepository {
   public constructor(public record: CandidateVerificationSettingsRecord | null = null) {}
 
@@ -535,12 +539,12 @@ describe('候选裁决设置', () => {
     );
 
     await expect(
-      service.testConnection({ consentToPaidCall: false }),
+      service.testConnection({ consentToPaidCall: false }, immediatePaidOperation),
     ).rejects.toThrow('请先确认本次测试会产生一次文本模型调用');
     expect(testConnection).not.toHaveBeenCalled();
 
     await expect(
-      service.testConnection({ consentToPaidCall: true }),
+      service.testConnection({ consentToPaidCall: true }, immediatePaidOperation),
     ).resolves.toEqual({
       ok: true,
       provider: 'aliyun-bailian',

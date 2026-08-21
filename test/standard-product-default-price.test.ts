@@ -11,6 +11,7 @@ import {
   normalizeUpdateStandardProductInput,
 } from '../src/core/product-standardization';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { removeVersion44ExtensionArtifacts } from './version31-fixture';
 
 const openedApplications: LocalApplication[] = [];
@@ -281,7 +282,7 @@ describe('修改标准商品默认订单单价', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       verified.prepare(`
         INSERT INTO standard_product_price_events (
           id, standard_product_id,

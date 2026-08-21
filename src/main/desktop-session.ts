@@ -84,6 +84,7 @@ import type {
   OcrUsageView,
   SaveOcrUsageQuotaInput,
 } from '../core/ocr-usage';
+import { OcrQuotaPausedError, OCR_QUOTA_PAUSED_CODE } from '../core/ocr-usage';
 import type {
   CandidateVerificationConnectionTestInput,
   CandidateVerificationConnectionTestResult,
@@ -148,7 +149,7 @@ import {
   type RecognitionBatchItemUpdate,
 } from './local-application';
 import { OcrSettingsService } from './ocr-settings';
-import { OcrUsageService } from './ocr-usage-service';
+import { OcrUsageService, type OcrUsageWorkspace } from './ocr-usage-service';
 import { CandidateVerificationSettingsService } from './candidate-verification-settings';
 import { Preferences } from './preferences';
 import { WorkspaceInUseError } from './workspace';
@@ -1224,7 +1225,7 @@ export class DesktopSession {
   public testOcrConnection(
     input: OcrConnectionTestInput,
   ): Promise<OcrConnectionTestResult> {
-    return this.ocrSettings.testConnection(input);
+    return this.ocrSettings.testConnection(input, this.currentOcrUsageWorkspace());
   }
 
   public getOcrUsage(): OcrUsageView {
@@ -1245,6 +1246,7 @@ export class DesktopSession {
 
   private replayRecognitionItemsPausedByQuota(): void {
     if (this.state.kind !== 'ready' || !this.application) return;
+    if (this.ocrUsage?.getView().hardPaused) return;
     const application = this.application;
     const generation = this.workspaceGeneration;
     for (const { batchId, itemId } of application.listRecognitionItemsPausedByQuota()) {
@@ -1295,7 +1297,14 @@ export class DesktopSession {
   public testCandidateVerificationConnection(
     input: CandidateVerificationConnectionTestInput,
   ): Promise<CandidateVerificationConnectionTestResult> {
-    return this.requireCandidateVerificationSettings().testConnection(input);
+    return this.requireCandidateVerificationSettings().testConnection(
+      input,
+      this.currentOcrUsageWorkspace(),
+    );
+  }
+
+  private currentOcrUsageWorkspace(): OcrUsageWorkspace {
+    return this.requireOcrUsage().forDataDirectory(this.requireApplication().dataDirectory);
   }
 
   public getOrderIntakeSettings(): OrderIntakeSettingsView {
@@ -1324,7 +1333,6 @@ export class DesktopSession {
     this.workspaceGeneration += 1;
     this.recognitionBatches.splice(0);
     this.seenSourceHashes.clear();
-    this.ocrUsage?.bindEventStore(null);
     if (this.application) this.retireApplication(this.application);
     this.application = undefined;
     this.state = { kind: 'needs_data_directory' };
@@ -1342,19 +1350,11 @@ export class DesktopSession {
     const previousApplication = this.application;
     const preserveCurrentWorkspace = this.state.kind === 'ready' &&
       previousApplication !== undefined;
-    this.ocrUsage?.bindEventStore(null);
     const application = new LocalApplication(this.recognizer, this.ocrUsage);
     try {
       this.validateDataDirectory(dataDirectory);
       if (!remember) assertRememberedDataDirectoryExists(dataDirectory);
       application.openDataDirectory(dataDirectory);
-      this.ocrUsage?.bindEventStore({
-        recordOcrUsageEvent: (event) => application.recordOcrUsageEvent(event),
-        queryOcrMonthlyUsage: (fromIso, toIso) =>
-          application.queryOcrMonthlyUsage(fromIso, toIso),
-        queryRecentOcrUsageEvents: (limit) =>
-          application.queryRecentOcrUsageEvents(limit),
-      });
       this.reconcilePendingOrderIntake(application);
       const recognitionBatches = application.restoreRecognitionBatches();
       const orders = application.listOrders();
@@ -1373,6 +1373,7 @@ export class DesktopSession {
         orders,
       };
       if (previousApplication) this.retireApplication(previousApplication);
+      this.replayRecognitionItemsPausedByQuota();
       for (const item of pendingRecognitionItems) {
         const retryAt = item.nextRetryAt ? Date.parse(item.nextRetryAt) : Number.NaN;
         const delay = Number.isFinite(retryAt)
@@ -1399,7 +1400,6 @@ export class DesktopSession {
       }
     } catch (error) {
       application.close();
-      this.ocrUsage?.bindEventStore(null);
       if (preserveCurrentWorkspace) {
         throw error instanceof Error ? error : new Error('无法打开数据目录');
       }
@@ -1597,6 +1597,9 @@ export class DesktopSession {
           errorMessage: isTemporary && !shouldRetry
             ? '已自动重试 5 次，服务仍不可用，请手动重试或改为人工录入'
             : userFacingRecognitionError(error),
+          ...(error instanceof OcrQuotaPausedError
+            ? { failureCode: OCR_QUOTA_PAUSED_CODE }
+            : {}),
           sha256: reservedHash,
           retryCount: isTemporary
             ? Math.min(nextRetryCount, MAX_AUTOMATIC_RECOGNITION_RETRIES)

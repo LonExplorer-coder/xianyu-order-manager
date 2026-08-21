@@ -7,6 +7,7 @@ import type {
   SaveOcrSettingsInput,
 } from '../core/ocr-settings';
 import { normalizeBailianWorkspaceId } from '../core/ocr-settings';
+import type { OcrPaidOperationRunner } from './ocr-usage-service';
 
 export type OcrSettingsRecord = {
   workspaceId: string;
@@ -46,7 +47,6 @@ export class OcrSettingsService {
     private readonly repository: OcrSettingsRepository,
     private readonly apiKeyStore: ApiKeyStore,
     private readonly connectionTester: BailianConnectionTester,
-    private readonly usageGate?: { assertCanProceed(): void },
   ) {}
 
   public async getSettings(): Promise<OcrSettingsView> {
@@ -96,6 +96,7 @@ export class OcrSettingsService {
 
   public async testConnection(
     input: OcrConnectionTestInput,
+    usage: OcrPaidOperationRunner,
   ): Promise<OcrConnectionTestResult> {
     if (input.consentToPaidCall !== true) {
       throw new Error('请先确认本次测试会产生一次 OCR 调用');
@@ -105,12 +106,12 @@ export class OcrSettingsService {
     const apiKey = await this.apiKeyStore.getApiKey();
     if (!apiKey) throw new Error('请先保存百炼 API Key');
 
-    this.usageGate?.assertCanProceed();
-    const result = await this.connectionTester.testConnection({
+    const test = () => this.connectionTester.testConnection({
       workspaceId: record.workspaceId,
       region: record.region,
       apiKey,
     });
+    const result = await usage.runPaidOperation(test);
     return {
       ok: true,
       model: result.model,

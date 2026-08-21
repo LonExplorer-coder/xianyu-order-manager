@@ -35,8 +35,8 @@ export class OcrUsageSettingsFile implements OcrUsageSettingsRepository {
         !isNonNegativeInteger(parsed.monthlyLimitCents) ||
         !isQuotaMode(parsed.mode) ||
         !isNonNegativeInteger(parsed.estimatedPricePerCallCents) ||
-        (parsed.pausedMonth !== null && typeof parsed.pausedMonth !== 'string') ||
-        (parsed.resumedMonth !== null && typeof parsed.resumedMonth !== 'string')
+        (parsed.pausedMonth !== null && !isMonthKey(parsed.pausedMonth)) ||
+        (parsed.resumedMonth !== null && !isMonthKey(parsed.resumedMonth))
       ) {
         throw new Error('invalid OCR usage settings');
       }
@@ -71,6 +71,10 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isQuotaMode(value: unknown): value is OcrQuotaMode {
   return value === 'remind' || value === 'hard_stop';
+}
+
+function isMonthKey(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-(?:0[1-9]|1[0-2])$/u.test(value);
 }
 
 function isMissingFile(error: unknown): boolean {

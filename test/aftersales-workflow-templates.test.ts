@@ -18,6 +18,7 @@ import {
   projectAftersalesWorkflowSteps,
 } from '../src/core/aftersales-workflow-templates';
 import { LocalApplication } from '../src/main/local-application';
+import { CURRENT_WORKSPACE_SCHEMA_VERSION } from '../src/main/workspace';
 import { removeVersion38ExtensionArtifacts, removeVersion50ExtensionArtifacts } from './version31-fixture';
 
 const applications: LocalApplication[] = [];
@@ -901,7 +902,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(() => verified.prepare(`
         UPDATE aftersales_workflow_template_versions
         SET definition_json = '{"name":"覆盖"}'
@@ -1262,7 +1263,7 @@ describe('售后流程模板', () => {
     const verified = new DatabaseSync(databasePath);
     try {
       expect(verified.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(verified.prepare(`
         SELECT definition_json FROM aftersales_workflow_template_versions
         WHERE template_id = ? AND version = 2
@@ -1683,7 +1684,7 @@ describe('售后流程模板', () => {
     const legacy = new DatabaseSync(databasePath);
     try {
       expect(legacy.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 62 });
+        .toEqual({ version: CURRENT_WORKSPACE_SCHEMA_VERSION });
       expect(legacy.prepare(`
         SELECT step_id, kind, reason, remaining_risk, workflow_template_id,
           workflow_template_version, occurred_at

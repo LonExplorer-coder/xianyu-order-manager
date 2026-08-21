@@ -19,6 +19,7 @@ import { Preferences } from './preferences';
 import { BackupSettingsFile } from './backup-settings-file';
 import { OcrUsageSettingsFile } from './ocr-usage-settings-file';
 import { OcrUsageService } from './ocr-usage-service';
+import { OcrUsageDatabase } from './ocr-usage-database';
 
 export function createConfiguredDesktopSession(input: {
   configDirectory: string;
@@ -27,13 +28,15 @@ export function createConfiguredDesktopSession(input: {
   request?: FetchLike;
   validateDataDirectory?: DataDirectoryValidator;
 }): DesktopSession {
-  const ocrUsage = new OcrUsageService(new OcrUsageSettingsFile(input.configDirectory));
+  const ocrUsage = new OcrUsageService(
+    new OcrUsageSettingsFile(input.configDirectory),
+    new OcrUsageDatabase(input.configDirectory),
+  );
   const client = new BailianOcrClient(input.request, { onOcrCall: ocrUsage });
   const ocrSettings = new OcrSettingsService(
     new OcrSettingsFile(input.configDirectory),
     input.apiKeyStore,
     client,
-    ocrUsage,
   );
   const candidateVerificationSettings = new CandidateVerificationSettingsService(
     new CandidateVerificationSettingsFile(input.configDirectory),
@@ -49,7 +52,6 @@ export function createConfiguredDesktopSession(input: {
         return { model: result.model };
       },
     },
-    ocrUsage,
   );
   const recognizer = new ConfiguredBailianRecognizer(
     ocrSettings,

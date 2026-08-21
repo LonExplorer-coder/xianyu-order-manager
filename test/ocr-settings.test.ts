@@ -12,6 +12,10 @@ import {
   type OcrSettingsRepository,
 } from '../src/main/ocr-settings';
 
+const immediatePaidOperation = {
+  runPaidOperation: <T>(operation: () => Promise<T>): Promise<T> => operation(),
+};
+
 class MemorySettingsRepository implements OcrSettingsRepository {
   public constructor(public record: OcrSettingsRecord | null = null) {}
 
@@ -244,11 +248,14 @@ describe('OCR 设置', () => {
     );
 
     await expect(
-      service.testConnection({ consentToPaidCall: false }),
+      service.testConnection({ consentToPaidCall: false }, immediatePaidOperation),
     ).rejects.toThrow('请先确认本次测试会产生一次 OCR 调用');
     expect(testConnection).not.toHaveBeenCalled();
 
-    const result = await service.testConnection({ consentToPaidCall: true });
+    const result = await service.testConnection(
+      { consentToPaidCall: true },
+      immediatePaidOperation,
+    );
 
     expect(testConnection).toHaveBeenCalledWith({
       workspaceId: 'ws-explicit',

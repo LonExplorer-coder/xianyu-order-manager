@@ -4,6 +4,18 @@ export type OcrCallOutcome = 'success' | 'failure';
 
 export type OcrQuotaMode = 'remind' | 'hard_stop';
 
+export const OCR_QUOTA_PAUSED_CODE = 'ocr_quota_paused';
+export type OcrUsageFailureCode = typeof OCR_QUOTA_PAUSED_CODE;
+
+export class OcrQuotaPausedError extends Error {
+  public readonly code = OCR_QUOTA_PAUSED_CODE;
+
+  public constructor(options?: ErrorOptions) {
+    super('本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续', options);
+    this.name = 'OcrQuotaPausedError';
+  }
+}
+
 export const DEFAULT_OCR_MONTHLY_LIMIT_CENTS = 1_000;
 export const DEFAULT_OCR_ESTIMATED_PRICE_PER_CALL_CENTS = 5;
 
@@ -30,6 +42,8 @@ export type OcrCallRecorded = {
 
 export type OcrUsageEventRecord = Omit<OcrCallRecorded, 'occurredAt'> & {
   id: string;
+  /** 由数据目录绝对路径计算的不可逆指纹。 */
+  workspaceKey: string;
   /** ISO 毫秒时间；事件记录由服务层保证必有值。 */
   occurredAt: string;
   /** 成功调用按当时单价估算的费用，分；失败调用为 0。 */
