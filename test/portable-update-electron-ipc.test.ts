@@ -22,7 +22,9 @@ vi.mock('electron', () => ({
     getVersion: vi.fn(() => '0.2.68'),
     getPath: vi.fn((name: string) => {
       if (name === 'exe') {
-        return '/Applications/XianyuOrderManager.app/Contents/MacOS/XianyuOrderManager';
+        return process.platform === 'win32'
+          ? 'C:\\Portable\\XianyuOrderManager\\XianyuOrderManager.exe'
+          : '/Applications/XianyuOrderManager.app/Contents/MacOS/XianyuOrderManager';
       }
       if (name === 'documents') return '/Users/test/Documents';
       return '/Users/test/Library/Application Support/闲鱼订单管理';
@@ -85,9 +87,9 @@ describe('便携版更新 Electron IPC', () => {
 
     expect(createBackup).toHaveBeenCalledWith(backupRoot, '0.2.68');
     expect(launchUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      platform: 'darwin',
+      platform: process.platform,
       version: '0.3.0',
-      archivePath: join(archiveRoot, 'XianyuOrderManager-darwin-arm64-0.3.0.zip'),
+      archivePath: join(archiveRoot, downloaded.candidate!.archiveFile),
       backupDirectory: join(backupRoot, 'backup-1'),
     }));
     expect(applied).toEqual({
@@ -150,6 +152,8 @@ function fakeUpdateService(members: Record<string, unknown>): PortableUpdateServ
 }
 
 function updateView(status: 'idle' | 'available' | 'downloaded') {
+  const platform = process.platform === 'win32' ? 'win32' : 'darwin';
+  const architecture = process.platform === 'win32' ? 'x64' : 'arm64';
   const candidate = status === 'idle' ? null : {
     id: 'candidate-id',
     version: '0.3.0',
@@ -157,7 +161,7 @@ function updateView(status: 'idle' | 'available' | 'downloaded') {
     releaseNotes: '更新说明',
     publishedAt: '2026-08-22T02:00:00.000Z',
     releaseUrl: 'https://github.com/LonExplorer-coder/xianyu-order-manager/releases/tag/v0.3.0',
-    archiveFile: 'XianyuOrderManager-darwin-arm64-0.3.0.zip',
+    archiveFile: `XianyuOrderManager-${platform}-${architecture}-0.3.0.zip`,
     archiveBytes: 1024,
   };
   return {

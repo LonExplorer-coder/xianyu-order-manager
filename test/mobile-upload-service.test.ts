@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -22,7 +22,7 @@ describe('手机上传会话', () => {
     const received: Array<Array<{ name: string; content: string }>> = [];
     const submitSourceScreenshots = vi.fn(async (paths: string[]) => {
       received.push(await Promise.all(paths.map(async (path) => ({
-        name: path.split('/').at(-1) ?? '',
+        name: basename(path),
         content: await readFile(path, 'utf8'),
       }))));
       return {
@@ -30,7 +30,7 @@ describe('手机上传会话', () => {
         items: paths.map((path, index) => ({
           id: `item-${index + 1}`,
           batchId: 'mobile-batch-1',
-          sourceName: path.split('/').at(-1) ?? '',
+          sourceName: basename(path),
           status: 'waiting_recognition' as const,
           retryCount: 0,
         })),
