@@ -27,10 +27,19 @@ const config: ForgeConfig = {
         try {
           copyKeyringRuntime(buildPath, platform, arch);
           copySharpRuntime(buildPath, platform, arch);
-          writeWindowsPortableProgramMarker(buildPath, platform);
           callback();
         } catch (error) {
           callback(error instanceof Error ? error : new Error('无法复制系统凭据运行库'));
+        }
+      },
+    ],
+    afterComplete: [
+      (buildPath, _electronVersion, platform, _arch, callback) => {
+        try {
+          writeWindowsPortableProgramMarker(buildPath, platform);
+          callback();
+        } catch (error) {
+          callback(error instanceof Error ? error : new Error('无法记录 Windows 便携程序目录'));
         }
       },
     ],
