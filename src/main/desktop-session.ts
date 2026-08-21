@@ -85,6 +85,7 @@ import type {
   SaveOcrUsageQuotaInput,
 } from '../core/ocr-usage';
 import {
+  SOURCE_SCREENSHOT_BATCH_MAX_FILES,
   SOURCE_SCREENSHOT_EXTENSIONS,
   SOURCE_SCREENSHOT_MAX_BYTES,
 } from '../core/source-screenshots';
@@ -341,22 +342,27 @@ export class DesktopSession {
     }
   }
 
-  public submitSourceScreenshots(sourcePaths: string[]): Promise<RecognitionBatchView> {
+  public submitSourceScreenshots(
+    sourcePaths: string[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<RecognitionBatchView> {
     if (sourcePaths.length === 0) {
       throw new Error('请至少选择 1 张来源截图');
     }
-    if (sourcePaths.length > 50) {
+    if (sourcePaths.length > SOURCE_SCREENSHOT_BATCH_MAX_FILES) {
       throw new Error(
-        `一次最多选择 50 张，当前选择了 ${sourcePaths.length} 张，请重新选择`,
+        `一次最多选择 ${SOURCE_SCREENSHOT_BATCH_MAX_FILES} 张，当前选择了 ${sourcePaths.length} 张，请重新选择`,
       );
     }
 
-    return this.stageAndSubmitSourceScreenshots(sourcePaths);
+    return this.stageAndSubmitSourceScreenshots(sourcePaths, options.signal);
   }
 
   private async stageAndSubmitSourceScreenshots(
     sourcePaths: string[],
+    signal?: AbortSignal,
   ): Promise<RecognitionBatchView> {
+    assertScreenshotSubmissionActive(signal);
     const batchId = randomUUID();
     const applicationState = this.getState();
     if (applicationState.kind !== 'ready') {
@@ -367,6 +373,7 @@ export class DesktopSession {
     this.retainApplicationWork(application);
     try {
       for (const sourcePath of sourcePaths) {
+        assertScreenshotSubmissionActive(signal);
         await validateSourceForStaging(sourcePath);
       }
       const itemIds = sourcePaths.map(() => randomUUID());
@@ -379,6 +386,7 @@ export class DesktopSession {
       try {
         stagedPaths = [];
         for (const [index, sourcePath] of sourcePaths.entries()) {
+          assertScreenshotSubmissionActive(signal);
           const itemDirectory = join(stagingBatchDirectory, itemIds[index]);
           await mkdir(itemDirectory, { recursive: true });
           const stagedPath = join(itemDirectory, basename(sourcePath));
@@ -391,6 +399,7 @@ export class DesktopSession {
         throw new Error('无法接收所选来源截图，请确认文件仍存在且可访问');
       }
       if (
+        signal?.aborted ||
         generation !== this.workspaceGeneration ||
         application !== this.application
       ) {
@@ -412,6 +421,7 @@ export class DesktopSession {
         createdAt: new Date().toISOString(),
       };
       try {
+        assertScreenshotSubmissionActive(signal);
         application.createRecognitionBatch({
           id: batch.id,
           createdAt: batch.createdAt,
@@ -1887,6 +1897,12 @@ export class DesktopSession {
       status: 'awaiting_confirmation',
       draft: application.saveDraftReviewIssues(draft.id, reviewIssues),
     };
+  }
+}
+
+function assertScreenshotSubmissionActive(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error('来源截图接收已取消，未加入识别批次');
   }
 }
 

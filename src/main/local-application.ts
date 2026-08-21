@@ -32,6 +32,7 @@ import type {
   SourceSnapshot,
 } from '../core/contracts';
 import {
+  SOURCE_SCREENSHOT_BATCH_MAX_FILES,
   SOURCE_SCREENSHOT_MAX_BYTES,
   SOURCE_SCREENSHOT_MIME_BY_EXTENSION,
 } from '../core/source-screenshots';
@@ -1019,9 +1020,9 @@ export class LocalApplication {
     if (sourcePaths.length === 0) {
       throw new Error('请至少选择 1 张来源截图');
     }
-    if (sourcePaths.length > 50) {
+    if (sourcePaths.length > SOURCE_SCREENSHOT_BATCH_MAX_FILES) {
       throw new Error(
-        `一次最多选择 50 张，当前选择了 ${sourcePaths.length} 张，请重新选择`,
+        `一次最多选择 ${SOURCE_SCREENSHOT_BATCH_MAX_FILES} 张，当前选择了 ${sourcePaths.length} 张，请重新选择`,
       );
     }
     const batchId = randomUUID();

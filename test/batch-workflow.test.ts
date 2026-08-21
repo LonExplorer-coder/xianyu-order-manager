@@ -2153,6 +2153,24 @@ describe('批量来源截图识别队列', () => {
     expect(recognize).toHaveBeenCalledTimes(51);
   });
 
+  it('来源截图接收被取消时不建立识别批次或持久化队列', async () => {
+    const recognize = vi.fn<Recognizer['recognize']>();
+    const session = await openSession({ recognize });
+    const root = await mkdtemp(join(tmpdir(), 'xianyu-batch-aborted-intake-'));
+    const sourcePath = join(root, '已取消接收.png');
+    await writeFile(sourcePath, 'aborted-intake');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(session.submitSourceScreenshots(
+      [sourcePath],
+      { signal: controller.signal },
+    )).rejects.toThrow('来源截图接收已取消');
+
+    expect(session.listRecognitionBatches()).toEqual([]);
+    expect(recognize).not.toHaveBeenCalled();
+  });
+
   it('立即返回批次，并在同一桌面会话中跨批次串行识别', async () => {
     const pending: Array<{
       resolve: (attempt: Awaited<ReturnType<Recognizer['recognize']>>) => void;

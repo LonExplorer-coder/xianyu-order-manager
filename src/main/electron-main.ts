@@ -1701,9 +1701,9 @@ export function startElectronApplication(): void {
     });
     session.restore();
     mobileUploadService = new MobileUploadService({
-      submitSourceScreenshots: (paths) => {
+      submitSourceScreenshots: (paths, options) => {
         if (!session) throw new Error('应用会话尚未就绪');
-        return session.submitSourceScreenshots(paths);
+        return session.submitSourceScreenshots(paths, options);
       },
       getStagingRootDirectory: () => {
         const state = session?.getState();

@@ -10,22 +10,25 @@ import QRCode from 'qrcode';
 
 import type { RecognitionBatchView } from '../core/contracts';
 import {
-  MOBILE_UPLOAD_MAX_FILES,
   MOBILE_UPLOAD_SESSION_DURATION_MS,
   type MobileUploadSessionView,
   type MobileUploadStatus,
 } from '../core/mobile-upload';
 import {
+  SOURCE_SCREENSHOT_BATCH_MAX_FILES,
   SOURCE_SCREENSHOT_MAX_BYTES,
   SOURCE_SCREENSHOT_MIME_BY_EXTENSION,
 } from '../core/source-screenshots';
 const COOKIE_NAME = 'xianyu_mobile_upload';
 const MAX_AUTHORIZATION_BODY_BYTES = 1_024;
 const MAX_MULTIPART_BODY_BYTES = (
-  MOBILE_UPLOAD_MAX_FILES * SOURCE_SCREENSHOT_MAX_BYTES
+  SOURCE_SCREENSHOT_BATCH_MAX_FILES * SOURCE_SCREENSHOT_MAX_BYTES
 ) + (2 * 1024 * 1024);
 
-type SubmitSourceScreenshots = (paths: string[]) => Promise<RecognitionBatchView>;
+type SubmitSourceScreenshots = (
+  paths: string[],
+  options: { signal: AbortSignal },
+) => Promise<RecognitionBatchView>;
 
 interface MobileUploadServiceOptions {
   submitSourceScreenshots: SubmitSourceScreenshots;
@@ -46,6 +49,7 @@ interface ActiveMobileUploadSession {
   view: MobileUploadSessionView;
   expiryTimer: NodeJS.Timeout;
   stagingRootDirectory: string;
+  abortController: AbortController;
 }
 
 export class MobileUploadService {
@@ -57,6 +61,7 @@ export class MobileUploadService {
   private readonly now: () => Date;
   private readonly sessionDurationMs: number;
   private active: ActiveMobileUploadSession | null = null;
+  private lifecycle: Promise<void> = Promise.resolve();
 
   public constructor(options: MobileUploadServiceOptions) {
     this.submitSourceScreenshots = options.submitSourceScreenshots;
@@ -73,13 +78,18 @@ export class MobileUploadService {
   }
 
   public async start(): Promise<MobileUploadSessionView> {
+    return this.runLifecycle(() => this.startUnlocked());
+  }
+
+  private async startUnlocked(): Promise<MobileUploadSessionView> {
     if (this.active && !this.isExpired(this.active)) return { ...this.active.view };
-    if (this.active) await this.stop();
+    if (this.active) await this.stopUnlocked();
 
     const host = this.selectHost();
     const token = this.createSecret(48);
     const accessCode = this.createSecret(6, '0123456789');
     const browserToken = this.createSecret(32);
+    const abortController = new AbortController();
     const expiresAtMs = this.now().getTime() + this.sessionDurationMs;
     const stagingRootDirectory = resolve(this.getStagingRootDirectory());
     await rm(stagingRootDirectory, { recursive: true, force: true });
@@ -147,6 +157,7 @@ export class MobileUploadService {
       view,
       expiryTimer,
       stagingRootDirectory,
+      abortController,
     };
     return { ...view };
   }
@@ -161,9 +172,14 @@ export class MobileUploadService {
   }
 
   public async stop(): Promise<void> {
+    return this.runLifecycle(() => this.stopUnlocked());
+  }
+
+  private async stopUnlocked(): Promise<void> {
     const current = this.active;
     this.active = null;
     if (!current) return;
+    current.abortController.abort();
     clearTimeout(current.expiryTimer);
     current.server.closeAllConnections();
     await new Promise<void>((resolve) => {
@@ -273,7 +289,9 @@ export class MobileUploadService {
       if (this.active !== current || this.isExpired(current)) {
         throw new MobileUploadHttpError(401, '手机上传未授权');
       }
-      const batch = await this.submitSourceScreenshots(paths);
+      const batch = await this.submitSourceScreenshots(paths, {
+        signal: current.abortController.signal,
+      });
       this.sendHtml(response, 201, uploadSuccessPage(batch));
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -308,6 +326,12 @@ export class MobileUploadService {
 
   private sendNotFound(response: ServerResponse): void {
     this.sendText(response, 404, '页面不存在');
+  }
+
+  private runLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycle.then(operation, operation);
+    this.lifecycle = result.then(() => undefined, () => undefined);
+    return result;
   }
 }
 
@@ -357,9 +381,9 @@ async function parseMultipartImages(
       defParamCharset: 'utf8',
       limits: {
         fileSize: SOURCE_SCREENSHOT_MAX_BYTES,
-        files: MOBILE_UPLOAD_MAX_FILES,
+        files: SOURCE_SCREENSHOT_BATCH_MAX_FILES,
         fields: 0,
-        parts: MOBILE_UPLOAD_MAX_FILES,
+        parts: SOURCE_SCREENSHOT_BATCH_MAX_FILES,
         headerPairs: 100,
       },
     });
@@ -405,7 +429,7 @@ async function parseMultipartImages(
     failure ??= new MobileUploadHttpError(413, '一次最多上传 50 张来源截图');
   });
   parser.once('partsLimit', () => {
-    if (fileCount >= MOBILE_UPLOAD_MAX_FILES) {
+    if (fileCount >= SOURCE_SCREENSHOT_BATCH_MAX_FILES) {
       failure ??= new MobileUploadHttpError(413, '一次最多上传 50 张来源截图');
     }
   });
@@ -528,7 +552,7 @@ function authorizationPage(token: string): string {
 
 function uploadPage(expiresAtMs: number): string {
   return page('上传来源截图', `<h1>上传来源截图</h1>
-<p>选择 1–50 张包含完整闲鱼订单详情的 PNG、JPG、JPEG 或 WebP 图片；单张不超过 7.5 MB。</p>
+<p>选择 1–${SOURCE_SCREENSHOT_BATCH_MAX_FILES} 张包含完整闲鱼订单详情的 PNG、JPG、JPEG 或 WebP 图片；单张不超过 7.5 MB。</p>
 <form method="post" action="/upload" enctype="multipart/form-data">
 <label for="screenshots">来源截图</label>
 <input id="screenshots" name="screenshots" type="file" accept="image/png,image/jpeg,image/webp" multiple required>

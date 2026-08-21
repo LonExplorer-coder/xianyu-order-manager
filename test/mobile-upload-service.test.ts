@@ -266,6 +266,85 @@ describe('手机上传会话', () => {
     expect(submitSourceScreenshots).not.toHaveBeenCalled();
     expect(service.getStatus()).toEqual({ enabled: false });
   });
+
+  it('立即关闭会中止仍在提交阶段的来源截图接收', async () => {
+    let submissionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      submissionStarted = resolve;
+    });
+    let persisted = false;
+    let observedSignal: AbortSignal | undefined;
+    const submitSourceScreenshots = vi.fn(async (
+      _paths: string[],
+      options: { signal: AbortSignal },
+    ) => {
+      observedSignal = options.signal;
+      submissionStarted();
+      await new Promise<void>((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true,
+        });
+      });
+      persisted = true;
+      throw new Error('不应到达');
+    });
+    const service = new MobileUploadService({
+      submitSourceScreenshots,
+      getStagingRootDirectory: await stagingRoot(),
+      selectHost: () => '127.0.0.1',
+      createSecret: deterministicSecrets(
+        '8899aabbccddeeff00112233445566778899aabbccddeeff',
+        '445566',
+        'authorized-browser-token',
+      ),
+      createQrDataUrl: async () => 'data:image/png;base64,cXI=',
+    });
+    services.push(service);
+    const session = await service.start();
+    const cookie = await authorize(session.url, session.accessCode);
+    const form = new FormData();
+    form.append('screenshots', new Blob(['image'], { type: 'image/png' }), '订单.png');
+    const uploading = fetch(new URL('/upload', session.url), {
+      method: 'POST', headers: { cookie }, body: form,
+    }).catch((error: unknown) => error);
+
+    await started;
+    await service.stop();
+    await uploading;
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(persisted).toBe(false);
+    expect(service.getStatus()).toEqual({ enabled: false });
+  });
+
+  it('到期自动关闭与立即重开串行完成，不会由旧清理删除新会话暂存目录', async () => {
+    let now = new Date('2026-08-21T08:00:00.000Z');
+    const service = new MobileUploadService({
+      submitSourceScreenshots: vi.fn(),
+      getStagingRootDirectory: await stagingRoot(),
+      selectHost: () => '127.0.0.1',
+      createSecret: deterministicSecrets(
+        '111122223333444455556666777788889999aaaabbbbcccc',
+        '123456',
+        'first-browser-token',
+        'ddddeeeeffff000011112222333344445555666677778888',
+        '654321',
+        'second-browser-token',
+      ),
+      createQrDataUrl: async () => 'data:image/png;base64,cXI=',
+      now: () => now,
+    });
+    services.push(service);
+    await service.start();
+    now = new Date('2026-08-21T08:10:01.000Z');
+
+    expect(service.getStatus()).toEqual({ enabled: false });
+    const restarted = await service.start();
+
+    expect(restarted.enabled).toBe(true);
+    expect(restarted.accessCode).toBe('654321');
+    expect((await fetch(restarted.url)).status).toBe(200);
+  });
 });
 
 async function authorize(url: string, accessCode: string): Promise<string> {
