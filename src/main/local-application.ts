@@ -8344,6 +8344,8 @@ export class LocalApplication {
           screenshots.mime_type,
           screenshots.content_sha256,
           screenshots.created_at AS screenshot_created_at,
+          screenshots.storage_state AS screenshot_storage_state,
+          screenshots.current_bytes AS screenshot_current_bytes,
           snapshots.id AS snapshot_id,
           snapshots.source_type,
           snapshots.source_name,
@@ -8385,6 +8387,10 @@ export class LocalApplication {
             mimeType: asString(sourceRow.mime_type),
             sha256: asString(sourceRow.content_sha256),
             createdAt: asString(sourceRow.screenshot_created_at),
+            storageState: asSourceScreenshotStorageState(
+              sourceRow.screenshot_storage_state,
+            ),
+            currentBytes: asNullableNumber(sourceRow.screenshot_current_bytes),
           } satisfies SourceScreenshot,
         sourceSnapshot: {
           id: asString(sourceRow.snapshot_id),
@@ -8571,9 +8577,16 @@ export class LocalApplication {
   }> {
     const workspace = this.requireWorkspace();
     const row = workspace.database
-      .prepare('SELECT original_name, relative_path, mime_type FROM source_screenshots WHERE id = ?')
+      .prepare(`
+        SELECT original_name, relative_path, mime_type, storage_state
+        FROM source_screenshots
+        WHERE id = ?
+      `)
       .get(screenshotId) as SqlRow | undefined;
     if (!row) throw new Error('未找到来源截图');
+    if (asSourceScreenshotStorageState(row.storage_state) === 'deleted') {
+      throw new Error('来源截图已清理');
+    }
     return {
       bytes: await readFile(workspace.resolveStoredPath(asString(row.relative_path))),
       mimeType: asString(row.mime_type),
@@ -10958,4 +10971,11 @@ function validateShanghaiDateTimePair(
   if (normalized !== expected) {
     throw new Error(`规范化${label}与原文不一致`);
   }
+}
+
+function asSourceScreenshotStorageState(
+  value: string | number | null | undefined,
+): 'original' | 'compressed' | 'deleted' {
+  if (value === 'original' || value === 'compressed' || value === 'deleted') return value;
+  throw new Error('数据库来源截图存储状态格式错误');
 }

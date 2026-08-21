@@ -16,6 +16,24 @@ const api: DesktopApi = {
   getMobileUploadStatus: () => ipcRenderer.invoke('mobile-upload:get-status'),
   startMobileUpload: () => ipcRenderer.invoke('mobile-upload:start'),
   stopMobileUpload: () => ipcRenderer.invoke('mobile-upload:stop'),
+  getSourceScreenshotLifecycleSettings: () => (
+    ipcRenderer.invoke('source-screenshots:get-lifecycle-settings')
+  ),
+  saveSourceScreenshotLifecycleSettings: (input) => (
+    ipcRenderer.invoke('source-screenshots:save-lifecycle-settings', input)
+  ),
+  previewSourceScreenshotCleanup: () => (
+    ipcRenderer.invoke('source-screenshots:preview-cleanup')
+  ),
+  confirmSourceScreenshotCleanup: (previewToken) => (
+    ipcRenderer.invoke('source-screenshots:confirm-cleanup', previewToken)
+  ),
+  previewSingleSourceScreenshotDelete: (screenshotId) => (
+    ipcRenderer.invoke('source-screenshots:preview-single-delete', screenshotId)
+  ),
+  deleteSourceScreenshot: (screenshotId) => (
+    ipcRenderer.invoke('source-screenshots:delete', screenshotId)
+  ),
   selectSourceScreenshots: () => ipcRenderer.invoke('workflow:select-source-screenshots'),
   listRecognitionBatches: () => ipcRenderer.invoke('workflow:list-recognition-batches'),
   retryRecognitionItem: (batchId, itemId) => (

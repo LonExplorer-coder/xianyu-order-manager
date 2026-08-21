@@ -23,6 +23,7 @@ export function removeVersion62ExtensionArtifacts(database: DatabaseSync): void 
 }
 
 function removeVersion63ExtensionArtifacts(database: DatabaseSync): void {
+  removeVersion64ExtensionArtifacts(database);
   const applied = database.prepare(
     'SELECT 1 FROM schema_migrations WHERE version = 63',
   ).get();
@@ -31,6 +32,18 @@ function removeVersion63ExtensionArtifacts(database: DatabaseSync): void {
     DROP TRIGGER IF EXISTS recognition_batch_items_clear_failure_code;
     DROP TABLE IF EXISTS recognition_batch_item_failure_codes;
     DELETE FROM schema_migrations WHERE version = 63;
+  `);
+}
+
+function removeVersion64ExtensionArtifacts(database: DatabaseSync): void {
+  const applied = database.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 64',
+  ).get();
+  if (!applied) return;
+  database.exec(`
+    DROP INDEX IF EXISTS source_screenshots_by_storage_state_and_created_at;
+    DROP TABLE IF EXISTS source_screenshot_lifecycle_settings;
+    DELETE FROM schema_migrations WHERE version = 64;
   `);
 }
 

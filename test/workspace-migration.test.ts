@@ -1158,6 +1158,7 @@ describe('数据库升级', () => {
       { version: 60 },
       { version: 61 },
       { version: 62 },
+      { version: 63 },
       { version: CURRENT_WORKSPACE_SCHEMA_VERSION },
     ]);
     first.database.exec('SAVEPOINT verify_fulfillment_v25;');
@@ -1647,6 +1648,7 @@ describe('数据库升级', () => {
       { version: 60 },
       { version: 61 },
       { version: 62 },
+      { version: 63 },
       { version: CURRENT_WORKSPACE_SCHEMA_VERSION },
     ]);
     expect(
@@ -1935,6 +1937,7 @@ describe('数据库升级', () => {
         { version: 60 },
         { version: 61 },
         { version: 62 },
+        { version: 63 },
         { version: CURRENT_WORKSPACE_SCHEMA_VERSION },
       ]);
       expect(workspace.database.prepare(`

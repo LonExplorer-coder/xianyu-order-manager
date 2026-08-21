@@ -206,6 +206,12 @@ import type {
   RecipientSummaryView,
 } from './recipients';
 import type { MobileUploadSessionView, MobileUploadStatus } from './mobile-upload';
+import type {
+  SourceScreenshotCleanupPreview,
+  SourceScreenshotCleanupResult,
+  SourceScreenshotLifecycleSettings,
+  SourceScreenshotSingleDeletePreview,
+} from './source-screenshot-lifecycle';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -227,6 +233,16 @@ export interface DesktopApi {
   getMobileUploadStatus(): Promise<MobileUploadStatus>;
   startMobileUpload(): Promise<MobileUploadSessionView>;
   stopMobileUpload(): Promise<MobileUploadStatus>;
+  getSourceScreenshotLifecycleSettings(): Promise<SourceScreenshotLifecycleSettings>;
+  saveSourceScreenshotLifecycleSettings(
+    input: SourceScreenshotLifecycleSettings,
+  ): Promise<SourceScreenshotLifecycleSettings>;
+  previewSourceScreenshotCleanup(): Promise<SourceScreenshotCleanupPreview>;
+  confirmSourceScreenshotCleanup(previewToken: string): Promise<SourceScreenshotCleanupResult>;
+  previewSingleSourceScreenshotDelete(
+    screenshotId: string,
+  ): Promise<SourceScreenshotSingleDeletePreview>;
+  deleteSourceScreenshot(screenshotId: string): Promise<SourceScreenshotCleanupResult>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;

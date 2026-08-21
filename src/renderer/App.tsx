@@ -55,6 +55,10 @@ import type {
   SaveBackupSettingsInput,
 } from '../core/backup';
 import type { MobileUploadStatus } from '../core/mobile-upload';
+import type {
+  SourceScreenshotCleanupPreview,
+  SourceScreenshotLifecycleSettings,
+} from '../core/source-screenshot-lifecycle';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
 import type {
@@ -1176,7 +1180,8 @@ export function App({ api }: AppProps) {
     setOperationError('');
     try {
       const details = await api.getOrder(orderId);
-      const screenshotUrl = details.sourceScreenshot
+      const screenshotUrl = details.sourceScreenshot &&
+        details.sourceScreenshot.storageState !== 'deleted'
         ? await api.getScreenshotDataUrl(details.sourceScreenshot.id)
         : '';
       if (requestVersion !== detailSourceRequestVersion.current) return;
@@ -1205,7 +1210,8 @@ export function App({ api }: AppProps) {
         sourceSnapshot.id === sourceSnapshotId
       ));
       if (!source) throw new Error('未找到来源快照');
-      const screenshotUrl = source.sourceScreenshot
+      const screenshotUrl = source.sourceScreenshot &&
+        source.sourceScreenshot.storageState !== 'deleted'
         ? await api.getScreenshotDataUrl(source.sourceScreenshot.id)
         : '';
       if (requestVersion !== detailSourceRequestVersion.current) return;
@@ -1219,6 +1225,23 @@ export function App({ api }: AppProps) {
       if (requestVersion === detailSourceRequestVersion.current) {
         setBusyAction(null);
       }
+    }
+  }
+
+  async function deleteDetailSourceScreenshot(screenshotId: string) {
+    if (!orderDetails) return;
+    setBusyAction('detail');
+    setOperationError('');
+    try {
+      await api.deleteSourceScreenshot(screenshotId);
+      const details = await api.getOrder(orderDetails.order.id);
+      setOrderDetails(details);
+      setDetailScreenshotUrl('');
+    } catch (error) {
+      setOperationError(errorMessage(error));
+      throw error;
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -1558,6 +1581,7 @@ export function App({ api }: AppProps) {
         onBack={() => leaveOrderDetails(() => undefined)}
         onDirtyChange={setDetailDirtyKind}
         onSelectSource={(screenshotId) => void selectDetailSource(screenshotId)}
+        onDeleteSourceScreenshot={deleteDetailSourceScreenshot}
         onSaveCustomFieldValues={saveOrderCustomFieldValues}
         onUpdateOrder={updateExistingOrder}
         onUpdatePlatformTransactionStatus={updateOrderPlatformTransactionStatus}
@@ -7424,6 +7448,13 @@ function SettingsWorkspace({
   const [mobileUploadBusy, setMobileUploadBusy] = useState(false);
   const [mobileUploadFeedback, setMobileUploadFeedback] =
     useState<SettingsFeedback>(null);
+  const [screenshotLifecycleSettings, setScreenshotLifecycleSettings] =
+    useState<SourceScreenshotLifecycleSettings | null>(null);
+  const [screenshotLifecycleBusy, setScreenshotLifecycleBusy] = useState(false);
+  const [screenshotLifecycleFeedback, setScreenshotLifecycleFeedback] =
+    useState<SettingsFeedback>(null);
+  const [screenshotCleanupPreview, setScreenshotCleanupPreview] =
+    useState<SourceScreenshotCleanupPreview | null>(null);
   const [backupBusy, setBackupBusy] = useState<'create' | 'verify' | 'restore' | null>(null);
   const [backupFeedback, setBackupFeedback] = useState<SettingsFeedback>(null);
   const [autoBackupSettings, setAutoBackupSettings] = useState<BackupSettingsView | null>(null);
@@ -7494,6 +7525,25 @@ function SettingsWorkspace({
       })
       .finally(() => {
         if (active) setCandidateBusy(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, reloadToken]);
+
+  useEffect(() => {
+    let active = true;
+    setScreenshotLifecycleSettings(null);
+    setScreenshotLifecycleFeedback(null);
+    setScreenshotCleanupPreview(null);
+    void api.getSourceScreenshotLifecycleSettings()
+      .then((value) => {
+        if (active) setScreenshotLifecycleSettings(value);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setScreenshotLifecycleFeedback({ kind: 'error', message: errorMessage(error) });
+        }
       });
     return () => {
       active = false;
@@ -7580,6 +7630,62 @@ function SettingsWorkspace({
       setMobileUploadFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setMobileUploadBusy(false);
+    }
+  }
+
+  async function saveScreenshotCleanupPolicy(value: string) {
+    const cleanupAfterDays = value === '' ? null : Number(value);
+    if (cleanupAfterDays !== null && cleanupAfterDays !== 180 && cleanupAfterDays !== 365) {
+      return;
+    }
+    setScreenshotLifecycleBusy(true);
+    setScreenshotLifecycleFeedback(null);
+    setScreenshotCleanupPreview(null);
+    try {
+      const saved = await api.saveSourceScreenshotLifecycleSettings({ cleanupAfterDays });
+      setScreenshotLifecycleSettings(saved);
+      setScreenshotLifecycleFeedback({ kind: 'success', message: '来源截图清理策略已保存' });
+    } catch (error) {
+      setScreenshotLifecycleFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setScreenshotLifecycleBusy(false);
+    }
+  }
+
+  async function previewScreenshotCleanup() {
+    setScreenshotLifecycleBusy(true);
+    setScreenshotLifecycleFeedback(null);
+    try {
+      const preview = await api.previewSourceScreenshotCleanup();
+      setScreenshotCleanupPreview(preview);
+      if (preview.candidateCount === 0) {
+        setScreenshotLifecycleFeedback({ kind: 'success', message: '当前没有达到清理年龄的来源截图' });
+      }
+    } catch (error) {
+      setScreenshotLifecycleFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setScreenshotLifecycleBusy(false);
+    }
+  }
+
+  async function confirmScreenshotCleanup() {
+    if (!screenshotCleanupPreview?.previewToken) return;
+    setScreenshotLifecycleBusy(true);
+    setScreenshotLifecycleFeedback(null);
+    try {
+      const result = await api.confirmSourceScreenshotCleanup(
+        screenshotCleanupPreview.previewToken,
+      );
+      setScreenshotCleanupPreview(null);
+      setScreenshotLifecycleFeedback({
+        kind: 'success',
+        message: `已清理 ${result.deletedCount} 张来源截图，释放约 ${formatBackupBytes(result.releasedBytes)}`,
+      });
+    } catch (error) {
+      setScreenshotCleanupPreview(null);
+      setScreenshotLifecycleFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setScreenshotLifecycleBusy(false);
     }
   }
 
@@ -8037,6 +8143,87 @@ function SettingsWorkspace({
               </div>
             )}
             <SettingsNotice feedback={mobileUploadFeedback} />
+          </section>
+
+          <section
+            className="settings-section settings-section--screenshot-lifecycle"
+            aria-labelledby="screenshot-lifecycle-heading"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">本机数据</span>
+                <h2 id="screenshot-lifecycle-heading">来源截图存储</h2>
+                <p>
+                  超过 90 天的来源截图会在本机尝试高质量压缩；失败时保留原图。
+                  清理只删除图片文件，不删除识别原文、来源快照或订单数据。
+                </p>
+              </div>
+            </div>
+
+            <div className="screenshot-lifecycle-policy">
+              <label>
+                来源截图清理策略
+                <select
+                  aria-label="来源截图清理策略"
+                  value={screenshotLifecycleSettings?.cleanupAfterDays ?? ''}
+                  disabled={!screenshotLifecycleSettings || screenshotLifecycleBusy}
+                  onChange={(event) => void saveScreenshotCleanupPolicy(event.target.value)}
+                >
+                  <option value="">永不自动清理</option>
+                  <option value="180">满 180 天后进入清理预览</option>
+                  <option value="365">满 365 天后进入清理预览</option>
+                </select>
+              </label>
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={
+                  screenshotLifecycleBusy
+                  || !screenshotLifecycleSettings
+                  || screenshotLifecycleSettings.cleanupAfterDays === null
+                }
+                onClick={() => void previewScreenshotCleanup()}
+              >
+                {screenshotLifecycleBusy ? '正在检查…' : '预览来源截图清理'}
+              </button>
+            </div>
+
+            {screenshotCleanupPreview?.enabled && screenshotCleanupPreview.candidateCount > 0 && (
+              <div
+                className="directory-switch-notice screenshot-cleanup-confirmation"
+                role="group"
+                aria-label="来源截图清理确认"
+              >
+                <div>
+                  <strong>
+                    将清理 {screenshotCleanupPreview.candidateCount} 张来源截图
+                  </strong>
+                  <p>
+                    预计释放 {formatBackupBytes(screenshotCleanupPreview.estimatedBytes)}。
+                    此操作不能恢复图片，但订单与结构化来源证据保持不变。
+                  </p>
+                </div>
+                <div className="directory-switch-actions">
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    disabled={screenshotLifecycleBusy}
+                    onClick={() => setScreenshotCleanupPreview(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="button button--danger"
+                    type="button"
+                    disabled={screenshotLifecycleBusy}
+                    onClick={() => void confirmScreenshotCleanup()}
+                  >
+                    确认清理来源截图
+                  </button>
+                </div>
+              </div>
+            )}
+            <SettingsNotice feedback={screenshotLifecycleFeedback} />
           </section>
 
           <section className="settings-section settings-section--backup" aria-labelledby="backup-heading">
@@ -10901,6 +11088,7 @@ function DetailWorkspace({
   onBack,
   onDirtyChange,
   onSelectSource,
+  onDeleteSourceScreenshot,
   onSaveCustomFieldValues,
   onUpdateOrder,
   onUpdatePlatformTransactionStatus,
@@ -10921,6 +11109,7 @@ function DetailWorkspace({
   onBack: () => void;
   onDirtyChange: (kind: DetailDirtyKind) => void;
   onSelectSource: (sourceSnapshotId: string) => void;
+  onDeleteSourceScreenshot: (screenshotId: string) => Promise<void>;
   onSaveCustomFieldValues: (input: SaveCustomFieldValuesInput) => Promise<void>;
   onUpdateOrder: (input: OrderEditInput) => Promise<OrderDetails>;
   onUpdatePlatformTransactionStatus: (
@@ -10948,6 +11137,13 @@ function DetailWorkspace({
   const [customFieldValidity, setCustomFieldValidity] = useState<Record<string, boolean>>({});
   const [orderFunds, setOrderFunds] = useState<FinanceFactsForSource | null>(null);
   const [orderFundsError, setOrderFundsError] = useState(false);
+  const [sourceDeletePreview, setSourceDeletePreview] = useState<{
+    screenshotId: string;
+    originalName: string;
+    currentBytes: number;
+  } | null>(null);
+  const [sourceDeleteBusy, setSourceDeleteBusy] = useState(false);
+  const [sourceDeleteFeedback, setSourceDeleteFeedback] = useState('');
   const [recordFundsOpen, setRecordFundsOpen] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -11034,6 +11230,11 @@ function DetailWorkspace({
   const recipientChanged = sourceSnapshot.confirmed !== null &&
     sourceSnapshot.recognition.recipient !== sourceSnapshot.confirmed.recipient;
 
+  useEffect(() => {
+    setSourceDeletePreview(null);
+    setSourceDeleteFeedback('');
+  }, [sourceScreenshot?.id]);
+
   function customValue(definitionId: string, orderItemId: string | null) {
     return customValues.find((entry) => (
       entry.definitionId === definitionId &&
@@ -11074,6 +11275,34 @@ function DetailWorkspace({
       setCustomFieldFeedback({ kind: 'success', message: '自定义字段已保存。' });
     } catch (error) {
       setCustomFieldFeedback({ kind: 'error', message: errorMessage(error) });
+    }
+  }
+
+  async function previewSingleSourceDelete() {
+    if (!sourceScreenshot || sourceScreenshot.storageState === 'deleted') return;
+    setSourceDeleteBusy(true);
+    setSourceDeleteFeedback('');
+    try {
+      setSourceDeletePreview(await api.previewSingleSourceScreenshotDelete(sourceScreenshot.id));
+    } catch (error) {
+      setSourceDeleteFeedback(errorMessage(error));
+    } finally {
+      setSourceDeleteBusy(false);
+    }
+  }
+
+  async function confirmSingleSourceDelete() {
+    if (!sourceDeletePreview) return;
+    setSourceDeleteBusy(true);
+    setSourceDeleteFeedback('');
+    try {
+      await onDeleteSourceScreenshot(sourceDeletePreview.screenshotId);
+      setSourceDeletePreview(null);
+      setSourceDeleteFeedback('来源截图已清理，订单与结构化来源证据保持不变');
+    } catch (error) {
+      setSourceDeleteFeedback(errorMessage(error));
+    } finally {
+      setSourceDeleteBusy(false);
     }
   }
 
@@ -11166,12 +11395,20 @@ function DetailWorkspace({
           <div className="panel-label">
             <span><Icon name="image" />来源证据</span>
             <span>{sourceScreenshot
-              ? sourceScreenshot.mimeType.replace('image/', '').toUpperCase()
+              ? sourceScreenshot.storageState === 'deleted'
+                ? '已清理'
+                : sourceScreenshot.mimeType.replace('image/', '').toUpperCase()
               : '历史导入'}</span>
           </div>
-          {sourceScreenshot ? (
+          {sourceScreenshot && sourceScreenshot.storageState !== 'deleted' ? (
             <div className="source-image-stage">
               <img src={screenshotUrl} alt="来源截图" />
+            </div>
+          ) : sourceScreenshot ? (
+            <div className="source-image-stage source-import-stage">
+              <strong>来源截图已清理</strong>
+              <span>图片文件已按确认操作删除</span>
+              <small>识别原文、来源快照和订单数据仍保留</small>
             </div>
           ) : (
             <div className="source-image-stage source-import-stage">
@@ -11182,8 +11419,56 @@ function DetailWorkspace({
           )}
           <figcaption>
             <span>{sourceScreenshot?.originalName ?? sourceSnapshot.sourceName ?? '历史导入'}</span>
-            <small>保存于本机数据目录</small>
+            <small>
+              {sourceScreenshot?.storageState === 'deleted'
+                ? '图片已清理，来源记录仍保留'
+                : '保存于本机数据目录'}
+            </small>
           </figcaption>
+          {sourceScreenshot && sourceScreenshot.storageState !== 'deleted' && (
+            <button
+              className="button button--quiet source-delete-button"
+              type="button"
+              disabled={sourceDeleteBusy || sourceLoading}
+              onClick={() => void previewSingleSourceDelete()}
+            >
+              清理这张来源截图
+            </button>
+          )}
+          {sourceDeletePreview && (
+            <div
+              className="source-delete-confirmation"
+              role="group"
+              aria-label="单张来源截图清理确认"
+            >
+              <strong>确认清理 {sourceDeletePreview.originalName}？</strong>
+              <p>
+                预计释放 {formatBackupBytes(sourceDeletePreview.currentBytes)}。
+                图片删除后不能恢复，但订单与结构化来源证据不受影响。
+              </p>
+              <div>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={sourceDeleteBusy}
+                  onClick={() => setSourceDeletePreview(null)}
+                >
+                  取消
+                </button>
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={sourceDeleteBusy}
+                  onClick={() => void confirmSingleSourceDelete()}
+                >
+                  确认清理这张来源截图
+                </button>
+              </div>
+            </div>
+          )}
+          {sourceDeleteFeedback && (
+            <p className="source-delete-feedback" role="status">{sourceDeleteFeedback}</p>
+          )}
         </figure>
 
         <div className="detail-content">

@@ -87,6 +87,11 @@ import {
 } from './source-screenshot-dialog';
 import { acquireSingleInstance } from './single-instance';
 import { MobileUploadService } from './mobile-upload-service';
+import { ElectronSourceScreenshotCompressor } from './electron-source-screenshot-compressor';
+import {
+  isSourceScreenshotCleanupAfterDays,
+  type SourceScreenshotLifecycleSettings,
+} from '../core/source-screenshot-lifecycle';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
@@ -180,7 +185,17 @@ export function registerIpcHandlers(
       platform: process.platform,
     });
     await mobileUpload?.stop();
-    return desktopSession.useDataDirectory(selection.filePaths[0]);
+    const state = desktopSession.useDataDirectory(selection.filePaths[0]);
+    if (state.kind === 'ready') {
+      const compression = desktopSession.runAutomaticSourceScreenshotCompression?.();
+      void compression?.catch((error: unknown) => {
+        console.error(
+          '来源截图自动压缩失败：',
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }
+    return state;
   });
 
   ipcMain.handle('backup:create', async (event): Promise<BackupCreateOutcome> => {
@@ -334,6 +349,31 @@ export function registerIpcHandlers(
       return mobileUpload.getStatus();
     });
   }
+
+  ipcMain.handle('source-screenshots:get-lifecycle-settings', () => (
+    desktopSession.getSourceScreenshotLifecycleSettings()
+  ));
+  ipcMain.handle('source-screenshots:save-lifecycle-settings', (_event, input: unknown) => (
+    desktopSession.saveSourceScreenshotLifecycleSettings(
+      parseSourceScreenshotLifecycleSettings(input),
+    )
+  ));
+  ipcMain.handle('source-screenshots:preview-cleanup', () => (
+    desktopSession.previewSourceScreenshotCleanup()
+  ));
+  ipcMain.handle('source-screenshots:confirm-cleanup', (_event, previewToken: unknown) => (
+    desktopSession.confirmSourceScreenshotCleanup(
+      parseWorkflowId(previewToken, '来源截图清理预览'),
+    )
+  ));
+  ipcMain.handle('source-screenshots:preview-single-delete', (_event, screenshotId: unknown) => (
+    desktopSession.previewSingleSourceScreenshotDelete(
+      parseWorkflowId(screenshotId, '来源截图'),
+    )
+  ));
+  ipcMain.handle('source-screenshots:delete', (_event, screenshotId: unknown) => (
+    desktopSession.deleteSourceScreenshot(parseWorkflowId(screenshotId, '来源截图'))
+  ));
 
   ipcMain.handle('workflow:select-source-screenshots', async () => {
     const window = requireWindow();
@@ -1698,6 +1738,7 @@ export function startElectronApplication(): void {
         }),
       },
       validateDataDirectory,
+      sourceScreenshotCompressor: new ElectronSourceScreenshotCompressor(),
     });
     session.restore();
     mobileUploadService = new MobileUploadService({
@@ -1725,6 +1766,18 @@ export function startElectronApplication(): void {
     };
     runAutomaticBackupTick();
     setInterval(runAutomaticBackupTick, 30 * 60 * 1000).unref();
+
+    const runSourceScreenshotCompressionTick = (): void => {
+      if (!session || session.getState().kind !== 'ready') return;
+      void session.runAutomaticSourceScreenshotCompression().catch((error: unknown) => {
+        console.error(
+          '来源截图自动压缩失败：',
+          error instanceof Error ? error.message : error,
+        );
+      });
+    };
+    runSourceScreenshotCompressionTick();
+    setInterval(runSourceScreenshotCompressionTick, 24 * 60 * 60 * 1000).unref();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
@@ -1774,6 +1827,17 @@ function parseSaveOrderIntakeSettingsInput(input: unknown): SaveOrderIntakeSetti
     throw new Error('订单接收设置格式无效');
   }
   return { automaticImportEnabled: input.automaticImportEnabled };
+}
+
+function parseSourceScreenshotLifecycleSettings(
+  input: unknown,
+): SourceScreenshotLifecycleSettings {
+  if (!isRecord(input)) throw new Error('来源截图清理策略格式无效');
+  rejectUnknownKeys(input, new Set(['cleanupAfterDays']), '来源截图清理策略');
+  if (!isSourceScreenshotCleanupAfterDays(input.cleanupAfterDays)) {
+    throw new Error('来源截图清理策略只能选择永不清理、180 天或 365 天');
+  }
+  return { cleanupAfterDays: input.cleanupAfterDays };
 }
 
 const CANDIDATE_VERIFICATION_SETTINGS_KEYS = new Set([

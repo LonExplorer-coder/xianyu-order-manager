@@ -352,6 +352,8 @@ export type SourceScreenshot = {
   mimeType: string;
   sha256: string;
   createdAt: string;
+  storageState?: 'original' | 'compressed' | 'deleted';
+  currentBytes?: number | null;
 };
 
 export type ConfirmedOrderSnapshot = Omit<RecognitionResult, 'fulfillmentStatus'> & {

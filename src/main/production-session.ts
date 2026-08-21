@@ -20,6 +20,7 @@ import { BackupSettingsFile } from './backup-settings-file';
 import { OcrUsageSettingsFile } from './ocr-usage-settings-file';
 import { OcrUsageService } from './ocr-usage-service';
 import { OcrUsageDatabase } from './ocr-usage-database';
+import type { SourceScreenshotCompressor } from '../core/source-screenshot-lifecycle';
 
 export function createConfiguredDesktopSession(input: {
   configDirectory: string;
@@ -27,6 +28,7 @@ export function createConfiguredDesktopSession(input: {
   candidateVerificationApiKeyStores?: CandidateVerificationApiKeyStores;
   request?: FetchLike;
   validateDataDirectory?: DataDirectoryValidator;
+  sourceScreenshotCompressor?: SourceScreenshotCompressor;
 }): DesktopSession {
   const ocrUsage = new OcrUsageService(
     new OcrUsageSettingsFile(input.configDirectory),
@@ -72,6 +74,7 @@ export function createConfiguredDesktopSession(input: {
     candidateVerificationSettings,
     new BackupSettingsFile(input.configDirectory),
     ocrUsage,
+    input.sourceScreenshotCompressor,
   );
 }
 

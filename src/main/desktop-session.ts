@@ -183,6 +183,15 @@ import type {
   SaveBackupSettingsInput,
   BackupVerificationReport,
 } from '../core/backup';
+import type {
+  SourceScreenshotCleanupPreview,
+  SourceScreenshotCleanupResult,
+  SourceScreenshotCompressor,
+  SourceScreenshotCompressionResult,
+  SourceScreenshotLifecycleSettings,
+  SourceScreenshotSingleDeletePreview,
+} from '../core/source-screenshot-lifecycle';
+import { SourceScreenshotLifecycleService } from './source-screenshot-lifecycle-service';
 
 export type DataDirectoryValidator = (dataDirectory: string) => void;
 
@@ -191,6 +200,7 @@ export class DesktopSession {
   private state: BootstrapState = { kind: 'needs_data_directory' };
   private readonly recognitionBatches: RecognitionBatchView[] = [];
   private recognitionQueue: Promise<void> = Promise.resolve();
+  private dataFileMaintenanceQueue: Promise<void> = Promise.resolve();
   private readonly seenSourceHashes = new Set<string>();
   private workspaceGeneration = 0;
   private readonly applicationWorkCounts = new Map<LocalApplication, number>();
@@ -209,6 +219,7 @@ export class DesktopSession {
     private readonly candidateVerificationSettings?: CandidateVerificationSettingsService,
     private readonly backupSettings?: BackupSettingsFile,
     private readonly ocrUsage?: OcrUsageService,
+    private readonly sourceScreenshotCompressor?: SourceScreenshotCompressor,
   ) {}
 
   public restore(): BootstrapState {
@@ -240,12 +251,12 @@ export class DesktopSession {
 
   public createBackup(backupRootDirectory: string, appVersion: string): Promise<CreateBackupResult> {
     const application = this.requireApplication();
-    return createBackup({
+    return this.enqueueDataFileMaintenance(application, () => createBackup({
       dataDirectory: application.dataDirectory,
       database: application.database,
       backupRootDirectory,
       appVersion,
-    });
+    }));
   }
 
   public verifyBackup(backupDirectory: string): Promise<BackupVerificationReport> {
@@ -321,25 +332,72 @@ export class DesktopSession {
     }
     const application = this.requireApplication();
     const settings = this.readBackupSettings();
-    try {
-      return await runAutomaticBackupCycle({
-        dataDirectory: application.dataDirectory,
-        database: application.database,
-        settings,
-        appVersion,
-      });
-    } catch (error) {
-      if (settings.backupRootDirectory) {
-        await recordBackupEvents(settings.backupRootDirectory, [
-          {
-            at: new Date().toISOString(),
-            kind: 'auto-failed',
-            note: error instanceof Error ? error.message : String(error),
-          },
-        ]).catch(() => undefined);
+    return this.enqueueDataFileMaintenance(application, async () => {
+      try {
+        return await runAutomaticBackupCycle({
+          dataDirectory: application.dataDirectory,
+          database: application.database,
+          settings,
+          appVersion,
+        });
+      } catch (error) {
+        if (settings.backupRootDirectory) {
+          await recordBackupEvents(settings.backupRootDirectory, [
+            {
+              at: new Date().toISOString(),
+              kind: 'auto-failed',
+              note: error instanceof Error ? error.message : String(error),
+            },
+          ]).catch(() => undefined);
+        }
+        throw error;
       }
-      throw error;
+    });
+  }
+
+  public runAutomaticSourceScreenshotCompression(): Promise<SourceScreenshotCompressionResult> {
+    if (!this.sourceScreenshotCompressor) {
+      throw new Error('当前运行环境未配置来源截图压缩能力');
     }
+    return this.enqueueSourceScreenshotLifecycle((service) => (
+      service.runAutomaticCompression()
+    ));
+  }
+
+  public getSourceScreenshotLifecycleSettings(): SourceScreenshotLifecycleSettings {
+    return this.sourceScreenshotLifecycle().getSettings();
+  }
+
+  public saveSourceScreenshotLifecycleSettings(
+    settings: SourceScreenshotLifecycleSettings,
+  ): SourceScreenshotLifecycleSettings {
+    return this.sourceScreenshotLifecycle().saveSettings(settings);
+  }
+
+  public previewSourceScreenshotCleanup(): Promise<SourceScreenshotCleanupPreview> {
+    return this.enqueueSourceScreenshotLifecycle((service) => service.previewCleanup());
+  }
+
+  public confirmSourceScreenshotCleanup(
+    previewToken: string,
+  ): Promise<SourceScreenshotCleanupResult> {
+    return this.enqueueSourceScreenshotLifecycle((service) => (
+      service.confirmCleanup(previewToken)
+    ));
+  }
+
+  public previewSingleSourceScreenshotDelete(
+    screenshotId: string,
+  ): Promise<SourceScreenshotSingleDeletePreview> {
+    return this.enqueueSourceScreenshotLifecycle((service) => (
+      service.previewSingleDelete(screenshotId)
+    ));
+  }
+
+  public deleteSourceScreenshot(screenshotId: string): Promise<SourceScreenshotCleanupResult> {
+    return this.enqueueSourceScreenshotLifecycle((service) => (
+      service.deleteScreenshot(screenshotId)
+    ));
   }
 
   public submitSourceScreenshots(
@@ -1219,7 +1277,7 @@ export class DesktopSession {
       const screenshot = await this.requireApplication().readSourceScreenshot(screenshotId);
       return `data:${screenshot.mimeType};base64,${Buffer.from(screenshot.bytes).toString('base64')}`;
     } catch (error) {
-      if (readableError(error) === '未找到来源截图') throw error;
+      if (['未找到来源截图', '来源截图已清理'].includes(readableError(error))) throw error;
       throw new Error('无法读取来源截图，请检查数据目录后重试');
     }
   }
@@ -1319,6 +1377,40 @@ export class DesktopSession {
 
   private currentOcrUsageWorkspace(): OcrUsageWorkspace {
     return this.requireOcrUsage().forDataDirectory(this.requireApplication().dataDirectory);
+  }
+
+  private sourceScreenshotLifecycle(
+    application = this.requireApplication(),
+  ): SourceScreenshotLifecycleService {
+    return new SourceScreenshotLifecycleService({
+      dataDirectory: application.dataDirectory,
+      database: application.database,
+      compressor: this.sourceScreenshotCompressor ?? {
+        compress: async () => {
+          throw new Error('当前运行环境未配置来源截图压缩能力');
+        },
+      },
+    });
+  }
+
+  private enqueueSourceScreenshotLifecycle<T>(
+    operation: (service: SourceScreenshotLifecycleService) => Promise<T>,
+  ): Promise<T> {
+    const application = this.requireApplication();
+    return this.enqueueDataFileMaintenance(application, () => (
+      operation(this.sourceScreenshotLifecycle(application))
+    ));
+  }
+
+  private enqueueDataFileMaintenance<T>(
+    application: LocalApplication,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    this.retainApplicationWork(application);
+    const result = this.dataFileMaintenanceQueue.then(operation);
+    const guarded = result.finally(() => this.releaseApplicationWork(application));
+    this.dataFileMaintenanceQueue = guarded.then(() => undefined, () => undefined);
+    return guarded;
   }
 
   public getOrderIntakeSettings(): OrderIntakeSettingsView {

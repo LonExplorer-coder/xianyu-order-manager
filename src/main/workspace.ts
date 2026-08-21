@@ -20,7 +20,7 @@ import {
 
 const DATABASE_FILENAME = 'xianyu-order-manager.sqlite3';
 const LOCK_FILENAME = '.xianyu-order-manager-writer.sqlite3';
-export const CURRENT_WORKSPACE_SCHEMA_VERSION = 63;
+export const CURRENT_WORKSPACE_SCHEMA_VERSION = 64;
 
 export class WorkspaceInUseError extends Error {
   public constructor(public readonly dataDirectory: string) {
@@ -220,7 +220,8 @@ function migrate(database: DatabaseSync): void {
   if (!versions.has(60)) migrateToVersion60(database);
   if (!versions.has(61)) migrateToVersion61(database);
   if (!versions.has(62)) migrateToVersion62(database);
-  if (!versions.has(CURRENT_WORKSPACE_SCHEMA_VERSION)) migrateToVersion63(database);
+  if (!versions.has(63)) migrateToVersion63(database);
+  if (!versions.has(CURRENT_WORKSPACE_SCHEMA_VERSION)) migrateToVersion64(database);
 }
 
 function migrateToVersion1(database: DatabaseSync): void {
@@ -8539,6 +8540,49 @@ function migrateToVersion63(database: DatabaseSync): void {
       FROM recognition_batch_items
       WHERE status = 'failed'
         AND error_message = '本月 OCR 用量已达硬暂停额度，请在设置中调整额度或确认继续';
+    `);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      .run(63, new Date().toISOString());
+    database.exec('COMMIT;');
+  } catch (error) {
+    rollbackQuietly(database);
+    throw error;
+  }
+}
+
+function migrateToVersion64(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;');
+  try {
+    const existingColumns = new Set((database.prepare(
+      'PRAGMA table_info(source_screenshots)',
+    ).all() as Array<{ name: string }>).map(({ name }) => name));
+    const columns = [
+      ['storage_state', "TEXT NOT NULL DEFAULT 'original' CHECK (storage_state IN ('original', 'compressed', 'deleted'))"],
+      ['original_relative_path', 'TEXT'],
+      ['original_bytes', 'INTEGER CHECK (original_bytes IS NULL OR original_bytes >= 0)'],
+      ['current_bytes', 'INTEGER CHECK (current_bytes IS NULL OR current_bytes >= 0)'],
+      ['compressed_at', 'TEXT'],
+      ['deleted_at', 'TEXT'],
+    ] as const;
+    for (const [name, definition] of columns) {
+      if (!existingColumns.has(name)) {
+        database.exec(`ALTER TABLE source_screenshots ADD COLUMN ${name} ${definition};`);
+      }
+    }
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS source_screenshot_lifecycle_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        cleanup_after_days INTEGER
+          CHECK (cleanup_after_days IS NULL OR cleanup_after_days IN (180, 365)),
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT OR IGNORE INTO source_screenshot_lifecycle_settings (
+        id, cleanup_after_days, updated_at
+      ) VALUES (1, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+      CREATE INDEX IF NOT EXISTS source_screenshots_by_storage_state_and_created_at
+      ON source_screenshots (storage_state, created_at, id);
     `);
     database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
       .run(CURRENT_WORKSPACE_SCHEMA_VERSION, new Date().toISOString());

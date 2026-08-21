@@ -544,6 +544,26 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     getMobileUploadStatus: vi.fn().mockResolvedValue({ enabled: false }),
     startMobileUpload: vi.fn().mockRejectedValue(new Error('测试未配置手机上传会话')),
     stopMobileUpload: vi.fn().mockResolvedValue({ enabled: false }),
+    getSourceScreenshotLifecycleSettings: vi.fn().mockResolvedValue({
+      cleanupAfterDays: null,
+    }),
+    saveSourceScreenshotLifecycleSettings: vi.fn(async (input) => input),
+    previewSourceScreenshotCleanup: vi.fn().mockResolvedValue({
+      enabled: false,
+      cleanupAfterDays: null,
+      candidateCount: 0,
+      estimatedBytes: 0,
+      candidates: [],
+      previewToken: null,
+    }),
+    confirmSourceScreenshotCleanup: vi.fn().mockResolvedValue({
+      deletedCount: 0,
+      releasedBytes: 0,
+    }),
+    previewSingleSourceScreenshotDelete: vi.fn().mockRejectedValue(
+      new Error('测试未配置来源截图删除预览'),
+    ),
+    deleteSourceScreenshot: vi.fn().mockResolvedValue({ deletedCount: 1, releasedBytes: 0 }),
     selectSourceScreenshots: vi.fn(async () => {
       selectedDraft = await selectOneSourceScreenshot();
       return selectedDraft ? batchForDraft(selectedDraft) : null;
@@ -7042,6 +7062,63 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('订单详情二次确认后只清理当前来源截图文件并保留订单与来源记录', async () => {
+    const user = userEvent.setup();
+    const deletedScreenshot = {
+      ...sourceScreenshot,
+      storageState: 'deleted' as const,
+      currentBytes: 0,
+    };
+    const deletedDetails: OrderDetails = {
+      ...orderDetails,
+      sourceScreenshot: deletedScreenshot,
+      sources: [{
+        ...orderDetails.sources[0],
+        sourceScreenshot: deletedScreenshot,
+      }],
+    };
+    const getOrder = vi.fn()
+      .mockResolvedValueOnce(orderDetails)
+      .mockResolvedValueOnce(deletedDetails);
+    const deleteSourceScreenshot = vi.fn().mockResolvedValue({
+      deletedCount: 1,
+      releasedBytes: 4_096,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: 'D:\\闲鱼订单', orders: [orderSummary()],
+      }),
+      getOrder,
+      getScreenshotDataUrl: vi.fn().mockResolvedValue('data:image/png;base64,ZGV0YWls'),
+      listOrders: vi.fn().mockResolvedValue([orderSummary()]),
+      queryOrders: vi.fn().mockResolvedValue(workbenchResult([orderSummary()])),
+      previewSingleSourceScreenshotDelete: vi.fn().mockResolvedValue({
+        screenshotId: sourceScreenshot.id,
+        originalName: sourceScreenshot.originalName,
+        currentBytes: 4_096,
+      }),
+      deleteSourceScreenshot,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', {
+      name: `查看订单 ${confirmedOrder.orderNumber}`,
+    }));
+    await user.click(await screen.findByRole('button', { name: '清理这张来源截图' }));
+
+    const confirmation = await screen.findByRole('group', { name: '单张来源截图清理确认' });
+    expect(confirmation).toHaveTextContent('脱敏测试订单.png');
+    expect(confirmation).toHaveTextContent('4 KB');
+    expect(deleteSourceScreenshot).not.toHaveBeenCalled();
+
+    await user.click(within(confirmation).getByRole('button', { name: '确认清理这张来源截图' }));
+
+    expect(deleteSourceScreenshot).toHaveBeenCalledWith(sourceScreenshot.id);
+    expect(await screen.findByText('来源截图已清理')).toBeVisible();
+    expect(screen.queryByRole('img', { name: '来源截图' })).not.toBeInTheDocument();
+    expect(screen.getAllByText(confirmedOrder.orderNumber).length).toBeGreaterThan(0);
+  });
+
   it('选中多笔订单后只能批量设置平台交易状态', async () => {
     const user = userEvent.setup();
     const first = orderSummary(confirmedOrder, { revision: 1 });
@@ -10597,6 +10674,61 @@ describe('订单管理工作台', () => {
     expect(stopMobileUpload).toHaveBeenCalledTimes(1);
   });
 
+  it('设置页保存来源截图清理策略，预览预计空间并二次确认批量清理', async () => {
+    const user = userEvent.setup();
+    const saveSettings = vi.fn(async (input) => input);
+    const preview = {
+      enabled: true,
+      cleanupAfterDays: 180 as const,
+      candidateCount: 2,
+      estimatedBytes: 6_144,
+      candidates: [
+        { screenshotId: 'shot-1', originalName: '来源一.png', createdAt: '2026-01-01T00:00:00.000Z', currentBytes: 2_048 },
+        { screenshotId: 'shot-2', originalName: '来源二.png', createdAt: '2026-01-02T00:00:00.000Z', currentBytes: 4_096 },
+      ],
+      previewToken: 'cleanup-preview-token',
+    };
+    const confirmCleanup = vi.fn().mockResolvedValue({
+      deletedCount: 2,
+      releasedBytes: 6_144,
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/当前订单数据', orders: [],
+      }),
+      getSourceScreenshotLifecycleSettings: vi.fn().mockResolvedValue({
+        cleanupAfterDays: 180,
+      }),
+      saveSourceScreenshotLifecycleSettings: saveSettings,
+      previewSourceScreenshotCleanup: vi.fn().mockResolvedValue(preview),
+      confirmSourceScreenshotCleanup: confirmCleanup,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const section = await screen.findByRole('region', { name: '来源截图存储' });
+    const policy = within(section).getByRole('combobox', { name: '来源截图清理策略' });
+    expect(policy).toHaveValue('180');
+    await user.selectOptions(policy, '365');
+    expect(saveSettings).toHaveBeenCalledWith({ cleanupAfterDays: 365 });
+
+    await user.click(within(section).getByRole('button', { name: '预览来源截图清理' }));
+    const confirmation = await within(section).findByRole('group', {
+      name: '来源截图清理确认',
+    });
+    expect(confirmation).toHaveTextContent('2 张');
+    expect(confirmation).toHaveTextContent('6 KB');
+    expect(confirmCleanup).not.toHaveBeenCalled();
+
+    await user.click(within(confirmation).getByRole('button', { name: '确认清理来源截图' }));
+
+    expect(confirmCleanup).toHaveBeenCalledWith('cleanup-preview-token');
+    expect(await within(section).findByRole('status')).toHaveTextContent(
+      '已清理 2 张来源截图，释放约 6 KB',
+    );
+  });
+
   it('设置页可开启自动备份、选择位置并查看状态与清理记录', async () => {
     const user = userEvent.setup();
     const saveBackupSettings = vi.fn(async (input: unknown) => input);
@@ -10811,10 +10943,11 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
     const settingsGroup = screen.getByRole('group', { name: '应用设置' });
-    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 5)
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 6)
       .map((heading) => heading.textContent)).toEqual([
         '数据存储位置',
         '手机上传',
+        '来源截图存储',
         '备份与恢复',
         '自动入库',
         '百炼 OCR',
