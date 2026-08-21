@@ -34,6 +34,7 @@ const EXCLUDED_TOP_LEVEL_ENTRIES = new Set([
   `${DATABASE_FILENAME}-shm`,
   `${DATABASE_FILENAME}-journal`,
   '.recognition-queue',
+  '.mobile-upload-staging',
 ]);
 
 // 操作系统与同步盘会自行落下的标记文件，不算备份损坏。

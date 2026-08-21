@@ -143,6 +143,11 @@ describe('完整备份', () => {
       join(dataDirectory, '.recognition-queue', 'batch-9', 'item-1', '排队中.png'),
       Buffer.from('识别中暂存'),
     );
+    await mkdir(join(dataDirectory, '.mobile-upload-staging', 'upload-1'), { recursive: true });
+    await writeFile(
+      join(dataDirectory, '.mobile-upload-staging', 'upload-1', '手机上传中.png'),
+      Buffer.from('手机上传暂存'),
+    );
     const backupRoot = join(root, '备份库');
 
     const result = await createBackup({

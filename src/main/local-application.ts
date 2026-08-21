@@ -31,6 +31,10 @@ import type {
   SourceScreenshot,
   SourceSnapshot,
 } from '../core/contracts';
+import {
+  SOURCE_SCREENSHOT_MAX_BYTES,
+  SOURCE_SCREENSHOT_MIME_BY_EXTENSION,
+} from '../core/source-screenshots';
 import type {
   CandidateAdjudicationAudit,
   CandidateAdjudicationAuditView,
@@ -378,13 +382,6 @@ type PersistRecognitionDraftInput = {
   createdAt: string;
 };
 
-const IMAGE_MIME_TYPES: Record<string, string> = {
-  '.jpeg': 'image/jpeg',
-  '.jpg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-};
-const MAX_SOURCE_SCREENSHOT_BYTES = 7_500_000;
 const UNATTRIBUTED_OCR_WORKSPACE_KEY = '0'.repeat(64);
 const MAX_RECOGNITION_CONFLICTS = RECOGNITION_CONFLICT_LIMITS.details;
 const MAX_RECOGNITION_CONFLICT_VALUES = RECOGNITION_CONFLICT_LIMITS.valuesPerSide;
@@ -687,7 +684,7 @@ export class LocalApplication {
     }
     const queuePath = workspace.resolveStoredPath(asString(queueItem.queue_relative_path));
     const extension = extname(queuePath).toLowerCase();
-    const mimeType = IMAGE_MIME_TYPES[extension];
+    const mimeType = SOURCE_SCREENSHOT_MIME_BY_EXTENSION.get(extension);
     if (!mimeType) throw new Error('当前仅支持 PNG、JPG、JPEG 或 WebP 来源截图');
     let bytes: Buffer;
     try {
@@ -695,7 +692,7 @@ export class LocalApplication {
     } catch {
       throw new Error('无法读取本机队列中的来源截图，请重新上传这张截图');
     }
-    if (bytes.byteLength > MAX_SOURCE_SCREENSHOT_BYTES) {
+    if (bytes.byteLength > SOURCE_SCREENSHOT_MAX_BYTES) {
       throw new Error('来源截图不能超过 7.5 MB，请压缩后重试');
     }
     const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -930,18 +927,18 @@ export class LocalApplication {
   ): Promise<OrderDraft> {
     const workspace = this.requireWorkspace();
     const extension = extname(sourcePath).toLowerCase();
-    const mimeType = IMAGE_MIME_TYPES[extension];
+    const mimeType = SOURCE_SCREENSHOT_MIME_BY_EXTENSION.get(extension);
     if (!mimeType) {
       throw new Error('当前仅支持 PNG、JPG、JPEG 或 WebP 来源截图');
     }
 
     const sourceStats = await stat(sourcePath);
     if (!sourceStats.isFile()) throw new Error('请选择一个来源截图文件');
-    if (sourceStats.size > MAX_SOURCE_SCREENSHOT_BYTES) {
+    if (sourceStats.size > SOURCE_SCREENSHOT_MAX_BYTES) {
       throw new Error('来源截图不能超过 7.5 MB，请压缩后重试');
     }
     const bytes = await readFile(sourcePath);
-    if (bytes.byteLength > MAX_SOURCE_SCREENSHOT_BYTES) {
+    if (bytes.byteLength > SOURCE_SCREENSHOT_MAX_BYTES) {
       throw new Error('来源截图不能超过 7.5 MB，请压缩后重试');
     }
     const sha256 = createHash('sha256').update(bytes).digest('hex');

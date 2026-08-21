@@ -1705,6 +1705,11 @@ export function startElectronApplication(): void {
         if (!session) throw new Error('应用会话尚未就绪');
         return session.submitSourceScreenshots(paths);
       },
+      getStagingRootDirectory: () => {
+        const state = session?.getState();
+        if (!state || state.kind !== 'ready') throw new Error('请先选择可用的数据目录');
+        return join(state.dataDirectory, '.mobile-upload-staging');
+      },
     });
     registerIpcHandlers(session, mobileUploadService);
     mainWindow = createWindow();
@@ -1727,13 +1732,22 @@ export function startElectronApplication(): void {
   });
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    handleAllWindowsClosed(mobileUploadService, process.platform, () => app.quit());
   });
 
   app.on('before-quit', () => {
     void mobileUploadService?.stop();
     session?.close();
   });
+}
+
+export function handleAllWindowsClosed(
+  mobileUpload: Pick<MobileUploadService, 'stop'> | undefined,
+  platform: NodeJS.Platform,
+  quit: () => void,
+): void {
+  void mobileUpload?.stop();
+  if (platform !== 'darwin') quit();
 }
 
 function portableSmokePhase(value: string): 'write' | 'read' {

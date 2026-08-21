@@ -1,13 +1,20 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MobileUploadService } from '../src/main/mobile-upload-service';
 
 const services: MobileUploadService[] = [];
+const storageRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.stop()));
+  await Promise.all(storageRoots.splice(0).map((root) => (
+    rm(root, { recursive: true, force: true })
+  )));
 });
 
 describe('手机上传会话', () => {
@@ -45,6 +52,7 @@ describe('手机上传会话', () => {
     });
     const service = new MobileUploadService({
       submitSourceScreenshots,
+      getStagingRootDirectory: await stagingRoot(),
       selectHost: () => '127.0.0.1',
       createSecret: deterministicSecrets(
         '0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -129,6 +137,7 @@ describe('手机上传会话', () => {
     const submitSourceScreenshots = vi.fn();
     const service = new MobileUploadService({
       submitSourceScreenshots,
+      getStagingRootDirectory: await stagingRoot(),
       selectHost: () => '127.0.0.1',
       createSecret: deterministicSecrets(
         'abcdef0123456789abcdef0123456789abcdef0123456789',
@@ -152,7 +161,7 @@ describe('手机上传会话', () => {
 
     now = new Date('2026-08-21T08:10:01.000Z');
     const expired = await fetch(session.url);
-    expect(expired.status).toBe(410);
+    expect(expired.status).toBe(404);
     expect(service.getStatus()).toEqual({ enabled: false });
 
     const restarted = await service.start();
@@ -165,6 +174,7 @@ describe('手机上传会话', () => {
     const submitSourceScreenshots = vi.fn();
     const service = new MobileUploadService({
       submitSourceScreenshots,
+      getStagingRootDirectory: await stagingRoot(),
       selectHost: () => '127.0.0.1',
       createSecret: deterministicSecrets(
         'fedcba9876543210fedcba9876543210fedcba9876543210',
@@ -207,6 +217,55 @@ describe('手机上传会话', () => {
     })).status).toBe(413);
     expect(submitSourceScreenshots).not.toHaveBeenCalled();
   });
+
+  it('请求解析期间会话到期时不再把暂存文件送入识别批次', async () => {
+    let now = new Date('2026-08-21T08:00:00.000Z');
+    const submitSourceScreenshots = vi.fn();
+    const service = new MobileUploadService({
+      submitSourceScreenshots,
+      getStagingRootDirectory: await stagingRoot(),
+      selectHost: () => '127.0.0.1',
+      createSecret: deterministicSecrets(
+        '00112233445566778899aabbccddeeff0011223344556677',
+        '112233',
+        'authorized-browser-token',
+      ),
+      createQrDataUrl: async () => 'data:image/png;base64,cXI=',
+      now: () => now,
+    });
+    services.push(service);
+    const session = await service.start();
+    const cookie = await authorize(session.url, session.accessCode);
+    const target = new URL('/upload', session.url);
+    const boundary = 'xianyu-mobile-upload-boundary';
+    const responseStatus = new Promise<number>((resolve, reject) => {
+      const request = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: 'POST',
+        headers: {
+          cookie,
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+      }, (response) => {
+        response.resume();
+        response.once('end', () => resolve(response.statusCode ?? 0));
+      });
+      request.once('error', reject);
+      request.write(
+        `--${boundary}\r\nContent-Disposition: form-data; name="screenshots"; filename="订单.png"\r\nContent-Type: image/png\r\n\r\nimage`,
+      );
+      setTimeout(() => {
+        now = new Date('2026-08-21T08:10:01.000Z');
+        request.end(`\r\n--${boundary}--\r\n`);
+      }, 20);
+    });
+
+    expect(await responseStatus).toBe(401);
+    expect(submitSourceScreenshots).not.toHaveBeenCalled();
+    expect(service.getStatus()).toEqual({ enabled: false });
+  });
 });
 
 async function authorize(url: string, accessCode: string): Promise<string> {
@@ -225,4 +284,10 @@ async function authorize(url: string, accessCode: string): Promise<string> {
 function deterministicSecrets(...values: string[]): (length: number, alphabet?: string) => string {
   const queue = [...values];
   return () => queue.shift() ?? 'fallback-secret';
+}
+
+async function stagingRoot(): Promise<() => string> {
+  const root = await mkdtemp(join(tmpdir(), 'xianyu-mobile-upload-test-'));
+  storageRoots.push(root);
+  return () => join(root, '.mobile-upload-staging');
 }

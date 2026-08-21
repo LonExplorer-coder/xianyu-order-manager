@@ -3,36 +3,33 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { networkInterfaces, tmpdir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { networkInterfaces } from 'node:os';
+import { basename, extname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import QRCode from 'qrcode';
 
 import type { RecognitionBatchView } from '../core/contracts';
 import {
-  MOBILE_UPLOAD_MAX_FILE_BYTES,
   MOBILE_UPLOAD_MAX_FILES,
   MOBILE_UPLOAD_SESSION_DURATION_MS,
   type MobileUploadSessionView,
   type MobileUploadStatus,
 } from '../core/mobile-upload';
-
-const SUPPORTED_IMAGES = new Map([
-  ['.png', 'image/png'],
-  ['.jpg', 'image/jpeg'],
-  ['.jpeg', 'image/jpeg'],
-  ['.webp', 'image/webp'],
-]);
+import {
+  SOURCE_SCREENSHOT_MAX_BYTES,
+  SOURCE_SCREENSHOT_MIME_BY_EXTENSION,
+} from '../core/source-screenshots';
 const COOKIE_NAME = 'xianyu_mobile_upload';
 const MAX_AUTHORIZATION_BODY_BYTES = 1_024;
 const MAX_MULTIPART_BODY_BYTES = (
-  MOBILE_UPLOAD_MAX_FILES * MOBILE_UPLOAD_MAX_FILE_BYTES
+  MOBILE_UPLOAD_MAX_FILES * SOURCE_SCREENSHOT_MAX_BYTES
 ) + (2 * 1024 * 1024);
 
 type SubmitSourceScreenshots = (paths: string[]) => Promise<RecognitionBatchView>;
 
 interface MobileUploadServiceOptions {
   submitSourceScreenshots: SubmitSourceScreenshots;
+  getStagingRootDirectory: () => string;
   selectHost?: () => string;
   createSecret?: (length: number, alphabet?: string) => string;
   createQrDataUrl?: (url: string) => Promise<string>;
@@ -48,10 +45,12 @@ interface ActiveMobileUploadSession {
   expiresAtMs: number;
   view: MobileUploadSessionView;
   expiryTimer: NodeJS.Timeout;
+  stagingRootDirectory: string;
 }
 
 export class MobileUploadService {
   private readonly submitSourceScreenshots: SubmitSourceScreenshots;
+  private readonly getStagingRootDirectory: () => string;
   private readonly selectHost: () => string;
   private readonly createSecret: (length: number, alphabet?: string) => string;
   private readonly createQrDataUrl: (url: string) => Promise<string>;
@@ -61,6 +60,7 @@ export class MobileUploadService {
 
   public constructor(options: MobileUploadServiceOptions) {
     this.submitSourceScreenshots = options.submitSourceScreenshots;
+    this.getStagingRootDirectory = options.getStagingRootDirectory;
     this.selectHost = options.selectHost ?? selectPrivateIpv4Address;
     this.createSecret = options.createSecret ?? secureRandomText;
     this.createQrDataUrl = options.createQrDataUrl ?? ((url) => QRCode.toDataURL(url, {
@@ -81,6 +81,9 @@ export class MobileUploadService {
     const accessCode = this.createSecret(6, '0123456789');
     const browserToken = this.createSecret(32);
     const expiresAtMs = this.now().getTime() + this.sessionDurationMs;
+    const stagingRootDirectory = resolve(this.getStagingRootDirectory());
+    await rm(stagingRootDirectory, { recursive: true, force: true });
+    await mkdir(stagingRootDirectory, { recursive: true });
     const server = createServer({
       requestTimeout: 60_000,
       headersTimeout: 10_000,
@@ -104,7 +107,12 @@ export class MobileUploadService {
     });
     server.maxRequestsPerSocket = 20;
 
-    await listen(server, host);
+    try {
+      await listen(server, host);
+    } catch (error) {
+      await rm(stagingRootDirectory, { recursive: true, force: true });
+      throw error;
+    }
     const address = server.address();
     if (!address || typeof address === 'string') {
       server.close();
@@ -116,6 +124,7 @@ export class MobileUploadService {
       qrDataUrl = await this.createQrDataUrl(url);
     } catch {
       server.close();
+      await rm(stagingRootDirectory, { recursive: true, force: true });
       throw new Error('无法生成手机上传二维码');
     }
     const view: MobileUploadSessionView = {
@@ -137,6 +146,7 @@ export class MobileUploadService {
       expiresAtMs,
       view,
       expiryTimer,
+      stagingRootDirectory,
     };
     return { ...view };
   }
@@ -159,6 +169,8 @@ export class MobileUploadService {
     await new Promise<void>((resolve) => {
       current.server.close(() => resolve());
     });
+    await rm(current.stagingRootDirectory, { recursive: true, force: true })
+      .catch(() => undefined);
   }
 
   private async handleRequest(
@@ -171,7 +183,7 @@ export class MobileUploadService {
       return;
     }
     if (this.isExpired(current)) {
-      this.sendText(response, 410, '手机上传会话已过期，请回到桌面端重新开启');
+      this.sendNotFound(response);
       await this.stop();
       return;
     }
@@ -203,7 +215,7 @@ export class MobileUploadService {
         return;
       }
       if (request.method === 'POST') {
-        await this.receiveUpload(request, response);
+        await this.receiveUpload(request, response, current);
         return;
       }
     }
@@ -245,6 +257,7 @@ export class MobileUploadService {
   private async receiveUpload(
     request: IncomingMessage,
     response: ServerResponse,
+    current: ActiveMobileUploadSession,
   ): Promise<void> {
     if (!contentType(request).startsWith('multipart/form-data')) {
       throw new MobileUploadHttpError(415, '请选择来源截图后再上传');
@@ -253,10 +266,13 @@ export class MobileUploadService {
     if (Number.isFinite(declaredLength) && declaredLength > MAX_MULTIPART_BODY_BYTES) {
       throw new MobileUploadHttpError(413, '本次上传内容过大，请减少来源截图后重试');
     }
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), 'xianyu-mobile-upload-'));
+    const temporaryDirectory = await mkdtemp(join(current.stagingRootDirectory, 'upload-'));
     try {
       const paths = await parseMultipartImages(request, temporaryDirectory);
       if (paths.length === 0) throw new MobileUploadHttpError(400, '请至少选择 1 张来源截图');
+      if (this.active !== current || this.isExpired(current)) {
+        throw new MobileUploadHttpError(401, '手机上传未授权');
+      }
       const batch = await this.submitSourceScreenshots(paths);
       this.sendHtml(response, 201, uploadSuccessPage(batch));
     } finally {
@@ -340,7 +356,7 @@ async function parseMultipartImages(
       preservePath: false,
       defParamCharset: 'utf8',
       limits: {
-        fileSize: MOBILE_UPLOAD_MAX_FILE_BYTES,
+        fileSize: SOURCE_SCREENSHOT_MAX_BYTES,
         files: MOBILE_UPLOAD_MAX_FILES,
         fields: 0,
         parts: MOBILE_UPLOAD_MAX_FILES,
@@ -358,7 +374,9 @@ async function parseMultipartImages(
   parser.on('file', (fieldName, file, info) => {
     fileCount += 1;
     const safeName = safeUploadFileName(info.filename, fileCount);
-    const expectedMime = SUPPORTED_IMAGES.get(extname(safeName).toLowerCase());
+    const expectedMime = SOURCE_SCREENSHOT_MIME_BY_EXTENSION.get(
+      extname(safeName).toLowerCase(),
+    );
     if (fieldName !== 'screenshots' || !expectedMime || expectedMime !== info.mimeType) {
       failure ??= new MobileUploadHttpError(
         400,
@@ -372,7 +390,7 @@ async function parseMultipartImages(
     const write = mkdir(itemDirectory, { recursive: true })
       .then(() => pipeline(file, createWriteStream(destination, { flags: 'wx' })))
       .then(async () => {
-        if (file.truncated || (await stat(destination)).size > MOBILE_UPLOAD_MAX_FILE_BYTES) {
+        if (file.truncated || (await stat(destination)).size > SOURCE_SCREENSHOT_MAX_BYTES) {
           failure ??= new MobileUploadHttpError(
             413,
             '单张来源截图不能超过 7.5 MB，请压缩后重试',

@@ -3,6 +3,8 @@ import { dirname } from 'node:path';
 
 import type { OpenDialogOptions } from 'electron';
 
+import { SOURCE_SCREENSHOT_EXTENSIONS } from '../core/source-screenshots';
+
 type SourceScreenshotSelection = {
   canceled: boolean;
   filePaths: string[];
@@ -16,7 +18,10 @@ export function sourceScreenshotDialogOptions(
     buttonLabel: '创建识别批次',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '来源截图', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+      {
+        name: '来源截图',
+        extensions: SOURCE_SCREENSHOT_EXTENSIONS.map((extension) => extension.slice(1)),
+      },
     ],
   };
 

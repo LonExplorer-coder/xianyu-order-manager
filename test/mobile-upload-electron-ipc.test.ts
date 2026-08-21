@@ -36,7 +36,10 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { registerIpcHandlers } from '../src/main/electron-main';
+import {
+  handleAllWindowsClosed,
+  registerIpcHandlers,
+} from '../src/main/electron-main';
 
 afterEach(() => {
   electronBoundary.handlers.clear();
@@ -89,6 +92,20 @@ describe('手机上传 Electron IPC', () => {
 
     expect(mobileUpload.stop).toHaveBeenCalledTimes(1);
     expect(useDataDirectory).toHaveBeenCalledWith('/Users/test/Documents/新闲鱼订单数据');
+  });
+
+  it('关闭全部桌面窗口后立即关闭手机上传会话，macOS 只保留无网络入口的应用进程', () => {
+    const stop = vi.fn(async () => undefined);
+    const quit = vi.fn();
+
+    handleAllWindowsClosed({ stop } as unknown as MobileUploadService, 'darwin', quit);
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(quit).not.toHaveBeenCalled();
+
+    handleAllWindowsClosed({ stop } as unknown as MobileUploadService, 'win32', quit);
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(quit).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -84,6 +84,10 @@ import type {
   OcrUsageView,
   SaveOcrUsageQuotaInput,
 } from '../core/ocr-usage';
+import {
+  SOURCE_SCREENSHOT_EXTENSIONS,
+  SOURCE_SCREENSHOT_MAX_BYTES,
+} from '../core/source-screenshots';
 import { OcrQuotaPausedError, OCR_QUOTA_PAUSED_CODE } from '../core/ocr-usage';
 import type {
   CandidateVerificationConnectionTestInput,
@@ -1952,8 +1956,7 @@ function recognitionRetryDelay(retryCount: number): number {
   return AUTOMATIC_RECOGNITION_RETRY_DELAYS_MS[index];
 }
 
-const STAGEABLE_SOURCE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
-const MAX_STAGEABLE_SOURCE_BYTES = 7_500_000;
+const STAGEABLE_SOURCE_EXTENSIONS = new Set<string>(SOURCE_SCREENSHOT_EXTENSIONS);
 
 async function validateSourceForStaging(sourcePath: string): Promise<void> {
   let sourceStats;
@@ -1966,7 +1969,7 @@ async function validateSourceForStaging(sourcePath: string): Promise<void> {
   if (!STAGEABLE_SOURCE_EXTENSIONS.has(extname(sourcePath).toLowerCase())) {
     throw new Error('当前仅支持 PNG、JPG、JPEG 或 WebP 来源截图');
   }
-  if (sourceStats.size > MAX_STAGEABLE_SOURCE_BYTES) {
+  if (sourceStats.size > SOURCE_SCREENSHOT_MAX_BYTES) {
     throw new Error('来源截图不能超过 7.5 MB，请压缩后重试');
   }
 }
