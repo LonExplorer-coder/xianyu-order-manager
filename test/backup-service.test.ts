@@ -148,6 +148,11 @@ describe('完整备份', () => {
       join(dataDirectory, '.mobile-upload-staging', 'upload-1', '手机上传中.png'),
       Buffer.from('手机上传暂存'),
     );
+    await mkdir(join(dataDirectory, '.source-screenshot-trash'), { recursive: true });
+    await writeFile(
+      join(dataDirectory, '.source-screenshot-trash', '待清理.image'),
+      Buffer.from('来源截图清理回滚副本'),
+    );
     const backupRoot = join(root, '备份库');
 
     const result = await createBackup({

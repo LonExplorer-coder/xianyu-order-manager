@@ -17,7 +17,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:native-image-crop": "electron scripts/electron-native-image-crop-smoke.cjs",
-    "test:source-screenshot-compression": "electron scripts/electron-source-screenshot-compression-smoke.cjs",
     "test:credential-store": "node scripts/system-credential-smoke.mjs",
     "test:packaged-credential-store": "node scripts/run-packaged-credential-smoke.mjs",
     "acceptance:stage-one:capture": "node scripts/run-private-stage-one-capture.mjs",
@@ -37,6 +36,7 @@
     "qrcode": "1.5.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "sharp": "0.35.3",
     "yauzl": "3.3.1"
   },
   "devDependencies": {
@@ -68,7 +68,8 @@
       "yauzl": "3.3.1"
     },
     "onlyBuiltDependencies": [
-      "electron"
+      "electron",
+      "sharp"
     ]
   }
 }

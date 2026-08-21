@@ -1,5 +1,8 @@
 export type SourceScreenshotStorageState = 'original' | 'compressed' | 'deleted';
-export type SourceScreenshotCleanupAfterDays = 180 | 365 | null;
+export const SOURCE_SCREENSHOT_CLEANUP_AFTER_DAYS_OPTIONS = [180, 365] as const;
+export type SourceScreenshotCleanupAfterDays =
+  | typeof SOURCE_SCREENSHOT_CLEANUP_AFTER_DAYS_OPTIONS[number]
+  | null;
 
 export interface SourceScreenshotLifecycleSettings {
   cleanupAfterDays: SourceScreenshotCleanupAfterDays;
@@ -58,5 +61,7 @@ export interface SourceScreenshotSingleDeletePreview {
 export function isSourceScreenshotCleanupAfterDays(
   value: unknown,
 ): value is SourceScreenshotCleanupAfterDays {
-  return value === null || value === 180 || value === 365;
+  return value === null || SOURCE_SCREENSHOT_CLEANUP_AFTER_DAYS_OPTIONS.some(
+    (candidate) => candidate === value,
+  );
 }

@@ -87,11 +87,12 @@ import {
 } from './source-screenshot-dialog';
 import { acquireSingleInstance } from './single-instance';
 import { MobileUploadService } from './mobile-upload-service';
-import { ElectronSourceScreenshotCompressor } from './electron-source-screenshot-compressor';
+import { SharpSourceScreenshotCompressor } from './sharp-source-screenshot-compressor';
 import {
   isSourceScreenshotCleanupAfterDays,
   type SourceScreenshotLifecycleSettings,
 } from '../core/source-screenshot-lifecycle';
+import { runPackagedSourceScreenshotCompressionSmoke } from './packaged-source-screenshot-compression-smoke';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
@@ -1666,7 +1667,8 @@ function requireHistoricalOrderImportSession(
 export function startElectronApplication(): void {
   const isPackagedSmokeProcess = Boolean(
     process.env.XIANYU_PACKAGED_PORTABLE_SMOKE
-    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1',
+    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1'
+    || process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1',
   );
   if (!acquireSingleInstance(app, () => mainWindow, isPackagedSmokeProcess)) return;
 
@@ -1712,6 +1714,22 @@ export function startElectronApplication(): void {
       return;
     }
 
+    if (process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1') {
+      try {
+        if (!app.isPackaged) throw new Error('打包后来源截图压缩测试只能针对打包应用运行');
+        const result = await runPackagedSourceScreenshotCompressionSmoke();
+        console.log(`Packaged source screenshot compression smoke passed: ${JSON.stringify(result)}`);
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Packaged source screenshot compression smoke failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      }
+      return;
+    }
+
     const configDirectory = join(app.getPath('userData'), 'bootstrap');
     const validateDataDirectory = (dataDirectory: string): void => {
       assertDataDirectoryOutsideProgram({
@@ -1738,7 +1756,7 @@ export function startElectronApplication(): void {
         }),
       },
       validateDataDirectory,
-      sourceScreenshotCompressor: new ElectronSourceScreenshotCompressor(),
+      sourceScreenshotCompressor: new SharpSourceScreenshotCompressor(),
     });
     session.restore();
     mobileUploadService = new MobileUploadService({

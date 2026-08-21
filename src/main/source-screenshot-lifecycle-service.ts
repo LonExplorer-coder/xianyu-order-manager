@@ -89,6 +89,7 @@ export class SourceScreenshotLifecycleService {
   }
 
   public async runAutomaticCompression(): Promise<SourceScreenshotCompressionResult> {
+    await this.removeDeletedArtifacts();
     await this.removeRetainedOriginalCopies();
     const cutoff = this.now().getTime() - (COMPRESSION_AFTER_DAYS * DAY_MS);
     const candidates = this.listRows().filter((row) => (
@@ -118,6 +119,7 @@ export class SourceScreenshotLifecycleService {
   }
 
   public async previewCleanup(): Promise<SourceScreenshotCleanupPreview> {
+    await this.removeDeletedArtifacts();
     const { cleanupAfterDays } = this.getSettings();
     if (cleanupAfterDays === null) return disabledCleanupPreview();
     const candidates = await this.cleanupCandidates(cleanupAfterDays);
@@ -154,45 +156,45 @@ export class SourceScreenshotLifecycleService {
     const row = this.requireActiveRow(screenshotId);
     const sourcePath = this.resolveStoredPath(row.relative_path);
     const currentBytes = await this.fileBytes(row);
-    const holdingPath = `${sourcePath}.delete-${randomUUID()}`;
-    let moved = false;
-    let recoverableBytes: Buffer | null = null;
+    const holdingRelativePath = currentBytes > 0
+      ? `.source-screenshot-trash/${randomUUID()}.image`
+      : row.relative_path;
+    const holdingPath = this.resolveStoredPath(holdingRelativePath);
+    let holdingCreated = false;
     try {
-      try {
-        await rename(sourcePath, holdingPath);
-        moved = true;
-        recoverableBytes = await readFile(holdingPath);
-      } catch (error) {
-        if (currentBytes > 0) throw error;
+      if (currentBytes > 0) {
+        const recoverableBytes = await readFile(sourcePath);
+        await mkdir(dirname(holdingPath), { recursive: true });
+        await writeFile(holdingPath, recoverableBytes, { flag: 'wx' });
+        if (!(await readFile(holdingPath)).equals(recoverableBytes)) {
+          throw new Error('来源截图清理回滚副本校验失败');
+        }
+        holdingCreated = true;
       }
       this.database.exec('BEGIN IMMEDIATE;');
       try {
         const update = this.database.prepare(`
           UPDATE source_screenshots
           SET storage_state = 'deleted',
+              original_relative_path = relative_path,
+              relative_path = ?,
               original_bytes = COALESCE(original_bytes, ?),
               current_bytes = 0,
               deleted_at = ?
           WHERE id = ? AND storage_state <> 'deleted'
-        `).run(currentBytes, this.now().toISOString(), row.id);
+        `).run(holdingRelativePath, currentBytes, this.now().toISOString(), row.id);
         if (update.changes !== 1) throw new Error('来源截图存储状态已变化，请重新预览');
-        if (moved) {
-          await unlink(holdingPath);
-          moved = false;
-        }
         this.database.exec('COMMIT;');
       } catch (error) {
         rollbackQuietly(this.database);
         throw error;
       }
     } catch (error) {
-      if (moved) {
-        await rename(holdingPath, sourcePath).catch(() => undefined);
-      } else if (recoverableBytes) {
-        await writeFile(sourcePath, recoverableBytes).catch(() => undefined);
-      }
+      if (holdingCreated) await rm(holdingPath, { force: true }).catch(() => undefined);
       throw error;
     }
+    await unlink(sourcePath).catch(() => undefined);
+    if (holdingCreated) await unlink(holdingPath).catch(() => undefined);
     await this.removeOriginalCopy(row);
     return { deletedCount: 1, releasedBytes: currentBytes };
   }
@@ -313,6 +315,18 @@ export class SourceScreenshotLifecycleService {
     for (const row of this.listRows()) {
       if (row.storage_state === 'compressed') await this.removeOriginalCopy(row);
     }
+  }
+
+  private async removeDeletedArtifacts(): Promise<void> {
+    for (const row of this.listRows()) {
+      if (row.storage_state !== 'deleted') continue;
+      await unlink(this.resolveStoredPath(row.relative_path)).catch(() => undefined);
+      await this.removeOriginalCopy(row);
+    }
+    await rm(this.resolveStoredPath('.source-screenshot-trash'), {
+      recursive: true,
+      force: true,
+    }).catch(() => undefined);
   }
 
   private async removeOriginalCopy(row: ScreenshotRow): Promise<void> {

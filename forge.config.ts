@@ -4,7 +4,7 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { cpSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 
 const MAC_RELEASE_BUILD = process.env.XIANYU_MAC_RELEASE === '1';
@@ -17,7 +17,7 @@ type MacSignOptions = Exclude<
 
 const config: ForgeConfig = {
   packagerConfig: {
-    asar: true,
+    asar: { unpack: '**/*.{node,dylib,dll}' },
     name: 'XianyuOrderManager',
     executableName: 'XianyuOrderManager',
     appBundleId: 'com.lonexplorer.xianyu-order-manager',
@@ -26,6 +26,7 @@ const config: ForgeConfig = {
       (buildPath, _electronVersion, platform, arch, callback) => {
         try {
           copyKeyringRuntime(buildPath, platform, arch);
+          copySharpRuntime(buildPath, platform, arch);
           callback();
         } catch (error) {
           callback(error instanceof Error ? error : new Error('无法复制系统凭据运行库'));
@@ -115,6 +116,26 @@ function keyringPlatformPackage(platform: string, arch: string): string {
     return `keyring-win32-${arch}-msvc`;
   }
   throw new Error(`系统凭据运行库不支持目标平台 ${platform}-${arch}`);
+}
+
+function copySharpRuntime(buildPath: string, platform: string, arch: string): void {
+  const packages = sharpRuntimePackages(platform, arch);
+  for (const packageName of ['sharp', ...packages]) {
+    const source = join(process.cwd(), 'node_modules', ...packageName.split('/'));
+    const destination = join(buildPath, 'node_modules', ...packageName.split('/'));
+    mkdirSync(dirname(destination), { recursive: true });
+    cpSync(source, destination, { recursive: true, dereference: true });
+  }
+}
+
+function sharpRuntimePackages(platform: string, arch: string): string[] {
+  if (platform === 'darwin' && (arch === 'arm64' || arch === 'x64')) {
+    return [`@img/sharp-darwin-${arch}`, `@img/sharp-libvips-darwin-${arch}`];
+  }
+  if (platform === 'win32' && ['arm64', 'x64', 'ia32'].includes(arch)) {
+    return [`@img/sharp-win32-${arch}`];
+  }
+  throw new Error(`来源截图压缩运行库不支持目标平台 ${platform}-${arch}`);
 }
 
 export default config;

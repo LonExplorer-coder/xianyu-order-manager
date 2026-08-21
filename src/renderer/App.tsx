@@ -55,9 +55,12 @@ import type {
   SaveBackupSettingsInput,
 } from '../core/backup';
 import type { MobileUploadStatus } from '../core/mobile-upload';
-import type {
-  SourceScreenshotCleanupPreview,
-  SourceScreenshotLifecycleSettings,
+import {
+  isSourceScreenshotCleanupAfterDays,
+  SOURCE_SCREENSHOT_CLEANUP_AFTER_DAYS_OPTIONS,
+  type SourceScreenshotCleanupAfterDays,
+  type SourceScreenshotCleanupPreview,
+  type SourceScreenshotLifecycleSettings,
 } from '../core/source-screenshot-lifecycle';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
@@ -7634,10 +7637,9 @@ function SettingsWorkspace({
   }
 
   async function saveScreenshotCleanupPolicy(value: string) {
-    const cleanupAfterDays = value === '' ? null : Number(value);
-    if (cleanupAfterDays !== null && cleanupAfterDays !== 180 && cleanupAfterDays !== 365) {
-      return;
-    }
+    const parsed: unknown = value === '' ? null : Number(value);
+    if (!isSourceScreenshotCleanupAfterDays(parsed)) return;
+    const cleanupAfterDays: SourceScreenshotCleanupAfterDays = parsed;
     setScreenshotLifecycleBusy(true);
     setScreenshotLifecycleFeedback(null);
     setScreenshotCleanupPreview(null);
@@ -8170,8 +8172,9 @@ function SettingsWorkspace({
                   onChange={(event) => void saveScreenshotCleanupPolicy(event.target.value)}
                 >
                   <option value="">永不自动清理</option>
-                  <option value="180">满 180 天后进入清理预览</option>
-                  <option value="365">满 365 天后进入清理预览</option>
+                  {SOURCE_SCREENSHOT_CLEANUP_AFTER_DAYS_OPTIONS.map((days) => (
+                    <option key={days} value={days}>满 {days} 天后进入清理预览</option>
+                  ))}
                 </select>
               </label>
               <button
