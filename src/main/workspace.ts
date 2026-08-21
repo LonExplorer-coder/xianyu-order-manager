@@ -8559,6 +8559,7 @@ function migrateToVersion64(database: DatabaseSync): void {
     const columns = [
       ['storage_state', "TEXT NOT NULL DEFAULT 'original' CHECK (storage_state IN ('original', 'compressed', 'deleted'))"],
       ['original_relative_path', 'TEXT'],
+      ['delete_source_relative_path', 'TEXT'],
       ['original_bytes', 'INTEGER CHECK (original_bytes IS NULL OR original_bytes >= 0)'],
       ['current_bytes', 'INTEGER CHECK (current_bytes IS NULL OR current_bytes >= 0)'],
       ['compressed_at', 'TEXT'],

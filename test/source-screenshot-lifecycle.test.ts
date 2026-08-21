@@ -59,6 +59,23 @@ describe('来源截图文件生命周期', () => {
       expect(await readFile(join(fixture.dataDirectory, row.relative_path), 'utf8'))
         .toContain('original');
     }
+
+    await writeFile(
+      join(fixture.dataDirectory, 'screenshots/old.png'),
+      '异常退出残留原图',
+    );
+    await service.deleteScreenshot('old');
+    const deletedOld = screenshotRow(fixture.workspace, 'old');
+    expect(deletedOld).toMatchObject({
+      storage_state: 'deleted',
+      original_relative_path: 'screenshots/old.png',
+      delete_source_relative_path: 'screenshots/old.compressed.jpg',
+    });
+    await expect(access(join(fixture.dataDirectory, 'screenshots/old.png'))).rejects.toThrow();
+    await expect(access(join(
+      fixture.dataDirectory,
+      'screenshots/old.compressed.jpg',
+    ))).rejects.toThrow();
     fixture.workspace.close();
   });
 
@@ -176,7 +193,8 @@ async function lifecycleFixture() {
 
 function screenshotRow(workspace: Workspace, id: string) {
   return workspace.database.prepare(`
-    SELECT storage_state, relative_path, original_relative_path, mime_type,
+    SELECT storage_state, relative_path, original_relative_path,
+      delete_source_relative_path, mime_type,
       original_bytes, current_bytes, compressed_at, deleted_at
     FROM source_screenshots
     WHERE id = ?
@@ -184,6 +202,7 @@ function screenshotRow(workspace: Workspace, id: string) {
     storage_state: string;
     relative_path: string;
     original_relative_path: string | null;
+    delete_source_relative_path: string | null;
     mime_type: string;
     original_bytes: number | null;
     current_bytes: number | null;

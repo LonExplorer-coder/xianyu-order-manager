@@ -39,6 +39,7 @@ interface ScreenshotRow {
   original_name: string;
   relative_path: string;
   original_relative_path: string | null;
+  delete_source_relative_path: string | null;
   mime_type: string;
   storage_state: SourceScreenshotStorageState;
   original_bytes: number | null;
@@ -176,7 +177,7 @@ export class SourceScreenshotLifecycleService {
         const update = this.database.prepare(`
           UPDATE source_screenshots
           SET storage_state = 'deleted',
-              original_relative_path = relative_path,
+              delete_source_relative_path = relative_path,
               relative_path = ?,
               original_bytes = COALESCE(original_bytes, ?),
               current_bytes = 0,
@@ -231,6 +232,7 @@ export class SourceScreenshotLifecycleService {
           UPDATE source_screenshots
           SET storage_state = 'compressed',
               original_relative_path = relative_path,
+              delete_source_relative_path = NULL,
               relative_path = ?,
               mime_type = ?,
               original_bytes = ?,
@@ -284,6 +286,7 @@ export class SourceScreenshotLifecycleService {
   private listRows(): ScreenshotRow[] {
     return this.database.prepare(`
       SELECT id, original_name, relative_path, original_relative_path,
+        delete_source_relative_path,
         mime_type, storage_state, original_bytes, current_bytes, created_at
       FROM source_screenshots
       ORDER BY created_at, id
@@ -293,6 +296,7 @@ export class SourceScreenshotLifecycleService {
   private requireActiveRow(screenshotId: string): ScreenshotRow {
     const row = this.database.prepare(`
       SELECT id, original_name, relative_path, original_relative_path,
+        delete_source_relative_path,
         mime_type, storage_state, original_bytes, current_bytes, created_at
       FROM source_screenshots
       WHERE id = ?
@@ -321,6 +325,10 @@ export class SourceScreenshotLifecycleService {
     for (const row of this.listRows()) {
       if (row.storage_state !== 'deleted') continue;
       await unlink(this.resolveStoredPath(row.relative_path)).catch(() => undefined);
+      if (row.delete_source_relative_path) {
+        await unlink(this.resolveStoredPath(row.delete_source_relative_path))
+          .catch(() => undefined);
+      }
       await this.removeOriginalCopy(row);
     }
     await rm(this.resolveStoredPath('.source-screenshot-trash'), {

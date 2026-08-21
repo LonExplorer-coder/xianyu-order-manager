@@ -92,7 +92,6 @@ import {
   isSourceScreenshotCleanupAfterDays,
   type SourceScreenshotLifecycleSettings,
 } from '../core/source-screenshot-lifecycle';
-import { runPackagedSourceScreenshotCompressionSmoke } from './packaged-source-screenshot-compression-smoke';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
@@ -1667,8 +1666,7 @@ function requireHistoricalOrderImportSession(
 export function startElectronApplication(): void {
   const isPackagedSmokeProcess = Boolean(
     process.env.XIANYU_PACKAGED_PORTABLE_SMOKE
-    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1'
-    || process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1',
+    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1',
   );
   if (!acquireSingleInstance(app, () => mainWindow, isPackagedSmokeProcess)) return;
 
@@ -1707,22 +1705,6 @@ export function startElectronApplication(): void {
       } catch (error) {
         console.error(
           'Packaged credential store smoke test failed:',
-          error instanceof Error ? error.message : 'unknown error',
-        );
-        app.exit(1);
-      }
-      return;
-    }
-
-    if (process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1') {
-      try {
-        if (!app.isPackaged) throw new Error('打包后来源截图压缩测试只能针对打包应用运行');
-        const result = await runPackagedSourceScreenshotCompressionSmoke();
-        console.log(`Packaged source screenshot compression smoke passed: ${JSON.stringify(result)}`);
-        app.exit(0);
-      } catch (error) {
-        console.error(
-          'Packaged source screenshot compression smoke failed:',
           error instanceof Error ? error.message : 'unknown error',
         );
         app.exit(1);
