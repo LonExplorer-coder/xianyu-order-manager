@@ -541,6 +541,9 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
     saveBackupSettings: vi.fn(async (input) => input),
     selectBackupRoot: vi.fn().mockResolvedValue({ kind: 'canceled' }),
     getBackupStatus: vi.fn().mockResolvedValue(null),
+    getMobileUploadStatus: vi.fn().mockResolvedValue({ enabled: false }),
+    startMobileUpload: vi.fn().mockRejectedValue(new Error('测试未配置手机上传会话')),
+    stopMobileUpload: vi.fn().mockResolvedValue({ enabled: false }),
     selectSourceScreenshots: vi.fn(async () => {
       selectedDraft = await selectOneSourceScreenshot();
       return selectedDraft ? batchForDraft(selectedDraft) : null;
@@ -10544,6 +10547,56 @@ describe('订单管理工作台', () => {
     expect(screen.getByText(/可经「更改数据目录」切换到恢复结果/)).toBeVisible();
   });
 
+  it('设置页显式开启手机上传会话并展示二维码、临时访问码、失效时间与立即关闭入口', async () => {
+    const user = userEvent.setup();
+    const active = {
+      enabled: true as const,
+      url: 'http://192.168.1.2:41234/?session=secret',
+      qrDataUrl: 'data:image/png;base64,cXI=',
+      accessCode: '482913',
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+    const getMobileUploadStatus = vi.fn().mockResolvedValue({ enabled: false });
+    const startMobileUpload = vi.fn().mockResolvedValue(active);
+    const stopMobileUpload = vi.fn().mockResolvedValue({ enabled: false });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready',
+        dataDirectory: '/Users/test/当前订单数据',
+        orders: [],
+      }),
+      getMobileUploadStatus,
+      startMobileUpload,
+      stopMobileUpload,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const section = await screen.findByRole('region', { name: '手机上传' });
+    const toggle = within(section).getByRole('switch', { name: '手机上传' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(within(section).getByText('默认关闭，只在需要时短暂开启。')).toBeVisible();
+
+    await user.click(toggle);
+
+    expect(await within(section).findByRole('img', { name: '手机上传二维码' })).toHaveAttribute(
+      'src',
+      active.qrDataUrl,
+    );
+    expect(within(section).getByText(active.url)).toBeVisible();
+    expect(within(section).getByText(active.accessCode)).toBeVisible();
+    expect(within(section).getByText(/失效时间/)).toBeVisible();
+    expect(startMobileUpload).toHaveBeenCalledTimes(1);
+
+    await user.click(within(section).getByRole('button', { name: '立即关闭手机上传' }));
+
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+    expect(within(section).queryByRole('img', { name: '手机上传二维码' }))
+      .not.toBeInTheDocument();
+    expect(stopMobileUpload).toHaveBeenCalledTimes(1);
+  });
+
   it('设置页可开启自动备份、选择位置并查看状态与清理记录', async () => {
     const user = userEvent.setup();
     const saveBackupSettings = vi.fn(async (input: unknown) => input);
@@ -10758,9 +10811,10 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
     const settingsGroup = screen.getByRole('group', { name: '应用设置' });
-    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 4)
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 5)
       .map((heading) => heading.textContent)).toEqual([
         '数据存储位置',
+        '手机上传',
         '备份与恢复',
         '自动入库',
         '百炼 OCR',

@@ -54,6 +54,7 @@ import type {
   BackupVerificationReport,
   SaveBackupSettingsInput,
 } from '../core/backup';
+import type { MobileUploadStatus } from '../core/mobile-upload';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
 import type {
@@ -7419,6 +7420,10 @@ function SettingsWorkspace({
     useState(false);
   const [dataDirectoryFeedback, setDataDirectoryFeedback] =
     useState<SettingsFeedback>(null);
+  const [mobileUpload, setMobileUpload] = useState<MobileUploadStatus | null>(null);
+  const [mobileUploadBusy, setMobileUploadBusy] = useState(false);
+  const [mobileUploadFeedback, setMobileUploadFeedback] =
+    useState<SettingsFeedback>(null);
   const [backupBusy, setBackupBusy] = useState<'create' | 'verify' | 'restore' | null>(null);
   const [backupFeedback, setBackupFeedback] = useState<SettingsFeedback>(null);
   const [autoBackupSettings, setAutoBackupSettings] = useState<BackupSettingsView | null>(null);
@@ -7495,6 +7500,38 @@ function SettingsWorkspace({
     };
   }, [api, reloadToken]);
 
+  useEffect(() => {
+    let active = true;
+    setMobileUpload(null);
+    setMobileUploadFeedback(null);
+    void api.getMobileUploadStatus()
+      .then((status) => {
+        if (active) setMobileUpload(status);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setMobileUpload({ enabled: false });
+          setMobileUploadFeedback({ kind: 'error', message: errorMessage(error) });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, reloadToken]);
+
+  useEffect(() => {
+    if (!mobileUpload?.enabled) return undefined;
+    const delay = Math.max(0, new Date(mobileUpload.expiresAt).getTime() - Date.now() + 250);
+    const timer = window.setTimeout(() => {
+      void api.getMobileUploadStatus()
+        .then(setMobileUpload)
+        .catch((error: unknown) => {
+          setMobileUploadFeedback({ kind: 'error', message: errorMessage(error) });
+        });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [api, mobileUpload]);
+
   async function toggleAutomaticImport() {
     if (!orderIntakeSettings || savingOrderIntake) return;
     const previous = orderIntakeSettings;
@@ -7524,6 +7561,25 @@ function SettingsWorkspace({
       await onChangeDataDirectory();
     } catch (error) {
       setDataDirectoryFeedback({ kind: 'error', message: errorMessage(error) });
+    }
+  }
+
+  async function toggleMobileUpload() {
+    if (!mobileUpload || mobileUploadBusy) return;
+    setMobileUploadBusy(true);
+    setMobileUploadFeedback(null);
+    try {
+      if (mobileUpload.enabled) {
+        setMobileUpload(await api.stopMobileUpload());
+        setMobileUploadFeedback({ kind: 'success', message: '手机上传已关闭' });
+      } else {
+        setMobileUpload(await api.startMobileUpload());
+        setMobileUploadFeedback({ kind: 'success', message: '手机上传已开启，仅在本次会话内有效' });
+      }
+    } catch (error) {
+      setMobileUploadFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setMobileUploadBusy(false);
     }
   }
 
@@ -7920,6 +7976,67 @@ function SettingsWorkspace({
               </div>
             )}
             <SettingsNotice feedback={dataDirectoryFeedback} />
+          </section>
+
+          <section
+            className="settings-section settings-section--mobile-upload"
+            aria-labelledby="mobile-upload-heading"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">订单接收</span>
+                <h2 id="mobile-upload-heading">手机上传</h2>
+                <p>让同一 Wi-Fi 的手机把来源截图送入当前数据目录的既有识别批次。</p>
+              </div>
+              <button
+                className={`settings-switch${mobileUpload?.enabled ? ' is-on' : ''}`}
+                type="button"
+                role="switch"
+                aria-checked={mobileUpload?.enabled ?? false}
+                aria-label="手机上传"
+                aria-busy={mobileUploadBusy || mobileUpload === null}
+                disabled={mobileUploadBusy || mobileUpload === null}
+                onClick={() => void toggleMobileUpload()}
+              >
+                <span className="settings-switch-track" aria-hidden="true"><i /></span>
+                <span>
+                  {mobileUploadBusy
+                    ? '正在处理…'
+                    : mobileUpload?.enabled ? '已开启' : '已关闭'}
+                </span>
+              </button>
+            </div>
+
+            {!mobileUpload?.enabled ? (
+              <p className="mobile-upload-policy">默认关闭，只在需要时短暂开启。</p>
+            ) : (
+              <div className="mobile-upload-session">
+                <img src={mobileUpload.qrDataUrl} alt="手机上传二维码" />
+                <div className="mobile-upload-session-details">
+                  <div>
+                    <span>手机访问地址</span>
+                    <code>{mobileUpload.url}</code>
+                  </div>
+                  <div>
+                    <span>临时访问码</span>
+                    <strong>{mobileUpload.accessCode}</strong>
+                  </div>
+                  <p>
+                    失效时间：{new Date(mobileUpload.expiresAt).toLocaleString()}。
+                    手机页面只能上传来源截图，不能查看、编辑或导出订单。
+                  </p>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    disabled={mobileUploadBusy}
+                    onClick={() => void toggleMobileUpload()}
+                  >
+                    立即关闭手机上传
+                  </button>
+                </div>
+              </div>
+            )}
+            <SettingsNotice feedback={mobileUploadFeedback} />
           </section>
 
           <section className="settings-section settings-section--backup" aria-labelledby="backup-heading">

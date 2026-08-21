@@ -5900,6 +5900,76 @@ select:focus-visible {
   opacity: 0.62;
 }
 
+.mobile-upload-policy {
+  max-width: 690px;
+  margin: 19px 0 0;
+  color: #777d80;
+  font-size: 10px;
+}
+
+.mobile-upload-session {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+.mobile-upload-session img {
+  display: block;
+  width: 180px;
+  height: 180px;
+  border: 1px solid #d9dad7;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.mobile-upload-session-details {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.mobile-upload-session-details > div {
+  display: grid;
+  gap: 5px;
+}
+
+.mobile-upload-session-details span {
+  color: #747d87;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.mobile-upload-session-details code {
+  overflow-wrap: anywhere;
+  color: var(--navy-900);
+}
+
+.mobile-upload-session-details strong {
+  color: var(--navy-900);
+  font-size: 27px;
+  letter-spacing: 0.18em;
+}
+
+.mobile-upload-session-details p {
+  margin: 0;
+  color: #747d87;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.mobile-upload-session-details .button {
+  justify-self: start;
+}
+
+@media (max-width: 720px) {
+  .mobile-upload-session {
+    grid-template-columns: 1fr;
+  }
+}
+
 .order-intake-policy {
   max-width: 690px;
   margin: 19px 0 0;

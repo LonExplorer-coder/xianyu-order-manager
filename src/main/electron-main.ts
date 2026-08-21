@@ -86,9 +86,11 @@ import {
   sourceScreenshotDialogOptions,
 } from './source-screenshot-dialog';
 import { acquireSingleInstance } from './single-instance';
+import { MobileUploadService } from './mobile-upload-service';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
+let mobileUploadService: MobileUploadService | undefined;
 const PRODUCT_CATALOG_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 const HISTORICAL_ORDER_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 
@@ -141,7 +143,10 @@ function backupPickerDefaultPath(settings: BackupSettingsView): string {
     ?? join(app.getPath('documents'), '闲鱼订单备份');
 }
 
-export function registerIpcHandlers(desktopSession: DesktopSession): void {
+export function registerIpcHandlers(
+  desktopSession: DesktopSession,
+  mobileUpload?: MobileUploadService,
+): void {
   let productCatalogImportSession: {
     id: string;
     buffer: Buffer;
@@ -174,6 +179,7 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
       executablePath: app.getPath('exe'),
       platform: process.platform,
     });
+    await mobileUpload?.stop();
     return desktopSession.useDataDirectory(selection.filePaths[0]);
   });
 
@@ -319,6 +325,15 @@ export function registerIpcHandlers(desktopSession: DesktopSession): void {
   ipcMain.handle('backup:get-status', (): Promise<BackupStatusView | null> => (
     desktopSession.getBackupStatus()
   ));
+
+  if (mobileUpload) {
+    ipcMain.handle('mobile-upload:get-status', () => mobileUpload.getStatus());
+    ipcMain.handle('mobile-upload:start', () => mobileUpload.start());
+    ipcMain.handle('mobile-upload:stop', async () => {
+      await mobileUpload.stop();
+      return mobileUpload.getStatus();
+    });
+  }
 
   ipcMain.handle('workflow:select-source-screenshots', async () => {
     const window = requireWindow();
@@ -1685,7 +1700,13 @@ export function startElectronApplication(): void {
       validateDataDirectory,
     });
     session.restore();
-    registerIpcHandlers(session);
+    mobileUploadService = new MobileUploadService({
+      submitSourceScreenshots: (paths) => {
+        if (!session) throw new Error('应用会话尚未就绪');
+        return session.submitSourceScreenshots(paths);
+      },
+    });
+    registerIpcHandlers(session, mobileUploadService);
     mainWindow = createWindow();
 
     const runAutomaticBackupTick = (): void => {
@@ -1710,6 +1731,7 @@ export function startElectronApplication(): void {
   });
 
   app.on('before-quit', () => {
+    void mobileUploadService?.stop();
     session?.close();
   });
 }

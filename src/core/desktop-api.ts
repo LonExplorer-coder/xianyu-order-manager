@@ -205,6 +205,7 @@ import type {
   MergeRecipientsInput,
   RecipientSummaryView,
 } from './recipients';
+import type { MobileUploadSessionView, MobileUploadStatus } from './mobile-upload';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -223,6 +224,9 @@ export interface DesktopApi {
   saveBackupSettings(input: SaveBackupSettingsInput): Promise<BackupSettingsView>;
   selectBackupRoot(purpose?: 'backup' | 'restore'): Promise<BackupSelectRootOutcome>;
   getBackupStatus(): Promise<BackupStatusView | null>;
+  getMobileUploadStatus(): Promise<MobileUploadStatus>;
+  startMobileUpload(): Promise<MobileUploadSessionView>;
+  stopMobileUpload(): Promise<MobileUploadStatus>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;
