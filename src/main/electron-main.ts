@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
@@ -36,7 +36,10 @@ import type {
   BackupVerifyOutcome,
   SaveBackupSettingsInput,
 } from '../core/backup';
-import { formatBackupStamp } from './backup-service';
+import {
+  createBackup as createBackupForUpdateSmoke,
+  formatBackupStamp,
+} from './backup-service';
 import { normalizeOrderExportInput } from '../core/order-export';
 import { normalizeShipmentGroupExportInput } from '../core/shipment-group-export';
 import {
@@ -92,10 +95,23 @@ import {
   isSourceScreenshotCleanupAfterDays,
   type SourceScreenshotLifecycleSettings,
 } from '../core/source-screenshot-lifecycle';
+import { runUpdateCandidateSmoke } from './update-candidate-smoke';
+import { Workspace } from './workspace';
+import { PortableUpdateService } from './portable-update-service';
+import {
+  launchPortableUpdateInstaller,
+  type PortableUpdateInstallInput,
+} from './portable-update-installer';
+import type {
+  PortableUpdateApplyResult,
+  PortableUpdateArchitecture,
+  PortableUpdatePlatform,
+} from '../core/portable-update';
 
 let mainWindow: BrowserWindow | undefined;
 let session: DesktopSession | undefined;
 let mobileUploadService: MobileUploadService | undefined;
+let portableUpdateService: PortableUpdateService | undefined;
 const PRODUCT_CATALOG_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 const HISTORICAL_ORDER_MAX_WORKBOOK_BYTES = 10 * 1024 * 1024;
 
@@ -151,6 +167,10 @@ function backupPickerDefaultPath(settings: BackupSettingsView): string {
 export function registerIpcHandlers(
   desktopSession: DesktopSession,
   mobileUpload?: MobileUploadService,
+  portableUpdate?: PortableUpdateService,
+  launchUpdate: (
+    input: PortableUpdateInstallInput,
+  ) => Promise<unknown> = launchPortableUpdateInstaller,
 ): void {
   let productCatalogImportSession: {
     id: string;
@@ -374,6 +394,72 @@ export function registerIpcHandlers(
   ipcMain.handle('source-screenshots:delete', (_event, screenshotId: unknown) => (
     desktopSession.deleteSourceScreenshot(parseWorkflowId(screenshotId, '来源截图'))
   ));
+
+  if (portableUpdate) {
+    ipcMain.handle('portable-update:get-view', () => portableUpdate.getView());
+    ipcMain.handle('portable-update:check', () => portableUpdate.checkForUpdate());
+    ipcMain.handle('portable-update:download', (_event, candidateId: unknown) => (
+      portableUpdate.downloadUpdate(parseWorkflowId(candidateId, '更新候选'))
+    ));
+    ipcMain.handle(
+      'portable-update:apply',
+      async (event, candidateId: unknown): Promise<PortableUpdateApplyResult> => {
+        if (app.isPackaged === false) {
+          throw new Error('便携版更新只能在打包后的应用中执行');
+        }
+        const parsedCandidateId = parseWorkflowId(candidateId, '更新候选');
+        const prepared = await portableUpdate.verifyDownloadedUpdate(parsedCandidateId);
+        const settings = desktopSession.getBackupSettings();
+        let backupRootDirectory = settings.manualBackupRootDirectory;
+        if (backupRootDirectory && !existsSync(backupRootDirectory)) {
+          throw new Error(`配置的备份位置不存在或已断开（${backupRootDirectory}）；请接上外接硬盘或重新选择`);
+        }
+        if (!backupRootDirectory) {
+          const window = BrowserWindow.fromWebContents(event.sender) ?? requireWindow();
+          const selection = await dialog.showOpenDialog(window, {
+            title: '选择更新前备份保存位置',
+            buttonLabel: '备份到这里并继续更新',
+            defaultPath: join(app.getPath('documents'), '闲鱼订单备份'),
+            properties: creatableDirectoryProperties(),
+          });
+          if (selection.canceled || selection.filePaths.length === 0) {
+            throw new Error('已取消更新：应用前必须创建并验证备份');
+          }
+          backupRootDirectory = selection.filePaths[0];
+          desktopSession.updateBackupLocationDefaults({
+            manualBackupRootDirectory: backupRootDirectory,
+          });
+        }
+        const backup = await desktopSession.createBackup(
+          backupRootDirectory,
+          app.getVersion(),
+        );
+        if (!backup.verification.ok) {
+          throw new Error(`更新前备份验证未通过：${backup.verification.problems.join('；')}`);
+        }
+        const workingDirectory = join(
+          dirname(prepared.archivePath),
+          `apply-${randomUUID()}`,
+        );
+        await launchUpdate({
+          platform: portableUpdatePlatform(),
+          version: prepared.candidate.version,
+          currentProcessId: process.pid,
+          currentExecutablePath: app.getPath('exe'),
+          archivePath: prepared.archivePath,
+          backupDirectory: backup.backupDirectory,
+          workingDirectory,
+          nonce: randomUUID(),
+        });
+        setTimeout(() => app.quit(), 250).unref();
+        return {
+          started: true,
+          version: prepared.candidate.version,
+          backupDirectory: backup.backupDirectory,
+        };
+      },
+    );
+  }
 
   ipcMain.handle('workflow:select-source-screenshots', async () => {
     const window = requireWindow();
@@ -1666,7 +1752,10 @@ function requireHistoricalOrderImportSession(
 export function startElectronApplication(): void {
   const isPackagedSmokeProcess = Boolean(
     process.env.XIANYU_PACKAGED_PORTABLE_SMOKE
-    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1',
+    || process.env.XIANYU_PACKAGED_CREDENTIAL_SMOKE === '1'
+    || process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1'
+    || process.env.XIANYU_UPDATE_BACKUP_SMOKE === '1'
+    || process.env.XIANYU_UPDATE_CANDIDATE_SMOKE === '1',
   );
   if (!acquireSingleInstance(app, () => mainWindow, isPackagedSmokeProcess)) return;
 
@@ -1712,6 +1801,101 @@ export function startElectronApplication(): void {
       return;
     }
 
+    if (process.env.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE === '1') {
+      try {
+        if (!app.isPackaged) throw new Error('来源截图压缩冒烟只能针对打包应用运行');
+        const width = 32;
+        const height = 64;
+        const source = nativeImage.createFromBitmap(
+          Buffer.alloc(width * height * 4, 240),
+          { width, height, scaleFactor: 1 },
+        ).toPNG();
+        const result = await new SharpSourceScreenshotCompressor().compress(
+          source,
+          'image/png',
+        );
+        if (
+          result.outputSize.width !== width
+          || result.outputSize.height !== height
+          || result.bytes.length === 0
+        ) {
+          throw new Error('打包后来源截图压缩结果无效');
+        }
+        console.log(`Packaged source screenshot compression smoke passed: ${result.bytes.length}`);
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Packaged source screenshot compression smoke failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      }
+      return;
+    }
+
+    if (process.env.XIANYU_UPDATE_CANDIDATE_SMOKE === '1') {
+      try {
+        if (!app.isPackaged) throw new Error('更新候选健康检查只能针对打包应用运行');
+        const result = await runUpdateCandidateSmoke({
+          backupDirectory: requiredSmokePath(
+            process.env.XIANYU_UPDATE_BACKUP_DIRECTORY,
+            '更新备份目录',
+          ),
+          healthDataDirectory: requiredSmokePath(
+            process.env.XIANYU_UPDATE_HEALTH_DATA_DIRECTORY,
+            '更新健康检查数据目录',
+          ),
+        });
+        console.log(`Update candidate smoke passed: ${JSON.stringify(result)}`);
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Update candidate smoke failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      }
+      return;
+    }
+
+    if (process.env.XIANYU_UPDATE_BACKUP_SMOKE === '1') {
+      let workspace: Workspace | undefined;
+      try {
+        if (!app.isPackaged) throw new Error('更新备份测试只能针对打包应用运行');
+        const dataDirectory = requiredSmokePath(
+          process.env.XIANYU_UPDATE_DATA_DIRECTORY,
+          '更新备份数据目录',
+        );
+        workspace = Workspace.open(dataDirectory);
+        const result = await createBackupForUpdateSmoke({
+          dataDirectory,
+          database: workspace.database,
+          backupRootDirectory: requiredSmokePath(
+            process.env.XIANYU_UPDATE_BACKUP_ROOT_DIRECTORY,
+            '更新备份保存位置',
+          ),
+          appVersion: app.getVersion(),
+        });
+        if (!result.verification.ok) {
+          throw new Error(`更新备份验证未通过：${result.verification.problems.join('；')}`);
+        }
+        console.log(`Update backup smoke passed: ${JSON.stringify({
+          backupDirectory: result.backupDirectory,
+          checkedFiles: result.verification.checkedFiles,
+        })}`);
+        app.exit(0);
+      } catch (error) {
+        console.error(
+          'Update backup smoke failed:',
+          error instanceof Error ? error.message : 'unknown error',
+        );
+        app.exit(1);
+      } finally {
+        workspace?.close();
+      }
+      return;
+    }
+
     const configDirectory = join(app.getPath('userData'), 'bootstrap');
     const validateDataDirectory = (dataDirectory: string): void => {
       assertDataDirectoryOutsideProgram({
@@ -1752,7 +1936,13 @@ export function startElectronApplication(): void {
         return join(state.dataDirectory, '.mobile-upload-staging');
       },
     });
-    registerIpcHandlers(session, mobileUploadService);
+    portableUpdateService = new PortableUpdateService({
+      currentVersion: app.getVersion(),
+      platform: portableUpdatePlatform(),
+      architecture: portableUpdateArchitecture(),
+      updatesDirectory: join(app.getPath('userData'), 'updates'),
+    });
+    registerIpcHandlers(session, mobileUploadService, portableUpdateService);
     mainWindow = createWindow();
 
     const runAutomaticBackupTick = (): void => {
@@ -1811,6 +2001,17 @@ function portableSmokePhase(value: string): 'write' | 'read' {
 function requiredSmokePath(value: string | undefined, label: string): string {
   if (!value?.trim()) throw new Error(`便携版冒烟缺少${label}`);
   return value;
+}
+
+function portableUpdatePlatform(): PortableUpdatePlatform {
+  if (process.platform === 'darwin' || process.platform === 'win32') return process.platform;
+  throw new Error(`便携版更新不支持当前平台 ${process.platform}`);
+}
+
+function portableUpdateArchitecture(): PortableUpdateArchitecture {
+  if (process.platform === 'darwin' && process.arch === 'arm64') return 'arm64';
+  if (process.platform === 'win32' && process.arch === 'x64') return 'x64';
+  throw new Error(`便携版更新不支持当前架构 ${process.platform}-${process.arch}`);
 }
 
 

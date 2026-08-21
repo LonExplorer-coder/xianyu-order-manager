@@ -62,6 +62,7 @@ import {
   type SourceScreenshotCleanupPreview,
   type SourceScreenshotLifecycleSettings,
 } from '../core/source-screenshot-lifecycle';
+import type { PortableUpdateView } from '../core/portable-update';
 import type { CandidateAdjudicationAuditView } from '../core/candidate-adjudication-audit';
 import type { CandidateAdjudicationFailureCode } from '../core/candidate-verification';
 import type {
@@ -7458,6 +7459,11 @@ function SettingsWorkspace({
     useState<SettingsFeedback>(null);
   const [screenshotCleanupPreview, setScreenshotCleanupPreview] =
     useState<SourceScreenshotCleanupPreview | null>(null);
+  const [portableUpdate, setPortableUpdate] = useState<PortableUpdateView | null>(null);
+  const [portableUpdateBusy, setPortableUpdateBusy] =
+    useState<'check' | 'download' | 'apply' | null>(null);
+  const [portableUpdateFeedback, setPortableUpdateFeedback] =
+    useState<SettingsFeedback>(null);
   const [backupBusy, setBackupBusy] = useState<'create' | 'verify' | 'restore' | null>(null);
   const [backupFeedback, setBackupFeedback] = useState<SettingsFeedback>(null);
   const [autoBackupSettings, setAutoBackupSettings] = useState<BackupSettingsView | null>(null);
@@ -7528,6 +7534,24 @@ function SettingsWorkspace({
       })
       .finally(() => {
         if (active) setCandidateBusy(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, reloadToken]);
+
+  useEffect(() => {
+    let active = true;
+    setPortableUpdate(null);
+    setPortableUpdateFeedback(null);
+    void api.getPortableUpdateView()
+      .then((view) => {
+        if (active) setPortableUpdate(view);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setPortableUpdateFeedback({ kind: 'error', message: errorMessage(error) });
+        }
       });
     return () => {
       active = false;
@@ -7688,6 +7712,55 @@ function SettingsWorkspace({
       setScreenshotLifecycleFeedback({ kind: 'error', message: errorMessage(error) });
     } finally {
       setScreenshotLifecycleBusy(false);
+    }
+  }
+
+  async function checkPortableUpdate() {
+    setPortableUpdateBusy('check');
+    setPortableUpdateFeedback(null);
+    try {
+      const view = await api.checkForPortableUpdate();
+      setPortableUpdate(view);
+      if (view.status === 'up_to_date') {
+        setPortableUpdateFeedback({ kind: 'success', message: '当前已是最新正式版本' });
+      }
+    } catch (error) {
+      setPortableUpdateFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setPortableUpdateBusy(null);
+    }
+  }
+
+  async function downloadPortableUpdate() {
+    if (!portableUpdate?.candidate) return;
+    setPortableUpdateBusy('download');
+    setPortableUpdateFeedback(null);
+    try {
+      setPortableUpdate(await api.downloadPortableUpdate(portableUpdate.candidate.id));
+      setPortableUpdateFeedback({
+        kind: 'success',
+        message: '更新 ZIP 与 SHA-256 已验证，可以在备份保护下应用',
+      });
+    } catch (error) {
+      setPortableUpdateFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setPortableUpdateBusy(null);
+    }
+  }
+
+  async function applyPortableUpdate() {
+    if (!portableUpdate?.candidate || portableUpdate.status !== 'downloaded') return;
+    setPortableUpdateBusy('apply');
+    setPortableUpdateFeedback(null);
+    try {
+      const result = await api.applyPortableUpdate(portableUpdate.candidate.id);
+      setPortableUpdateFeedback({
+        kind: 'success',
+        message: `更新辅助程序已启动；已验证备份 ${result.backupDirectory}，应用即将退出`,
+      });
+    } catch (error) {
+      setPortableUpdateFeedback({ kind: 'error', message: errorMessage(error) });
+      setPortableUpdateBusy(null);
     }
   }
 
@@ -8447,6 +8520,78 @@ function SettingsWorkspace({
                 </div>
               )}
             </div>
+          </section>
+
+          <section
+            className="settings-section settings-section--portable-update"
+            aria-labelledby="portable-update-heading"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <span className="section-kicker">程序维护</span>
+                <h2 id="portable-update-heading">便携版更新</h2>
+                <p>
+                  只在你主动操作时检查 GitHub 正式发布；不会后台强制升级。
+                  应用更新前会自动创建并验证完整备份，订单数据目录不会随程序移动。
+                </p>
+              </div>
+              <span className="service-state is-ready">
+                当前版本 {portableUpdate?.currentVersion ?? '读取中'}
+              </span>
+            </div>
+
+            <div className="portable-update-actions">
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={!portableUpdate || portableUpdateBusy !== null}
+                onClick={() => void checkPortableUpdate()}
+              >
+                {portableUpdateBusy === 'check' ? '正在检查…' : '检查更新'}
+              </button>
+            </div>
+
+            {portableUpdate?.candidate && (
+              <div className="portable-update-candidate">
+                <div>
+                  <strong>{portableUpdate.candidate.name}</strong>
+                  <span>
+                    {`版本 ${portableUpdate.candidate.version} · ${formatBackupBytes(portableUpdate.candidate.archiveBytes)} · ${new Date(portableUpdate.candidate.publishedAt).toLocaleDateString()}`}
+                  </span>
+                </div>
+                {portableUpdate.candidate.releaseNotes && (
+                  <p>{portableUpdate.candidate.releaseNotes}</p>
+                )}
+
+                {portableUpdate.status === 'downloaded' ? (
+                  <div className="portable-update-ready">
+                    <strong>更新 ZIP 与 SHA-256 已验证</strong>
+                    <p>
+                      下一步将先创建并验证备份，再退出应用并由更新辅助程序完成替换；
+                      候选验证或替换失败时恢复旧程序。
+                    </p>
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      disabled={portableUpdateBusy !== null}
+                      onClick={() => void applyPortableUpdate()}
+                    >
+                      {portableUpdateBusy === 'apply' ? '正在备份并准备…' : '备份并应用更新'}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="button button--primary"
+                    type="button"
+                    disabled={portableUpdateBusy !== null}
+                    onClick={() => void downloadPortableUpdate()}
+                  >
+                    {portableUpdateBusy === 'download' ? '正在下载并验证…' : '下载更新'}
+                  </button>
+                )}
+              </div>
+            )}
+            <SettingsNotice feedback={portableUpdateFeedback} />
           </section>
 
           {orderIntakeLoading && !orderIntakeSettings && (

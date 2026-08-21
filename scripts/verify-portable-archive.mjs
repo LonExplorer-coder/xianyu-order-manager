@@ -44,7 +44,26 @@ try {
   runPackagedApplication(firstInstall.executable, {
     XIANYU_PACKAGED_CREDENTIAL_SMOKE: '1',
   }, '系统凭据库');
+  runPackagedApplication(firstInstall.executable, {
+    XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE: '1',
+  }, '来源截图压缩运行库');
   runPortablePhase(firstInstall.executable, 'write', configDirectory, dataDirectory);
+
+  const updateBackupRoot = join(externalDirectory, 'update-backups');
+  runPackagedApplication(firstInstall.executable, {
+    XIANYU_UPDATE_BACKUP_SMOKE: '1',
+    XIANYU_UPDATE_DATA_DIRECTORY: dataDirectory,
+    XIANYU_UPDATE_BACKUP_ROOT_DIRECTORY: updateBackupRoot,
+  }, '更新前完整备份');
+  const updateBackups = readdirSync(updateBackupRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('xianyu-backup-'));
+  if (updateBackups.length !== 1) throw new Error('更新前完整备份产物数量异常');
+  const updateBackupDirectory = join(updateBackupRoot, updateBackups[0].name);
+  runPackagedApplication(firstInstall.executable, {
+    XIANYU_UPDATE_CANDIDATE_SMOKE: '1',
+    XIANYU_UPDATE_BACKUP_DIRECTORY: updateBackupDirectory,
+    XIANYU_UPDATE_HEALTH_DATA_DIRECTORY: join(externalDirectory, 'update-health-data'),
+  }, '更新候选隔离恢复');
 
   await removeDirectoryWithRetries(firstInstall.root, {
     label: '第一份便携程序目录',
@@ -73,10 +92,12 @@ try {
     checks: {
       archiveExtracted: true,
       packagedCredentialStore: true,
+      packagedScreenshotCompression: true,
       dataDirectorySelected: true,
       orderImported: true,
       firstProgramDirectoryRemoved: true,
       replacementProgramReadExistingOrder: true,
+      updateCandidateBackupSmoke: true,
     },
   });
   completed = true;
@@ -187,7 +208,44 @@ function verifyProgramStructure(program, target) {
         'keyring-win32-x64-msvc',
         'keyring.win32-x64-msvc.node',
       );
-  for (const requiredPath of [join(resources, 'app.asar'), keyringBinary]) {
+  const sharpBinary = target.platform === 'darwin'
+    ? join(
+        resources,
+        'app.asar.unpacked',
+        'node_modules',
+        '@img',
+        'sharp-darwin-arm64',
+        'lib',
+        `sharp-darwin-arm64-${packageJson.dependencies.sharp}.node`,
+      )
+    : join(
+        resources,
+        'app.asar.unpacked',
+        'node_modules',
+        '@img',
+        'sharp-win32-x64',
+        'lib',
+        `sharp-win32-x64-${packageJson.dependencies.sharp}.node`,
+      );
+  const requiredPaths = [join(resources, 'app.asar'), keyringBinary, sharpBinary];
+  if (target.platform === 'darwin') {
+    const libvipsDirectory = join(
+      resources,
+      'app.asar.unpacked',
+      'node_modules',
+      '@img',
+      'sharp-libvips-darwin-arm64',
+      'lib',
+    );
+    const libvipsFile = existsSync(libvipsDirectory)
+      ? readdirSync(libvipsDirectory).find((name) => (
+        name.startsWith('libvips-cpp.') && name.endsWith('.dylib')
+      ))
+      : undefined;
+    if (!libvipsFile) throw new Error('便携版缺少 Sharp libvips 运行库');
+    requiredPaths.push(join(libvipsDirectory, libvipsFile));
+  }
+  for (const requiredPath of requiredPaths) {
     if (!existsSync(requiredPath)) {
       throw new Error(`便携版缺少运行文件：${relative(program, requiredPath)}`);
     }
@@ -228,9 +286,16 @@ function runPortablePhase(executable, phase, configDirectory, dataDirectory) {
 function runPackagedApplication(executable, additions, label) {
   const environment = { ...process.env };
   delete environment.XIANYU_PACKAGED_CREDENTIAL_SMOKE;
+  delete environment.XIANYU_PACKAGED_SCREENSHOT_COMPRESSION_SMOKE;
   delete environment.XIANYU_PACKAGED_PORTABLE_SMOKE;
   delete environment.XIANYU_PORTABLE_SMOKE_CONFIG_DIRECTORY;
   delete environment.XIANYU_PORTABLE_SMOKE_DATA_DIRECTORY;
+  delete environment.XIANYU_UPDATE_CANDIDATE_SMOKE;
+  delete environment.XIANYU_UPDATE_BACKUP_DIRECTORY;
+  delete environment.XIANYU_UPDATE_HEALTH_DATA_DIRECTORY;
+  delete environment.XIANYU_UPDATE_BACKUP_SMOKE;
+  delete environment.XIANYU_UPDATE_DATA_DIRECTORY;
+  delete environment.XIANYU_UPDATE_BACKUP_ROOT_DIRECTORY;
   Object.assign(environment, additions);
   delete environment.ELECTRON_RUN_AS_NODE;
   const result = spawnSync(executable, [], {

@@ -5989,6 +5989,40 @@ select:focus-visible {
   margin-top: 16px;
 }
 
+.portable-update-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.portable-update-candidate {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid #d9dad7;
+  border-radius: 12px;
+  background: #f8f8f5;
+}
+
+.portable-update-candidate > div:first-child,
+.portable-update-ready {
+  display: grid;
+  gap: 5px;
+}
+
+.portable-update-candidate span,
+.portable-update-candidate p {
+  margin: 0;
+  color: #747d87;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.portable-update-candidate .button {
+  justify-self: start;
+}
+
 .source-delete-button {
   margin: 10px 14px 14px;
 }

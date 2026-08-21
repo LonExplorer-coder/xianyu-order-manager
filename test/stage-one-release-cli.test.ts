@@ -507,10 +507,12 @@ function portableEvidence(input: {
     checks: {
       archiveExtracted: true,
       packagedCredentialStore: true,
+      packagedScreenshotCompression: true,
       dataDirectorySelected: true,
       orderImported: true,
       firstProgramDirectoryRemoved: true,
       replacementProgramReadExistingOrder: true,
+      updateCandidateBackupSmoke: true,
     },
   };
 }

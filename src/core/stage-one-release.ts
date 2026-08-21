@@ -3,10 +3,12 @@ import type { StageOneAcceptanceReport } from './stage-one-acceptance';
 export const PORTABLE_ACCEPTANCE_CHECKS = [
   'archiveExtracted',
   'packagedCredentialStore',
+  'packagedScreenshotCompression',
   'dataDirectorySelected',
   'orderImported',
   'firstProgramDirectoryRemoved',
   'replacementProgramReadExistingOrder',
+  'updateCandidateBackupSmoke',
 ] as const;
 
 export type PortableAcceptanceCheck = (typeof PORTABLE_ACCEPTANCE_CHECKS)[number];

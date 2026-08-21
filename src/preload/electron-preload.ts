@@ -34,6 +34,14 @@ const api: DesktopApi = {
   deleteSourceScreenshot: (screenshotId) => (
     ipcRenderer.invoke('source-screenshots:delete', screenshotId)
   ),
+  getPortableUpdateView: () => ipcRenderer.invoke('portable-update:get-view'),
+  checkForPortableUpdate: () => ipcRenderer.invoke('portable-update:check'),
+  downloadPortableUpdate: (candidateId) => (
+    ipcRenderer.invoke('portable-update:download', candidateId)
+  ),
+  applyPortableUpdate: (candidateId) => (
+    ipcRenderer.invoke('portable-update:apply', candidateId)
+  ),
   selectSourceScreenshots: () => ipcRenderer.invoke('workflow:select-source-screenshots'),
   listRecognitionBatches: () => ipcRenderer.invoke('workflow:list-recognition-batches'),
   retryRecognitionItem: (batchId, itemId) => (

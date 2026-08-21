@@ -212,6 +212,10 @@ import type {
   SourceScreenshotLifecycleSettings,
   SourceScreenshotSingleDeletePreview,
 } from './source-screenshot-lifecycle';
+import type {
+  PortableUpdateApplyResult,
+  PortableUpdateView,
+} from './portable-update';
 
 export type BootstrapState =
   | { kind: 'needs_data_directory' }
@@ -243,6 +247,10 @@ export interface DesktopApi {
     screenshotId: string,
   ): Promise<SourceScreenshotSingleDeletePreview>;
   deleteSourceScreenshot(screenshotId: string): Promise<SourceScreenshotCleanupResult>;
+  getPortableUpdateView(): Promise<PortableUpdateView>;
+  checkForPortableUpdate(): Promise<PortableUpdateView>;
+  downloadPortableUpdate(candidateId: string): Promise<PortableUpdateView>;
+  applyPortableUpdate(candidateId: string): Promise<PortableUpdateApplyResult>;
   selectSourceScreenshots(): Promise<RecognitionBatchView | null>;
   listRecognitionBatches(): Promise<RecognitionBatchView[]>;
   retryRecognitionItem(batchId: string, itemId: string): Promise<void>;

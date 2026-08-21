@@ -564,6 +564,14 @@ function createApi(overrides: DesktopApiTestOverrides = {}): DesktopApi {
       new Error('测试未配置来源截图删除预览'),
     ),
     deleteSourceScreenshot: vi.fn().mockResolvedValue({ deletedCount: 1, releasedBytes: 0 }),
+    getPortableUpdateView: vi.fn().mockResolvedValue({
+      currentVersion: '0.2.68', status: 'idle', candidate: null, downloaded: null,
+    }),
+    checkForPortableUpdate: vi.fn().mockResolvedValue({
+      currentVersion: '0.2.68', status: 'up_to_date', candidate: null, downloaded: null,
+    }),
+    downloadPortableUpdate: vi.fn().mockRejectedValue(new Error('测试未配置更新下载')),
+    applyPortableUpdate: vi.fn().mockRejectedValue(new Error('测试未配置更新应用')),
     selectSourceScreenshots: vi.fn(async () => {
       selectedDraft = await selectOneSourceScreenshot();
       return selectedDraft ? batchForDraft(selectedDraft) : null;
@@ -10729,6 +10737,73 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('设置页只在用户触发后检查、下载，并在备份保护下应用便携版更新', async () => {
+    const user = userEvent.setup();
+    const candidate = {
+      id: 'candidate-030',
+      version: '0.3.0',
+      name: '稳定版 0.3.0',
+      releaseNotes: '新增可靠更新流程。',
+      publishedAt: '2026-08-22T02:00:00.000Z',
+      releaseUrl: 'https://github.com/LonExplorer-coder/xianyu-order-manager/releases/tag/v0.3.0',
+      archiveFile: 'XianyuOrderManager-darwin-arm64-0.3.0.zip',
+      archiveBytes: 100_000_000,
+    };
+    const available = {
+      currentVersion: '0.2.68', status: 'available' as const,
+      candidate, downloaded: null,
+    };
+    const downloaded = {
+      ...available,
+      status: 'downloaded' as const,
+      downloaded: {
+        archivePath: '/Users/test/updates/0.3.0/update.zip',
+        archiveSha256: 'a'.repeat(64),
+        archiveBytes: candidate.archiveBytes,
+      },
+    };
+    const checkForPortableUpdate = vi.fn().mockResolvedValue(available);
+    const downloadPortableUpdate = vi.fn().mockResolvedValue(downloaded);
+    const applyPortableUpdate = vi.fn().mockResolvedValue({
+      started: true,
+      version: '0.3.0',
+      backupDirectory: '/Volumes/Backup/xianyu-backup-20260822-100000',
+    });
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/当前订单数据', orders: [],
+      }),
+      getPortableUpdateView: vi.fn().mockResolvedValue({
+        currentVersion: '0.2.68', status: 'idle', candidate: null, downloaded: null,
+      }),
+      checkForPortableUpdate,
+      downloadPortableUpdate,
+      applyPortableUpdate,
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const section = await screen.findByRole('region', { name: '便携版更新' });
+    expect(within(section).getByText('当前版本 0.2.68')).toBeVisible();
+    expect(checkForPortableUpdate).not.toHaveBeenCalled();
+
+    await user.click(within(section).getByRole('button', { name: '检查更新' }));
+    expect(await within(section).findByText('稳定版 0.3.0')).toBeVisible();
+    expect(within(section).getByText('新增可靠更新流程。')).toBeVisible();
+    await user.click(within(section).getByRole('button', { name: '下载更新' }));
+    expect(downloadPortableUpdate).toHaveBeenCalledWith(candidate.id);
+    expect((await within(section).findAllByText(/ZIP 与 SHA-256 已验证/)).length)
+      .toBeGreaterThan(0);
+
+    await user.click(within(section).getByRole('button', { name: '备份并应用更新' }));
+
+    expect(applyPortableUpdate).toHaveBeenCalledWith(candidate.id);
+    expect(await within(section).findByRole('status')).toHaveTextContent(
+      '更新辅助程序已启动',
+    );
+  });
+
   it('设置页可开启自动备份、选择位置并查看状态与清理记录', async () => {
     const user = userEvent.setup();
     const saveBackupSettings = vi.fn(async (input: unknown) => input);
@@ -10943,12 +11018,13 @@ describe('订单管理工作台', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const automaticImport = await screen.findByRole('switch', { name: '自动入库' });
     const settingsGroup = screen.getByRole('group', { name: '应用设置' });
-    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 6)
+    expect(within(settingsGroup).getAllByRole('heading', { level: 2 }).slice(0, 7)
       .map((heading) => heading.textContent)).toEqual([
         '数据存储位置',
         '手机上传',
         '来源截图存储',
         '备份与恢复',
+        '便携版更新',
         '自动入库',
         '百炼 OCR',
       ]);

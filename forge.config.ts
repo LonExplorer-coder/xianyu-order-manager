@@ -120,7 +120,13 @@ function keyringPlatformPackage(platform: string, arch: string): string {
 
 function copySharpRuntime(buildPath: string, platform: string, arch: string): void {
   const packages = sharpRuntimePackages(platform, arch);
-  for (const packageName of ['sharp', ...packages]) {
+  for (const packageName of [
+    'sharp',
+    '@img/colour',
+    'detect-libc',
+    'semver',
+    ...packages,
+  ]) {
     const source = join(process.cwd(), 'node_modules', ...packageName.split('/'));
     const destination = join(buildPath, 'node_modules', ...packageName.split('/'));
     mkdirSync(dirname(destination), { recursive: true });

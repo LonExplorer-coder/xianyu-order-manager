@@ -1,5 +1,3 @@
-import sharp from 'sharp';
-
 import type {
   CompressedSourceScreenshot,
   SourceScreenshotCompressor,
@@ -20,6 +18,7 @@ export class SharpSourceScreenshotCompressor implements SourceScreenshotCompress
     if (!SUPPORTED_SOURCE_MIME_TYPES.has(mimeType)) {
       throw new Error('来源截图图片格式不支持压缩');
     }
+    const { default: sharp } = await import('sharp');
     const metadata = await sharp(bytes, { failOn: 'error' }).metadata();
     const sourceSize = metadata.autoOrient ?? {
       width: metadata.width,
