@@ -3,7 +3,7 @@ import AutoUnpackNativesPlugin from '@electron-forge/plugin-auto-unpack-natives'
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 
@@ -27,6 +27,7 @@ const config: ForgeConfig = {
         try {
           copyKeyringRuntime(buildPath, platform, arch);
           copySharpRuntime(buildPath, platform, arch);
+          writeWindowsPortableProgramMarker(buildPath, platform);
           callback();
         } catch (error) {
           callback(error instanceof Error ? error : new Error('无法复制系统凭据运行库'));
@@ -142,6 +143,17 @@ function sharpRuntimePackages(platform: string, arch: string): string[] {
     return [`@img/sharp-win32-${arch}`];
   }
   throw new Error(`来源截图压缩运行库不支持目标平台 ${platform}-${arch}`);
+}
+
+function writeWindowsPortableProgramMarker(buildPath: string, platform: string): void {
+  if (platform !== 'win32') return;
+  const markerName = '.xianyu-portable-program.json';
+  const topLevelEntries = [...readdirSync(buildPath), markerName].sort();
+  writeFileSync(join(buildPath, markerName), `${JSON.stringify({
+    schemaVersion: 1,
+    product: 'xianyu-order-manager',
+    topLevelEntries,
+  }, null, 2)}\n`, 'utf8');
 }
 
 export default config;

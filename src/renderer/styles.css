@@ -6005,6 +6005,24 @@ select:focus-visible {
   background: #f8f8f5;
 }
 
+.portable-update-last-result {
+  display: grid;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #c9d8ca;
+  border-radius: 10px;
+  background: #f1f8f1;
+  color: #355a3b;
+  font-size: 10px;
+}
+
+.portable-update-last-result.is-failed {
+  border-color: #e0c5c2;
+  background: #fff6f5;
+  color: #8f2e27;
+}
+
 .portable-update-candidate > div:first-child,
 .portable-update-ready {
   display: grid;

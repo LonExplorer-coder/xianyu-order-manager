@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
@@ -10,8 +10,10 @@ import type {
   PortableUpdateArchitecture,
   PortableUpdateCandidateView,
   PortableUpdatePlatform,
+  PortableUpdateLastApplyResult,
   PortableUpdateView,
 } from '../core/portable-update';
+import { PORTABLE_ACCEPTANCE_CHECKS } from '../core/stage-one-release';
 
 const RELEASE_API_URL =
   'https://api.github.com/repos/LonExplorer-coder/xianyu-order-manager/releases/latest';
@@ -32,6 +34,7 @@ interface PortableUpdateServiceOptions {
   platform: PortableUpdatePlatform;
   architecture: PortableUpdateArchitecture;
   updatesDirectory: string;
+  statusFilePath?: string;
   fetcher?: Fetcher;
 }
 
@@ -62,6 +65,7 @@ export interface PreparedPortableUpdate {
   candidate: PortableUpdateCandidateView;
   archivePath: string;
   evidencePath: string;
+  archiveSha256: string;
 }
 
 export class PortableUpdateService {
@@ -70,6 +74,7 @@ export class PortableUpdateService {
   private readonly architecture: PortableUpdateArchitecture;
   private readonly updatesDirectory: string;
   private readonly fetcher: Fetcher;
+  private readonly statusFilePath: string;
   private candidate: InternalCandidate | null = null;
   private view: PortableUpdateView;
 
@@ -82,6 +87,9 @@ export class PortableUpdateService {
     this.platform = options.platform;
     this.architecture = options.architecture;
     this.updatesDirectory = resolve(options.updatesDirectory);
+    this.statusFilePath = resolve(
+      options.statusFilePath ?? join(this.updatesDirectory, 'last-update-status.json'),
+    );
     this.fetcher = options.fetcher ?? fetch;
     this.view = {
       currentVersion,
@@ -92,7 +100,10 @@ export class PortableUpdateService {
   }
 
   public getView(): PortableUpdateView {
-    return structuredClone(this.view);
+    return structuredClone({
+      ...this.view,
+      lastApplyResult: readLastApplyResult(this.statusFilePath),
+    });
   }
 
   public async checkForUpdate(): Promise<PortableUpdateView> {
@@ -281,6 +292,7 @@ export class PortableUpdateService {
         versionDirectory,
         `portable-${this.platform}-${this.architecture}.json`,
       ),
+      archiveSha256: candidate.parsedEvidence.archiveSha256,
     };
   }
 
@@ -330,7 +342,7 @@ function parsePortableEvidence(
 ): PortableEvidence {
   let value: unknown;
   try {
-    value = JSON.parse(raw);
+    value = JSON.parse(raw.replace(/^\uFEFF/u, ''));
   } catch (error) {
     throw new Error('更新证据不是有效 JSON', { cause: error });
   }
@@ -349,16 +361,7 @@ function parsePortableEvidence(
   }
   if (record.gitDirty !== false) throw new Error('更新证据来自非干净工作树');
   const checks = requireRecord(record.checks, '更新证据验收项');
-  for (const key of [
-    'archiveExtracted',
-    'packagedCredentialStore',
-    'packagedScreenshotCompression',
-    'dataDirectorySelected',
-    'orderImported',
-    'firstProgramDirectoryRemoved',
-    'replacementProgramReadExistingOrder',
-    'updateCandidateBackupSmoke',
-  ]) {
+  for (const key of PORTABLE_ACCEPTANCE_CHECKS) {
     if (checks[key] !== true) throw new Error(`更新证据缺少已通过验收项：${key}`);
   }
   return {
@@ -368,6 +371,36 @@ function parsePortableEvidence(
     archiveFile: expected.archiveFile,
     archiveSha256,
     raw,
+  };
+}
+
+function readLastApplyResult(path: string): PortableUpdateLastApplyResult | null {
+  let value: unknown;
+  try {
+    const raw = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(raw) > 16 * 1024) return null;
+    value = JSON.parse(raw.replace(/^\uFEFF/u, ''));
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    !['applying', 'succeeded', 'failed'].includes(String(record.status))
+    || typeof record.version !== 'string'
+    || !validVersion(record.version)
+    || typeof record.message !== 'string'
+    || record.message.length > 1_000
+    || typeof record.occurredAt !== 'string'
+    || !Number.isFinite(Date.parse(record.occurredAt))
+  ) {
+    return null;
+  }
+  return {
+    status: record.status as PortableUpdateLastApplyResult['status'],
+    version: record.version,
+    message: record.message,
+    occurredAt: record.occurredAt,
   };
 }
 

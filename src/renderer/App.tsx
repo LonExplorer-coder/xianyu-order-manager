@@ -8551,6 +8551,24 @@ function SettingsWorkspace({
               </button>
             </div>
 
+            {portableUpdate?.lastApplyResult && (
+              <div
+                className={`portable-update-last-result is-${portableUpdate.lastApplyResult.status}`}
+                role={portableUpdate.lastApplyResult.status === 'failed' ? 'alert' : 'status'}
+              >
+                <strong>
+                  {portableUpdate.lastApplyResult.status === 'failed'
+                    ? '上次更新失败'
+                    : portableUpdate.lastApplyResult.status === 'succeeded'
+                      ? '上次更新已完成'
+                      : '更新正在应用'}
+                </strong>
+                <span>
+                  {portableUpdate.lastApplyResult.message} · 版本 {portableUpdate.lastApplyResult.version}
+                </span>
+              </div>
+            )}
+
             {portableUpdate?.candidate && (
               <div className="portable-update-candidate">
                 <div>

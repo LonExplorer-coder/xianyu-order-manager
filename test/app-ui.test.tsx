@@ -10804,6 +10804,35 @@ describe('订单管理工作台', () => {
     );
   });
 
+  it('更新辅助程序失败后，旧程序重开会明确显示回滚结果', async () => {
+    const user = userEvent.setup();
+    const api = createApi({
+      getBootstrapState: vi.fn().mockResolvedValue({
+        kind: 'ready', dataDirectory: '/Users/test/当前订单数据', orders: [],
+      }),
+      getPortableUpdateView: vi.fn().mockResolvedValue({
+        currentVersion: '0.2.69',
+        status: 'idle',
+        candidate: null,
+        downloaded: null,
+        lastApplyResult: {
+          status: 'failed',
+          version: '0.3.0',
+          message: '更新失败，已恢复旧便携程序',
+          occurredAt: '2026-08-22T02:10:00.000Z',
+        },
+      }),
+    });
+
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const section = await screen.findByRole('region', { name: '便携版更新' });
+    expect(within(section).getByRole('alert')).toHaveTextContent('上次更新失败');
+    expect(within(section).getByRole('alert')).toHaveTextContent('已恢复旧便携程序');
+    expect(within(section).getByRole('alert')).toHaveTextContent('版本 0.3.0');
+  });
+
   it('设置页可开启自动备份、选择位置并查看状态与清理记录', async () => {
     const user = userEvent.setup();
     const saveBackupSettings = vi.fn(async (input: unknown) => input);

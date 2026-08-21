@@ -228,6 +228,9 @@ function verifyProgramStructure(program, target) {
         `sharp-win32-x64-${packageJson.dependencies.sharp}.node`,
       );
   const requiredPaths = [join(resources, 'app.asar'), keyringBinary, sharpBinary];
+  if (target.platform === 'win32') {
+    requiredPaths.push(join(program, '.xianyu-portable-program.json'));
+  }
   if (target.platform === 'darwin') {
     const libvipsDirectory = join(
       resources,
@@ -248,6 +251,20 @@ function verifyProgramStructure(program, target) {
   for (const requiredPath of requiredPaths) {
     if (!existsSync(requiredPath)) {
       throw new Error(`便携版缺少运行文件：${relative(program, requiredPath)}`);
+    }
+  }
+  if (target.platform === 'win32') {
+    const marker = JSON.parse(readFileSync(
+      join(program, '.xianyu-portable-program.json'),
+      'utf8',
+    ));
+    const actualEntries = readdirSync(program).sort();
+    if (
+      marker.schemaVersion !== 1
+      || marker.product !== 'xianyu-order-manager'
+      || JSON.stringify(marker.topLevelEntries) !== JSON.stringify(actualEntries)
+    ) {
+      throw new Error('Windows 便携版边界标记与程序目录不一致');
     }
   }
 }

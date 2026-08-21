@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join } from 'node:path';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 
 import { runPackagedCredentialStoreSmoke } from '../adapters/credentials/packaged-credential-smoke';
 import { SystemApiKeyStore } from '../adapters/credentials/system-api-key-store';
@@ -447,8 +447,14 @@ export function registerIpcHandlers(
           currentProcessId: process.pid,
           currentExecutablePath: app.getPath('exe'),
           archivePath: prepared.archivePath,
+          archiveSha256: prepared.archiveSha256,
           backupDirectory: backup.backupDirectory,
           workingDirectory,
+          statusFilePath: join(
+            app.getPath('userData'),
+            'updates',
+            'last-update-status.json',
+          ),
           nonce: randomUUID(),
         });
         setTimeout(() => app.quit(), 250).unref();
@@ -1924,7 +1930,12 @@ export function startElectronApplication(): void {
       validateDataDirectory,
       sourceScreenshotCompressor: new SharpSourceScreenshotCompressor(),
     });
-    session.restore();
+    const restoredState = session.restore();
+    if (!await completePortableUpdateStartup(restoredState)) {
+      session.close();
+      app.exit(1);
+      return;
+    }
     mobileUploadService = new MobileUploadService({
       submitSourceScreenshots: (paths, options) => {
         if (!session) throw new Error('应用会话尚未就绪');
@@ -1941,6 +1952,11 @@ export function startElectronApplication(): void {
       platform: portableUpdatePlatform(),
       architecture: portableUpdateArchitecture(),
       updatesDirectory: join(app.getPath('userData'), 'updates'),
+      statusFilePath: join(
+        app.getPath('userData'),
+        'updates',
+        'last-update-status.json',
+      ),
     });
     registerIpcHandlers(session, mobileUploadService, portableUpdateService);
     mainWindow = createWindow();
@@ -2012,6 +2028,68 @@ function portableUpdateArchitecture(): PortableUpdateArchitecture {
   if (process.platform === 'darwin' && process.arch === 'arm64') return 'arm64';
   if (process.platform === 'win32' && process.arch === 'x64') return 'x64';
   throw new Error(`便携版更新不支持当前架构 ${process.platform}-${process.arch}`);
+}
+
+export async function completePortableUpdateStartup(
+  state: ReturnType<DesktopSession['restore']>,
+): Promise<boolean> {
+  const token = process.env.XIANYU_UPDATE_POST_INSTALL_TOKEN;
+  if (!token) return true;
+  const statusFilePath = requiredSmokePath(
+    process.env.XIANYU_UPDATE_STATUS_FILE,
+    '更新结果文件',
+  );
+  const markerPath = requiredSmokePath(
+    process.env.XIANYU_UPDATE_POST_INSTALL_MARKER,
+    '更新启动确认文件',
+  );
+  const expectedVersion = requiredSmokePath(
+    process.env.XIANYU_UPDATE_EXPECTED_VERSION,
+    '更新目标版本',
+  );
+  const updatesRoot = join(app.getPath('userData'), 'updates');
+  assertPathInside(statusFilePath, updatesRoot, '更新结果文件');
+  assertPathInside(markerPath, updatesRoot, '更新启动确认文件');
+  const success = app.getVersion() === expectedVersion && state.kind === 'ready';
+  await writePortableUpdateStatus(statusFilePath, {
+    status: success ? 'succeeded' : 'failed',
+    version: expectedVersion,
+    message: success
+      ? '新便携程序已启动并读取原订单数据目录'
+      : '新便携程序未能读取原订单数据目录',
+    occurredAt: new Date().toISOString(),
+  });
+  if (success) {
+    await mkdir(dirname(markerPath), { recursive: true });
+    await writeFile(markerPath, token, 'utf8');
+  }
+  for (const key of [
+    'XIANYU_UPDATE_POST_INSTALL_TOKEN',
+    'XIANYU_UPDATE_POST_INSTALL_MARKER',
+    'XIANYU_UPDATE_STATUS_FILE',
+    'XIANYU_UPDATE_EXPECTED_VERSION',
+  ]) {
+    delete process.env[key];
+  }
+  return success;
+}
+
+async function writePortableUpdateStatus(
+  path: string,
+  value: Record<string, string>,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporaryPath = `${path}.tmp-${randomUUID()}`;
+  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, 'utf8');
+  await rm(path, { force: true });
+  await rename(temporaryPath, path);
+}
+
+function assertPathInside(path: string, root: string, label: string): void {
+  const relativePath = relative(resolve(root), resolve(path));
+  if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
+    throw new Error(`${label}必须位于更新暂存区`);
+  }
 }
 
 

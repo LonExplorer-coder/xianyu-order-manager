@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -94,6 +94,24 @@ describe('便携版更新检查与下载', () => {
       '0.3.0',
       'XianyuOrderManager-darwin-arm64-0.3.0.zip',
     ))).rejects.toThrow();
+  });
+
+  it('重启后读取更新辅助程序持久化的成功或回滚结果', async () => {
+    const fixture = await updateFixture({ releaseVersion: '0.3.0' });
+    await mkdir(fixture.updatesDirectory, { recursive: true });
+    await writeFile(join(fixture.updatesDirectory, 'last-update-status.json'), `\uFEFF${JSON.stringify({
+      status: 'failed',
+      version: '0.3.0',
+      message: '更新失败，已恢复旧便携程序',
+      occurredAt: '2026-08-22T02:10:00.000Z',
+    })}`);
+
+    expect(new PortableUpdateService(fixture.options).getView().lastApplyResult).toEqual({
+      status: 'failed',
+      version: '0.3.0',
+      message: '更新失败，已恢复旧便携程序',
+      occurredAt: '2026-08-22T02:10:00.000Z',
+    });
   });
 });
 

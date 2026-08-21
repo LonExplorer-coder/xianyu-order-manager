@@ -20,11 +20,19 @@ export interface DownloadedPortableUpdateView {
 
 export type PortableUpdateStatus = 'idle' | 'up_to_date' | 'available' | 'downloaded';
 
+export interface PortableUpdateLastApplyResult {
+  status: 'applying' | 'succeeded' | 'failed';
+  version: string;
+  message: string;
+  occurredAt: string;
+}
+
 export interface PortableUpdateView {
   currentVersion: string;
   status: PortableUpdateStatus;
   candidate: PortableUpdateCandidateView | null;
   downloaded: DownloadedPortableUpdateView | null;
+  lastApplyResult?: PortableUpdateLastApplyResult | null;
 }
 
 export interface PortableUpdateApplyResult {

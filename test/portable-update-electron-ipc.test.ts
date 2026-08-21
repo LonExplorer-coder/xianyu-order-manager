@@ -66,6 +66,7 @@ describe('便携版更新 Electron IPC', () => {
         candidate: downloaded.candidate!,
         archivePath: join(archiveRoot, downloaded.candidate!.archiveFile),
         evidencePath: join(archiveRoot, 'portable-darwin-arm64.json'),
+        archiveSha256: 'a'.repeat(64),
       })),
     });
     const createBackup = vi.fn(async () => verifiedBackup(join(backupRoot, 'backup-1')));
@@ -106,6 +107,7 @@ describe('便携版更新 Electron IPC', () => {
         candidate: downloaded.candidate!,
         archivePath: '/Users/test/updates/update.zip',
         evidencePath: '/Users/test/updates/evidence.json',
+        archiveSha256: 'a'.repeat(64),
       })),
     });
     const launchUpdate = vi.fn();
